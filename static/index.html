@@ -508,6 +508,13 @@ function signalBeep(){
 }
 
 /* ─── CHART ─── */
+// State for the dense round-number price-level grid (Quotex-style).
+// Tracks the price lines currently attached to candleSeries so we can
+// remove + recreate them only when the visible price range shifts beyond
+// the existing grid (avoids creating thousands of lines on every tick).
+let _priceLines = [];
+let _priceLinesRange = { lo: 0, hi: 0, step: 0 };
+
 function initChart(){
   const container = $('chart-container');
   chart = LightweightCharts.createChart(container, {
@@ -532,6 +539,112 @@ function initChart(){
     borderUpColor: 'rgba(0,200,83,0.25)', borderDownColor: 'rgba(255,23,68,0.25)',
     wickUpColor: 'rgba(0,200,83,0.25)', wickDownColor: 'rgba(255,23,68,0.25)'
   });
+  // Subscribe to visible range changes so we can re-draw the dense price
+  // grid whenever the user zooms/pans or the candle range shifts.
+  chart.timeScale().subscribeVisibleTimeRangeChange(() => {
+    refreshPriceLines();
+  });
+}
+
+/* Determine the appropriate price step for round-number grid lines based
+   on the asset's price magnitude. Quotex shows dense lines (every 0.00010
+   for EUR/USD-style pairs, every 0.00010 for USD/BRL-style pairs, every
+   0.010 for JPY pairs like USD/JPY @ ~150). The step is chosen so that
+   roughly 15-25 lines fit in the visible price range — dense but readable. */
+function pickPriceStep(priceRange){
+  if(priceRange <= 0) return 0.00010;
+  // Find the magnitude of the price range — we want ~20 lines visible
+  const targetLines = 20;
+  const rawStep = priceRange / targetLines;
+  // Round step up to a "nice" value: 1, 2, 5 × 10^n
+  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const norm = rawStep / mag;
+  let niceStep;
+  if(norm <= 1)      niceStep = 1 * mag;
+  else if(norm <= 2) niceStep = 2 * mag;
+  else if(norm <= 5) niceStep = 5 * mag;
+  else               niceStep = 10 * mag;
+  return niceStep;
+}
+
+/* Build / refresh the dense round-number price-level grid on candleSeries.
+   Called on chart init, pair change, candle update, and visible-range change.
+   Only recreates lines when the visible price range moves outside the
+   existing grid's coverage — avoids leaking price lines on every tick. */
+function refreshPriceLines(){
+  if(!candleSeries || !candleData.length) return;
+  // Determine the visible price range from the candle data
+  // (LightweightCharts doesn't expose visible price range directly, so
+  // we use the last N candles that fit in the visible time range)
+  const visRange = chart.timeScale().getVisibleRange();
+  let lo = Infinity, hi = -Infinity;
+  if(visRange && visRange.from && visRange.to){
+    for(const c of candleData){
+      if(c.time >= visRange.from && c.time <= visRange.to){
+        if(c.low < lo) lo = c.low;
+        if(c.high > hi) hi = c.high;
+      }
+    }
+  }
+  // Fallback: use last 100 candles
+  if(!isFinite(lo) || !isFinite(hi)){
+    const recent = candleData.slice(-100);
+    lo = Math.min(...recent.map(c => c.low));
+    hi = Math.max(...recent.map(c => c.high));
+  }
+  if(!isFinite(lo) || !isFinite(hi) || lo <= 0 || hi <= 0) return;
+
+  // Pad range by 10% so lines extend beyond visible candles
+  const pad = (hi - lo) * 0.10;
+  lo -= pad;
+  hi += pad;
+
+  // Pick a "nice" step based on the range
+  const step = pickPriceStep(hi - lo);
+  if(step <= 0) return;
+
+  // Snap lo/hi to step boundaries
+  const gridLo = Math.floor(lo / step) * step;
+  const gridHi = Math.ceil(hi / step) * step;
+
+  // If the existing grid already covers this range with the same step,
+  // no work to do — avoids recreating lines on every tick.
+  if(_priceLinesRange.step === step &&
+     _priceLinesRange.lo <= gridLo &&
+     _priceLinesRange.hi >= gridHi) return;
+
+  // Remove existing price lines
+  for(const pl of _priceLines){
+    try{ candleSeries.removePriceLine(pl); }catch(_){}
+  }
+  _priceLines = [];
+
+  // Determine decimal places for labels based on step magnitude
+  let decimals = 5;
+  if(step >= 1)        decimals = 2;
+  else if(step >= 0.1) decimals = 3;
+  else if(step >= 0.01) decimals = 4;
+  else if(step >= 0.001) decimals = 5;
+  else                 decimals = 6;
+
+  // Create new price lines at every "nice" round number in the range
+  for(let p = gridLo; p <= gridHi + step * 0.5; p += step){
+    // Avoid floating-point drift (0.1 + 0.2 !== 0.3)
+    const price = Math.round(p / step) * step;
+    if(price <= 0) continue;
+    try{
+      const pl = candleSeries.createPriceLine({
+        price: price,
+        color: 'rgba(139,148,158,0.25)',     // subtle gray, doesn't dominate
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: '',
+      });
+      _priceLines.push(pl);
+    }catch(_){}
+  }
+  _priceLinesRange = { lo: gridLo, hi: gridHi, step: step };
 }
 
 function updateChart(candles, predCandle, resetView){
@@ -549,6 +662,11 @@ function updateChart(candles, predCandle, resetView){
   } else {
     ghostSeries.setData([]);
   }
+  // Reset the price-line grid coverage — new pair/new data means we need
+  // to recompute step + range from scratch (existing grid was for the old
+  // pair's price magnitude).
+  _priceLinesRange = { lo: 0, hi: 0, step: 0 };
+  refreshPriceLines();
   // Full redraw already painted the true values — drop any in-flight
   // animation so it doesn't fight the fresh authoritative state.
   liveTarget = null; liveDisplay = null;
