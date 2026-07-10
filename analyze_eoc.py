@@ -148,6 +148,115 @@ def _classify_regime(candles):
     ema21 = _ema(closes, 21)
     rsi_val = _rsi(closes)
 
+
+def _dynamic_thresholds(candles):
+    """Compute volatility-adaptive thresholds (2026-07-10 review Issue #3).
+
+    Static thresholds (RSI>=75, buy_pct>=65) fail in low-volatility periods
+    (nighttime OTC) where RSI never reaches 75, AND in high-volatility
+    periods where RSI blows past 75 and keeps going.
+
+    Returns dict with adaptive thresholds based on recent RSI distribution
+    and recent ATR:
+      rsi_overbought: typically 70-80, lower in low-vol periods
+      rsi_oversold:   typically 20-30, higher in low-vol periods
+      buy_strong:     typically 60-70, lower in low-activity periods
+      sell_strong:    typically 30-40, higher in low-activity periods
+    """
+    if len(candles) < 10:
+        return {"rsi_overbought": 75, "rsi_oversold": 25,
+                "buy_strong": 65, "sell_strong": 35}
+
+    # Compute RSI for last 20 candles
+    rsi_values = []
+    for i in range(max(14, len(candles) - 20), len(candles) + 1):
+        if i >= 15:
+            rsi_values.append(_rsi(closes_for_rsi := [c["close"] for c in candles[:i]]))
+
+    if not rsi_values:
+        return {"rsi_overbought": 75, "rsi_oversold": 25,
+                "buy_strong": 65, "sell_strong": 35}
+
+    # Mean and stddev of recent RSI
+    rsi_mean = sum(rsi_values) / len(rsi_values)
+    if len(rsi_values) > 1:
+        variance = sum((r - rsi_mean) ** 2 for r in rsi_values) / len(rsi_values)
+        rsi_std = variance ** 0.5
+    else:
+        rsi_std = 10
+
+    # Adaptive RSI thresholds: mean ± 1.5×stddev, clamped to sane bounds
+    rsi_overbought = max(65, min(85, rsi_mean + 1.5 * rsi_std))
+    rsi_oversold   = min(35, max(15, rsi_mean - 1.5 * rsi_std))
+
+    # ATR-based volatility classification
+    atr = _atr(candles, 20)
+    recent_ranges = [c["high"] - c["low"] for c in candles[-10:]]
+    avg_recent_range = sum(recent_ranges) / len(recent_ranges) if recent_ranges else atr
+    vol_ratio = avg_recent_range / atr if atr > 0 else 1.0
+
+    # In low-volatility periods (vol_ratio < 0.7), lower the buy/sell thresholds
+    # so theories still fire. In high-volatility, raise them.
+    if vol_ratio < 0.7:
+        buy_strong, sell_strong = 58, 42
+    elif vol_ratio > 1.3:
+        buy_strong, sell_strong = 70, 30
+    else:
+        buy_strong, sell_strong = 65, 35
+
+    return {
+        "rsi_overbought": round(rsi_overbought),
+        "rsi_oversold": round(rsi_oversold),
+        "buy_strong": buy_strong,
+        "sell_strong": sell_strong,
+    }
+
+
+def _detect_last_seconds_spike(ticks, atr, lookback_seconds=5):
+    """Detect artificial spike in last N ticks (2026-07-10 review Issue #4).
+
+    OTC broker algorithms sometimes create a large spike in the last 3-5
+    seconds to trick retail traders. This function checks if the last few
+    ticks contain an abnormal magnitude move.
+
+    Returns dict with:
+      is_spike: bool — True if spike detected
+      spike_magnitude: float — ratio of largest recent tick move to ATR
+      spike_direction: 'UP' or 'DOWN' or None
+    """
+    if not ticks or len(ticks) < 5 or atr <= 0:
+        return {"is_spike": False, "spike_magnitude": 0, "spike_direction": None}
+
+    # Look at last 5 ticks (approximates last 3-5 seconds at typical tick rates)
+    recent = list(ticks)[-5:]
+    max_move = 0
+    max_dir = None
+    for i in range(1, len(recent)):
+        move = abs(recent[i] - recent[i-1])
+        if move > max_move:
+            max_move = move
+            max_dir = "UP" if recent[i] > recent[i-1] else "DOWN"
+
+    # Spike = single tick move > 1.5× ATR (abnormally large for OTC)
+    magnitude_ratio = max_move / atr
+    is_spike = magnitude_ratio > 1.5
+
+    return {
+        "is_spike": is_spike,
+        "spike_magnitude": round(magnitude_ratio, 2),
+        "spike_direction": max_dir if is_spike else None,
+    }
+
+
+def _classify_regime(candles):
+    """Classify market regime using EMA crossover + RSI + ADX-like trending."""
+    if len(candles) < 10:
+        return {"trend": "SIDEWAYS", "zone": "UNKNOWN"}
+    closes = [c["close"] for c in candles[-30:]]  # More data points
+    ema9  = _ema(closes, 9)
+    ema21 = _ema(closes, 21)
+    rsi_val = _rsi(closes)
+
     # EMA separation as a percentage of price
     sep = abs(ema9 - ema21) / ema21 if ema21 > 0 else 0
     # Strong separation = strong trend
@@ -2024,15 +2133,22 @@ def _theory_mean(candles, ticks, muted):
             score += 3
             reasons.append(f"MEAN:+3 CALL big-bear-body={body_ratio:.2f}xATR")
 
-    # ── 2. RSI extreme ─────────────────────────────────────────────────────
+    # ── 2. RSI extreme (DYNAMIC thresholds — Issue #3) ────────────────────
+    # Was static rsi>=75 / rsi<=25. Now uses _dynamic_thresholds() which
+    # computes adaptive bounds based on recent RSI distribution. In low-
+    # volatility periods (nighttime OTC) where RSI oscillates 40-60, the
+    # thresholds lower so MEAN still fires. In high-volatility, they widen.
     closes = [c["close"] for c in candles]
     rsi = _rsi(closes)
-    if rsi >= 75:
+    dyn = _dynamic_thresholds(candles)
+    rsi_ob = dyn["rsi_overbought"]
+    rsi_os = dyn["rsi_oversold"]
+    if rsi >= rsi_ob:
         score -= 2
-        reasons.append(f"MEAN:-2 PUT rsi-overbought={rsi:.0f}")
-    elif rsi <= 25:
+        reasons.append(f"MEAN:-2 PUT rsi-overbought={rsi:.0f}>={rsi_ob}")
+    elif rsi <= rsi_os:
         score += 2
-        reasons.append(f"MEAN:+2 CALL rsi-oversold={rsi:.0f}")
+        reasons.append(f"MEAN:+2 CALL rsi-oversold={rsi:.0f}<={rsi_os}")
 
     # ── 3. Failed-continuation wick (long wick opposite to close direction) ─
     upper_wick = last["high"] - max(last["open"], last["close"])
@@ -2631,7 +2747,7 @@ def _theory_structure(candles, muted):
 def analyze_eoc(candles, ticks, micro_history=None, period=60,
                 muted=None, asset="", running_ticks=None,
                 recent_accuracy=None, recent_n=0, currently_flipped=False,
-                live_only=False):
+                live_only=False, htf_trend="SIDEWAYS"):
     """
     Main entry point: run all theories and blend into a signal.
 
@@ -2662,7 +2778,14 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                    every 2-3 ticks.
                    When False (the default — used at EOC and for grading),
                    ALL theories run as before.
-                          samples before flipping, otherwise too noisy).
+
+    HIGHER TIMEFRAME CONFLUENCE (2026-07-10 review Issue #5):
+      htf_trend -> the 5-minute trend for this asset
+                   ('UPTREND', 'DOWNTREND', or 'SIDEWAYS'). When the 1m
+                   signal direction OPPOSES the 5m trend, strength is
+                   demoted (STRONG→MEDIUM, MEDIUM→WEAK) and a HTF_CONFLICT
+                   reason is appended. When ALIGNED, a small confidence
+                   bonus is applied. SIDEWAYS = no filter (market undecided).
 
     If recent_accuracy < 0.40 AND recent_n >= 8  =>  flip CALL<->PUT at the
     end.  This is the safety net against systematic model bias (e.g. when
@@ -2865,6 +2988,49 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
             f"INVERT:+1 {majority} targeted-flip-continuation-theories "
             f"(recent_acc={recent_accuracy:.0%} over n={recent_n})")
 
+    # ── HIGHER TIMEFRAME CONFLUENCE (2026-07-10 review Issue #5) ─────────
+    # If the 1m signal direction OPPOSES the 5m trend, demote strength.
+    # If ALIGNED, small confidence bonus. SIDEWAYS = no filter.
+    htf_applied = False
+    if htf_trend in ("UPTREND", "DOWNTREND") and majority in ("CALL", "PUT"):
+        signal_up = majority == "CALL"
+        htf_up = htf_trend == "UPTREND"
+        if signal_up == htf_up:
+            # Aligned with HTF trend — small confidence boost
+            confidence = min(100, confidence + 3)
+            all_reasons.append(
+                f"HTF_CONFLUENCE:+1 {majority} aligned-with-5m-{htf_trend}")
+            htf_applied = True
+        else:
+            # Opposes HTF trend — demote strength
+            if strength == "STRONG":
+                strength = "MEDIUM"
+                all_reasons.append(
+                    f"HTF_CONFLICT:-1 STRONG->MEDIUM opposes-5m-{htf_trend}")
+            elif strength == "MEDIUM":
+                strength = "WEAK"
+                all_reasons.append(
+                    f"HTF_CONFLICT:-1 MEDIUM->WEAK opposes-5m-{htf_trend}")
+            htf_applied = True
+
+    # ── LAST-SECONDS SPIKE FILTER (2026-07-10 review Issue #4) ───────────
+    # If running_ticks show an artificial spike in the last 3-5 ticks,
+    # dampen the signal (broker manipulation trap).
+    spike_info = None
+    if running_ticks and len(running_ticks) >= 5:
+        atr_val = _atr(candles)
+        spike_info = _detect_last_seconds_spike(running_ticks, atr_val)
+        if spike_info["is_spike"]:
+            # Spike detected — demote strength (don't fully suppress, just caution)
+            if strength == "STRONG":
+                strength = "MEDIUM"
+            elif strength == "MEDIUM":
+                strength = "WEAK"
+            all_reasons.append(
+                f"SPIKE_FILTER:-1 {strength} last-3s-spike "
+                f"mag={spike_info['spike_magnitude']}xATR "
+                f"dir={spike_info['spike_direction']}")
+
     return {
         "signal": majority,
         "score": net,
@@ -2877,6 +3043,9 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
         "market_state": market_state,
         "theories_detail": theories_detail,
         "_flipped": flipped,
+        "_htf_trend": htf_trend,
+        "_htf_applied": htf_applied,
+        "_spike": spike_info,
     }
 
 

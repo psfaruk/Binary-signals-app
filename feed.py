@@ -218,6 +218,17 @@ def _floor_to_period(ts: float, period: int) -> int:
     return (int(ts) // period) * period
 
 
+def _ema_simple(prices: list[float], period: int) -> float:
+    """Simple EMA calculation for HTF trend detection."""
+    if not prices:
+        return 0.0
+    k = 2 / (period + 1)
+    ema = prices[0]
+    for p in prices[1:]:
+        ema = p * k + ema * (1 - k)
+    return ema
+
+
 # ── Per-asset stream state ────────────────────────────────────────────────────
 # Everything that used to live directly on QuotexFeed (one asset at a time)
 # now lives on its own _AssetStream instance, owned for its whole life by one
@@ -339,7 +350,111 @@ class QuotexFeed:
         # re-run periodically from the manager loop.
         self._last_db_cleanup: float = 0.0
 
+        # ── NTP time offset (2026-07-10 review Issue #1) ─────────────────────
+        # Difference between local system clock and NTP server time, in
+        # seconds. Added to time.time() in _now() to get corrected time.
+        # Re-synced every 5 minutes from the manager loop. Without this, a
+        # 1-2s clock drift on Railway/Vercel containers causes signal-delay
+        # gate to fire late and the candle-boundary tick-close to miss the
+        # true open price.
+        self._time_offset: float = 0.0
+        self._last_ntp_sync: float = 0.0
+
+        # ── Higher Timeframe (HTF) trend cache (2026-07-10 review Issue #5) ─
+        # {asset: {"trend": "UPTREND"/"DOWNTREND"/"SIDEWAYS",
+        #          "fetched_at": float, "ema9": float, "ema21": float}}
+        # Refreshed every 60s per asset (5m candle = 300s, so 60s cache is
+        # plenty). Used to filter 1m signals: if 1m signal opposes 5m trend,
+        # strength is demoted.
+        self._htf_cache: dict[str, dict] = {}
+
     # ── Public ────────────────────────────────────────────────────────────────
+
+    def _now(self) -> float:
+        """Wall-clock time corrected by NTP offset. Use this instead of
+        time.time() in any timing-critical path (candle boundaries, signal
+        delay, stale detection). Falls back to time.time() if NTP sync has
+        not yet completed (offset = 0)."""
+        return time.time() + self._time_offset
+
+    async def _sync_ntp(self) -> None:
+        """Fetch NTP server time and compute offset vs local clock.
+        Runs once at startup and every 5 minutes from the manager loop.
+        Uses pool.ntp.org (global, anycast) with a 3s timeout — never blocks
+        the event loop if NTP is unreachable (just leaves offset at 0)."""
+        try:
+            import ntplib
+            client = ntplib.NTPClient()
+            # Run in thread because NTPClient.request is blocking
+            resp = await asyncio.to_thread(
+                client.request, "pool.ntp.org", version=3, timeout=3)
+            offset = resp.offset
+            # Sanity check: offset should be < 5s. If larger, something's
+            # wrong (NTP server or network) — don't apply it.
+            if abs(offset) < 5.0:
+                old = self._time_offset
+                self._time_offset = offset
+                self._last_ntp_sync = time.time()
+                if abs(old - offset) > 0.1:
+                    print(f"[feed] NTP sync: offset {old:.3f}s -> {offset:.3f}s")
+            else:
+                print(f"[feed] NTP offset too large ({offset:.3f}s), ignoring")
+        except Exception as exc:
+            # NTP is best-effort — never crash the feed over it
+            print(f"[feed] NTP sync failed (non-fatal): {exc}")
+
+    async def _get_htf_trend(self, asset: str) -> str:
+        """Get the 5-minute trend for an asset (Higher Timeframe Confluence).
+        Returns 'UPTREND', 'DOWNTREND', or 'SIDEWAYS'.
+        Cached per-asset for 60 seconds — 5m candle is 300s so 60s cache is
+        plenty. Used to filter 1m signals: if 1m signal opposes 5m trend,
+        strength is demoted in analyze_eoc."""
+        # Check cache (60s TTL)
+        cached = self._htf_cache.get(asset)
+        if cached and (time.time() - cached["fetched_at"]) < 60:
+            return cached.get("trend", "SIDEWAYS")
+
+        if not self._client:
+            return "SIDEWAYS"
+
+        try:
+            # Fetch last 30 5m candles (2.5 hours of history)
+            raw = await asyncio.wait_for(
+                self._client.get_candles(
+                    asset,
+                    end_from_time=None,
+                    offset=30 * 300,  # 30 candles × 300s
+                    period=300,        # 5-minute candles
+                ),
+                timeout=10.0,
+            )
+            candles = _normalise(raw) if raw else []
+            if len(candles) < 10:
+                return "SIDEWAYS"
+
+            # Compute EMA9 vs EMA21 on closes
+            closes = [c["close"] for c in candles[-30:]]
+            ema9 = _ema_simple(closes, 9)
+            ema21 = _ema_simple(closes, 21)
+            sep = abs(ema9 - ema21) / ema21 if ema21 > 0 else 0
+
+            if ema9 > ema21 and sep > 0.0003:
+                trend = "UPTREND"
+            elif ema9 < ema21 and sep > 0.0003:
+                trend = "DOWNTREND"
+            else:
+                trend = "SIDEWAYS"
+
+            self._htf_cache[asset] = {
+                "trend": trend,
+                "fetched_at": time.time(),
+                "ema9": ema9,
+                "ema21": ema21,
+            }
+            return trend
+        except Exception as exc:
+            print(f"[feed] HTF trend fetch failed for {asset}: {exc}")
+            return "SIDEWAYS"
 
     def available_pairs(self) -> dict:
         return {"pairs": self._pairs_list, "payout_floor": PAYOUT_FLOOR}
@@ -784,7 +899,7 @@ class QuotexFeed:
 
     # ── EOC helpers ──────────────────────────────────────────────────────────
 
-    def _analyze_core(self, asset: str, period: int, candles: list[dict],
+    async def _analyze_core(self, asset: str, period: int, candles: list[dict],
                       ticks: list[float],
                       running_ticks: list[float] | None = None,
                       stream: _AssetStream | None = None,
@@ -837,6 +952,14 @@ class QuotexFeed:
             except Exception:
                 acc, n_acc = None, 0
 
+        # Get HTF (5m) trend for confluence filtering (Issue #5).
+        # Cached per-asset for 60s. SIDEWAYS = no filter applied.
+        htf_trend = "SIDEWAYS"
+        try:
+            htf_trend = await self._get_htf_trend(asset)
+        except Exception:
+            pass
+
         result = analyze_eoc(candles, ticks,
                              micro_history=micro_hist,
                              period=period,
@@ -846,7 +969,8 @@ class QuotexFeed:
                              recent_accuracy=acc,
                              recent_n=n_acc,
                              currently_flipped=stream.inverted if stream is not None else False,
-                             live_only=live_only)
+                             live_only=live_only,
+                             htf_trend=htf_trend)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
@@ -872,7 +996,7 @@ class QuotexFeed:
         # Reset the flip-suppression tracker for the new candle.
         stream.live_signal_history = []
 
-        result, micro_hist = self._analyze_core(
+        result, micro_hist = await self._analyze_core(
             stream.asset, stream.period, closed, base_ticks,
             running_ticks=None, stream=stream)
         if result is None:
@@ -1853,7 +1977,7 @@ class QuotexFeed:
 
                         if len(stream.ticks) - stream._live_reeval_ticks >= reeval_interval:
                             try:
-                                fresh, _ = self._analyze_core(
+                                fresh, _ = await self._analyze_core(
                                     stream.asset, stream.period,
                                     stream.base_candles, stream.base_ticks,
                                     running_ticks=list(stream.ticks),
@@ -2282,6 +2406,12 @@ class QuotexFeed:
                 if time.time() - self._last_perf_refresh > 300:
                     self._last_perf_refresh = time.time()
                     await self._refresh_theory_mutes()
+
+                # ── NTP time sync every 5 minutes (Issue #1) ─────────────────
+                # Corrects clock drift on Railway/Vercel containers so candle
+                # boundaries and signal-delay gate fire at the right time.
+                if time.time() - self._last_ntp_sync > 300:
+                    await self._sync_ntp()
 
                 # ── DB row-count cleanup every 6 hours ─────────────────────
                 # asyncio.to_thread: _db.cleanup() is blocking sqlite3 I/O
