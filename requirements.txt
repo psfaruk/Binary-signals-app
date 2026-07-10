@@ -1,0 +1,4 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+pyquotex>=4.2.0
