@@ -174,13 +174,27 @@ def theory_perf(asset=None, period=None, days=7, min_n=30):
 
 
 def get_recent_signals(asset, period, limit=20):
+    """Return recent signals with full details for frontend history display.
+    Includes postmortem (win/loss reason), tags, right/wrong theories."""
     with _cursor() as c:
-        rows = c.execute("""SELECT ctime, signal, accuracy, score, strength
+        rows = c.execute("""SELECT ctime, signal, accuracy, score, confidence,
+                   strength, agree, theories, actual, regime, zone,
+                   tags, postmortem, right_codes, wrong_codes,
+                   a_open, a_close, reasons
                    FROM signal_log
                    WHERE asset=? AND period=? AND signal IN ('CALL','PUT')
                    ORDER BY ctime DESC LIMIT ?""",
                    (asset, period, limit)).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+
+def get_signal_detail(asset, period, ctime):
+    """Return a single signal's full detail (for the reason modal)."""
+    with _cursor() as c:
+        row = c.execute("""SELECT * FROM signal_log
+                   WHERE asset=? AND period=? AND ctime=?
+                   LIMIT 1""", (asset, period, ctime)).fetchone()
+        return dict(row) if row else None
 
 
 def recent_accuracy(asset, period, n=20):

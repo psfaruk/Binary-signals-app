@@ -43,6 +43,12 @@ PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "81"))
 # either to "0" via the platform's env var UI to fall back to prior behavior.
 ENABLE_LIVE_THEORY   = os.environ.get("ENABLE_LIVE_THEORY",   "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
+# ── Signal delay (2026-07-10) ──────────────────────────────────────────────
+# How long after a new candle opens before the prediction is broadcast to
+# clients. Lets the opening 2-3 seconds of ticks confirm the gap direction
+# and initial momentum before the user acts on the signal. Set to 0 to
+# disable (broadcast immediately at EOC, old behavior).
+SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
 
 # ── Fallback display-name helper ─────────────────────────────────────────────
 def _api_to_display(api_name: str) -> str:
@@ -258,6 +264,14 @@ class _AssetStream:
     # Flip suppression tracker — records signal direction at each LIVE re-eval
     # in the current candle. If signal flips 2+ times in last 10s, demote.
     live_signal_history: list = field(default_factory=list)  # [(tick_count, signal, ts)]
+    # ── Signal delay (2026-07-10) ─────────────────────────────────────────
+    # User requirement: prediction candle open হওয়ার ২-৩ সেকেন্ড পরে signal
+    # broadcast হবে, যাতে opening tick behavior confirm হয়। EOC-তে
+    # signal_delay_until = time.time() + SIGNAL_DELAY_SEC সেট হয়; tick
+    # broadcast এর সময় চেক করা হয় — যদি এখনও delay চলছে, prediction কে
+    # broadcast থেকে বাদ দেওয়া হয় (candle data যাবে, prediction যাবে না)।
+    # যখন delay শেষ হয়, প্রথম tick-এ prediction broadcast হয়।
+    signal_delay_until: float = 0.0  # wall-time when signal can be broadcast
 
 
 # ── Feed ──────────────────────────────────────────────────────────────────────
@@ -1398,6 +1412,12 @@ class QuotexFeed:
 
         stream.prediction = self._run_eoc(stream, actual_open=first_tick)
 
+        # ── Signal delay (2026-07-10) ──────────────────────────────────────
+        # Set the gate so the prediction is NOT broadcast until
+        # SIGNAL_DELAY_SEC seconds after the new candle opens. Candle data
+        # and tick updates still flow; only the prediction panel waits.
+        stream.signal_delay_until = time.time() + SIGNAL_DELAY_SEC
+
         # Persist microstructure NOW — after EOC (so DB was clean during analysis)
         # but BEFORE ticks.clear() so the tick buffer is still fully intact.
         if _micro_snap:
@@ -1475,6 +1495,9 @@ class QuotexFeed:
         # Generate initial prediction from history so the ghost candle
         # appears immediately without waiting for the first EOC.
         stream.prediction = self._run_eoc(stream, actual_open=last["close"])
+        # Initial subscription joins mid-candle — no signal delay (the candle
+        # has already been running, opening ticks already happened).
+        stream.signal_delay_until = 0.0
         await self._broadcast({
             "type":       "snapshot",
             "asset":      asset,
@@ -1534,12 +1557,17 @@ class QuotexFeed:
                             stream, expected_new, last_px, open_is_real=False)
                         running  = self._running_candle(stream)
                         all_c    = stream.candles + [running]
+                        # ── Signal delay (2026-07-10) ──
+                        # Don't broadcast prediction at EOC — wait for the
+                        # signal_delay_until gate to pass in the tick loop.
+                        # Candle data + accuracy flow now; prediction flows
+                        # a few seconds later once opening ticks confirm.
                         await self._broadcast({
                             "type":       "eoc",
                             "asset":      stream.asset,
                             "period":     stream.period,
                             "candles":    all_c[-300:],
-                            "prediction": stream.prediction,
+                            "prediction": None,   # gated — arrives via tick
                             "accuracy":   accuracy,
                         })
 
@@ -1613,12 +1641,15 @@ class QuotexFeed:
 
                         new_running = self._running_candle(stream)
                         all_candles = stream.candles + [new_running]
+                        # ── Signal delay (2026-07-10) ──
+                        # Same gate as timer-close: prediction withheld at
+                        # EOC, delivered via tick loop once delay passes.
                         await self._broadcast({
                             "type":       "eoc",
                             "asset":      stream.asset,
                             "period":     stream.period,
                             "candles":    all_candles[-300:],
-                            "prediction": stream.prediction,
+                            "prediction": None,   # gated — arrives via tick
                             "accuracy":   accuracy,
                         })
                     else:
@@ -1853,10 +1884,35 @@ class QuotexFeed:
                             "micro":         self._analyze_microstructure(
                                                  stream.ticks, stream.candle_open_price),
                         }
-                        # Carry the re-anchored/re-evaluated/gated prediction
-                        # so the client redraws its signal panel from it.
-                        if reanchored or pred_changed:
-                            msg["prediction"] = stream.prediction
+                        # ── Signal delay gate (2026-07-10) ──────────────────
+                        # While the opening-tick confirmation window is still
+                        # active, do NOT broadcast the prediction. Candle data,
+                        # micro, and running_conf still flow so the chart and
+                        # micro panel update live — only the signal panel
+                        # waits. Once the gate passes, the FIRST eligible tick
+                        # broadcasts the prediction (pred_changed = True).
+                        now_ts = time.time()
+                        if stream.signal_delay_until > 0 and now_ts < stream.signal_delay_until:
+                            # Still in delay window — withhold prediction
+                            delay_left = stream.signal_delay_until - now_ts
+                            # If reanchored/pred_changed happened during the
+                            # delay (rare), queue it for after delay passes
+                            if reanchored or pred_changed:
+                                # mark that prediction is pending — will be
+                                # broadcast on the first tick after delay
+                                pass
+                        else:
+                            # Delay passed (or no delay set). If this is the
+                            # first broadcast after the gate opened, force
+                            # prediction delivery even if no LIVE re-eval fired.
+                            if stream.signal_delay_until > 0:
+                                # Gate just opened — clear it and force broadcast
+                                stream.signal_delay_until = 0.0
+                                pred_changed = True  # force prediction in this msg
+                            # Carry the re-anchored/re-evaluated/gated prediction
+                            # so the client redraws its signal panel from it.
+                            if reanchored or pred_changed:
+                                msg["prediction"] = stream.prediction
                         await self._broadcast(msg)
 
             except asyncio.CancelledError:

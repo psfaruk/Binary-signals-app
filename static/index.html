@@ -56,10 +56,13 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 #signal-box.call{background:var(--green-bg);box-shadow:inset 0 0 20px rgba(0,200,83,.08)}
 #signal-box.put{background:var(--red-bg);box-shadow:inset 0 0 20px rgba(255,23,68,.08)}
 #signal-box.neutral{background:rgba(139,148,158,.08)}
+#signal-box.pending{background:rgba(33,150,243,.08);box-shadow:inset 0 0 20px rgba(33,150,243,.08);animation:pulse-pending 1s infinite}
+@keyframes pulse-pending{0%,100%{opacity:1}50%{opacity:.6}}
 #signal-label{font-size:22px;font-weight:800;letter-spacing:1px;line-height:1.2}
 #signal-box.call #signal-label{color:var(--green)}
 #signal-box.put #signal-label{color:var(--red)}
 #signal-box.neutral #signal-label{color:var(--text-dim)}
+#signal-box.pending #signal-label{color:#2196F3}
 .signal-row{display:flex;justify-content:space-between;align-items:center;padding:2px 0;font-size:12px}
 .signal-row .label{color:var(--text-dim)}
 .signal-row .value{font-family:var(--mono);font-weight:600}
@@ -117,9 +120,32 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .tape-price{display:inline-block;margin-right:16px;font-family:var(--mono);font-size:12px}
 .tape-price.up{color:var(--green)}.tape-price.down{color:var(--red)}.tape-price.flat{color:var(--text-dim)}
 .tape-arrow{font-size:10px;margin-right:2px}
-#history-panel{padding:6px 10px;border-left:1px solid var(--border);min-width:200px;max-width:280px;overflow-y:auto}
-.history-row{display:flex;align-items:center;gap:6px;font-size:11px;padding:1px 0}
-.history-icon{font-size:13px}.history-label{font-family:var(--mono);font-weight:600;font-size:11px}
+#history-panel{padding:6px 10px;border-left:1px solid var(--border);min-width:240px;max-width:340px;overflow-y:auto;max-height:78px}
+.history-row{display:flex;align-items:center;gap:6px;font-size:11px;padding:3px 4px;border-radius:3px;cursor:pointer;transition:background .15s}
+.history-row:hover{background:rgba(255,255,255,.05)}
+.history-icon{font-size:13px;width:16px;text-align:center}
+.history-label{font-family:var(--mono);font-weight:600;font-size:11px;min-width:36px}
+.history-meta{font-size:10px;color:var(--text-dim);margin-left:auto;font-family:var(--mono)}
+.history-strength{font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700}
+.history-strength.STRONG{background:var(--green);color:#000}
+.history-strength.MEDIUM{background:var(--yellow);color:#000}
+.history-strength.WEAK{background:var(--text-dim);color:#fff}
+/* Signal detail modal */
+#signal-detail-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
+#signal-detail-overlay.show{display:flex}
+#signal-detail-modal{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;max-width:560px;max-height:80vh;overflow-y:auto;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+#signal-detail-modal h3{margin:0 0 8px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+#signal-detail-modal .detail-close{cursor:pointer;color:var(--text-dim);font-size:18px}
+#signal-detail-modal .detail-row{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-bottom:1px solid rgba(255,255,255,.05)}
+#signal-detail-modal .detail-row .label{color:var(--text-dim)}
+#signal-detail-modal .detail-row .value{font-family:var(--mono);font-weight:600;text-align:right;max-width:60%;word-break:break-word}
+#signal-detail-modal .detail-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+#signal-detail-modal .detail-tag{font-size:10px;padding:2px 6px;border-radius:3px;background:rgba(33,150,243,.15);color:#64b5f6;font-family:var(--mono)}
+#signal-detail-modal .detail-postmortem{background:rgba(0,0,0,.3);padding:8px;border-radius:4px;font-family:var(--mono);font-size:11px;margin-top:8px;line-height:1.5;color:var(--text-dim);white-space:pre-wrap;word-break:break-word}
+#signal-detail-modal .detail-theories{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:8px}
+#signal-detail-modal .theory-pill{font-size:10px;padding:3px 6px;border-radius:3px;display:flex;justify-content:space-between}
+#signal-detail-modal .theory-pill.right{background:rgba(0,200,83,.12);color:var(--green)}
+#signal-detail-modal .theory-pill.wrong{background:rgba(255,23,68,.12);color:var(--red)}
 #accuracy-bar{display:flex;align-items:center;gap:6px;padding:2px 12px 4px;font-size:11px;color:var(--text-dim);background:rgba(0,0,0,.2)}
 #accuracy-bar .pct{font-family:var(--mono);font-weight:700;color:var(--green)}
 /* RESPONSIVE */
@@ -278,10 +304,17 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <div id="accuracy-bar">Accuracy: <span class="pct" id="acc-pct">—</span> <span id="acc-detail"></span></div>
     </div>
     <div id="history-panel">
-      <div class="section-title">Signal History</div>
+      <div class="section-title">Signal History <span style="float:right;font-size:10px;color:var(--text-dim);font-weight:400">click row for detail</span></div>
       <div id="history-list"></div>
     </div>
   </footer>
+</div>
+<!-- Signal detail modal (win/loss reason popup) -->
+<div id="signal-detail-overlay">
+  <div id="signal-detail-modal">
+    <h3><span id="detail-title">Signal Detail</span><span class="detail-close" id="detail-close">×</span></h3>
+    <div id="detail-body"></div>
+  </div>
 </div>
 <script>
 (function(){
@@ -292,7 +325,7 @@ const WS_URL = (location.protocol==='https:'?'wss://':'ws://')+location.host+'/w
 const RECONNECT_BASE = 1000;
 const RECONNECT_MAX = 30000;
 const TICK_TAPE_MAX = 40;
-const HISTORY_MAX = 12;
+const HISTORY_MAX = 30;
 
 /* ─── STATE ─── */
 let ws = null, reconnectTimer = null, reconnectAttempts = 0;
@@ -306,11 +339,11 @@ let currentMicro = null, runningConf = null;
 let tapePrices = [], tapeDir = [];
 let staleTimeout = null;
 /* ── CANDLE COUNTDOWN STATE ── */
-/* Tracks the running candle's open time so we can compute seconds-to-close.
-   Updated from tick/eoc/snapshot messages (the running candle's `time` field
-   is its open time). The countdown is rendered in #candle-countdown. */
-let runningCandleOpenTime = 0;   // unix seconds (start of running candle)
-let countdownEl = null;          // cached #candle-countdown element
+let runningCandleOpenTime = 0;
+let countdownEl = null;
+/* ── SIGNAL HISTORY (server-backed) ── */
+let serverSignals = [];   // full signal list from DB (with details)
+let detailOverlay = null, detailBody = null, detailTitle = null;
 // Live-candle smoothing: real ticks land irregularly (Quotex OTC pairs
 // typically send 2-4/sec, sometimes with multi-second gaps), so we animate
 // the displayed close toward the latest real value every rAF frame instead
@@ -356,6 +389,14 @@ const theoriesToggle = $('theories-toggle');
 const theoriesList = $('theories-list');
 const tickTapeInner = $('tick-tape-inner');
 const historyList = $('history-list');
+// Signal detail modal refs
+detailOverlay = $('signal-detail-overlay');
+detailBody = $('detail-body');
+detailTitle = $('detail-title');
+$('detail-close').addEventListener('click', () => detailOverlay.classList.remove('show'));
+detailOverlay.addEventListener('click', (e) => {
+  if(e.target === detailOverlay) detailOverlay.classList.remove('show');
+});
 const accPct = $('acc-pct');
 const accDetail = $('acc-detail');
 const staleOverlay = $('stale-overlay');
@@ -472,6 +513,26 @@ function animateLiveCandle(ts){
 requestAnimationFrame(animateLiveCandle);
 
 /* ─── SIGNAL DISPLAY ─── */
+/* renderPending — shown when the prediction is being withheld during the
+   opening-tick confirmation window (signal delay, 2026-07-10). The signal
+   panel turns blue and pulses while waiting for the 2-3s gate to open. */
+function renderPending(){
+  signalBox.className = 'pending signal-pop';
+  signalLabel.textContent = '⏳ PENDING';
+  sigScore.textContent = '—';
+  sigScore.style.color = 'var(--text-dim)';
+  sigStrength.className = 'value strength-weak';
+  sigStrength.textContent = 'WAIT';
+  sigConfVal.textContent = '—';
+  sigConfBar.style.width = '0%';
+  sigConfBar.style.background = '#2196F3';
+  sigAgree.textContent = '—';
+  sigRegime.textContent = '—';
+  theoriesList.innerHTML = '';
+  theoriesList.classList.remove('open');
+  theoriesToggle.classList.remove('open');
+}
+
 function renderSignal(pred){
   if(!pred) return;
   const s = pred.signal || 'NEUTRAL';
@@ -604,9 +665,17 @@ function renderTape(){
   tickTapeInner.innerHTML = html;
 }
 
-/* ─── SIGNAL HISTORY ─── */
-function addHistory(signal, accuracy){
-  signalHistory.unshift({ signal, accuracy });
+/* ─── SIGNAL HISTORY (server-backed, with win/loss reasons) ─── */
+/* History now loads from the server's signal_log table (via WebSocket
+   "signals" request or fetched on demand). Each entry carries the full
+   postmortem: signal, accuracy, score, strength, regime, tags, right/wrong
+   theories, and the win/loss reason text. Clicking a row opens a detail
+   modal with everything. */
+
+function addHistory(signal, accuracy, detail){
+  // detail is optional; when present (from EOC msg) we store a stub that
+  // the server-backed load will enrich later.
+  signalHistory.unshift({ signal, accuracy, detail: detail || null });
   if(signalHistory.length > HISTORY_MAX) signalHistory.pop();
   totalSignals++;
   if(accuracy === 'correct') totalCorrect++;
@@ -614,15 +683,119 @@ function addHistory(signal, accuracy){
   renderAccuracy();
 }
 
+function loadServerHistory(){
+  /* Ask the server for the last 50 signals for this asset/period. */
+  if(!ws || ws.readyState !== WebSocket.OPEN) return;
+  send({ type: 'signals', asset: currentAsset, period: currentPeriod });
+}
+
+function onServerSignals(sigs){
+  /* Server sent us the full history (with details). Merge into our list. */
+  if(!sigs || !sigs.length) return;
+  serverSignals = sigs;
+  // Rebuild signalHistory from server data (most recent first)
+  signalHistory = sigs.slice(0, HISTORY_MAX).map(s => ({
+    signal: s.signal,
+    accuracy: s.accuracy,
+    detail: s
+  }));
+  // Recompute totals from server data (more accurate than incremental)
+  const graded = sigs.filter(s => s.accuracy === 'correct' || s.accuracy === 'wrong');
+  totalSignals = graded.length;
+  totalCorrect = graded.filter(s => s.accuracy === 'correct').length;
+  renderHistory();
+  renderAccuracy();
+}
+
 function renderHistory(){
   let html = '';
-  signalHistory.forEach(h => {
+  if(!signalHistory.length){
+    html = '<div style="color:var(--text-dim);font-size:11px;padding:4px">No signals yet</div>';
+    historyList.innerHTML = html;
+    return;
+  }
+  signalHistory.forEach((h, idx) => {
     const icon = h.accuracy === 'correct' ? '✅' : h.accuracy === 'wrong' ? '❌' : '➖';
     const color = h.signal === 'CALL' ? 'var(--green)' : h.signal === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
-    html += '<div class="history-row"><span class="history-icon">' + icon + '</span><span class="history-label" style="color:' + color + '">' + h.signal + '</span></div>';
+    const strength = h.detail?.strength || '';
+    const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
+    const score = h.detail?.score != null ? (h.detail.score >= 0 ? '+' : '') + h.detail.score : '';
+    // Click opens detail modal if we have full detail
+    const clickable = h.detail ? `onclick="window._showSignalDetail(${idx})"` : '';
+    html += `<div class="history-row" ${clickable}>`
+         +  `<span class="history-icon">${icon}</span>`
+         +  `<span class="history-label" style="color:${color}">${h.signal}</span>`
+         +  (strength ? `<span class="history-strength ${strengthCls}">${strength[0]}</span>` : '')
+         +  (score ? `<span class="history-meta">${score}</span>` : '')
+         +  `</div>`;
   });
-  if(!signalHistory.length) html = '<div style="color:var(--text-dim);font-size:11px">No signals yet</div>';
   historyList.innerHTML = html;
+}
+
+window._showSignalDetail = function(idx){
+  const h = signalHistory[idx];
+  if(!h || !h.detail) return;
+  const d = h.detail;
+  const sig = d.signal || '—';
+  const acc = d.accuracy || '—';
+  const accIcon = acc === 'correct' ? '✅ WIN' : acc === 'wrong' ? '❌ LOSS' : '➖ DRAW';
+  const accColor = acc === 'correct' ? 'var(--green)' : acc === 'wrong' ? 'var(--red)' : 'var(--text-dim)';
+
+  detailTitle.innerHTML = `<span style="color:${sig==='CALL'?'var(--green)':'var(--red)'}">${sig}</span> <span style="color:${accColor};font-size:13px;margin-left:8px">${accIcon}</span>`;
+
+  // Build detail rows
+  let rows = '';
+  const dateStr = d.ctime ? new Date(d.ctime * 1000).toLocaleString() : '—';
+  rows += detailRow('Time', dateStr);
+  rows += detailRow('Asset', currentAsset);
+  rows += detailRow('Score', d.score != null ? (d.score >= 0 ? '+' : '') + d.score : '—');
+  rows += detailRow('Confidence', d.confidence != null ? Math.round(d.confidence) + '%' : '—');
+  rows += detailRow('Strength', d.strength || '—');
+  rows += detailRow('Agree', d.agree != null ? d.agree + ' theories' : '—');
+  rows += detailRow('Actual', d.actual || '—');
+  rows += detailRow('Regime', (d.regime || '—') + '/' + (d.zone || '—'));
+  if(d.a_open != null && d.a_close != null){
+    const move = d.a_close - d.a_open;
+    const movePct = d.a_open ? (move / d.a_open * 100).toFixed(3) + '%' : '—';
+    rows += detailRow('Candle Move', move.toFixed(5) + ' (' + movePct + ')');
+  }
+
+  // Tags
+  let tagsHtml = '';
+  if(d.tags){
+    const tags = d.tags.split(',').filter(t => t.trim());
+    if(tags.length){
+      tagsHtml = '<div class="detail-tags">' + tags.map(t => `<span class="detail-tag">${esc(t)}</span>`).join('') + '</div>';
+    }
+  }
+
+  // Right/wrong theories
+  let theoriesHtml = '';
+  const rightCodes = (d.right_codes || '').split(',').filter(t => t.trim());
+  const wrongCodes = (d.wrong_codes || '').split(',').filter(t => t.trim());
+  if(rightCodes.length || wrongCodes.length){
+    theoriesHtml = '<div class="detail-theories">';
+    rightCodes.forEach(t => {
+      theoriesHtml += `<div class="theory-pill right"><span>${esc(t)}</span><span>✓</span></div>`;
+    });
+    wrongCodes.forEach(t => {
+      theoriesHtml += `<div class="theory-pill wrong"><span>${esc(t)}</span><span>✗</span></div>`;
+    });
+    theoriesHtml += '</div>';
+  }
+
+  // Postmortem (win/loss reason)
+  let pmHtml = '';
+  if(d.postmortem){
+    pmHtml = '<div style="margin-top:8px"><div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">WIN/LOSS REASON:</div><div class="detail-postmortem">' + esc(d.postmortem) + '</div></div>';
+  }
+
+  detailBody.innerHTML = rows + tagsHtml + theoriesHtml + pmHtml;
+  detailOverlay.classList.add('show');
+};
+
+function detailRow(label, value){
+  return `<div class="detail-row"><span class="label">${label}</span><span class="value">${esc(String(value))}</span></div>`;
 }
 
 function renderAccuracy(){
@@ -665,6 +838,9 @@ function connect(){
     reconnectAttempts = 0;
     send({ type: 'pairs' });
     send({ type: 'subscribe', asset: currentAsset, period: currentPeriod });
+    // Load signal history from server (so it persists across page refreshes
+    // and reconnects, and carries full win/loss detail).
+    setTimeout(loadServerHistory, 800);
   };
   ws.onmessage = e => {
     try { handleMsg(JSON.parse(e.data)); } catch(err){ console.error('msg parse error', err); }
@@ -702,6 +878,7 @@ function handleMsg(msg){
     case 'snapshot': onSnapshot(msg); break;
     case 'tick': onTick(msg); break;
     case 'eoc': onEoc(msg); break;
+    case 'signals': onServerSignals(msg.signals); break;
     case 'pairs': renderPairs(msg.pairs); break;
     case 'stale': onStale(msg); break;
   }
@@ -749,6 +926,11 @@ function onEoc(msg){
   if(msg.prediction){
     lastPrediction = msg.prediction;
     renderSignal(msg.prediction);
+  } else {
+    // Signal delay (2026-07-10): no prediction broadcast at EOC — show a
+    // PENDING state until the gate opens and the prediction arrives via
+    // a subsequent tick message.
+    renderPending();
   }
   // Record previous signal accuracy
   if(signalHistory.length > 0 && msg.accuracy){
@@ -756,6 +938,10 @@ function onEoc(msg){
   }
   if(lastPrediction){
     addHistory(lastPrediction.signal || 'NEUTRAL', msg.accuracy || 'draw');
+    // Refresh full history from server so the new entry gets its detail
+    // (postmortem, tags, right/wrong theories) loaded asynchronously.
+    // Small delay lets the DB write complete.
+    setTimeout(loadServerHistory, 500);
   }
   // Reset micro
   currentMicro = null;
@@ -809,8 +995,11 @@ pairSelect.addEventListener('change', () => {
   // doesn't mix the old pair's signal into the new pair's history.
   runningCandleOpenTime = 0;
   lastPrediction = null;
+  renderPending();   // show PENDING until new pair's prediction arrives
   tickTapeInner.innerHTML = '<span class="tape-price flat">Waiting for data...</span>';
   send({ type: 'subscribe', asset: currentAsset, period: currentPeriod });
+  // Load new pair's signal history from server.
+  setTimeout(loadServerHistory, 500);
 });
 
 soundBtn.addEventListener('click', () => {

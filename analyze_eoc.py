@@ -962,7 +962,31 @@ def _theory_trap(candles, ticks, muted):
 
 
 def _theory_gap(candles, muted):
-    """GAP - Gap between candles."""
+    """GAP - Gap between candles (OTC-optimized fade logic, 2026-07-10).
+
+    Web research finding: in OTC markets (no real catalyst), common gaps fill
+    ~90% of the time. So the dominant edge is FADE THE GAP, not continue it.
+
+    Previous logic rewarded continuation (gap-up-continue → CALL). That is the
+    OPPOSITE of what works in OTC. This rewrite flips it:
+
+      Prev green + Gap UP   → PUT  (fade: gap up after bull = exhaustion)
+      Prev green + Gap DOWN → CALL (fill: gap down after bull = pullback buy)
+      Prev red   + Gap UP   → PUT  (fill: gap up after bear = dead-cat bounce)
+      Prev red   + Gap DOWN → CALL (fade: gap down after bear = exhaustion)
+
+    Score scales with gap size relative to ATR:
+      - Small gap (<0.1 ATR): ±1 (weak, mostly noise)
+      - Medium gap (0.1-0.3 ATR): ±2 (standard fade)
+      - Large gap (>0.3 ATR): ±3 (high-conviction fade)
+
+    Gap-type bonus (uses the classification computed in _save_micro, but
+    re-derives it here since theories don't get micro_snap):
+      - FILLED: gap was already filled by this candle → strong confirmation +1
+      - REJECTED: wick tested gap zone and rejected → +1
+      - PURE: gap unvisited → no bonus (uncertain)
+      - FLIP: gap up but closed down (or vice versa) → +1 (reversal confirmed)
+    """
     if "GAP" in muted:
         return None
     if len(candles) < 2:
@@ -974,23 +998,82 @@ def _theory_gap(candles, muted):
         return None
     gap_pct = gap / prev["close"]
 
-    if abs(gap_pct) < 0.00005:
+    # Threshold raised from 0.00005 to 0.0002 (0.02%) — old threshold fired
+    # on nearly every candle (noise). 0.02% filters out sub-pip jitter.
+    if abs(gap_pct) < 0.0002:
         return None
 
+    # Gap size relative to ATR (for conviction scaling)
+    atr = _atr(candles)
+    gap_size_ratio = abs(gap) / atr if atr > 0 else 0
+    if gap_size_ratio > 0.3:
+        size_score = 3   # large gap → high-conviction fade
+    elif gap_size_ratio > 0.1:
+        size_score = 2   # medium gap → standard fade
+    else:
+        size_score = 1   # small gap → weak signal
+
+    # Previous candle direction (bull = green, bear = red)
+    prev_bull = prev["close"] >= prev["open"]
+    gap_up = gap > 0
+
+    # OTC fade logic matrix
     score = 0
     reasons = []
-    if gap_pct > 0 and last["close"] < last["open"]:
-        score -= 2
-        reasons.append(f"GAP:-2 PUT gap-up-rejected {gap_pct:.5f}")
-    elif gap_pct < 0 and last["close"] > last["open"]:
-        score += 2
-        reasons.append(f"GAP:+2 CALL gap-down-filled {gap_pct:.5f}")
-    elif gap_pct > 0 and last["close"] > last["open"]:
-        score += 2
-        reasons.append(f"GAP:+2 CALL gap-up-continue {gap_pct:.5f}")
-    elif gap_pct < 0 and last["close"] < last["open"]:
-        score -= 2
-        reasons.append(f"GAP:-2 PUT gap-down-continue {gap_pct:.5f}")
+    if prev_bull and gap_up:
+        # Green → Gap Up → fade (PUT)
+        # Rationale: OTC common gaps fill ~90%. Up-gap after bullish close =
+        # exhaustion/profit-taking → price returns down.
+        score = -size_score
+        reasons.append(f"GAP:-{size_score} PUT green-then-gapup-fade "
+                       f"gap={gap_pct:.5f} size={gap_size_ratio:.2f}xATR")
+    elif prev_bull and not gap_up:
+        # Green → Gap Down → fill (CALL)
+        # Rationale: gap down after bullish close = pullback; price returns
+        # up to fill the gap → CALL.
+        score = size_score
+        reasons.append(f"GAP:+{size_score} CALL green-then-gapdown-fill "
+                       f"gap={gap_pct:.5f} size={gap_size_ratio:.2f}xATR")
+    elif not prev_bull and gap_up:
+        # Red → Gap Up → fill (PUT)
+        # Rationale: gap up after bearish close = dead-cat bounce; price
+        # returns down to fill → PUT.
+        score = -size_score
+        reasons.append(f"GAP:-{size_score} PUT red-then-gapup-fill "
+                       f"gap={gap_pct:.5f} size={gap_size_ratio:.2f}xATR")
+    else:
+        # Red → Gap Down → fade (CALL)
+        # Rationale: gap down after bearish close = exhaustion; price bounces
+        # up to fade the gap → CALL.
+        score = size_score
+        reasons.append(f"GAP:+{score} CALL red-then-gapdown-fade "
+                       f"gap={gap_pct:.5f} size={gap_size_ratio:.2f}xATR")
+
+    # ── Gap-type bonus (re-derive classification inline) ───────────────────
+    # This mirrors the FILLED/REJECTED/PURE/FLIP logic from feed.py's
+    # _save_micro, so the theory can use it without needing micro_snap passed
+    # in (theories only get candles + ticks).
+    is_bull_c = last["close"] >= last["open"]
+    pc = prev["close"]
+    w_fill = ((gap_up and last["low"] <= pc) or
+              (not gap_up and last["high"] >= pc))
+    b_fill = ((gap_up and last["close"] <= pc) or
+              (not gap_up and last["close"] >= pc))
+    if b_fill:
+        # Gap fully filled by close → strong confirmation of fade direction
+        score = score + (1 if score > 0 else -1)
+        reasons.append("GAP:bonus±1 FILLED (close returned to prev close)")
+    elif w_fill:
+        # Wick tested gap zone — was it rejected?
+        if gap_up == is_bull_c:
+            # Rejected: wick went into gap but close rejected → bonus
+            score = score + (1 if score > 0 else -1)
+            reasons.append("GAP:bonus±1 REJECTED (wick tested + rejected)")
+    elif gap_up != is_bull_c:
+        # FLIP: gap direction opposite to close direction → reversal confirmed
+        score = score + (1 if score > 0 else -1)
+        reasons.append("GAP:bonus±1 FLIP (gap dir != close dir)")
+    # PURE gap (unvisited) → no bonus, direction still uncertain
 
     return ("CALL" if score > 0 else "PUT", score, reasons)
 
@@ -1191,6 +1274,374 @@ def _theory_micro(candles, ticks, muted):
     # ── Fight zone dampening ─────────────────────────────────────────────
     if is_fight:
         score = int(score * 0.4)
+
+    if score == 0:
+        return None
+    return "CALL" if score > 0 else "PUT", score, reasons
+
+
+def _theory_continuity(candles, ticks, muted):
+    """CONTINUITY - NEW (2026-07-10): Cross-candle tick continuity analysis.
+
+    Analyzes the CONTINUITY between one candle's closing ticks and the next
+    candle's opening ticks. This catches momentum carry-over and gap
+    confirmation that single-candle theories miss:
+
+      1. STRONG CONTINUATION: last candle's last 5 ticks + current candle's
+         first 5 ticks ALL same direction → strong momentum carry → continue
+      2. TICK REVERSAL: last candle closed bullish but its last 5 ticks were
+         bearish (or vice versa) → internal reversal → next candle likely
+         follows the late ticks, not the body direction
+      3. OPENING CONFIRMATION: current candle's first few ticks confirm or
+         reject the gap direction (works with the signal delay feature)
+
+    Uses `ticks` which on the closed-candle path = the just-closed candle's
+    ticks. On the live re-eval path = running candle's ticks. The closed
+    candle's ticks are the PRIMARY input here.
+    """
+    if "CONTINUITY" in muted:
+        return None
+    if not ticks or len(ticks) < 10:
+        return None
+    if len(candles) < 2:
+        return None
+
+    score = 0
+    reasons = []
+
+    n = len(ticks)
+    last = candles[-1]
+    prev = candles[-2]
+
+    # Last candle's body direction
+    body_dir = 1 if last["close"] > last["open"] else (-1 if last["close"] < last["open"] else 0)
+
+    # ── 1. LAST CANDLE'S LATE TICKS vs BODY DIRECTION ─────────────────────
+    # If the candle is bullish but its last 5 ticks are bearish → internal
+    # reversal → next candle likely bearish
+    last5_move = ticks[-1] - ticks[-5] if n >= 5 else ticks[-1] - ticks[0]
+    last5_dir = 1 if last5_move > 0 else (-1 if last5_move < 0 else 0)
+
+    if body_dir != 0 and last5_dir != 0 and body_dir != last5_dir:
+        # Late ticks OPPOSITE to body → internal reversal
+        if last5_dir > 0:
+            score += 2
+            reasons.append(f"CONTINUITY:+2 CALL late-tick-reversal-up "
+                           f"(bull-body but last5={last5_move:.6f})")
+        else:
+            score -= 2
+            reasons.append(f"CONTINUITY:-2 PUT late-tick-reversal-down "
+                           f"(bear-body but last5={last5_move:.6f})")
+
+    # ── 2. STRONG CONTINUATION (late ticks match body direction) ──────────
+    elif body_dir != 0 and last5_dir != 0 and body_dir == last5_dir:
+        # Late ticks CONFIRM body direction → strong momentum carry
+        # Check magnitude: if last-5 move is significant (>0.3 ATR)
+        atr = _atr(candles)
+        if atr > 0:
+            last5_strength = abs(last5_move) / atr
+            if last5_strength > 0.3:
+                if last5_dir > 0:
+                    score += 2
+                    reasons.append(f"CONTINUITY:+2 CALL strong-carry-up "
+                                   f"last5={last5_strength:.2f}xATR")
+                else:
+                    score -= 2
+                    reasons.append(f"CONTINUITY:-2 PUT strong-carry-down "
+                                   f"last5={last5_strength:.2f}xATR")
+            elif last5_strength > 0.15:
+                # Moderate carry
+                if last5_dir > 0:
+                    score += 1
+                    reasons.append(f"CONTINUITY:+1 CALL moderate-carry-up "
+                                   f"last5={last5_strength:.2f}xATR")
+                else:
+                    score -= 1
+                    reasons.append(f"CONTINUITY:-1 PUT moderate-carry-down "
+                                   f"last5={last5_strength:.2f}xATR")
+
+    # ── 3. GAP CONFIRMATION via opening ticks ─────────────────────────────
+    # If there's a gap between prev.close and last.open, check if the last
+    # candle's ticks confirm or reject that gap
+    gap = last["open"] - prev["close"]
+    if prev["close"] > 0:
+        gap_pct = gap / prev["close"]
+        if abs(gap_pct) > 0.0002:  # 0.02% threshold (matches GAP theory)
+            # Check if last candle's overall tick direction confirms or
+            # rejects the gap
+            overall_move = ticks[-1] - ticks[0]
+            overall_dir = 1 if overall_move > 0 else (-1 if overall_move < 0 else 0)
+            gap_dir = 1 if gap > 0 else -1
+
+            if overall_dir != 0 and gap_dir != 0:
+                if overall_dir == gap_dir:
+                    # Ticks confirm gap direction → gap likely continues
+                    # (rare in OTC, but when it happens it's strong)
+                    if gap_dir > 0:
+                        score += 1
+                        reasons.append("CONTINUITY:+1 CALL gap-confirmed-by-ticks")
+                    else:
+                        score -= 1
+                        reasons.append("CONTINUITY:-1 PUT gap-confirmed-by-ticks")
+                else:
+                    # Ticks REJECT gap direction → gap fading (common in OTC)
+                    # This aligns with GAP theory's fade logic
+                    if gap_dir > 0:
+                        # Gap up but ticks moved down → fade confirmed
+                        score -= 1
+                        reasons.append("CONTINUITY:-1 PUT gap-up-rejected-by-ticks")
+                    else:
+                        # Gap down but ticks moved up → fade confirmed
+                        score += 1
+                        reasons.append("CONTINUITY:+1 CALL gap-down-rejected-by-ticks")
+
+    # ── 4. TICK SPEED CONSISTENCY (late vs early) ─────────────────────────
+    # If the candle's late ticks are FASTER than early ticks → momentum
+    # building into the close → next candle likely continues
+    if n >= 20:
+        half = n // 2
+        early_speed = abs(ticks[half] - ticks[0]) / half if half > 0 else 0
+        late_speed = abs(ticks[-1] - ticks[half]) / (n - half) if (n - half) > 0 else 0
+        if early_speed > 0:
+            speed_ratio = late_speed / early_speed
+            if speed_ratio > 2.0:
+                # Late ticks 2x faster than early → strong momentum build
+                if last5_dir > 0:
+                    score += 1
+                    reasons.append(f"CONTINUITY:+1 CALL late-speed-surge "
+                                   f"ratio={speed_ratio:.1f}")
+                elif last5_dir < 0:
+                    score -= 1
+                    reasons.append(f"CONTINUITY:-1 PUT late-speed-surge "
+                                   f"ratio={speed_ratio:.1f}")
+
+    if score == 0:
+        return None
+    return "CALL" if score > 0 else "PUT", score, reasons
+
+
+def _theory_momentum(candles, muted):
+    """MOMENTUM - NEW (2026-07-10): Multi-candle body-size momentum analysis.
+
+    Compares the BODY SIZES of the last 5 closed candles to detect momentum
+    building or fading — a pattern that single-candle theories miss:
+
+      1. GROWING BODIES (momentum building): each candle's body larger than
+         the previous → trend accelerating → continuation signal
+      2. SHRINKING BODIES (momentum fading): each candle's body smaller than
+         the previous → trend exhausting → reversal signal
+      3. EXPANSION FROM COMPRESSION: 2 small candles followed by 1 large
+         candle → breakout direction likely continues
+      4. BODY SIZE DIVERGENCE: price making higher highs but body sizes
+         shrinking → classic divergence → reversal warning
+
+    Score scales with how clear the pattern is (3-candle > 2-candle).
+    """
+    if "MOMENTUM" in muted:
+        return None
+    if len(candles) < 5:
+        return None
+
+    score = 0
+    reasons = []
+
+    # Compute body sizes (signed) for last 5 candles
+    last5 = candles[-5:]
+    bodies = []
+    for c in last5:
+        body = c["close"] - c["open"]
+        bodies.append(body)
+    abs_bodies = [abs(b) for b in bodies]
+    directions = [1 if b > 0 else (-1 if b < 0 else 0) for b in bodies]
+
+    atr = _atr(candles)
+    if atr <= 0:
+        return None
+
+    # Normalize body sizes to ATR for cross-pair comparison
+    norm_bodies = [ab / atr for ab in abs_bodies]
+
+    # ── 1. GROWING BODIES (momentum building) ─────────────────────────────
+    # Check if last 3 bodies are growing: |b3| > |b2| > |b1|
+    if len(abs_bodies) >= 3:
+        b1, b2, b3 = abs_bodies[-3], abs_bodies[-2], abs_bodies[-1]
+        if b3 > b2 > b1 and b3 > b1 * 1.5:
+            # Growing bodies → momentum building
+            # Direction: follow the last candle's direction
+            if directions[-1] > 0:
+                score += 3
+                reasons.append(f"MOMENTUM:+3 CALL growing-bodies "
+                               f"b1={norm_bodies[-3]:.2f}->b3={norm_bodies[-1]:.2f}xATR")
+            elif directions[-1] < 0:
+                score -= 3
+                reasons.append(f"MOMENTUM:-3 PUT growing-bodies "
+                               f"b1={norm_bodies[-3]:.2f}->b3={norm_bodies[-1]:.2f}xATR")
+
+        # ── 2. SHRINKING BODIES (momentum fading → reversal) ──────────────
+        elif b1 > b2 > b3 and b1 > b3 * 2:
+            # Shrinking bodies → exhaustion → reversal
+            if directions[-1] > 0:
+                score -= 2
+                reasons.append(f"MOMENTUM:-2 PUT shrinking-bull-bodies "
+                               f"b1={norm_bodies[-3]:.2f}->b3={norm_bodies[-1]:.2f}xATR")
+            elif directions[-1] < 0:
+                score += 2
+                reasons.append(f"MOMENTUM:+2 CALL shrinking-bear-bodies "
+                               f"b1={norm_bodies[-3]:.2f}->b3={norm_bodies[-1]:.2f}xATR")
+
+    # ── 3. EXPANSION FROM COMPRESSION (breakout) ──────────────────────────
+    # 2 small candles followed by 1 large candle
+    if len(abs_bodies) >= 3:
+        small_avg = (abs_bodies[-3] + abs_bodies[-2]) / 2
+        large = abs_bodies[-1]
+        if small_avg > 0 and large > small_avg * 2.5:
+            # Breakout: large candle after 2 small → continuation
+            if directions[-1] > 0:
+                score += 2
+                reasons.append(f"MOMENTUM:+2 CALL breakout-from-compression "
+                               f"small={norm_bodies[-3]:.2f}->large={norm_bodies[-1]:.2f}xATR")
+            elif directions[-1] < 0:
+                score -= 2
+                reasons.append(f"MOMENTUM:-2 PUT breakout-from-compression "
+                               f"small={norm_bodies[-3]:.2f}->large={norm_bodies[-1]:.2f}xATR")
+
+    # ── 4. BODY SIZE DIVERGENCE ───────────────────────────────────────────
+    # Price making higher highs but bodies shrinking (or vice versa)
+    if len(candles) >= 4:
+        last4 = candles[-4:]
+        highs = [c["high"] for c in last4]
+        lows = [c["low"] for c in last4]
+        last4_bodies = abs_bodies[-4:]
+
+        # Bullish divergence: highs rising but bodies shrinking
+        if highs[-1] > highs[-2] > highs[-3] and last4_bodies[-1] < last4_bodies[-2] < last4_bodies[-3]:
+            score -= 2
+            reasons.append("MOMENTUM:-2 PUT bull-divergence (higher-highs, smaller-bodies)")
+        # Bearish divergence: lows falling but bodies shrinking
+        elif lows[-1] < lows[-2] < lows[-3] and last4_bodies[-1] < last4_bodies[-2] < last4_bodies[-3]:
+            score += 2
+            reasons.append("MOMENTUM:+2 CALL bear-divergence (lower-lows, smaller-bodies)")
+
+    if score == 0:
+        return None
+    return "CALL" if score > 0 else "PUT", score, reasons
+
+
+def _theory_history(candles, ticks, micro_history, muted):
+    """HISTORY - NEW (2026-07-10): Previous candles' microstructure analysis.
+
+    Looks at the LAST 3 closed candles' microstructure (from DB via
+    micro_history) to detect multi-candle patterns that single-candle
+    theories miss:
+
+      1. CONSECUTIVE PRESSURE: 3 candles in a row with same buyer/seller
+         pressure → strong continuation bias (but check exhaustion below)
+      2. PRESSURE SHIFT: last candle's pressure flipped vs previous 2 →
+         momentum shift signal
+      3. REACTION STREAK: last 2-3 candles all showed same reaction
+         (BUYER/SELLER) → key level rejection building
+      4. GAP CHAIN: multiple consecutive candles with same gap_type
+         (FILLED/REJECTED) → persistent fade/fill pattern
+
+    Uses micro_history which is fetched from candle_micro table by
+    feed.py/sim_feed.py before calling analyze_eoc.
+    """
+    if "HISTORY" in muted:
+        return None
+    if not micro_history or len(micro_history) < 2:
+        return None
+
+    score = 0
+    reasons = []
+
+    # Get last 3 micro history entries (most recent last)
+    hist = micro_history[-3:] if len(micro_history) >= 3 else micro_history
+
+    # ── 1. CONSECUTIVE PRESSURE ───────────────────────────────────────────
+    pressures = [h.get("pressure") for h in hist if h.get("pressure")]
+    if len(pressures) >= 3:
+        if all(p == "BUYER" for p in pressures):
+            # 3 consecutive buyer pressure candles
+            # Check if last candle's buy_pct is DECREASING (exhaustion)
+            buy_pcts = [h.get("buy_pct", 50) for h in hist]
+            if len(buy_pcts) >= 3 and buy_pcts[-1] < buy_pcts[-2] < buy_pcts[-3]:
+                # Pressure decreasing → exhaustion → reversal
+                score -= 2
+                reasons.append(f"HISTORY:-2 PUT buyer-pressure-fading "
+                               f"{buy_pcts[-3]}->{buy_pcts[-2]}->{buy_pcts[-1]}")
+            else:
+                # Strong sustained buyer pressure → continuation
+                score += 2
+                reasons.append(f"HISTORY:+2 CALL 3x-buyer-pressure "
+                               f"bp={buy_pcts[-1]}%")
+        elif all(p == "SELLER" for p in pressures):
+            sell_pcts = [h.get("sell_pct", 50) for h in hist]
+            if len(sell_pcts) >= 3 and sell_pcts[-1] < sell_pcts[-2] < sell_pcts[-3]:
+                score += 2
+                reasons.append(f"HISTORY:+2 CALL seller-pressure-fading "
+                               f"{sell_pcts[-3]}->{sell_pcts[-2]}->{sell_pcts[-1]}")
+            else:
+                score -= 2
+                reasons.append(f"HISTORY:-2 PUT 3x-seller-pressure "
+                               f"sp={sell_pcts[-1]}%")
+
+    # ── 2. PRESSURE SHIFT (last candle flipped vs previous) ───────────────
+    elif len(pressures) >= 2:
+        prev_pressures = pressures[:-1]
+        last_pressure = pressures[-1]
+        if last_pressure and last_pressure != "FIGHT":
+            prev_dominant = max(set(prev_pressures), key=prev_pressures.count)
+            if prev_dominant and prev_dominant != "FIGHT" and prev_dominant != last_pressure:
+                # Pressure flipped → momentum shift
+                if last_pressure == "BUYER":
+                    score += 2
+                    reasons.append(f"HISTORY:+2 CALL pressure-shift "
+                                   f"{prev_dominant}->{last_pressure}")
+                elif last_pressure == "SELLER":
+                    score -= 2
+                    reasons.append(f"HISTORY:-2 PUT pressure-shift "
+                                   f"{prev_dominant}->{last_pressure}")
+
+    # ── 3. REACTION STREAK ────────────────────────────────────────────────
+    reactions = [h.get("reaction") for h in hist if h.get("reaction")]
+    if len(reactions) >= 2:
+        last2 = reactions[-2:]
+        if all(r == "BUYER" for r in last2):
+            # 2 consecutive buyer reactions → strong support building → CALL
+            score += 2
+            reasons.append("HISTORY:+2 CALL 2x-buyer-reaction-streak")
+        elif all(r == "SELLER" for r in last2):
+            score -= 2
+            reasons.append("HISTORY:-2 PUT 2x-seller-reaction-streak")
+
+    # ── 4. GAP CHAIN ──────────────────────────────────────────────────────
+    gap_types = [h.get("gap_type") for h in hist if h.get("gap_type") and h.get("gap_type") != "NONE"]
+    if len(gap_types) >= 2:
+        last2_gaps = gap_types[-2:]
+        if all(g == "FILLED" for g in last2_gaps):
+            # 2 consecutive filled gaps → strong mean-reversion market →
+            # next gap likely fills too. But this is a market-state signal,
+            # not directional, so small score toward fade bias based on
+            # last candle direction.
+            last_close = candles[-1]["close"] if candles else 0
+            last_open = candles[-1]["open"] if candles else 0
+            if last_close > last_open:
+                # Last candle bullish + filled gaps → next likely bearish (fade)
+                score -= 1
+                reasons.append("HISTORY:-1 PUT 2x-filled-gap bearish-fade-bias")
+            elif last_close < last_open:
+                score += 1
+                reasons.append("HISTORY:+1 CALL 2x-filled-gap bullish-fade-bias")
+        elif all(g == "REJECTED" for g in last2_gaps):
+            # 2 consecutive rejected gaps → strong rejection at extremes
+            last_close = candles[-1]["close"] if candles else 0
+            last_open = candles[-1]["open"] if candles else 0
+            if last_close > last_open:
+                score += 1
+                reasons.append("HISTORY:+1 CALL 2x-rejected-gap bull-confirm")
+            elif last_close < last_open:
+                score -= 1
+                reasons.append("HISTORY:-1 PUT 2x-rejected-gap bear-confirm")
 
     if score == 0:
         return None
@@ -1675,19 +2126,23 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
     run_micro = running_micro if running_micro else closed_micro
 
     theories = [
-        ("CON",       lambda: _theory_con(candles, muted)),
-        ("REV",       lambda: _theory_rev(candles, muted)),
-        ("RUN",       lambda: _theory_run(candles, ticks, run_micro, muted)),
-        ("TRAP",      lambda: _theory_trap(candles, ticks, muted)),
-        ("GAP",       lambda: _theory_gap(candles, muted)),
-        ("LAST",      lambda: _theory_last(candles, ticks, muted)),
-        ("RNG",       lambda: _theory_rng(candles, muted)),
-        ("MICRO",     lambda: _theory_micro(candles, ticks, muted)),
-        ("MEAN",      lambda: _theory_mean(candles, ticks, muted)),
-        ("SHIFT",     lambda: _theory_shift(candles, ticks, muted)),
-        ("VELOCITY",  lambda: _theory_velocity(candles, ticks, run_micro, muted)),
-        ("LIVE_WICK", lambda: _theory_live_wick(candles, ticks, run_micro, muted)),
-        ("ORDERFLOW", lambda: _theory_orderflow(candles, ticks, run_micro, muted)),
+        ("CON",        lambda: _theory_con(candles, muted)),
+        ("REV",        lambda: _theory_rev(candles, muted)),
+        ("RUN",        lambda: _theory_run(candles, ticks, run_micro, muted)),
+        ("TRAP",       lambda: _theory_trap(candles, ticks, muted)),
+        ("GAP",        lambda: _theory_gap(candles, muted)),
+        ("LAST",       lambda: _theory_last(candles, ticks, muted)),
+        ("RNG",        lambda: _theory_rng(candles, muted)),
+        ("MICRO",      lambda: _theory_micro(candles, ticks, muted)),
+        ("MEAN",       lambda: _theory_mean(candles, ticks, muted)),
+        ("SHIFT",      lambda: _theory_shift(candles, ticks, muted)),
+        ("VELOCITY",   lambda: _theory_velocity(candles, ticks, run_micro, muted)),
+        ("LIVE_WICK",  lambda: _theory_live_wick(candles, ticks, run_micro, muted)),
+        ("ORDERFLOW",  lambda: _theory_orderflow(candles, ticks, run_micro, muted)),
+        # Multi-candle theories (2026-07-10)
+        ("MOMENTUM",   lambda: _theory_momentum(candles, muted)),
+        ("CONTINUITY", lambda: _theory_continuity(candles, ticks, muted)),
+        ("HISTORY",    lambda: _theory_history(candles, ticks, micro_history, muted)),
     ]
 
     # MST is special — returns (result, market_state)

@@ -110,8 +110,17 @@ async def get_history(asset: str, period: int):
 
 
 @app.get("/api/signals/{asset}/{period}")
-async def get_signals(asset: str, period: int, limit: int = 20):
+async def get_signals(asset: str, period: int, limit: int = 50):
     return {"signals": _db.get_recent_signals(asset, period, limit)}
+
+
+@app.get("/api/signals/{asset}/{period}/{ctime}")
+async def get_signal_detail(asset: str, period: int, ctime: int):
+    """Return full detail for a single signal (win/loss reason, theories, etc.)."""
+    detail = _db.get_signal_detail(asset, period, ctime)
+    if detail:
+        return detail
+    return {"error": "not found"}, 404
 
 
 # ── WebSocket endpoint ───────────────────────────────────────────────────────
@@ -155,7 +164,7 @@ async def ws_endpoint(ws: WebSocket):
             elif t == "signals":
                 asset = msg.get("asset", "")
                 period = int(msg.get("period", 60))
-                sigs = _db.get_recent_signals(asset, period, 20)
+                sigs = _db.get_recent_signals(asset, period, 50)
                 await ws.send_text(json.dumps({
                     "type": "signals",
                     "signals": sigs,

@@ -17,6 +17,9 @@ from analyze_eoc import analyze_eoc, _round_level, _key_levels, _parse_votes, _a
 PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "81"))
 ENABLE_LIVE_THEORY = os.environ.get("ENABLE_LIVE_THEORY", "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
+# Signal delay (2026-07-10): withhold prediction for N seconds after candle
+# open so opening ticks can confirm gap direction. Mirrors feed.py.
+SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
 ZONE_LOSS_GUARD = 3
 
 _SIM_PAIRS = [
@@ -75,6 +78,8 @@ class _AssetStream:
     cached_accuracy: tuple = field(default_factory=lambda: (None, 0))
     cached_accuracy_at: float = 0.0
     live_signal_history: list = field(default_factory=list)
+    # Signal delay (2026-07-10)
+    signal_delay_until: float = 0.0
     # Sim-specific
     _sim_price: float = 0.0
     _sim_momentum: float = 0.0
@@ -554,6 +559,9 @@ class QuotexFeed:
             else:
                 stream.zone_streak = {"regime": _key[0], "zone": _key[1], "losses": 1 if accuracy == "wrong" else 0}
         stream.prediction = self._run_eoc(stream, actual_open=first_tick)
+        # Signal delay (2026-07-10): withhold prediction broadcast for
+        # SIGNAL_DELAY_SEC seconds after the new candle opens.
+        stream.signal_delay_until = time.time() + SIGNAL_DELAY_SEC
         if _micro_snap:
             self._save_micro(stream.asset, stream.period, closed, _micro_snap, stream.candles, list(stream.ticks))
         stream.candle_open_time = new_open_time
@@ -587,6 +595,8 @@ class QuotexFeed:
             pair = next((p for p in self._pairs_list if p["asset"] == stream.asset), None)
             stream.payout = pair["payout"] if pair else None
             stream.prediction = self._run_eoc(stream, actual_open=last["close"])
+            # Initial subscription joins mid-candle — no signal delay.
+            stream.signal_delay_until = 0.0
             await self._broadcast({
                 "type": "snapshot", "asset": stream.asset, "period": stream.period,
                 "candles": history, "prediction": stream.prediction,
@@ -604,9 +614,12 @@ class QuotexFeed:
                     accuracy = self._close_running_and_start_new(stream, current_period, last_px)
                     running = self._running_candle(stream)
                     all_c = stream.candles + [running]
+                    # Signal delay (2026-07-10): withhold prediction at EOC;
+                    # it will be delivered via the tick loop once the delay
+                    # gate passes. Candle data + accuracy still flow.
                     await self._broadcast({
                         "type": "eoc", "asset": stream.asset, "period": stream.period,
-                        "candles": all_c[-300:], "prediction": stream.prediction,
+                        "candles": all_c[-300:], "prediction": None,
                         "accuracy": accuracy,
                     })
 
@@ -719,8 +732,22 @@ class QuotexFeed:
                     "candle": running, "running_conf": self._running_confirmation(stream),
                     "micro": micro,
                 }
-                if pred_changed:
-                    msg["prediction"] = stream.prediction
+                # ── Signal delay gate (2026-07-10) ──────────────────────────
+                # While the opening-tick confirmation window is still active,
+                # do NOT broadcast the prediction. Candle data, micro, and
+                # running_conf still flow. Once the gate passes, the FIRST
+                # eligible tick broadcasts the prediction.
+                now_ts = time.time()
+                if stream.signal_delay_until > 0 and now_ts < stream.signal_delay_until:
+                    # Still in delay window — withhold prediction
+                    pass
+                else:
+                    if stream.signal_delay_until > 0:
+                        # Gate just opened — clear it and force broadcast
+                        stream.signal_delay_until = 0.0
+                        pred_changed = True
+                    if pred_changed:
+                        msg["prediction"] = stream.prediction
                 await self._broadcast(msg)
 
                 # Tick interval: ~100ms (simulating real feed speed)
