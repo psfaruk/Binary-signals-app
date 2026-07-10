@@ -1885,9 +1885,28 @@ class QuotexFeed:
                                             **(stream.prediction or {}), **fresh}
                                         pred_changed = True
                                     else:
-                                        stream.prediction = {
-                                            **(stream.prediction or {}), **fresh}
-                                        pred_changed = True
+                                        # ── Direction-change gate (2026-07-10) ──
+                                        # Only broadcast if signal DIRECTION
+                                        # actually changed vs current prediction.
+                                        # Without this, mid-candle re-evals that
+                                        # produce the SAME direction (only score
+                                        # / confidence / strength changed) cause
+                                        # the frontend to re-broadcast beep +
+                                        # pop animation — making it LOOK like
+                                        # multiple signals on the same candle.
+                                        prev_sig = (stream.prediction or {}).get("signal")
+                                        if prev_sig != fresh["signal"]:
+                                            stream.prediction = {
+                                                **(stream.prediction or {}), **fresh}
+                                            pred_changed = True
+                                        else:
+                                            # Direction unchanged — update the
+                                            # stored prediction silently (so the
+                                            # latest score/confidence is kept for
+                                            # the next direction change to diff
+                                            # against), but do NOT broadcast.
+                                            stream.prediction = {
+                                                **(stream.prediction or {}), **fresh}
                             except Exception as exc:
                                 print(f"[feed] LIVE re-eval error "
                                       f"({stream.asset}@{stream.period}s): {exc}")
@@ -1897,8 +1916,16 @@ class QuotexFeed:
                             and stream.prediction.get("signal") != "NEUTRAL"):
                         gated = self._apply_strength_gate(stream, stream.prediction)
                         if gated is not stream.prediction:
+                            # Direction-change gate: only broadcast if the
+                            # gated version's signal DIRECTION differs from
+                            # what's currently stored. Strength-only changes
+                            # (WEAK↔MEDIUM↔STRONG) shouldn't trigger a fresh
+                            # alert on the same candle.
+                            prev_sig = stream.prediction.get("signal")
+                            new_sig = gated.get("signal")
                             stream.prediction = gated
-                            pred_changed = True
+                            if prev_sig != new_sig:
+                                pred_changed = True
 
                     # Skip broadcast if open price is still 0 (no valid tick yet)
                     # — prevents LightweightCharts "Value is null" on the client

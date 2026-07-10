@@ -25,6 +25,18 @@ Theories:
   MST   - Market-state classification
   MICRO - Closed-candle internal microstructure (NEW)
   SHIFT - Momentum shift detection (NEW)
+  MEAN  - Mean-reversion detector (OTC-tuned)
+  VELOCITY - Last 5/10 tick velocity + V-shape (LIVE)
+  LIVE_WICK - Real-time wick rejection forming (LIVE)
+  ORDERFLOW - Big-money vs retail tick-size disagreement (LIVE)
+  MOMENTUM  - Multi-candle body-size growth/shrink patterns
+  CONTINUITY - Cross-candle tick continuity
+  HISTORY   - Previous 3 candles' microstructure
+  FVG   - Fair Value Gap (gap-fill fade)             [LIQUIDITY, 2026-07-10]
+  OB    - Order Block (last opposite candle as S/R)  [LIQUIDITY, 2026-07-10]
+  SWEEP - Liquidity sweep / stop hunt (wick breaks swing, close reverses)
+                                                        [LIQUIDITY, 2026-07-10]
+  STRUCT - BOS / CHOCH structure break               [LIQUIDITY, 2026-07-10]
 """
 import math
 from collections import Counter
@@ -2065,6 +2077,498 @@ def _theory_shift(candles, ticks, muted):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  LIQUIDITY THEORIES (2026-07-10) — SMC concepts adapted for OTC
+#  Since OTC has no real volume, these use price structure only:
+#    FVG       — Fair Value Gap (3-candle imbalance, gap-fill fade)
+#    OB        — Order Block (last opposite candle before strong move)
+#    SWEEP     — Liquidity sweep / stop hunt (wick breaks swing, close reverses)
+#    STRUCT    — BOS (continuation) / CHOCH (reversal) structure break
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _find_fvgs(candles, lookback=20):
+    """
+    Detect unfilled Fair Value Gaps in the last `lookback` candles.
+
+    Bullish FVG: candles[i-1].high < candles[i+1].low  (gap up)
+        → expect price to come DOWN to fill it (fade from above)
+    Bearish FVG: candles[i-1].low > candles[i+1].high  (gap down)
+        → expect price to come UP to fill it (fade from below)
+
+    An FVG is "filled" when a later candle's range covers the entire gap.
+    Returns list of {"type": "bull"|"bear", "gap_low": f, "gap_high": f, "idx": int}
+    for UNFILLED gaps only.
+    """
+    if len(candles) < 3:
+        return []
+    fvgs = []
+    start = max(1, len(candles) - lookback)
+    for i in range(start, len(candles) - 1):
+        prev_high = candles[i - 1]["high"]
+        prev_low  = candles[i - 1]["low"]
+        next_low  = candles[i + 1]["low"]
+        next_high = candles[i + 1]["high"]
+
+        # Bullish FVG (gap up between prev_high and next_low)
+        if next_low > prev_high:
+            gap_low, gap_high = prev_high, next_low
+            filled = False
+            for j in range(i + 2, len(candles)):
+                if candles[j]["low"] <= gap_low:
+                    filled = True
+                    break
+            if not filled:
+                fvgs.append({"type": "bull", "gap_low": gap_low,
+                             "gap_high": gap_high, "idx": i})
+
+        # Bearish FVG (gap down between prev_low and next_high)
+        elif next_high < prev_low:
+            gap_low, gap_high = next_high, prev_low
+            filled = False
+            for j in range(i + 2, len(candles)):
+                if candles[j]["high"] >= gap_high:
+                    filled = True
+                    break
+            if not filled:
+                fvgs.append({"type": "bear", "gap_low": gap_low,
+                             "gap_high": gap_high, "idx": i})
+    return fvgs
+
+
+def _theory_fvg(candles, muted):
+    """
+    FVG — Fair Value Gap theory.
+
+    SMC doctrine: price tends to fill unfilled FVGs. In mean-reverting OTC
+    markets this is especially reliable because the broker's price generator
+    almost always reverts to fill algorithmic gaps.
+
+    Vote logic:
+      - Just-formed FVG (within last 3 candles) AND price far from gap
+        → continuation toward gap (price seeks the gap): ±2
+      - Recent FVG (within last 8 candles) AND price now INSIDE or AT gap
+        → fade (gap about to be filled): ±3
+    """
+    if "FVG" in muted:
+        return None
+    if len(candles) < 4:
+        return None
+
+    fvgs = _find_fvgs(candles, lookback=20)
+    if not fvgs:
+        return None
+
+    last = candles[-1]
+    close = last["close"]
+    atr = _atr(candles)
+    if atr <= 0:
+        return None
+
+    score = 0
+    reasons = []
+
+    for fvg in fvgs:
+        gap_mid = (fvg["gap_low"] + fvg["gap_high"]) / 2
+        age = len(candles) - 1 - fvg["idx"]  # candles since FVG formed
+        gap_size = fvg["gap_high"] - fvg["gap_low"]
+        gap_ratio = gap_size / atr
+
+        # Too small a gap = noise, skip
+        if gap_ratio < 0.15:
+            continue
+
+        # Case 1: price is currently INSIDE the gap → fill in progress
+        if fvg["gap_low"] <= close <= fvg["gap_high"]:
+            # Bullish FVG filled from above → expect continuation DOWN through gap
+            if fvg["type"] == "bull":
+                score -= 3
+                reasons.append(
+                    f"FVG:-3 PUT filling-bull-gap age={age} "
+                    f"size={gap_ratio:.2f}xATR")
+            else:
+                score += 3
+                reasons.append(
+                    f"FVG:+3 CALL filling-bear-gap age={age} "
+                    f"size={gap_ratio:.2f}xATR")
+            continue
+
+        # Case 2: price approaching gap from outside (within 0.5 ATR)
+        if fvg["type"] == "bull" and close > fvg["gap_high"]:
+            dist = close - fvg["gap_high"]
+            if dist < atr * 0.5:
+                # Price above bullish gap → expect drop to fill
+                score -= 2
+                reasons.append(
+                    f"FVG:-2 PUT approaching-bull-gap dist={dist/atr:.2f}xATR "
+                    f"age={age}")
+        elif fvg["type"] == "bear" and close < fvg["gap_low"]:
+            dist = fvg["gap_low"] - close
+            if dist < atr * 0.5:
+                # Price below bearish gap → expect rise to fill
+                score += 2
+                reasons.append(
+                    f"FVG:+2 CALL approaching-bear-gap dist={dist/atr:.2f}xATR "
+                    f"age={age}")
+
+    if score == 0:
+        return None
+    return "CALL" if score > 0 else "PUT", score, reasons
+
+
+def _find_order_blocks(candles, lookback=15):
+    """
+    Find Order Blocks: the last opposite-color candle before a strong
+    directional displacement move.
+
+    Bullish OB: last BEARISH candle before a strong BULLISH move (>=1.2x ATR body)
+    Bearish OB: last BULLISH candle before a strong BEARISH move
+
+    Returns list of {"type": "bull"|"bear", "ob_low": f, "ob_high": f,
+                     "ob_body": f, "idx": int, "displacement": f}
+    """
+    if len(candles) < 4:
+        return []
+    atr = _atr(candles)
+    if atr <= 0:
+        return []
+
+    obs = []
+    start = max(2, len(candles) - lookback)
+    for i in range(start, len(candles)):
+        c = candles[i]
+        body = c["close"] - c["open"]
+        abs_body = abs(body)
+        # Need a strong displacement move (>=1.2x ATR body)
+        if abs_body < atr * 1.2:
+            continue
+
+        # Find the most recent opposite-color candle before this one
+        for j in range(i - 1, max(0, i - 4) - 1, -1):
+            prev = candles[j]
+            prev_body = prev["close"] - prev["open"]
+            if body > 0 and prev_body < 0:  # Bullish move, bearish prev = Bullish OB
+                obs.append({
+                    "type": "bull",
+                    "ob_low": prev["low"],
+                    "ob_high": prev["high"],
+                    "ob_body": prev_body,
+                    "idx": j,
+                    "displacement": abs_body,
+                })
+                break
+            if body < 0 and prev_body > 0:  # Bearish move, bullish prev = Bearish OB
+                obs.append({
+                    "type": "bear",
+                    "ob_low": prev["low"],
+                    "ob_high": prev["high"],
+                    "ob_body": prev_body,
+                    "idx": j,
+                    "displacement": abs_body,
+                })
+                break
+    return obs[-5:]  # keep last 5
+
+
+def _theory_ob(candles, muted):
+    """
+    OB — Order Block theory.
+
+    An OB acts as support/resistance when price revisits it. In OTC the
+    broker's mean-reverting generator is especially prone to bouncing off
+    recent structural zones, so this is a high-quality edge.
+
+    Vote logic:
+      - Price currently INSIDE a recent bullish OB zone → CALL (bounce up)
+      - Price currently INSIDE a recent bearish OB zone → PUT (bounce down)
+      - Strength scales with OB recency (age < 3 → ±3, age < 8 → ±2, else ±1)
+    """
+    if "OB" in muted:
+        return None
+    if len(candles) < 5:
+        return None
+
+    obs = _find_order_blocks(candles, lookback=15)
+    if not obs:
+        return None
+
+    last = candles[-1]
+    close = last["close"]
+    atr = _atr(candles)
+    if atr <= 0:
+        return None
+
+    score = 0
+    reasons = []
+
+    for ob in obs:
+        age = len(candles) - 1 - ob["idx"]
+        if age > 12:
+            continue  # too stale
+
+        # Recency-based base score
+        if age <= 3:
+            base = 3
+        elif age <= 8:
+            base = 2
+        else:
+            base = 1
+
+        # Displacement strength bonus (stronger OB = more reliable)
+        disp_ratio = ob["displacement"] / atr
+        if disp_ratio > 1.8:
+            base += 1
+
+        # Price currently inside OB zone?
+        if ob["ob_low"] <= close <= ob["ob_high"]:
+            if ob["type"] == "bull":
+                score += base
+                reasons.append(
+                    f"OB:+{base} CALL inside-bull-OB age={age} "
+                    f"disp={disp_ratio:.2f}xATR")
+            else:
+                score -= base
+                reasons.append(
+                    f"OB:-{base} PUT inside-bear-OB age={age} "
+                    f"disp={disp_ratio:.2f}xATR")
+
+        # Price approaching OB from outside (within 0.3 ATR)?
+        elif ob["type"] == "bull" and close > ob["ob_high"]:
+            dist = close - ob["ob_high"]
+            if dist < atr * 0.3:
+                score += base - 1  # slightly weaker when not yet inside
+                if base - 1 > 0:
+                    reasons.append(
+                        f"OB:+{base-1} CALL approaching-bull-OB "
+                        f"dist={dist/atr:.2f}xATR age={age}")
+        elif ob["type"] == "bear" and close < ob["ob_low"]:
+            dist = ob["ob_low"] - close
+            if dist < atr * 0.3:
+                score -= base - 1
+                if base - 1 > 0:
+                    reasons.append(
+                        f"OB:-{base-1} PUT approaching-bear-OB "
+                        f"dist={dist/atr:.2f}xATR age={age}")
+
+    if score == 0:
+        return None
+    return "CALL" if score > 0 else "PUT", score, reasons
+
+
+def _theory_sweep(candles, muted):
+    """
+    SWEEP — Liquidity sweep / stop-hunt detector.
+
+    Classic institutional pattern:
+      Bullish sweep (PUT → CALL reversal):
+        - Candle's LOW breaks below a recent swing low (stop hunt)
+        - But candle CLOSES back above the swept swing low
+        → Stops were grabbed, reversal up likely
+      Bearish sweep (CALL → PUT reversal):
+        - Candle's HIGH breaks above a recent swing high
+        - But candle CLOSES back below the swept swing high
+        → Reversal down likely
+
+    This is one of the strongest SMC reversal signals. In OTC the broker
+    algorithm intentionally creates these sweeps against round-number /
+    swing clusters. Heavy weight when wick-to-body ratio is extreme.
+    """
+    if "SWEEP" in muted:
+        return None
+    if len(candles) < 6:
+        return None
+
+    levels = _key_levels(candles[:-1])  # exclude last candle from level calc
+    if not levels:
+        return None
+
+    last = candles[-1]
+    last_low = last["low"]
+    last_high = last["high"]
+    last_close = last["close"]
+    last_open = last["open"]
+    body = last_close - last_open
+    abs_body = abs(body)
+    atr = _atr(candles)
+    if atr <= 0 or abs_body < atr * 0.05:
+        return None
+
+    score = 0
+    reasons = []
+
+    for lv in levels:
+        age = len(candles) - 1 - lv["idx"]
+        if age > 10:
+            continue  # stale level
+
+        if lv["type"] == "swing_low":
+            # Bullish sweep: low pierces below swing_low, close back above
+            if (last_low < lv["price"]
+                    and last_close > lv["price"]
+                    and last_low < lv["price"] - atr * 0.05):  # meaningful pierce
+                # Sweep magnitude = how far below the level we went
+                pierce = lv["price"] - last_low
+                pierce_ratio = pierce / atr
+                # Wick-to-body ratio: long lower wick + small body = strong sweep
+                lower_wick = min(last_open, last_close) - last_low
+                wick_ratio = lower_wick / abs_body if abs_body > 0 else 0
+
+                base = 3
+                if pierce_ratio > 0.3:
+                    base += 1  # deep sweep
+                if wick_ratio > 2.0:
+                    base += 1  # very long wick (strong rejection)
+
+                score += base
+                reasons.append(
+                    f"SWEEP:+{base} CALL bull-sweep swing-low={lv['price']:.5f} "
+                    f"pierce={pierce_ratio:.2f}xATR wick={wick_ratio:.2f}x "
+                    f"age={age}")
+
+        elif lv["type"] == "swing_high":
+            # Bearish sweep: high pierces above swing_high, close back below
+            if (last_high > lv["price"]
+                    and last_close < lv["price"]
+                    and last_high > lv["price"] + atr * 0.05):
+                pierce = last_high - lv["price"]
+                pierce_ratio = pierce / atr
+                upper_wick = last_high - max(last_open, last_close)
+                wick_ratio = upper_wick / abs_body if abs_body > 0 else 0
+
+                base = 3
+                if pierce_ratio > 0.3:
+                    base += 1
+                if wick_ratio > 2.0:
+                    base += 1
+
+                score -= base
+                reasons.append(
+                    f"SWEEP:-{base} PUT bear-sweep swing-high={lv['price']:.5f} "
+                    f"pierce={pierce_ratio:.2f}xATR wick={wick_ratio:.2f}x "
+                    f"age={age}")
+
+    if score == 0:
+        return None
+    return "CALL" if score > 0 else "PUT", score, reasons
+
+
+def _theory_structure(candles, muted):
+    """
+    STRUCT — Break of Structure (BOS) / Change of Character (CHOCH).
+
+    Identifies the prevailing structure using the last 2 swing highs and
+    last 2 swing lows, then checks if the just-closed candle broke it.
+
+      BOS (continuation):
+        - In uptrend (HH + HL): close above last swing high → CALL continuation
+        - In downtrend (LH + LL): close below last swing low → PUT continuation
+        Score: ±2
+
+      CHOCH (reversal):
+        - In uptrend: close below last swing low → PUT (first sign of reversal)
+        - In downtrend: close above last swing high → CALL
+        Score: ±3 to ±4 (depending on body strength)
+
+    In OTC mean-reverting markets, CHOCH is the higher-quality signal
+    because trends rarely persist — the first counter-trend break usually
+    DOES mark the reversal. BOS gets lower weight because trend
+    continuation is the minority case in 60s OTC.
+    """
+    if "STRUCT" in muted:
+        return None
+    if len(candles) < 8:
+        return None
+
+    levels = _key_levels(candles[:-1])  # exclude last candle
+    swing_highs = [lv for lv in levels if lv["type"] == "swing_high"][-2:]
+    swing_lows  = [lv for lv in levels if lv["type"] == "swing_low"][-2:]
+    # Need at least 2 of each to determine structure (HH/HL or LH/LL)
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return None
+
+    last = candles[-1]
+    close = last["close"]
+    body = last["close"] - last["open"]
+    abs_body = abs(body)
+    atr = _atr(candles)
+    if atr <= 0:
+        return None
+
+    # Determine structure: compare last two swing highs and last two swing lows
+    sh1, sh2 = swing_highs[-2], swing_highs[-1]  # older, newer
+    sl1, sl2 = swing_lows[-2],  swing_lows[-1]
+
+    making_higher_highs = sh2["price"] > sh1["price"]
+    making_higher_lows  = sl2["price"] > sl1["price"]
+    making_lower_highs  = sh2["price"] < sh1["price"]
+    making_lower_lows   = sl2["price"] < sl1["price"]
+
+    last_sh = sh2["price"]
+    last_sl = sl2["price"]
+
+    score = 0
+    reasons = []
+
+    # ── BOS (continuation) ────────────────────────────────────────────────
+    if making_higher_highs and making_higher_lows and close > last_sh:
+        # Uptrend continuation: close broke above last swing high
+        score += 2
+        body_ratio = abs_body / atr
+        if body_ratio > 1.2:
+            score += 1
+            reasons.append(
+                f"STRUCT:+3 CALL bull-BOS close={close:.5f}>HH={last_sh:.5f} "
+                f"body={body_ratio:.2f}xATR")
+        else:
+            reasons.append(
+                f"STRUCT:+2 CALL bull-BOS close={close:.5f}>HH={last_sh:.5f}")
+
+    elif making_lower_highs and making_lower_lows and close < last_sl:
+        # Downtrend continuation: close broke below last swing low
+        score -= 2
+        body_ratio = abs_body / atr
+        if body_ratio > 1.2:
+            score -= 1
+            reasons.append(
+                f"STRUCT:-3 PUT bear-BOS close={close:.5f}<LL={last_sl:.5f} "
+                f"body={body_ratio:.2f}xATR")
+        else:
+            reasons.append(
+                f"STRUCT:-2 PUT bear-BOS close={close:.5f}<LL={last_sl:.5f}")
+
+    # ── CHOCH (reversal) ──────────────────────────────────────────────────
+    elif making_higher_highs and making_higher_lows and close < last_sl:
+        # Uptrend broken from below → bearish CHOCH
+        score -= 3
+        body_ratio = abs_body / atr
+        if body_ratio > 1.4:
+            score -= 1  # strong body confirms the reversal
+            reasons.append(
+                f"STRUCT:-4 PUT bear-CHOCH uptrend-broken close={close:.5f}<"
+                f"HL={last_sl:.5f} body={body_ratio:.2f}xATR")
+        else:
+            reasons.append(
+                f"STRUCT:-3 PUT bear-CHOCH uptrend-broken close={close:.5f}<"
+                f"HL={last_sl:.5f}")
+
+    elif making_lower_highs and making_lower_lows and close > last_sh:
+        # Downtrend broken from above → bullish CHOCH
+        score += 3
+        body_ratio = abs_body / atr
+        if body_ratio > 1.4:
+            score += 1
+            reasons.append(
+                f"STRUCT:+4 CALL bull-CHOCH downtrend-broken close={close:.5f}>"
+                f"LH={last_sh:.5f} body={body_ratio:.2f}xATR")
+        else:
+            reasons.append(
+                f"STRUCT:+3 CALL bull-CHOCH downtrend-broken close={close:.5f}>"
+                f"LH={last_sh:.5f}")
+
+    if score == 0:
+        return None
+    return "CALL" if score > 0 else "PUT", score, reasons
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2150,6 +2654,12 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
         ("MOMENTUM",   lambda: _theory_momentum(candles, muted)),
         ("CONTINUITY", lambda: _theory_continuity(candles, ticks, muted)),
         ("HISTORY",    lambda: _theory_history(candles, ticks, micro_history, muted)),
+        # Liquidity / SMC theories (2026-07-10) — price-structure only
+        # since OTC has no real volume. See ANALYSIS_running_candle.md.
+        ("FVG",        lambda: _theory_fvg(candles, muted)),
+        ("OB",         lambda: _theory_ob(candles, muted)),
+        ("SWEEP",      lambda: _theory_sweep(candles, muted)),
+        ("STRUCT",     lambda: _theory_structure(candles, muted)),
     ]
 
     # MST is special — returns (result, market_state)

@@ -110,8 +110,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .theory-item.call-vote{background:var(--green-bg)}.theory-item.put-vote{background:var(--red-bg)}
 .theory-name{color:var(--text-dim)}.theory-vote{font-weight:700;font-size:10px;padding:1px 6px;border-radius:2px}
 .theory-vote.call{background:var(--green);color:#000}.theory-vote.put{background:var(--red);color:#fff}
-/* BOTTOM BAR */
-#bottom{display:grid;grid-template-columns:1fr auto;gap:0;background:var(--card);border-top:1px solid var(--border);min-height:64px;max-height:80px;overflow:hidden}
+/* BOTTOM BAR — single column: tick-tape on top row, history records below.
+   History records now fill the empty space under the tick line, so the user
+   can see many signals at once instead of a 4-row vertical scroller. */
+#bottom{display:flex;flex-direction:column;background:var(--card);border-top:1px solid var(--border);overflow:hidden}
 #bottom>*{min-width:0}
 #tick-tape{padding:6px 12px;overflow:hidden;position:relative}
 /* Absolutely positioned and pinned right: newest tick enters at the right,
@@ -120,12 +122,18 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .tape-price{display:inline-block;margin-right:16px;font-family:var(--mono);font-size:12px}
 .tape-price.up{color:var(--green)}.tape-price.down{color:var(--red)}.tape-price.flat{color:var(--text-dim)}
 .tape-arrow{font-size:10px;margin-right:2px}
-#history-panel{padding:6px 10px;border-left:1px solid var(--border);min-width:240px;max-width:340px;overflow-y:auto;max-height:78px}
-.history-row{display:flex;align-items:center;gap:6px;font-size:11px;padding:3px 4px;border-radius:3px;cursor:pointer;transition:background .15s}
-.history-row:hover{background:rgba(255,255,255,.05)}
-.history-icon{font-size:13px;width:16px;text-align:center}
-.history-label{font-family:var(--mono);font-weight:600;font-size:11px;min-width:36px}
-.history-meta{font-size:10px;color:var(--text-dim);margin-left:auto;font-family:var(--mono)}
+/* Signal history — horizontal row of records under the tick-tape.
+   Fills the previously-empty space, so many records fit on-screen. */
+#history-panel{padding:4px 8px;border-top:1px solid var(--border);overflow:hidden}
+#history-panel .section-title{font-size:10px;color:var(--text-dim);padding:0 4px 2px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+#history-list{display:flex;flex-direction:row;gap:4px;overflow-x:auto;overflow-y:hidden;padding:2px 0}
+#history-list::-webkit-scrollbar{height:4px}
+#history-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.history-row{display:flex;align-items:center;gap:4px;font-size:11px;padding:3px 6px;border-radius:3px;cursor:pointer;transition:background .15s;flex:0 0 auto;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05)}
+.history-row:hover{background:rgba(255,255,255,.08)}
+.history-icon{font-size:13px;width:14px;text-align:center}
+.history-label{font-family:var(--mono);font-weight:600;font-size:11px;min-width:32px}
+.history-meta{font-size:10px;color:var(--text-dim);font-family:var(--mono)}
 .history-strength{font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700}
 .history-strength.STRONG{background:var(--green);color:#000}
 .history-strength.MEDIUM{background:var(--yellow);color:#000}
@@ -152,8 +160,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 @media(max-width:860px){
   #main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
   #panel{border-left:none;border-top:1px solid var(--border)}
-  #bottom{grid-template-columns:1fr;grid-template-rows:auto auto}
-  #history-panel{border-left:none;border-top:1px solid var(--border);max-width:100%}
+  /* On mobile the history list scrolls horizontally; the bottom bar
+     already stacks naturally via flex-direction:column. */
 }
 /* SIGNAL CHANGE ANIM */
 @keyframes signal-pop{0%{transform:scale(1)}50%{transform:scale(1.08)}100%{transform:scale(1)}}
@@ -304,7 +312,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <div id="accuracy-bar">Accuracy: <span class="pct" id="acc-pct">—</span> <span id="acc-detail"></span></div>
     </div>
     <div id="history-panel">
-      <div class="section-title">Signal History <span style="float:right;font-size:10px;color:var(--text-dim);font-weight:400">click row for detail</span></div>
+      <div class="section-title">Signal History <span style="font-size:10px;color:var(--text-dim);font-weight:400;margin-left:6px">click row for detail</span></div>
       <div id="history-list"></div>
     </div>
   </footer>
@@ -341,6 +349,19 @@ let staleTimeout = null;
 /* ── CANDLE COUNTDOWN STATE ── */
 let runningCandleOpenTime = 0;
 let countdownEl = null;
+/* ── SIGNAL ALERT DEDUP STATE (2026-07-10) ──
+   One candle = one audible/visual alert. The LIVE re-eval pipeline can
+   update stream.prediction several times per candle (same direction but
+   different score/confidence). Without dedup, every update re-triggers
+   signalBeep() + the signal-pop animation — making it LOOK like multiple
+   signals on the same candle.
+   - alertedCandleOpenTime: the candle open time we last beeped for
+   - alertedSignalDirection: CALL/PUT/NEUTRAL we last beeped for on that
+     candle. A flip CALL→PUT on the SAME candle is a real event and
+     SHOULD beep; only same-direction updates are suppressed.
+*/
+let alertedCandleOpenTime = 0;
+let alertedSignalDirection = null;
 /* ── SIGNAL HISTORY (server-backed) ── */
 let serverSignals = [];   // full signal list from DB (with details)
 let detailOverlay = null, detailBody = null, detailTitle = null;
@@ -531,13 +552,37 @@ function renderPending(){
   theoriesList.innerHTML = '';
   theoriesList.classList.remove('open');
   theoriesToggle.classList.remove('open');
+  // Reset alert dedup: PENDING means a new candle has started, so the
+  // next signal (whenever it arrives) should be treated as fresh.
+  alertedCandleOpenTime = 0;
+  alertedSignalDirection = null;
 }
 
 function renderSignal(pred){
   if(!pred) return;
   const s = pred.signal || 'NEUTRAL';
+
+  // ── Alert dedup (2026-07-10) ────────────────────────────────────────
+  // Only beep + pop animation when:
+  //   (a) this is a NEW candle (different open time from the last alert),
+  //   (b) the signal direction CHANGED on the same candle (CALL↔PUT,
+  //       CALL↔NEUTRAL, etc.).
+  // Same-direction updates from the LIVE re-eval pipeline (which fires
+  // every 2-30 ticks with refreshed score/confidence) must NOT re-alert.
+  const candleKey = runningCandleOpenTime || 0;
+  const isNewCandle = candleKey !== alertedCandleOpenTime;
+  const isDirectionChange = alertedSignalDirection !== s;
+  const shouldAlert = isNewCandle || isDirectionChange;
+  if(shouldAlert){
+    alertedCandleOpenTime = candleKey;
+    alertedSignalDirection = s;
+  }
+
   const cls = s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral';
-  signalBox.className = cls + ' signal-pop';
+  // Pop animation only on fresh alerts — re-applying the class would
+  // re-trigger the animation every render, which is exactly the bug
+  // we're fixing.
+  signalBox.className = cls + (shouldAlert ? ' signal-pop' : '');
   signalLabel.textContent = s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT' : '➖ NEUTRAL';
   const score = pred.score || 0;
   sigScore.textContent = (score >= 0 ? '+' : '') + score;
@@ -581,7 +626,8 @@ function renderSignal(pred){
       });
     }
   }
-  signalBeep();
+  // Beep only on fresh alerts — silent update otherwise.
+  if(shouldAlert) signalBeep();
 }
 
 /* ─── MICROSTRUCTURE ─── */
@@ -1002,6 +1048,11 @@ pairSelect.addEventListener('change', () => {
   // doesn't mix the old pair's signal into the new pair's history.
   runningCandleOpenTime = 0;
   lastPrediction = null;
+  // Reset alert dedup state so the FIRST signal on the new pair is treated
+  // as a fresh alert (rather than suppressed because the old pair had the
+  // same direction).
+  alertedCandleOpenTime = 0;
+  alertedSignalDirection = null;
   renderPending();   // show PENDING until new pair's prediction arrives
   tickTapeInner.innerHTML = '<span class="tape-price flat">Waiting for data...</span>';
   send({ type: 'subscribe', asset: currentAsset, period: currentPeriod });
