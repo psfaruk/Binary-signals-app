@@ -131,6 +131,26 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 #history-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 .history-row{display:flex;align-items:center;gap:4px;font-size:11px;padding:3px 6px;border-radius:3px;cursor:pointer;transition:background .15s;flex:0 0 auto;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05)}
 .history-row:hover{background:rgba(255,255,255,.08)}
+/* Most recent signal — visually distinct so the user can instantly tell
+   this is the current/recent candle's signal. Highlighted with a colored
+   border + subtle background tint matching the signal direction (green for
+   CALL, red for PUT). Border-radius slightly larger to make it pop. */
+.history-row-recent{
+  background:rgba(33,150,243,.15) !important;
+  border:1px solid #2196F3 !important;
+  box-shadow:0 0 0 1px rgba(33,150,243,.3), 0 0 8px rgba(33,150,243,.25);
+  font-weight:600;
+}
+.history-row-recent.history-call-tint{
+  background:rgba(0,200,83,.18) !important;
+  border:1px solid var(--green) !important;
+  box-shadow:0 0 0 1px rgba(0,200,83,.3), 0 0 8px rgba(0,200,83,.3);
+}
+.history-row-recent.history-put-tint{
+  background:rgba(255,23,68,.18) !important;
+  border:1px solid var(--red) !important;
+  box-shadow:0 0 0 1px rgba(255,23,68,.3), 0 0 8px rgba(255,23,68,.3);
+}
 .history-icon{font-size:13px;width:14px;text-align:center}
 .history-label{font-family:var(--mono);font-weight:600;font-size:11px;min-width:32px}
 .history-meta{font-size:10px;color:var(--text-dim);font-family:var(--mono)}
@@ -768,7 +788,16 @@ function renderHistory(){
     const score = h.detail?.score != null ? (h.detail.score >= 0 ? '+' : '') + h.detail.score : '';
     // Click opens detail modal if we have full detail
     const clickable = h.detail ? `onclick="window._showSignalDetail(${idx})"` : '';
-    html += `<div class="history-row" ${clickable}>`
+    // Most recent signal (idx === 0) gets a distinct class so it's visually
+    // identifiable as "this is the current/recent candle's signal".
+    // The tint color follows the signal direction (green=CALL, red=PUT).
+    let recentCls = '';
+    if(idx === 0){
+      recentCls = ' history-row-recent';
+      if(h.signal === 'CALL') recentCls += ' history-call-tint';
+      else if(h.signal === 'PUT') recentCls += ' history-put-tint';
+    }
+    html += `<div class="history-row${recentCls}" ${clickable}>`
          +  `<span class="history-icon">${icon}</span>`
          +  `<span class="history-label" style="color:${color}">${h.signal}</span>`
          +  (strength ? `<span class="history-strength ${strengthCls}">${strength[0]}</span>` : '')
