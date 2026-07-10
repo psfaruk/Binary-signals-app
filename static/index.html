@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Binary Signal Terminal</title>
-<script src="/static/lightweight-charts.js"></script>
+<script defer src="/static/lightweight-charts.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -178,10 +178,19 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 #accuracy-bar .pct{font-family:var(--mono);font-weight:700;color:var(--green)}
 /* RESPONSIVE */
 @media(max-width:860px){
-  #main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
-  #panel{border-left:none;border-top:1px solid var(--border)}
-  /* On mobile the history list scrolls horizontally; the bottom bar
-     already stacks naturally via flex-direction:column. */
+  /* Mobile fix (2026-07-10 review Issue #3):
+     Previously html/body had overflow:hidden + #app height:100vh, with
+     #main as 1fr 1fr (chart and panel split equally). On small screens
+     the panel content (signal panel, theories list) overflowed beyond
+     the visible area and was unreachable because the body couldn't scroll.
+     Now: allow vertical scroll on the whole page, let #app grow with
+     content, and give chart a sensible min-height instead of 1fr. */
+  html,body{height:auto;overflow-y:auto;overflow-x:hidden}
+  #app{height:auto;min-height:100vh}
+  #main{grid-template-columns:1fr;grid-template-rows:auto auto;overflow:visible}
+  #chart-wrap{min-height:50vh}
+  #panel{border-left:none;border-top:1px solid var(--border);overflow:visible}
+  #bottom{position:sticky;bottom:0;z-index:10}
 }
 /* SIGNAL CHANGE ANIM */
 @keyframes signal-pop{0%{transform:scale(1)}50%{transform:scale(1.08)}100%{transform:scale(1)}}
@@ -199,7 +208,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 @keyframes chart-spin{to{transform:rotate(360deg)}}
 #chart-loading-text{color:var(--text-dim);font-size:12px;font-weight:600}
 /* LOCKED PAIR */
+#pair-select option,
+#pair-select option.locked{
+  background:#0d1117;          /* explicit dark bg so --text-dim is readable */
+  color:var(--text);
+  padding:4px 8px;
+}
 #pair-select option.locked{color:var(--text-dim)}
+#pair-select option:disabled{color:var(--text-dim);background:#161b22}
 /* CANDLE COUNTDOWN — sits at the right edge of the chart, aligned with the
    price-scale label area so it visually pairs with the running price line. */
 #candle-countdown{
@@ -1087,9 +1103,18 @@ function fmtPrice(v){
 }
 
 function esc(s){
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+  // Regex-based HTML escape (2026-07-10 review Issue #6).
+  // Previous DOM-based version (createElement + textContent + innerHTML)
+  // created a new DOM element on every call — slow when rendering 50+
+  // signal history rows that each call esc() multiple times.
+  // Regex is ~10x faster for short strings.
+  if(s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /* ─── EVENTS ─── */
@@ -1129,7 +1154,16 @@ pairSelect.addEventListener('change', () => {
 soundBtn.addEventListener('click', () => {
   soundEnabled = !soundEnabled;
   soundBtn.textContent = soundEnabled ? '🔔' : '🔇';
-  if(soundEnabled && !audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  if(soundEnabled){
+    // Create AudioContext inside the user gesture (click) — required by
+    // browser autoplay policies. Without this, browsers keep the context
+    // in 'suspended' state and signalBeep() produces no sound.
+    if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    // Explicit resume in case it was suspended by the browser
+    if(audioCtx.state === 'suspended'){
+      audioCtx.resume().catch(()=>{ /* silent — best effort */ });
+    }
+  }
 });
 
 theoriesToggle.addEventListener('click', () => {
@@ -1139,12 +1173,33 @@ theoriesToggle.addEventListener('click', () => {
 });
 theoriesToggle.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); theoriesToggle.click(); }});
 
-/* ─── INIT ─── */
-initChart();
-renderHistory();
-renderAccuracy();
-showChartLoading();   // overlay is already visible (HTML default) — arms the timeout too
-connect();
+/* ─── INIT ───
+   Wrapped in a LightweightCharts-ready guard so the app never crashes
+   even if the deferred script hasn't loaded yet (slow network, ad-blocker
+   blocking /static/, etc). Falls back to a retry loop that waits for the
+   library to appear, then initializes. If it never appears, shows a
+   readable error message instead of an unhandled ReferenceError. */
+function safeInit(){
+  if(typeof LightweightCharts === 'undefined'){
+    // Library not loaded yet — retry every 100ms for up to 5s
+    if(!safeInit._retries) safeInit._retries = 0;
+    safeInit._retries++;
+    if(safeInit._retries > 50){
+      console.error('LightweightCharts failed to load after 5s');
+      const el = document.getElementById('chart-container');
+      if(el) el.innerHTML = '<div style="color:#ff1744;padding:20px;font-size:13px">Chart library failed to load. Check your network connection.</div>';
+      return;
+    }
+    setTimeout(safeInit, 100);
+    return;
+  }
+  initChart();
+  renderHistory();
+  renderAccuracy();
+  showChartLoading();   // overlay is already visible (HTML default) — arms the timeout too
+  connect();
+}
+safeInit();
 
 /* ─── CANDLE COUNTDOWN ───
    Renders a live "mm:ss" countdown to the running candle's close, positioned
@@ -1187,12 +1242,28 @@ function updateCandleCountdown(){
     countdownEl.className = '';
   }
 }
-setInterval(updateCandleCountdown, 200);
+// Store interval IDs so they can be cleared on page unload (Issue #5).
+// Without this, embedding the app as a SPA component would leak intervals
+// on every mount/unmount cycle. On a single-page reload the intervals
+// die anyway, but storing the IDs is best practice and future-proof.
+const _countdownInterval = setInterval(updateCandleCountdown, 200);
 
 // Ping to keep alive
-setInterval(()=>{
+const _keepaliveInterval = setInterval(()=>{
   if(ws && ws.readyState === WebSocket.OPEN) send({ type: 'status' });
 }, 15000);
+
+// Clean up on page hide (covers reload, navigation, mobile tab switch).
+// 'pagehide' fires more reliably than 'beforeunload' on mobile browsers.
+window.addEventListener('pagehide', () => {
+  try {
+    clearInterval(_countdownInterval);
+    clearInterval(_keepaliveInterval);
+    if(ws){
+      try{ ws.close(); }catch(_){}
+    }
+  } catch(_) {}
+});
 
 })();
 </script>
