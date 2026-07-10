@@ -77,6 +77,7 @@ class _AssetStream:
     # Last-10s optimization (2026-07-10)
     cached_accuracy: tuple = field(default_factory=lambda: (None, 0))
     cached_accuracy_at: float = 0.0
+    inverted: bool = False   # adaptive-inversion hysteresis, mirrors feed.py
     live_signal_history: list = field(default_factory=list)
     # Signal delay (2026-07-10)
     signal_delay_until: float = 0.0
@@ -120,9 +121,16 @@ class QuotexFeed:
                     if k != key:
                         s.interested_cids.discard(cid)
             stream.idle_since = None
+            # Signal delay (2026-07-10): a joiner inside the opening-tick
+            # confirmation window gets prediction=None (PENDING), same gate
+            # a live viewer would see — mirrors feed.py.
+            gated_prediction = stream.prediction
+            if (stream.signal_delay_until > 0
+                    and time.time() < stream.signal_delay_until):
+                gated_prediction = None
             return {"type": "snapshot", "ok": True, "status": "streaming",
                     "asset": asset, "period": period,
-                    "candles": stream.candles[-300:], "prediction": stream.prediction}
+                    "candles": stream.candles[-300:], "prediction": gated_prediction}
 
         pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
         if pair and pair.get("locked"):
@@ -351,15 +359,19 @@ class QuotexFeed:
         result = analyze_eoc(candles, ticks, micro_history=micro_hist, period=period,
                              muted=self._muted_theories, asset=asset,
                              running_ticks=running_ticks if ENABLE_LIVE_THEORY else None,
-                             recent_accuracy=acc, recent_n=n_acc)
+                             recent_accuracy=acc, recent_n=n_acc,
+                             currently_flipped=stream.inverted if stream is not None else False)
         return result, micro_hist
 
-    def _run_eoc(self, stream, actual_open=None):
+    async def _run_eoc(self, stream, actual_open=None):
         closed = stream.candles
         base_ticks = list(stream.ticks)
         # Refresh per-candle accuracy cache ONCE here (at candle open).
+        # asyncio.to_thread: sqlite3 I/O would otherwise block the shared
+        # event loop for every concurrent stream (2026-07-10).
         try:
-            stream.cached_accuracy = _db.recent_accuracy(stream.asset, stream.period, n=20)
+            stream.cached_accuracy = await asyncio.to_thread(
+                _db.recent_accuracy, stream.asset, stream.period, n=20)
             stream.cached_accuracy_at = time.time()
         except Exception:
             stream.cached_accuracy = (None, 0)
@@ -370,6 +382,7 @@ class QuotexFeed:
                                                   closed, base_ticks, stream=stream)
         if result is None:
             return None
+        stream.inverted = result.get("_flipped", False)
         stream.base_candles = closed
         stream.base_ticks = base_ticks
         stream._live_reeval_ticks = 0
@@ -539,7 +552,7 @@ class QuotexFeed:
         return {"time": stream.candle_open_time, "open": op,
                 "high": max(ticks), "low": min(ticks), "close": ticks[-1]}
 
-    def _close_running_and_start_new(self, stream, new_open_time, first_tick, open_is_real=True):
+    async def _close_running_and_start_new(self, stream, new_open_time, first_tick, open_is_real=True):
         if new_open_time <= stream.candle_open_time:
             return None
         closed = self._running_candle(stream)
@@ -558,7 +571,7 @@ class QuotexFeed:
                 stream.zone_streak["losses"] = stream.zone_streak["losses"] + 1 if accuracy == "wrong" else 0
             else:
                 stream.zone_streak = {"regime": _key[0], "zone": _key[1], "losses": 1 if accuracy == "wrong" else 0}
-        stream.prediction = self._run_eoc(stream, actual_open=first_tick)
+        stream.prediction = await self._run_eoc(stream, actual_open=first_tick)
         # Signal delay (2026-07-10): withhold prediction broadcast for
         # SIGNAL_DELAY_SEC seconds after the new candle opens.
         stream.signal_delay_until = time.time() + SIGNAL_DELAY_SEC
@@ -594,7 +607,7 @@ class QuotexFeed:
             stream.candle_open_is_real = False
             pair = next((p for p in self._pairs_list if p["asset"] == stream.asset), None)
             stream.payout = pair["payout"] if pair else None
-            stream.prediction = self._run_eoc(stream, actual_open=last["close"])
+            stream.prediction = await self._run_eoc(stream, actual_open=last["close"])
             # Initial subscription joins mid-candle — no signal delay.
             stream.signal_delay_until = 0.0
             await self._broadcast({
@@ -611,7 +624,7 @@ class QuotexFeed:
                 # Check candle boundary
                 if stream.candle_open_time > 0 and current_period != stream.candle_open_time:
                     last_px = list(stream.ticks)[-1] if stream.ticks else stream._sim_price
-                    accuracy = self._close_running_and_start_new(stream, current_period, last_px)
+                    accuracy = await self._close_running_and_start_new(stream, current_period, last_px)
                     running = self._running_candle(stream)
                     all_c = stream.candles + [running]
                     # Signal delay (2026-07-10): withhold prediction at EOC;

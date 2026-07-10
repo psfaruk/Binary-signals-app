@@ -912,6 +912,13 @@ function onTick(msg){
     runningConf = msg.running_conf;
     if(currentMicro) renderMicro(currentMicro);
   }
+  // Signal delay (2026-07-10): the delayed prediction arrives on a tick
+  // message once the gate opens — this is the only place it's delivered
+  // (EOC broadcasts prediction:null while the delay is active).
+  if(msg.prediction){
+    lastPrediction = msg.prediction;
+    renderSignal(msg.prediction);
+  }
 }
 
 function onEoc(msg){

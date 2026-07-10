@@ -2070,7 +2070,7 @@ def _theory_shift(candles, ticks, muted):
 
 def analyze_eoc(candles, ticks, micro_history=None, period=60,
                 muted=None, asset="", running_ticks=None,
-                recent_accuracy=None, recent_n=0):
+                recent_accuracy=None, recent_n=0, currently_flipped=False):
     """
     Main entry point: run all theories and blend into a signal.
 
@@ -2083,6 +2083,13 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                           If None, no adaptive logic is applied.
       recent_n         -> how many recent predictions the accuracy was
                           computed over (used to gate the flip — needs ≥8
+      currently_flipped -> whether the PREVIOUS candle's signal was already
+                          adaptive-flipped. Adds hysteresis: entering the
+                          flip needs accuracy < 40%, but once flipped it
+                          takes accuracy climbing back > 55% to revert —
+                          without this a flip that starts working pushes
+                          accuracy just over 40% and immediately un-flips
+                          itself, oscillating candle to candle.
                           samples before flipping, otherwise too noisy).
 
     If recent_accuracy < 0.40 AND recent_n >= 8  =>  flip CALL<->PUT at the
@@ -2218,10 +2225,15 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
     # If recent_accuracy < 0.40 over a sufficient sample, the model is
     # systematically wrong — flip CALL<->PUT. This is the safety net that
     # turns a 100%-inverted model into a 60%+ correct model.
+    # Hysteresis (2026-07-10): entering the flip uses the 40% floor; once
+    # flipped, only a recovery above 55% reverts it. Otherwise a flip that
+    # starts working nudges accuracy just past 40% and un-flips itself right
+    # back into the bad state on the very next candle.
+    flip_threshold = 0.55 if currently_flipped else 0.40
     flipped = False
     if (recent_accuracy is not None
             and recent_n >= 8
-            and recent_accuracy < 0.40):
+            and recent_accuracy < flip_threshold):
         majority = "PUT" if majority == "CALL" else "CALL"
         net = -net
         flipped = True

@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -120,7 +120,7 @@ async def get_signal_detail(asset: str, period: int, ctime: int):
     detail = _db.get_signal_detail(asset, period, ctime)
     if detail:
         return detail
-    return {"error": "not found"}, 404
+    raise HTTPException(status_code=404, detail="not found")
 
 
 # ── WebSocket endpoint ───────────────────────────────────────────────────────
