@@ -598,7 +598,22 @@ def _build_micro(ticks, open_price):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _theory_con(candles, muted):
-    """CON - Continuation: follow the trend, but CHECK for exhaustion."""
+    """CON - Continuation: follow the trend, but CHECK for exhaustion.
+
+    OTC mean-reversion note (2026-07-10 review):
+      Continuation theories systematically underperform in 60s OTC markets
+      because broker price generators are mean-reverting. 3-candle streaks
+      signal exhaustion, not continuation. To compensate:
+        - 3-candle streak vote reduced from +2 to +1 (still fires, but
+          is easily out-voted by REV/MEAN/SWEEP when they fire)
+        - EMA-trend vote ONLY fires when RSI is in the neutral 30-70
+          band (no vote in overbought/oversold — those zones belong
+          to MEAN/REV)
+        - New: 4+ same-direction candles fire a REVERSAL vote (exhaustion)
+          instead of a continuation vote. This was previously the
+          domain of MEAN, but CON needs to stop voting continuation
+          when the streak is clearly extended.
+    """
     if "CON" in muted:
         return None
     if len(candles) < 5:
@@ -618,6 +633,22 @@ def _theory_con(candles, muted):
         else:
             dirs.append(0)
 
+    # Count consecutive same-direction candles ending at the last candle.
+    # Looks at most last 8 candles (enough to detect 4+ exhaustion without
+    # counting ancient history).
+    consec = 0
+    if candles:
+        last_dir = 1 if candles[-1]["close"] > candles[-1]["open"] else (
+                  -1 if candles[-1]["close"] < candles[-1]["open"] else 0)
+        if last_dir != 0:
+            for c in reversed(candles[-8:]):
+                c_dir = (1 if c["close"] > c["open"] else
+                        -1 if c["close"] < c["open"] else 0)
+                if c_dir == last_dir:
+                    consec += 1
+                else:
+                    break
+
     if all(d >= 0 for d in dirs) and sum(dirs) >= 2:
         # Check for exhaustion: are candles getting SMALLER?
         sizes = [c["high"] - c["low"] for c in candles[-3:]]
@@ -625,37 +656,37 @@ def _theory_con(candles, muted):
             # Shrinking bullish candles = momentum dying → DON'T follow
             score -= 2
             reasons.append("CON:-2 PUT bull-shrinking-exhaust")
+        elif consec >= 4:
+            # 4+ consecutive bull candles in mean-reverting OTC = exhaustion
+            score -= 1
+            reasons.append(f"CON:-1 PUT {consec}-bull-exhaustion")
         else:
-            # Reduced from +3 to +2 — continuation theories were over-weighted
+            # Reduced from +2 to +1 — continuation theories were over-weighted
             # vs reversal theories in mean-reverting OTC markets.
-            score += 2
-            reasons.append("CON:+2 CALL 3-bull-continue")
+            score += 1
+            reasons.append("CON:+1 CALL 3-bull-continue")
     elif all(d <= 0 for d in dirs) and sum(dirs) <= -2:
         sizes = [c["high"] - c["low"] for c in candles[-3:]]
         if sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * 0.5:
             score += 2
             reasons.append("CON:+2 CALL bear-shrinking-exhaust")
+        elif consec >= 4:
+            score += 1
+            reasons.append(f"CON:+1 CALL {consec}-bear-exhaustion")
         else:
-            score -= 2
-            reasons.append("CON:-2 PUT 3-bear-continue")
-
-    # EMA trend alignment — but check RSI for overbought/oversold
-    rsi_val = regime.get("rsi", 50)
-    if regime["trend"] == "UPTREND":
-        if rsi_val >= 75:
-            # Overbought in uptrend — continuation risky
-            score += 1  # Still slightly bullish, but reduced
-            reasons.append(f"CON:+1 CALL ema-bull-rsi={rsi_val:.0f}-overbought")
-        else:
-            score += 2
-            reasons.append("CON:+2 CALL ema-bullish")
-    elif regime["trend"] == "DOWNTREND":
-        if rsi_val <= 25:
             score -= 1
-            reasons.append(f"CON:-1 PUT ema-bear-rsi={rsi_val:.0f}-oversold")
-        else:
-            score -= 2
-            reasons.append("CON:-2 PUT ema-bearish")
+            reasons.append("CON:-1 PUT 3-bear-continue")
+
+    # EMA trend alignment — but ONLY when RSI is in neutral zone
+    # (overbought/oversold zones belong to MEAN/REV)
+    rsi_val = regime.get("rsi", 50)
+    if regime["trend"] == "UPTREND" and 30 <= rsi_val <= 70:
+        score += 1
+        reasons.append(f"CON:+1 CALL ema-bullish rsi={rsi_val:.0f}")
+    elif regime["trend"] == "DOWNTREND" and 30 <= rsi_val <= 70:
+        score -= 1
+        reasons.append(f"CON:-1 PUT ema-bearish rsi={rsi_val:.0f}")
+    # No EMA vote when RSI is in extreme zones — MEAN theory handles those
 
     if score == 0:
         return None
@@ -1204,11 +1235,20 @@ def _theory_micro(candles, ticks, muted):
     it looks at the CLOSED candle's tick-level behavior to predict
     the NEXT candle's direction.
 
-    Key insight: if the closed candle's internal pressure (buyer/seller)
-    was strong AND the close was in the direction of pressure, the next
-    candle is likely to CONTINUE. If pressure was strong but close
-    went AGAINST pressure (reversal inside the candle), the next candle
-    may continue the reversal.
+    OTC mean-reversion fix (2026-07-10 review):
+      Previous logic: "buyers dominated AND closed up → next continues up"
+      This is the SAME logic as CON theory and was systematically wrong
+      in mean-reverting OTC markets. Strong close in one direction
+      signals exhaustion, not continuation.
+
+      New logic:
+        - Strong buyer pressure + bullish close in OTC = exhaustion → PUT
+        - Strong buyer pressure + bearish close = failed move → PUT (was PUT before)
+        - Strong seller pressure + bearish close in OTC = exhaustion → CALL
+        - Strong seller pressure + bullish close = failed move → CALL
+        - Phase patterns: late reversal phases still vote momentum shift
+        - Reaction and momentum_shift are unchanged (those catch genuine
+          microstructure shifts, not just pressure direction)
     """
     if "MICRO" in muted:
         return None
@@ -1229,46 +1269,61 @@ def _theory_micro(candles, ticks, muted):
     mom_shift = micro.get("momentum_shift")
     pressure  = micro.get("pressure")
     is_fight  = micro.get("is_fight", False)
+    atr = _atr(candles)
 
-    # ── Core: Pressure alignment with candle direction ────────────────────
-    # If buyer pressure > 65% AND candle closed BULLISH → strong CALL signal
-    # If buyer pressure > 65% BUT candle closed BEARISH → reversal → PUT
+    # ── Core: Pressure + candle direction → OTC mean-reversion vote ──────
+    # Strong buyer pressure + bullish close = exhaustion → expect PUT next
+    # Strong buyer pressure + bearish close = failed move → expect PUT next
+    # Strong seller pressure + bearish close = exhaustion → expect CALL next
+    # Strong seller pressure + bullish close = failed move → expect CALL next
+    # (i.e. STRONG pressure in either direction = mean-reversion signal)
+    body = (candles[-1]["close"] - candles[-1]["open"]) if candles else 0
+    body_ratio = abs(body) / atr if atr > 0 else 0
+
     if buy_pct >= 65:
-        if net > 0:
-            # Buyers dominated AND closed up → next candle continues up
-            score += 3
-            reasons.append(f"MICRO:+3 CALL buyers-won bp={buy_pct}% net=+{net:.5f}")
-        elif net < 0:
-            # Buyers dominated but SELLERS won the close → reversal incoming
-            score -= 2
-            reasons.append(f"MICRO:-2 PUT buyers-lost-close bp={buy_pct}% net={net:.5f}")
-    elif buy_pct <= 35:
-        if net < 0:
+        # Strong buyer pressure → expect mean reversion down
+        if body_ratio > 1.0:
+            # Big bullish body confirms exhaustion
             score -= 3
-            reasons.append(f"MICRO:-3 PUT sellers-won sp={100-buy_pct}% net={net:.5f}")
-        elif net > 0:
+            reasons.append(
+                f"MICRO:-3 PUT strong-buyers-mean-revert bp={buy_pct}% "
+                f"body={body_ratio:.2f}xATR")
+        else:
+            score -= 2
+            reasons.append(
+                f"MICRO:-2 PUT strong-buyers bp={buy_pct}% net={net:.5f}")
+    elif buy_pct <= 35:
+        # Strong seller pressure → expect mean reversion up
+        if body_ratio > 1.0:
+            score += 3
+            reasons.append(
+                f"MICRO:+3 CALL strong-sellers-mean-revert sp={100-buy_pct}% "
+                f"body={body_ratio:.2f}xATR")
+        else:
             score += 2
-            reasons.append(f"MICRO:+2 CALL sellers-lost-close sp={100-buy_pct}% net=+{net:.5f}")
+            reasons.append(
+                f"MICRO:+2 CALL strong-sellers sp={100-buy_pct}% net={net:.5f}")
 
     # ── Reaction at close ─────────────────────────────────────────────────
-    if reaction == "BUYER" and net > 0:
+    # This catches genuine reversal patterns (wick rejection at end) —
+    # vote WITH the reaction direction (it's a reversal signal)
+    if reaction == "BUYER":
         score += 2
         reasons.append("MICRO:+2 CALL closed-with-buyer-rejection")
-    elif reaction == "SELLER" and net < 0:
+    elif reaction == "SELLER":
         score -= 2
         reasons.append("MICRO:-2 PUT closed-with-seller-rejection")
 
     # ── Phase pattern at close ────────────────────────────────────────────
+    # Late reversal phases = momentum shift signals (unchanged)
     if len(phases) == 3:
         if phases == ["DOWN", "DOWN", "UP"]:
-            # Bearish start, bullish finish → momentum shift → CALL
             score += 2
             reasons.append("MICRO:+2 CALL phases=DOWN,DOWN,UP")
         elif phases == ["UP", "UP", "DOWN"]:
             score -= 2
             reasons.append("MICRO:-2 PUT phases=UP,UP,DOWN")
         elif phases == ["UP", "DOWN", "UP"]:
-            # V-shape recovery → CALL
             score += 1
             reasons.append("MICRO:+1 CALL V-recovery")
         elif phases == ["DOWN", "UP", "DOWN"]:
@@ -1276,6 +1331,7 @@ def _theory_micro(candles, ticks, muted):
             reasons.append("MICRO:-1 PUT inverted-V")
 
     # ── Momentum shift from ticks ────────────────────────────────────────
+    # Late direction change is a genuine microstructure signal (unchanged)
     if mom_shift == "BULL_SHIFT":
         score += 2
         reasons.append("MICRO:+2 CALL late-momentum-shift-bull")
@@ -2739,21 +2795,52 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
     # flipped, only a recovery above 55% reverts it. Otherwise a flip that
     # starts working nudges accuracy just past 40% and un-flips itself right
     # back into the bad state on the very next candle.
+    #
+    # TARGETED INVERSION (2026-07-10 review):
+    #   Previously flipped ALL theories at once. Problem: if some theories
+    #   (e.g. REV, MEAN) were already correct, flipping them made them wrong.
+    #   New logic: only flip the theories that have a CONTINUATION bias
+    #   (CON, MST, RUN, MICRO, GAP, MOMENTUM, CONTINUITY). Reversal theories
+    #   (REV, TRAP, LAST, MEAN, FVG, OB, SWEEP, STRUCT, VELOCITY, LIVE_WICK)
+    #   are left alone — they were right.
     flip_threshold = 0.55 if currently_flipped else 0.40
     flipped = False
     if (recent_accuracy is not None
             and recent_n >= 8
             and recent_accuracy < flip_threshold):
-        majority = "PUT" if majority == "CALL" else "CALL"
-        net = -net
+        # Theories that vote CONTINUATION by default — these get inverted
+        CONTINUATION_BIASED = {
+            "CON", "MST", "RUN", "MICRO", "GAP", "MOMENTUM", "CONTINUITY",
+            "HISTORY",  # HISTORY inherits whatever direction it saw = continuation
+            "SHIFT",    # SHIFT also inherits direction = continuation
+        }
+        # Invert the per-theory votes (only continuation-biased ones)
+        for td in theories_detail:
+            if td["code"] in CONTINUATION_BIASED:
+                td["vote"] = "PUT" if td["vote"] == "CALL" else "CALL"
+                td["score"] = -td["score"]
+        # Recompute the blend from the (partially) inverted theories_detail
+        call_score = sum(abs(td["score"]) for td in theories_detail
+                         if td["vote"] == "CALL")
+        put_score = sum(abs(td["score"]) for td in theories_detail
+                        if td["vote"] == "PUT")
+        net = call_score - put_score
+        total = call_score + put_score
+        if total > 0:
+            agree = max(call_score, put_score)
+            confidence = round(agree / total * 100)
+            majority = "CALL" if net > 0 else "PUT"
+            # Recompute strength
+            if confidence >= 65 and abs(net) >= 5:
+                strength = "STRONG"
+            elif confidence >= 52:
+                strength = "MEDIUM"
+            else:
+                strength = "WEAK"
         flipped = True
         all_reasons.append(
-            f"INVERT:+1 {majority} adaptive-flip "
+            f"INVERT:+1 {majority} targeted-flip-continuation-theories "
             f"(recent_acc={recent_accuracy:.0%} over n={recent_n})")
-        # Reflect the flip in the per-theory detail too (debugging aid)
-        for td in theories_detail:
-            td["vote"] = "PUT" if td["vote"] == "CALL" else "CALL"
-            td["score"] = -td["score"]
 
     return {
         "signal": majority,
