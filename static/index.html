@@ -190,6 +190,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 #stale-overlay{display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(255,23,68,.08);z-index:10;pointer-events:none;align-items:center;justify-content:center}
 #stale-overlay.show{display:flex}
 #stale-msg{background:var(--red);color:#fff;padding:6px 16px;border-radius:var(--radius);font-weight:700;font-size:13px;animation:flash-red 1s infinite}
+/* CHART LOADING OVERLAY — shown while waiting for the first snapshot of
+   candles (initial connect, or after switching pairs). Hidden the moment
+   real candle data paints, so it never sits over a live chart. */
+#chart-loading-overlay{display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(19,23,34,.85);z-index:11;align-items:center;justify-content:center;flex-direction:column;gap:10px}
+#chart-loading-overlay.show{display:flex}
+#chart-loading-spinner{width:34px;height:34px;border:3px solid rgba(88,166,255,.2);border-top-color:#58a6ff;border-radius:50%;animation:chart-spin .7s linear infinite}
+@keyframes chart-spin{to{transform:rotate(360deg)}}
+#chart-loading-text{color:var(--text-dim);font-size:12px;font-weight:600}
 /* LOCKED PAIR */
 #pair-select option.locked{color:var(--text-dim)}
 /* CANDLE COUNTDOWN — sits at the right edge of the chart, aligned with the
@@ -240,6 +248,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <div id="chart-container"></div>
       <div id="candle-countdown" class="idle">--:--</div>
       <div id="stale-overlay"><span id="stale-msg">⚠ FEED STALE</span></div>
+      <div id="chart-loading-overlay" class="show">
+        <div id="chart-loading-spinner"></div>
+        <span id="chart-loading-text">Loading chart data…</span>
+      </div>
     </section>
     <!-- RIGHT PANEL -->
     <aside id="panel">
@@ -441,6 +453,24 @@ detailOverlay.addEventListener('click', (e) => {
 const accPct = $('acc-pct');
 const accDetail = $('acc-detail');
 const staleOverlay = $('stale-overlay');
+const chartLoadingOverlay = $('chart-loading-overlay');
+let chartLoadingTimeout = null;
+function showChartLoading(){
+  if(!chartLoadingOverlay) return;
+  chartLoadingOverlay.classList.add('show');
+  // Defensive cap: history-load can rarely fail server-side (API timeout),
+  // in which case no snapshot with candles ever arrives to clear this via
+  // updateChart(). Never let the spinner block the chart forever — hide it
+  // after a generous timeout even if real data never shows up.
+  clearTimeout(chartLoadingTimeout);
+  chartLoadingTimeout = setTimeout(
+    () => chartLoadingOverlay.classList.remove('show'), 20000);
+}
+function hideChartLoading(){
+  if(!chartLoadingOverlay) return;
+  clearTimeout(chartLoadingTimeout);
+  chartLoadingOverlay.classList.remove('show');
+}
 
 /* ─── AUDIO ─── */
 function beep(freq=880, dur=0.12, vol=0.3){
@@ -488,10 +518,16 @@ function initChart(){
   });
 }
 
-function updateChart(candles, predCandle){
+function updateChart(candles, predCandle, resetView){
   candleData = candles.map(c=>({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
   candleSeries.setData(candleData);
-  if(candleData.length) chart.timeScale().scrollToPosition(3, false);
+  // Real candle data has painted — the loading spinner's job is done.
+  if(candleData.length) hideChartLoading();
+  // Only snap the view back to the latest bars on a genuine fresh load
+  // (initial connect / pair switch). Calling this on every EOC (every
+  // candle close) was blowing away any zoom/pan the user had set up,
+  // since onEoc calls updateChart() once a minute.
+  if(resetView && candleData.length) chart.timeScale().scrollToPosition(3, false);
   if(predCandle){
     ghostSeries.setData([predCandle]);
   } else {
@@ -961,7 +997,7 @@ function handleMsg(msg){
 
 function onSnapshot(msg){
   const c = msg.candles || [];
-  updateChart(c);
+  updateChart(c, null, true);
   if(c.length) addTapeTick(c[c.length-1].close);
   // Snapshot's last candle is the running candle — track its open time for
   // the countdown timer. (Each candle's `time` field = its open time.)
@@ -1071,6 +1107,7 @@ pairSelect.addEventListener('change', () => {
   liveTarget = null; liveDisplay = null; lastRealTickAt = null;
   if(candleSeries) candleSeries.setData([]);
   if(ghostSeries) ghostSeries.setData([]);
+  showChartLoading();
   currentMicro = null; runningConf = null;
   renderMicro(null);
   // Reset countdown AND prediction so a slow-arriving EOC for the new pair
@@ -1106,6 +1143,7 @@ theoriesToggle.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key 
 initChart();
 renderHistory();
 renderAccuracy();
+showChartLoading();   // overlay is already visible (HTML default) — arms the timeout too
 connect();
 
 /* ─── CANDLE COUNTDOWN ───
