@@ -1,4 +1,10 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 websockets==14.1
-pyquotex>=4.2.0
+python-dotenv>=1.0.0
+# pyquotex is NOT on PyPI — install directly from GitHub:
+#   pip install "git+https://github.com/cleitonleonel/pyquotex.git"
+# or add as a pip extra-index / VCS dependency. See README for instructions.
+# Without pyquotex installed, the app falls back to sim_feed.py (random-walk
+# simulated data) which will NOT match the real Quotex broker's candle data.
+pyquotex @ git+https://github.com/cleitonleonel/pyquotex.git
