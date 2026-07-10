@@ -138,6 +138,29 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 #stale-msg{background:var(--red);color:#fff;padding:6px 16px;border-radius:var(--radius);font-weight:700;font-size:13px;animation:flash-red 1s infinite}
 /* LOCKED PAIR */
 #pair-select option.locked{color:var(--text-dim)}
+/* CANDLE COUNTDOWN — sits at the right edge of the chart, aligned with the
+   price-scale label area so it visually pairs with the running price line. */
+#candle-countdown{
+  position:absolute;
+  top:8px;
+  right:72px;             /* offset past the price-scale (chart's right gutter) */
+  z-index:5;
+  pointer-events:none;
+  font-family:'Inter',system-ui,sans-serif;
+  font-size:13px;
+  font-weight:700;
+  letter-spacing:.5px;
+  color:#fff;
+  background:rgba(33,150,243,.85);   /* blue — distinct from green/red signals */
+  padding:4px 10px;
+  border-radius:6px;
+  box-shadow:0 2px 8px rgba(0,0,0,.4);
+  font-variant-numeric:tabular-nums;
+  transition:background .25s, color .25s;
+}
+#candle-countdown.warn{background:rgba(255,152,0,.9);color:#000}     /* last 10s = orange */
+#candle-countdown.critical{background:rgba(255,23,68,.95);color:#fff;animation:flash-red .6s infinite} /* last 5s = red */
+#candle-countdown.idle{background:rgba(48,54,61,.7);color:var(--text-dim)}
 </style>
 </head>
 <body>
@@ -161,6 +184,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
     <!-- CHART -->
     <section id="chart-wrap" aria-label="Live Candle Chart">
       <div id="chart-container"></div>
+      <div id="candle-countdown" class="idle">--:--</div>
       <div id="stale-overlay"><span id="stale-msg">⚠ FEED STALE</span></div>
     </section>
     <!-- RIGHT PANEL -->
@@ -281,6 +305,12 @@ let pairsList = [];
 let currentMicro = null, runningConf = null;
 let tapePrices = [], tapeDir = [];
 let staleTimeout = null;
+/* ── CANDLE COUNTDOWN STATE ── */
+/* Tracks the running candle's open time so we can compute seconds-to-close.
+   Updated from tick/eoc/snapshot messages (the running candle's `time` field
+   is its open time). The countdown is rendered in #candle-countdown. */
+let runningCandleOpenTime = 0;   // unix seconds (start of running candle)
+let countdownEl = null;          // cached #candle-countdown element
 // Live-candle smoothing: real ticks land irregularly (Quotex OTC pairs
 // typically send 2-4/sec, sometimes with multi-second gaps), so we animate
 // the displayed close toward the latest real value every rAF frame instead
@@ -681,6 +711,11 @@ function onSnapshot(msg){
   const c = msg.candles || [];
   updateChart(c);
   if(c.length) addTapeTick(c[c.length-1].close);
+  // Snapshot's last candle is the running candle — track its open time for
+  // the countdown timer. (Each candle's `time` field = its open time.)
+  if(c.length){
+    runningCandleOpenTime = c[c.length-1].time;
+  }
   if(msg.prediction){
     lastPrediction = msg.prediction;
     renderSignal(msg.prediction);
@@ -689,7 +724,11 @@ function onSnapshot(msg){
 
 function onTick(msg){
   const c = msg.candle;
-  if(c) updateLastCandle(c);
+  if(c){
+    updateLastCandle(c);
+    // The running candle's `time` is its open time — refresh the countdown.
+    runningCandleOpenTime = c.time;
+  }
   if(c) addTapeTick(c.close);
   if(msg.micro) renderMicro(msg.micro);
   if(msg.running_conf){
@@ -702,6 +741,11 @@ function onEoc(msg){
   const c = msg.candles || [];
   updateChart(c);
   if(c.length) addTapeTick(c[c.length-1].close);
+  // EOC fires when a new candle opens. The last candle in the array is now
+  // the NEW running candle — its open time restarts the countdown.
+  if(c.length){
+    runningCandleOpenTime = c[c.length-1].time;
+  }
   if(msg.prediction){
     lastPrediction = msg.prediction;
     renderSignal(msg.prediction);
@@ -761,6 +805,10 @@ pairSelect.addEventListener('change', () => {
   if(ghostSeries) ghostSeries.setData([]);
   currentMicro = null; runningConf = null;
   renderMicro(null);
+  // Reset countdown AND prediction so a slow-arriving EOC for the new pair
+  // doesn't mix the old pair's signal into the new pair's history.
+  runningCandleOpenTime = 0;
+  lastPrediction = null;
   tickTapeInner.innerHTML = '<span class="tape-price flat">Waiting for data...</span>';
   send({ type: 'subscribe', asset: currentAsset, period: currentPeriod });
 });
@@ -783,6 +831,49 @@ initChart();
 renderHistory();
 renderAccuracy();
 connect();
+
+/* ─── CANDLE COUNTDOWN ───
+   Renders a live "mm:ss" countdown to the running candle's close, positioned
+   at the top-right of the chart (aligned with the price scale area). Color
+   escalates as the candle nears its close:
+     - blue  (>10s remaining)   — normal
+     - orange (<=10s)           — warn zone (last 10s re-eval window)
+     - red    (<=5s, flashing)  — critical zone (last 5s)
+     - gray   (no running candle data yet)
+   Updates every 200ms for a smooth feel without hammering the DOM. */
+countdownEl = document.getElementById('candle-countdown');
+
+function updateCandleCountdown(){
+  if(!countdownEl) return;
+  if(!runningCandleOpenTime || !currentPeriod){
+    countdownEl.textContent = '--:--';
+    countdownEl.className = 'idle';
+    return;
+  }
+  // runningCandleOpenTime is in unix seconds (UTC). The candle closes at
+  // openTime + period. Use Date.now() (ms) for wall-clock accuracy.
+  const closeAt = (runningCandleOpenTime + currentPeriod) * 1000;
+  const remainingMs = closeAt - Date.now();
+  if(remainingMs <= 0){
+    // Candle should have closed — show 00:00 briefly until next EOC arrives
+    countdownEl.textContent = '00:00';
+    countdownEl.className = 'critical';
+    return;
+  }
+  const totalSec = Math.ceil(remainingMs / 1000);
+  const mm = Math.floor(totalSec / 60);
+  const ss = totalSec % 60;
+  countdownEl.textContent = String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
+  // Color escalation
+  if(totalSec <= 5){
+    countdownEl.className = 'critical';
+  } else if(totalSec <= 10){
+    countdownEl.className = 'warn';
+  } else {
+    countdownEl.className = '';
+  }
+}
+setInterval(updateCandleCountdown, 200);
 
 // Ping to keep alive
 setInterval(()=>{

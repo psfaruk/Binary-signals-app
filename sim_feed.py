@@ -71,6 +71,10 @@ class _AssetStream:
     base_candles: list = field(default_factory=list)
     base_ticks: list = field(default_factory=list)
     _live_reeval_ticks: int = 0
+    # Last-10s optimization (2026-07-10)
+    cached_accuracy: tuple = field(default_factory=lambda: (None, 0))
+    cached_accuracy_at: float = 0.0
+    live_signal_history: list = field(default_factory=list)
     # Sim-specific
     _sim_price: float = 0.0
     _sim_momentum: float = 0.0
@@ -325,19 +329,40 @@ class QuotexFeed:
 
     # ── EOC analysis (same logic as feed.py) ──────────────────────────────
 
-    def _analyze_core(self, asset, period, candles, ticks, running_ticks=None):
+    def _analyze_core(self, asset, period, candles, ticks, running_ticks=None,
+                      stream=None):
         if len(candles) < 5:
             return None, []
         micro_hist = _db.get_micro_history(asset, period, n=5, before_ctime=candles[-1]["time"])
+        # Use cached accuracy if stream provided (avoids DB query on every
+        # LIVE re-eval). Fall back to DB query for background trackers.
+        if stream is not None:
+            acc, n_acc = stream.cached_accuracy
+        else:
+            try:
+                acc, n_acc = _db.recent_accuracy(asset, period, n=20)
+            except Exception:
+                acc, n_acc = None, 0
         result = analyze_eoc(candles, ticks, micro_history=micro_hist, period=period,
                              muted=self._muted_theories, asset=asset,
-                             running_ticks=running_ticks if ENABLE_LIVE_THEORY else None)
+                             running_ticks=running_ticks if ENABLE_LIVE_THEORY else None,
+                             recent_accuracy=acc, recent_n=n_acc)
         return result, micro_hist
 
     def _run_eoc(self, stream, actual_open=None):
         closed = stream.candles
         base_ticks = list(stream.ticks)
-        result, micro_hist = self._analyze_core(stream.asset, stream.period, closed, base_ticks)
+        # Refresh per-candle accuracy cache ONCE here (at candle open).
+        try:
+            stream.cached_accuracy = _db.recent_accuracy(stream.asset, stream.period, n=20)
+            stream.cached_accuracy_at = time.time()
+        except Exception:
+            stream.cached_accuracy = (None, 0)
+            stream.cached_accuracy_at = time.time()
+        # Reset flip-suppression tracker for new candle.
+        stream.live_signal_history = []
+        result, micro_hist = self._analyze_core(stream.asset, stream.period,
+                                                  closed, base_ticks, stream=stream)
         if result is None:
             return None
         stream.base_candles = closed
@@ -599,22 +624,87 @@ class QuotexFeed:
                 micro = self._analyze_microstructure(stream.ticks, stream.candle_open_price)
 
                 # LIVE theory re-eval
+                # Priority 1 (2026-07-10): ADAPTIVE refresh rate.
+                #   - Last 5s: every 2 ticks (Priority 3 critical zone)
+                #   - Last 10s: every 3 ticks
+                #   - Last 30s: every 10 ticks
+                #   - Earlier: every 30 ticks (cheap baseline)
+                # Priority 3 (2026-07-10): volatility speedup — if last 3
+                # ticks moved >0.5 ATR, cut interval in half.
                 pred_changed = False
-                if (ENABLE_LIVE_THEORY and stream.base_candles
-                        and len(stream.ticks) >= 15
-                        and len(stream.ticks) - stream._live_reeval_ticks >= 30):
-                    try:
-                        fresh, _ = self._analyze_core(stream.asset, stream.period,
-                                                       stream.base_candles, stream.base_ticks,
-                                                       running_ticks=list(stream.ticks))
-                        stream._live_reeval_ticks = len(stream.ticks)
-                        if fresh and fresh.get("signal") in ("CALL", "PUT"):
-                            stream.prediction = {**(stream.prediction or {}), **fresh}
-                            pred_changed = True
-                    except Exception as exc:
-                        import traceback as tb
-                        print(f"[sim] LIVE re-eval error: {exc}")
-                        tb.print_exc()
+                if ENABLE_LIVE_THEORY and stream.base_candles and len(stream.ticks) >= 15:
+                    if stream.candle_open_time > 0:
+                        time_to_close = (stream.candle_open_time + stream.period) - time.time()
+                        if time_to_close < 5:
+                            reeval_interval = 2   # Priority 3: critical zone
+                        elif time_to_close < 10:
+                            reeval_interval = 3
+                        elif time_to_close < 30:
+                            reeval_interval = 10
+                        else:
+                            reeval_interval = 30
+                    else:
+                        reeval_interval = 30
+
+                    # Priority 3: volatility speedup
+                    if len(stream.ticks) >= 4 and reeval_interval > 2:
+                        try:
+                            recent = list(stream.ticks)[-4:]
+                            recent_range = max(recent) - min(recent)
+                            _atr_val = (_atr(stream.candles[-20:])
+                                        if len(stream.candles) >= 20
+                                        else 0.0001)
+                            if _atr_val > 0 and recent_range > _atr_val * 0.5:
+                                reeval_interval = max(2, reeval_interval // 2)
+                        except Exception:
+                            pass
+
+                    if len(stream.ticks) - stream._live_reeval_ticks >= reeval_interval:
+                        try:
+                            fresh, _ = self._analyze_core(stream.asset, stream.period,
+                                                           stream.base_candles, stream.base_ticks,
+                                                           running_ticks=list(stream.ticks),
+                                                           stream=stream)
+                            stream._live_reeval_ticks = len(stream.ticks)
+                            if fresh and fresh.get("signal") in ("CALL", "PUT"):
+                                # Flip suppression (2026-07-10)
+                                sig = fresh["signal"]
+                                stream.live_signal_history.append(
+                                    (len(stream.ticks), sig, time.time()))
+                                cutoff = time.time() - 10
+                                stream.live_signal_history = [
+                                    h for h in stream.live_signal_history
+                                    if h[2] >= cutoff]
+                                dirs = [h[1] for h in stream.live_signal_history]
+                                flips = 0
+                                for i in range(1, len(dirs)):
+                                    if dirs[i] != dirs[i-1]:
+                                        flips += 1
+                                if flips >= 3 and len(dirs) >= 4:
+                                    fresh = dict(fresh)
+                                    fresh["signal"] = "NEUTRAL"
+                                    fresh["strength"] = "WEAK"
+                                    fresh.setdefault("reasons", []).append(
+                                        f"FLIP_SUPPRESS: {flips} flips in last 10s → NEUTRAL")
+                                    stream.prediction = fresh
+                                    pred_changed = True
+                                    # NOTE: do NOT `continue` — fall through
+                                    # to broadcast so client sees NEUTRAL.
+                                elif flips >= 2 and len(dirs) >= 3:
+                                    fresh = dict(fresh)
+                                    if fresh.get("strength") != "WEAK":
+                                        fresh["strength"] = "WEAK"
+                                        fresh.setdefault("reasons", []).append(
+                                            f"FLIP_DEMOTE: {flips} flips in last 10s → WEAK")
+                                    stream.prediction = {**(stream.prediction or {}), **fresh}
+                                    pred_changed = True
+                                else:
+                                    stream.prediction = {**(stream.prediction or {}), **fresh}
+                                    pred_changed = True
+                        except Exception as exc:
+                            import traceback as tb
+                            print(f"[sim] LIVE re-eval error: {exc}")
+                            tb.print_exc()
 
                 # Strength gate
                 if ENABLE_STRENGTH_GATE and stream.prediction and stream.prediction.get("signal") != "NEUTRAL":

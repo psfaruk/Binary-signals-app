@@ -183,6 +183,28 @@ def get_recent_signals(asset, period, limit=20):
         return [dict(r) for r in reversed(rows)]
 
 
+def recent_accuracy(asset, period, n=20):
+    """Return (accuracy_float, sample_count) over the last N graded signals.
+
+    accuracy_float = correct / (correct + wrong)   — draws excluded.
+    Returns (None, 0) when no graded rows exist.
+    A single graded row returns (1.0 or 0.0, 1) — caller is responsible for
+    gating on sample size (analyze_eoc requires recent_n >= 8 before flipping).
+    """
+    with _cursor() as c:
+        rows = c.execute("""SELECT accuracy
+                   FROM signal_log
+                   WHERE asset=? AND period=? AND signal IN ('CALL','PUT')
+                     AND accuracy IN ('correct','wrong')
+                   ORDER BY ctime DESC LIMIT ?""",
+                   (asset, period, n)).fetchall()
+    if not rows:
+        return None, 0
+    correct = sum(1 for r in rows if r["accuracy"] == "correct")
+    total = len(rows)
+    return correct / total, total
+
+
 def cleanup(days=7):
     cutoff = time.time() - days * 86400
     with _cursor() as c:

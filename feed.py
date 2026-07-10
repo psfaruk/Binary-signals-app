@@ -250,6 +250,14 @@ class _AssetStream:
     base_candles: list = field(default_factory=list)
     base_ticks: list = field(default_factory=list)
     _live_reeval_ticks: int = 0   # last tick-count LIVE re-eval fired at
+    # ── Last-10s optimization (2026-07-10) ────────────────────────────────
+    # Cached recent_accuracy — queried ONCE per candle (accuracy only changes
+    # at candle close, so re-querying mid-candle is pure waste).
+    cached_accuracy: tuple = field(default_factory=lambda: (None, 0))
+    cached_accuracy_at: float = 0.0   # wall-time of last accuracy query
+    # Flip suppression tracker — records signal direction at each LIVE re-eval
+    # in the current candle. If signal flips 2+ times in last 10s, demote.
+    live_signal_history: list = field(default_factory=list)  # [(tick_count, signal, ts)]
 
 
 # ── Feed ──────────────────────────────────────────────────────────────────────
@@ -751,7 +759,8 @@ class QuotexFeed:
 
     def _analyze_core(self, asset: str, period: int, candles: list[dict],
                       ticks: list[float],
-                      running_ticks: list[float] | None = None
+                      running_ticks: list[float] | None = None,
+                      stream: _AssetStream | None = None
                       ) -> tuple[dict | None, list]:
         """
         Shared EOC analysis: pure analyze_eoc theory blend, nothing else.
@@ -766,18 +775,37 @@ class QuotexFeed:
         restricts it to the 5 candle-slots immediately before the just-closed
         candle: a restart / asset switch can no longer feed hours-old rows to
         MICRO as if they were the previous candle.
+
+        Last-10s optimization (2026-07-10): if `stream` is provided, use
+        stream.cached_accuracy instead of querying the DB every call.
+        Accuracy only changes at candle close, so caching it per-candle
+        saves ~190 DB queries/minute across 38 always-on streams.
         """
         if len(candles) < 5:
             return None, []
         micro_hist = _db.get_micro_history(
             asset, period, n=5,
             before_ctime=candles[-1]["time"])
+
+        # Use cached accuracy if a stream is provided (avoids DB query on
+        # every LIVE re-eval in the last 10s). Fall back to DB query for
+        # background trackers that don't have a stream context.
+        if stream is not None:
+            acc, n_acc = stream.cached_accuracy
+        else:
+            try:
+                acc, n_acc = _db.recent_accuracy(asset, period, n=20)
+            except Exception:
+                acc, n_acc = None, 0
+
         result = analyze_eoc(candles, ticks,
                              micro_history=micro_hist,
                              period=period,
                              muted=self._muted_theories,
                              asset=asset,
-                             running_ticks=running_ticks if ENABLE_LIVE_THEORY else None)
+                             running_ticks=running_ticks if ENABLE_LIVE_THEORY else None,
+                             recent_accuracy=acc,
+                             recent_n=n_acc)
         return result, micro_hist
 
     def _run_eoc(self, stream: _AssetStream,
@@ -787,9 +815,23 @@ class QuotexFeed:
         # running_ticks=None here: the NEW candle's ticks are empty at this
         # exact moment (they accumulate after this call). LIVE theory picks
         # up once ticks come in, via the periodic re-eval in the stream loop.
+
+        # Refresh the per-candle accuracy cache ONCE here (at candle open).
+        # All subsequent LIVE re-evals in the last 10s will reuse this cached
+        # value instead of hitting the DB ~5-10 times per candle.
+        try:
+            stream.cached_accuracy = _db.recent_accuracy(stream.asset,
+                                                         stream.period, n=20)
+            stream.cached_accuracy_at = time.time()
+        except Exception:
+            stream.cached_accuracy = (None, 0)
+            stream.cached_accuracy_at = time.time()
+        # Reset the flip-suppression tracker for the new candle.
+        stream.live_signal_history = []
+
         result, micro_hist = self._analyze_core(
             stream.asset, stream.period, closed, base_ticks,
-            running_ticks=None)
+            running_ticks=None, stream=stream)
         if result is None:
             return None
         # Snapshot for the periodic LIVE-theory re-eval (see stream loop).
@@ -1676,29 +1718,120 @@ class QuotexFeed:
                     # rendered from tick updates and does not need to overwrite
                     # the last completed bar in history.
 
-                    # ── LIVE theory periodic re-eval (Method A, 2026-07-10, untested) ──
+                    # ── LIVE theory periodic re-eval (Method A, 2026-07-10) ──
                     # Re-run analyze_eoc with the running candle's own ticks
-                    # every ~30 ticks so the LIVE vote can update mid-candle.
-                    # Reuses the (closed candles, just-closed ticks) snapshot
-                    # taken by _run_eoc at candle-open — stream.ticks now
-                    # holds the NEW (still-open) candle's ticks instead.
+                    # so the LIVE vote can update mid-candle. Reuses the
+                    # (closed candles, just-closed ticks) snapshot taken by
+                    # _run_eoc at candle-open — stream.ticks now holds the NEW
+                    # (still-open) candle's ticks instead.
+                    #
+                    # Priority 1 update (2026-07-10): ADAPTIVE refresh rate.
+                    #   - Last 10 seconds of candle: re-eval every 3 ticks
+                    #     (the close is the most predictive moment)
+                    #   - Last 30 seconds: every 10 ticks
+                    #   - Earlier: every 30 ticks (cheap baseline)
+                    #
+                    # Priority 3 update (2026-07-10): PHASE-AWARE refinement.
+                    #   - "Critical zone" (last 5s) goes even faster: every 2 ticks
+                    #   - High-recent-volatility window (last 3 ticks' range
+                    #     > 0.5 ATR) → cut interval in half — fast move =
+                    #     potential signal change, re-eval immediately
                     pred_changed = False
                     if (ENABLE_LIVE_THEORY and stream.base_candles
-                            and len(stream.ticks) >= 15
-                            and len(stream.ticks) - stream._live_reeval_ticks >= 30):
-                        try:
-                            fresh, _ = self._analyze_core(
-                                stream.asset, stream.period,
-                                stream.base_candles, stream.base_ticks,
-                                running_ticks=list(stream.ticks))
-                            stream._live_reeval_ticks = len(stream.ticks)
-                            if fresh and fresh.get("signal") in ("CALL", "PUT"):
-                                stream.prediction = {
-                                    **(stream.prediction or {}), **fresh}
-                                pred_changed = True
-                        except Exception as exc:
-                            print(f"[feed] LIVE re-eval error "
-                                  f"({stream.asset}@{stream.period}s): {exc}")
+                            and len(stream.ticks) >= 15):
+                        # Compute adaptive re-eval interval
+                        if stream.candle_open_time > 0:
+                            time_to_close = (stream.candle_open_time
+                                             + stream.period) - time.time()
+                            if time_to_close < 5:
+                                reeval_interval = 2   # Priority 3: last 5s = critical
+                            elif time_to_close < 10:
+                                reeval_interval = 3   # last 10s
+                            elif time_to_close < 30:
+                                reeval_interval = 10  # last 30s
+                            else:
+                                reeval_interval = 30  # mid-candle
+                        else:
+                            reeval_interval = 30
+
+                        # Priority 3: volatility speedup — if last 3 ticks
+                        # moved more than 0.5 ATR, the market is making a
+                        # decisive move RIGHT NOW. Cut interval in half so we
+                        # re-evaluate before the move is over.
+                        if len(stream.ticks) >= 4 and reeval_interval > 2:
+                            try:
+                                recent = list(stream.ticks)[-4:]
+                                recent_range = max(recent) - min(recent)
+                                _atr_val = (_atr(stream.candles[-20:])
+                                            if len(stream.candles) >= 20
+                                            else 0.0001)
+                                if _atr_val > 0 and recent_range > _atr_val * 0.5:
+                                    reeval_interval = max(2, reeval_interval // 2)
+                            except Exception:
+                                pass
+
+                        if len(stream.ticks) - stream._live_reeval_ticks >= reeval_interval:
+                            try:
+                                fresh, _ = self._analyze_core(
+                                    stream.asset, stream.period,
+                                    stream.base_candles, stream.base_ticks,
+                                    running_ticks=list(stream.ticks),
+                                    stream=stream)
+                                stream._live_reeval_ticks = len(stream.ticks)
+                                if fresh and fresh.get("signal") in ("CALL", "PUT"):
+                                    # ── Flip suppression (2026-07-10) ──────
+                                    # Track this re-eval's signal direction.
+                                    # If the signal has flipped 2+ times in
+                                    # the last 10s, the model is uncertain →
+                                    # demote to WEAK. 3+ flips → NEUTRAL
+                                    # (suppress the trade entirely).
+                                    sig = fresh["signal"]
+                                    stream.live_signal_history.append(
+                                        (len(stream.ticks), sig, time.time()))
+                                    # Keep only last 10s of history
+                                    cutoff = time.time() - 10
+                                    stream.live_signal_history = [
+                                        h for h in stream.live_signal_history
+                                        if h[2] >= cutoff]
+                                    # Count direction changes
+                                    dirs = [h[1] for h in stream.live_signal_history]
+                                    flips = 0
+                                    for i in range(1, len(dirs)):
+                                        if dirs[i] != dirs[i-1]:
+                                            flips += 1
+                                    if flips >= 3 and len(dirs) >= 4:
+                                        # Heavy flipping → NEUTRAL (suppress)
+                                        fresh = dict(fresh)
+                                        fresh["signal"] = "NEUTRAL"
+                                        fresh["strength"] = "WEAK"
+                                        fresh.setdefault("reasons", []).append(
+                                            f"FLIP_SUPPRESS: {flips} flips in "
+                                            f"last 10s → NEUTRAL (uncertain)")
+                                        stream.prediction = fresh
+                                        pred_changed = True
+                                        # NOTE: do NOT `continue` here — that
+                                        # would skip the tick broadcast below,
+                                        # and the client would never receive the
+                                        # NEUTRAL update. Fall through to the
+                                        # broadcast instead.
+                                    elif flips >= 2 and len(dirs) >= 3:
+                                        # Moderate flipping → demote to WEAK
+                                        fresh = dict(fresh)
+                                        if fresh.get("strength") != "WEAK":
+                                            fresh["strength"] = "WEAK"
+                                            fresh.setdefault("reasons", []).append(
+                                                f"FLIP_DEMOTE: {flips} flips in "
+                                                f"last 10s → WEAK")
+                                        stream.prediction = {
+                                            **(stream.prediction or {}), **fresh}
+                                        pred_changed = True
+                                    else:
+                                        stream.prediction = {
+                                            **(stream.prediction or {}), **fresh}
+                                        pred_changed = True
+                            except Exception as exc:
+                                print(f"[feed] LIVE re-eval error "
+                                      f"({stream.asset}@{stream.period}s): {exc}")
 
                     # ── Strength gate (Method B, 2026-07-10, untested) ──────────
                     if (ENABLE_STRENGTH_GATE and stream.prediction
