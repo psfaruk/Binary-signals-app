@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+session.json
+signals.db
+qx_cache*/
