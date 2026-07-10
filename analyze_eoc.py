@@ -2630,7 +2630,8 @@ def _theory_structure(candles, muted):
 
 def analyze_eoc(candles, ticks, micro_history=None, period=60,
                 muted=None, asset="", running_ticks=None,
-                recent_accuracy=None, recent_n=0, currently_flipped=False):
+                recent_accuracy=None, recent_n=0, currently_flipped=False,
+                live_only=False):
     """
     Main entry point: run all theories and blend into a signal.
 
@@ -2650,6 +2651,17 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                           without this a flip that starts working pushes
                           accuracy just over 40% and immediately un-flips
                           itself, oscillating candle to candle.
+
+    LIVE-ONLY FAST PATH (2026-07-10 review Next Action #1):
+      live_only -> when True (LIVE re-eval in last 10s), skip the 13 closed-
+                   candle theories that don't benefit from running_ticks.
+                   Only RUN, VELOCITY, LIVE_WICK, ORDERFLOW run — these
+                   are the only theories that actually use running_ticks.
+                   Cuts CPU ~70% per re-eval AND removes the noise from
+                   closed-candle theories re-evaluating identical inputs
+                   every 2-3 ticks.
+                   When False (the default — used at EOC and for grading),
+                   ALL theories run as before.
                           samples before flipping, otherwise too noisy).
 
     If recent_accuracy < 0.40 AND recent_n >= 8  =>  flip CALL<->PUT at the
@@ -2692,6 +2704,13 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
     # Use running_micro for the RUN theory when doing live re-eval
     run_micro = running_micro if running_micro else closed_micro
 
+    # ── Live-only fast path (2026-07-10 review Next Action #1) ───────────
+    # When live_only=True (LIVE re-eval in last 10s), only run theories
+    # that actually USE running_ticks. The 13 closed-candle theories re-
+    # evaluate IDENTICAL inputs every 2-3 ticks (no signal change, just
+    # CPU waste + noise). Skipping them cuts CPU ~70% per re-eval.
+    LIVE_THEORIES = {"RUN", "VELOCITY", "LIVE_WICK", "ORDERFLOW"}
+
     theories = [
         ("CON",        lambda: _theory_con(candles, muted)),
         ("REV",        lambda: _theory_rev(candles, muted)),
@@ -2717,11 +2736,15 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
         ("SWEEP",      lambda: _theory_sweep(candles, muted)),
         ("STRUCT",     lambda: _theory_structure(candles, muted)),
     ]
+    # Apply live_only filter — keep only the LIVE theories
+    if live_only:
+        theories = [(c, fn) for c, fn in theories if c in LIVE_THEORIES]
 
     # MST is special — returns (result, market_state)
+    # Skip in live_only mode (MST only looks at closed candles)
     mst_result = None
     market_state = {}
-    if "MST" not in muted:
+    if "MST" not in muted and not live_only:
         try:
             mst = _theory_mst(candles, muted)
             if mst:

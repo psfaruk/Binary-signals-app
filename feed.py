@@ -787,7 +787,8 @@ class QuotexFeed:
     def _analyze_core(self, asset: str, period: int, candles: list[dict],
                       ticks: list[float],
                       running_ticks: list[float] | None = None,
-                      stream: _AssetStream | None = None
+                      stream: _AssetStream | None = None,
+                      live_only: bool = False
                       ) -> tuple[dict | None, list]:
         """
         Shared EOC analysis: pure analyze_eoc theory blend, nothing else.
@@ -807,12 +808,23 @@ class QuotexFeed:
         stream.cached_accuracy instead of querying the DB every call.
         Accuracy only changes at candle close, so caching it per-candle
         saves ~190 DB queries/minute across 38 always-on streams.
+
+        Live-only fast path (2026-07-10 review Next Action #1):
+          live_only=True → only RUN, VELOCITY, LIVE_WICK, ORDERFLOW run.
+          Cuts CPU ~70% per re-eval AND removes the noise from closed-candle
+          theories re-evaluating identical inputs every 2-3 ticks. Used for
+          LIVE re-eval in the last 30s of a candle.
         """
         if len(candles) < 5:
             return None, []
-        micro_hist = _db.get_micro_history(
-            asset, period, n=5,
-            before_ctime=candles[-1]["time"])
+        # Skip DB query in live_only mode — closed-candle theories don't run
+        # anyway, so micro_history would just be wasted I/O.
+        if live_only:
+            micro_hist = []
+        else:
+            micro_hist = _db.get_micro_history(
+                asset, period, n=5,
+                before_ctime=candles[-1]["time"])
 
         # Use cached accuracy if a stream is provided (avoids DB query on
         # every LIVE re-eval in the last 10s). Fall back to DB query for
@@ -833,7 +845,8 @@ class QuotexFeed:
                              running_ticks=running_ticks if ENABLE_LIVE_THEORY else None,
                              recent_accuracy=acc,
                              recent_n=n_acc,
-                             currently_flipped=stream.inverted if stream is not None else False)
+                             currently_flipped=stream.inverted if stream is not None else False,
+                             live_only=live_only)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
@@ -1799,6 +1812,7 @@ class QuotexFeed:
                     if (ENABLE_LIVE_THEORY and stream.base_candles
                             and len(stream.ticks) >= 15):
                         # Compute adaptive re-eval interval
+                        time_to_close = -1  # default: unknown, mid-candle
                         if stream.candle_open_time > 0:
                             time_to_close = (stream.candle_open_time
                                              + stream.period) - time.time()
@@ -1812,6 +1826,14 @@ class QuotexFeed:
                                 reeval_interval = 30  # mid-candle
                         else:
                             reeval_interval = 30
+                        # Live-only fast path (2026-07-10 review Next Action #1):
+                        # In the last 30s (where LIVE re-eval actually matters),
+                        # only run the 4 theories that use running_ticks.
+                        # Earlier in the candle there's nothing to gain from
+                        # re-eval (closed candle hasn't changed), so we still
+                        # use the full theory set just for consistency — but the
+                        # 30-tick interval means it fires rarely.
+                        live_only = 0 < time_to_close < 30
 
                         # Priority 3: volatility speedup — if last 3 ticks
                         # moved more than 0.5 ATR, the market is making a
@@ -1835,7 +1857,8 @@ class QuotexFeed:
                                     stream.asset, stream.period,
                                     stream.base_candles, stream.base_ticks,
                                     running_ticks=list(stream.ticks),
-                                    stream=stream)
+                                    stream=stream,
+                                    live_only=live_only)
                                 stream._live_reeval_ticks = len(stream.ticks)
                                 if fresh and fresh.get("signal") in ("CALL", "PUT"):
                                     # ── Flip suppression (2026-07-10) ──────
@@ -1926,6 +1949,49 @@ class QuotexFeed:
                             stream.prediction = gated
                             if prev_sig != new_sig:
                                 pred_changed = True
+
+                    # ── Signal Stability Tracker (2026-07-10 review Next Action #2) ─
+                    # If the last 3-4 LIVE re-evals in the last 10s all voted
+                    # the SAME direction (no flips), the model is confident →
+                    # upgrade strength. This is the symmetric opposite of the
+                    # flip-suppression demote above: stable signals get a bonus.
+                    if stream.prediction and stream.prediction.get("signal") in ("CALL","PUT"):
+                        dirs = [h[1] for h in stream.live_signal_history]
+                        if len(dirs) >= 4:
+                            # All 4+ most recent votes are the same direction
+                            last4 = dirs[-4:]
+                            if all(d == last4[0] for d in last4):
+                                cur_strength = stream.prediction.get("strength", "")
+                                # Upgrade WEAK → MEDIUM, MEDIUM → STRONG
+                                if cur_strength == "WEAK":
+                                    gated_pred = dict(stream.prediction)
+                                    gated_pred["strength"] = "MEDIUM"
+                                    gated_pred.setdefault("reasons", []).append(
+                                        f"STABILITY_BONUS: 4+ same-direction votes "
+                                        f"in last 10s → WEAK upgraded to MEDIUM")
+                                    stream.prediction = gated_pred
+                                    pred_changed = True
+                                elif cur_strength == "MEDIUM":
+                                    gated_pred = dict(stream.prediction)
+                                    gated_pred["strength"] = "STRONG"
+                                    gated_pred.setdefault("reasons", []).append(
+                                        f"STABILITY_BONUS: 4+ same-direction votes "
+                                        f"in last 10s → MEDIUM upgraded to STRONG")
+                                    stream.prediction = gated_pred
+                                    pred_changed = True
+                            elif len(dirs) >= 3:
+                                # 3 same-direction votes — smaller bonus
+                                last3 = dirs[-3:]
+                                if all(d == last3[0] for d in last3):
+                                    cur_strength = stream.prediction.get("strength", "")
+                                    if cur_strength == "WEAK":
+                                        gated_pred = dict(stream.prediction)
+                                        gated_pred["strength"] = "MEDIUM"
+                                        gated_pred.setdefault("reasons", []).append(
+                                            f"STABILITY_BONUS: 3 same-direction votes "
+                                            f"in last 10s → WEAK upgraded to MEDIUM")
+                                        stream.prediction = gated_pred
+                                        pred_changed = True
 
                     # Skip broadcast if open price is still 0 (no valid tick yet)
                     # — prevents LightweightCharts "Value is null" on the client
