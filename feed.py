@@ -2569,10 +2569,140 @@ class QuotexFeed:
 
     # ── Manager loop ──────────────────────────────────────────────────────────
 
+    async def _auto_login_startup(self) -> None:
+        """Startup auto-login (2026-07-11).
+
+        If QX_TOKEN is missing or empty but QX_EMAIL + QX_PASSWORD are set,
+        do a fresh browser-login NOW so the first connection attempt has a
+        valid ssid. This makes the app fully auto-connecting — the user
+        only needs to set email + password in .env, and the app handles
+        token refresh on every restart.
+        """
+        token = os.environ.get("QX_TOKEN", "").strip()
+        email = os.environ.get("QX_EMAIL", "").strip()
+        password = os.environ.get("QX_PASSWORD", "").strip()
+
+        if token:
+            # Already have a token — skip the pre-login. _connect() will use
+            # it first, and fall back to email/password if it fails.
+            print(f"[feed] startup: QX_TOKEN present ({token[:8]}...) — skipping pre-login")
+            return
+
+        if not email or not password:
+            print("[feed] startup: QX_EMAIL/QX_PASSWORD not set — "
+                  "manual token or .env setup required")
+            return
+
+        print(f"[feed] startup: no QX_TOKEN, doing fresh browser-login "
+              f"for {email[:3]}***@{email.split('@')[-1] if '@' in email else '?'}")
+        await self._do_browser_login(email, password, save_to_env=True)
+
+    async def _auto_relogin(self) -> None:
+        """Re-login after connection failure (2026-07-11).
+
+        Called when _connect() has failed 2 times in a row. If QX_EMAIL +
+        QX_PASSWORD are set, does a fresh browser-login to get a new ssid,
+        then writes it to .env so subsequent restarts skip this step.
+        """
+        email = os.environ.get("QX_EMAIL", "").strip()
+        password = os.environ.get("QX_PASSWORD", "").strip()
+        if not email or not password:
+            print("[feed] auto-relogin: no email/password, can't auto-recover")
+            return
+
+        # Clear any stale token — it's clearly not working
+        old_token = os.environ.get("QX_TOKEN", "").strip()
+        if old_token:
+            print(f"[feed] auto-relogin: clearing stale token ({old_token[:8]}...)")
+            os.environ.pop("QX_TOKEN", None)
+
+        print(f"[feed] auto-relogin: doing fresh browser-login after 2 failures")
+        await self._do_browser_login(email, password, save_to_env=True)
+
+    async def _do_browser_login(self, email: str, password: str,
+                                save_to_env: bool = False) -> bool:
+        """Do a browser-impersonated login via qx_login.fetch_session().
+        On success, sets QX_TOKEN env var and optionally appends it to .env.
+        Returns True on success, False on failure."""
+        try:
+            from qx_login import fetch_session
+            ua = os.environ.get("QX_UA", "").strip() or (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+            print("[feed] browser-login: fetching session via curl_cffi...")
+            sess = await asyncio.wait_for(
+                asyncio.to_thread(
+                    fetch_session, email, password, "market-qx.trade", ua),
+                timeout=90)
+
+            if not sess.get("ssid"):
+                err = sess.get("error", "unknown")
+                print(f"[feed] browser-login failed: {err}")
+                if "PIN" in err or "keep_code" in err:
+                    print("[feed]   → Quotex wants PIN verification for new device.")
+                    print("[feed]     Log in once from a browser on this machine,")
+                    print("[feed]     or run: python setup.py")
+                return False
+
+            ssid = sess["ssid"]
+            cookies = sess.get("cookies", "")
+            print(f"[feed] browser-login ok — ssid={ssid[:8]}...")
+            os.environ["QX_TOKEN"] = ssid
+            if cookies:
+                os.environ["QX_COOKIES"] = cookies
+
+            # Save to .env so subsequent restarts use it directly
+            if save_to_env:
+                self._save_token_to_env(ssid)
+            return True
+
+        except ImportError:
+            print("[feed] browser-login: curl_cffi not installed — pip install curl_cffi")
+            return False
+        except asyncio.TimeoutError:
+            print("[feed] browser-login: timed out (90s) — network slow or blocked")
+            return False
+        except Exception as exc:
+            print(f"[feed] browser-login error: {exc}")
+            return False
+
+    def _save_token_to_env(self, ssid: str) -> None:
+        """Append/update QX_TOKEN in .env file so subsequent restarts use it."""
+        try:
+            env_path = os.path.join(os.getcwd(), ".env")
+            lines = []
+            token_found = False
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("QX_TOKEN="):
+                            lines.append(f"QX_TOKEN={ssid}\n")
+                            token_found = True
+                        else:
+                            lines.append(line)
+            if not token_found:
+                # Append at end
+                if lines and not lines[-1].endswith("\n"):
+                    lines.append("\n")
+                lines.append(f"\n# Auto-saved working token (by feed.py auto-login):\n")
+                lines.append(f"QX_TOKEN={ssid}\n")
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            print(f"[feed] token saved to .env (QX_TOKEN={ssid[:8]}...)")
+        except Exception as exc:
+            print(f"[feed] could not save token to .env: {exc}")
+
     async def run(self, broadcast) -> None:
         self._broadcast = broadcast
         _db.init()          # create DB tables if not exist
         _db.cleanup()       # prune rows older than 7 days
+
+        # ── Auto-login on startup (2026-07-11) ─────────────────────────────
+        # If QX_EMAIL + QX_PASSWORD are set but the connection keeps failing
+        # (e.g., token expired, Cloudflare blocking), try a fresh browser-login
+        # ONCE before entering the main loop. This makes the app fully
+        # auto-connecting — no manual token refresh needed.
+        await self._auto_login_startup()
 
         HOUSEKEEP_SECS    = 5
         GLOBAL_STALE_SECS = 90
@@ -2584,6 +2714,13 @@ class QuotexFeed:
                     print("[feed] connecting...")
                     self._connected = await self._connect()
                     if not self._connected:
+                        # ── Auto re-login (2026-07-11) ──────────────────────
+                        # If connection failed AND we have email/password,
+                        # try a fresh browser-login to get a new ssid before
+                        # retrying. This handles token expiry automatically.
+                        if self._reconnect_attempts == 2:  # after 2 fails
+                            await self._auto_relogin()
+
                         # Exponential backoff (10→20→40→60s, capped) so repeated
                         # failures don't hammer Quotex into a 429 rate-limit.
                         self._reconnect_attempts += 1
