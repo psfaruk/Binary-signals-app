@@ -286,6 +286,36 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
           <div class="signal-row"><span class="label">Regime</span><span class="value" id="sig-regime">—</span></div>
         </div>
       </div>
+      <!-- MARKET STATE (2026-07-11) -->
+      <div class="panel-section" id="market-state-section">
+        <div class="section-title">Market State</div>
+        <div class="micro-grid">
+          <div class="micro-item">
+            <span class="micro-label">Trend</span>
+            <span class="micro-value" id="ms-trend">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Zone</span>
+            <span class="micro-value" id="ms-zone">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Phase</span>
+            <span class="micro-value" id="ms-phase">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Structure</span>
+            <span class="micro-value" id="ms-structure">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Volatility</span>
+            <span class="micro-value" id="ms-volatility">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">ZigZag Bias</span>
+            <span class="micro-value" id="ms-zigzag">—</span>
+          </div>
+        </div>
+      </div>
       <!-- MICROSTRUCTURE -->
       <div class="panel-section" style="flex:1;overflow-y:auto">
         <div class="section-title">Running Candle Microstructure</div>
@@ -440,6 +470,13 @@ const sigConfVal = $('sig-conf-val');
 const sigConfBar = $('sig-conf-bar');
 const sigAgree = $('sig-agree');
 const sigRegime = $('sig-regime');
+// Market State panel (2026-07-11)
+const msTrend = $('ms-trend');
+const msZone = $('ms-zone');
+const msPhase = $('ms-phase');
+const msStructure = $('ms-structure');
+const msVolatility = $('ms-volatility');
+const msZigzag = $('ms-zigzag');
 const bsBuy = $('bs-buy');
 const bsSell = $('bs-sell');
 const msPressure = $('ms-pressure');
@@ -739,6 +776,13 @@ function renderPending(){
   sigConfBar.style.background = '#2196F3';
   sigAgree.textContent = '—';
   sigRegime.textContent = '—';
+  // Reset market state panel
+  msTrend.textContent = '—';
+  msZone.textContent = '—';
+  msPhase.textContent = '—';
+  msStructure.textContent = '—';
+  msVolatility.textContent = '—';
+  msZigzag.textContent = '—';
   theoriesList.innerHTML = '';
   theoriesList.classList.remove('open');
   theoriesToggle.classList.remove('open');
@@ -788,6 +832,36 @@ function renderSignal(pred){
   sigAgree.textContent = (pred.agree || 0) + '/' + (pred.total || 0) + ' theories';
   const regime = pred.regime || '—';
   sigRegime.textContent = regime;
+  // ── Market State panel (2026-07-11) ─────────────────────────────────
+  // Display the new market_state fields: trend, zone, phase, structure,
+  // volatility, zigzag_bias. These come from _classify_market_state() in
+  // analyze_eoc.py and help the user see WHY the signal fired.
+  const ms = pred.market_state || {};
+  const trendVal = ms.trend || '—';
+  const zoneVal = ms.zone || '—';
+  const phaseVal = ms.phase || '—';
+  const structVal = ms.structure || '—';
+  const volVal = ms.volatility || '—';
+  const zzBias = ms.zigzag_bias || '—';
+  const zzStr = ms.bias_strength || 0;
+  msTrend.textContent = trendVal;
+  msTrend.style.color = trendVal === 'UPTREND' ? 'var(--green)' :
+                        trendVal === 'DOWNTREND' ? 'var(--red)' : 'var(--text-dim)';
+  msZone.textContent = zoneVal;
+  msZone.style.color = zoneVal === 'HIGH' ? 'var(--green)' :
+                       zoneVal === 'LOW' ? 'var(--red)' : 'var(--text-dim)';
+  msPhase.textContent = phaseVal;
+  msPhase.style.color = phaseVal === 'MARKUP' ? 'var(--green)' :
+                        phaseVal === 'MARKDOWN' ? 'var(--red)' :
+                        phaseVal === 'ACCUMULATION' ? 'var(--yellow)' :
+                        phaseVal === 'DISTRIBUTION' ? 'var(--yellow)' : 'var(--text-dim)';
+  msStructure.textContent = structVal;
+  msVolatility.textContent = volVal;
+  msVolatility.style.color = volVal === 'VOLATILE' ? 'var(--red)' :
+                             volVal === 'QUIET' ? 'var(--text-dim)' : 'var(--text)';
+  msZigzag.textContent = zzBias === '—' ? '—' : zzBias + ' (' + Math.round(zzStr * 100) + '%)';
+  msZigzag.style.color = zzBias === 'CALL' ? 'var(--green)' :
+                         zzBias === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
   // Theories
   theoriesList.innerHTML = '';
   const td = pred.theories_detail || [];
