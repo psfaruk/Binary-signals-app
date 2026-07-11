@@ -312,6 +312,91 @@ class QuotexWSClient:
         if ssid:
             self.session_data = {"token": ssid}
 
+    # ── session.json support (2026-07-11) ─────────────────────────────────
+    # Mirrors pyquotex's own session.json persistence so the app can reuse
+    # a working token across restarts. feed.py calls load_session_json() on
+    # startup; if a valid token + cookies are found, set_session() is called
+    # automatically — no manual token refresh needed.
+
+    @staticmethod
+    def load_session_json() -> dict | None:
+        """Read session.json from the current working directory.
+        Returns the first account's data (token, cookies, user_agent) or None.
+        Format: {"email@example.com": {"cookies": "...", "token": "...", "user_agent": "..."}}
+        """
+        import json
+        path = os.path.join(os.getcwd(), "session.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or not data:
+                return None
+            # Take the first account entry
+            first_key = next(iter(data))
+            acct = data[first_key]
+            if not isinstance(acct, dict):
+                return None
+            return {
+                "email":      first_key,
+                "token":      acct.get("token", ""),
+                "cookies":    acct.get("cookies", ""),
+                "user_agent": acct.get("user_agent", ""),
+            }
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            print(f"[quotex_ws] session.json read error: {exc}")
+            return None
+
+    @staticmethod
+    def clear_session_json_token() -> None:
+        """Clear the token field in session.json (set to None) so the next
+        connect attempt doesn't reuse a rejected/expired token.
+        Mirrors feed.py's _clear_stale_token() for pyquotex."""
+        import json
+        path = os.path.join(os.getcwd(), "session.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            changed = False
+            for acct in data.values():
+                if isinstance(acct, dict) and acct.get("token"):
+                    acct["token"] = None
+                    changed = True
+            if changed:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+                print("[quotex_ws] cleared stale token in session.json")
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            print(f"[quotex_ws] could not clear session.json token: {exc}")
+
+    @staticmethod
+    def save_session_json(email: str, token: str, cookies: str,
+                          user_agent: str) -> None:
+        """Save/update a working token in session.json so subsequent restarts
+        reuse it (skip the login flow entirely)."""
+        import json
+        path = os.path.join(os.getcwd(), "session.json")
+        try:
+            data = {}
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            data[email] = {
+                "cookies": cookies,
+                "token": token,
+                "user_agent": user_agent,
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+            print(f"[quotex_ws] saved working token to session.json ({email})")
+        except Exception as exc:
+            print(f"[quotex_ws] could not save session.json: {exc}")
+
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def connect(self) -> tuple[bool, str]:

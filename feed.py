@@ -2570,51 +2570,93 @@ class QuotexFeed:
     # ── Manager loop ──────────────────────────────────────────────────────────
 
     async def _auto_login_startup(self) -> None:
-        """Startup auto-login (2026-07-11).
+        """Startup auto-login (2026-07-11, updated 2026-07-12).
 
-        If QX_TOKEN is missing or empty but QX_EMAIL + QX_PASSWORD are set,
-        do a fresh browser-login NOW so the first connection attempt has a
-        valid ssid. This makes the app fully auto-connecting — the user
-        only needs to set email + password in .env, and the app handles
-        token refresh on every restart.
+        Auto-connect priority (mirrors the real production app's logic):
+          1. QX_TOKEN env var (fastest — set by previous run or .env)
+          2. session.json token (persisted by pyquotex or this app's save)
+          3. Fresh browser-login via qx_login.fetch_session() (email + password)
+
+        This makes the app FULLY auto-connecting:
+          - First run: needs email + password in .env → does browser-login → saves token
+          - Subsequent runs: reads token from session.json or QX_TOKEN → instant connect
+          - Token expired: auto-clears → does fresh browser-login → saves new token
         """
-        token = os.environ.get("QX_TOKEN", "").strip()
+        # ── Priority 1: QX_TOKEN env var ──────────────────────────────────
+        env_token = os.environ.get("QX_TOKEN", "").strip()
+        if env_token:
+            print(f"[feed] startup: QX_TOKEN present ({env_token[:8]}...) — using it")
+            return
+
+        # ── Priority 2: session.json ──────────────────────────────────────
+        # Read token + cookies + user_agent from session.json (same format
+        # pyquotex uses, so a session.json created by pyquotex works here too).
+        try:
+            from quotex_ws import QuotexWSClient
+            sess_data = QuotexWSClient.load_session_json()
+            if sess_data and sess_data.get("token"):
+                token = sess_data["token"]
+                cookies = sess_data.get("cookies", "")
+                ua = sess_data.get("user_agent", "")
+                print(f"[feed] startup: found token in session.json "
+                      f"({token[:8]}...) — using it")
+                # Set env vars so _connect() picks them up
+                os.environ["QX_TOKEN"] = token
+                if cookies:
+                    os.environ["QX_COOKIES"] = cookies
+                if ua:
+                    os.environ["QX_UA"] = ua
+                return
+        except Exception as exc:
+            print(f"[feed] startup: session.json read failed: {exc}")
+
+        # ── Priority 3: Fresh browser-login ───────────────────────────────
         email = os.environ.get("QX_EMAIL", "").strip()
         password = os.environ.get("QX_PASSWORD", "").strip()
 
-        if token:
-            # Already have a token — skip the pre-login. _connect() will use
-            # it first, and fall back to email/password if it fails.
-            print(f"[feed] startup: QX_TOKEN present ({token[:8]}...) — skipping pre-login")
-            return
-
         if not email or not password:
-            print("[feed] startup: QX_EMAIL/QX_PASSWORD not set — "
-                  "manual token or .env setup required")
+            print("[feed] startup: no token anywhere, and QX_EMAIL/QX_PASSWORD not set.")
+            print("[feed]   Options:")
+            print("[feed]   1. Run: python setup.py  (interactive credential entry)")
+            print("[feed]   2. Or place a session.json file in the project root")
+            print("[feed]   3. Or set QX_TOKEN in .env from your browser's Quotex session")
             return
 
-        print(f"[feed] startup: no QX_TOKEN, doing fresh browser-login "
+        print(f"[feed] startup: no token anywhere, doing fresh browser-login "
               f"for {email[:3]}***@{email.split('@')[-1] if '@' in email else '?'}")
         await self._do_browser_login(email, password, save_to_env=True)
 
     async def _auto_relogin(self) -> None:
-        """Re-login after connection failure (2026-07-11).
+        """Re-login after connection failure (2026-07-11, updated 2026-07-12).
 
-        Called when _connect() has failed 2 times in a row. If QX_EMAIL +
-        QX_PASSWORD are set, does a fresh browser-login to get a new ssid,
-        then writes it to .env so subsequent restarts skip this step.
+        Called when _connect() has failed 2 times in a row. Clears ALL stale
+        tokens (QX_TOKEN env var + session.json), then does a fresh
+        browser-login if email/password are available.
+
+        This mirrors the real production app's _clear_stale_token() + retry
+        pattern: when Quotex rejects a token, clear it everywhere so the
+        next attempt does a clean login instead of reusing the bad token.
         """
         email = os.environ.get("QX_EMAIL", "").strip()
         password = os.environ.get("QX_PASSWORD", "").strip()
-        if not email or not password:
-            print("[feed] auto-relogin: no email/password, can't auto-recover")
-            return
 
-        # Clear any stale token — it's clearly not working
+        # Clear stale QX_TOKEN env var
         old_token = os.environ.get("QX_TOKEN", "").strip()
         if old_token:
-            print(f"[feed] auto-relogin: clearing stale token ({old_token[:8]}...)")
+            print(f"[feed] auto-relogin: clearing stale QX_TOKEN ({old_token[:8]}...)")
             os.environ.pop("QX_TOKEN", None)
+
+        # Clear stale token in session.json (mirrors _clear_stale_token)
+        try:
+            from quotex_ws import QuotexWSClient
+            QuotexWSClient.clear_session_json_token()
+        except Exception:
+            pass
+
+        if not email or not password:
+            print("[feed] auto-relogin: no email/password, can't auto-recover.")
+            print("[feed]   Place a fresh session.json or set QX_TOKEN manually.")
+            return
 
         print(f"[feed] auto-relogin: doing fresh browser-login after 2 failures")
         await self._do_browser_login(email, password, save_to_env=True)
@@ -2622,7 +2664,10 @@ class QuotexFeed:
     async def _do_browser_login(self, email: str, password: str,
                                 save_to_env: bool = False) -> bool:
         """Do a browser-impersonated login via qx_login.fetch_session().
-        On success, sets QX_TOKEN env var and optionally appends it to .env.
+        On success:
+          - Sets QX_TOKEN + QX_COOKIES env vars (for immediate use)
+          - Saves to .env (so subsequent restarts read it)
+          - Saves to session.json (so pyquotex-style persistence works too)
         Returns True on success, False on failure."""
         try:
             from qx_login import fetch_session
@@ -2654,6 +2699,14 @@ class QuotexFeed:
             # Save to .env so subsequent restarts use it directly
             if save_to_env:
                 self._save_token_to_env(ssid)
+
+            # Also save to session.json (pyquotex-style persistence)
+            try:
+                from quotex_ws import QuotexWSClient
+                QuotexWSClient.save_session_json(email, ssid, cookies or "", ua)
+            except Exception as exc:
+                print(f"[feed] could not save session.json: {exc}")
+
             return True
 
         except ImportError:
