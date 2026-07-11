@@ -1,54 +1,113 @@
 @echo off
 chcp 65001 >nul
-REM Binary Signals App — Windows startup script
-REM ব্যবহার: double-click করুন অথবা Command Prompt-এ: start.bat
+title Binary Signals App
+
+REM ════════════════════════════════════════════════════════════════════
+REM   Binary Signals App — One-Click Launcher
+REM   শুধু এই ফাইলে double-click করুন, বাকিটা অ্যাপ নিজে করবে।
+REM ════════════════════════════════════════════════════════════════════
 
 cd /d "%~dp0"
 
 echo.
-echo ================================================================
-echo   Binary Signals App — শুরু হচ্ছে
-echo ================================================================
+echo ╔══════════════════════════════════════════════════════════════╗
+echo ║          Binary Signals App — শুরু হচ্ছে                       ║
+echo ╚══════════════════════════════════════════════════════════════╝
 echo.
 
-REM ── .env ফাইল চেক ─────────────────────────────────────────────────
-if not exist ".env" (
-    echo ❌ .env ফাইল নেই!
+REM ── ধাপ ১: Python চেক ─────────────────────────────────────────────
+echo [1/5] Python চেক হচ্ছে...
+python --version >nul 2>&1
+if errorlevel 1 (
     echo.
-    echo প্রথমবার setup করতে চালান:
+    echo ❌ Python ইনস্টল নেই!
     echo.
-    echo    python setup.py
+    echo দয়া করে Python ইনস্টল করুন:
+    echo   https://www.python.org/downloads/
+    echo.
+    echo ইনস্টল করার সময় "Add Python to PATH" অবশ্যই চেক করবেন।
     echo.
     pause
     exit /b 1
 )
+echo ✅ Python পাওয়া গেছে
 
-REM ── Python dependencies চেক ────────────────────────────────────────
-python -c "import fastapi, uvicorn, websockets, ntplib, curl_cffi" 2>nul
+REM ── ধাপ ২: Dependencies চেক/ইনস্টল ────────────────────────────────
+echo [2/5] Dependencies চেক হচ্ছে...
+python -c "import fastapi, uvicorn, websockets, ntplib, curl_cffi" >nul 2>&1
 if errorlevel 1 (
-    echo.
-    echo 📦 Python dependencies missing। ইনস্টল করা হচ্ছে...
-    echo.
-    pip install -r requirements.txt
+    echo 📦 Dependencies ইনস্টল করা হচ্ছে... একটু সময় লাগবে...
+    python -m pip install -r requirements.txt >nul 2>&1
     if errorlevel 1 (
-        echo.
-        echo ❌ pip install ব্যর্থ। যদি "pip" না থাকে, চেষ্টা করুন:
-        echo    python -m pip install -r requirements.txt
-        echo.
-        pause
-        exit /b 1
+        echo ❌ Dependencies ইনস্টল করতে সমস্যা। আবার চেষ্টা করা হচ্ছে...
+        python -m pip install --user -r requirements.txt
     )
 )
+echo ✅ Dependencies প্রস্তুত
 
-REM ── সার্ভার শুরু ──────────────────────────────────────────────────
+REM ── ধাপ ৩: session.json চেক ───────────────────────────────────────
+echo [3/5] Quotex session চেক হচ্ছে...
+if exist "session.json" (
+    echo ✅ session.json পাওয়া গেছে — অটো-কানেক্ট হবে
+    goto :START_SERVER
+)
+
+REM ── ধাপ ৪: .env চেক (email/password দিয়ে auto-login করবে) ────────
+echo [4/5] session.json নেই — .env চেক হচ্ছে...
+if exist ".env" (
+    REM .env আছে কিন্তু session.json নেই — অ্যাপ নিজে থেকে login করবে
+    echo ✅ .env পাওয়া গেছে — অ্যাপ নিজে থেকে login করবে
+    goto :START_SERVER
+)
+
+REM ── ধাপ ৫: প্রথমবার — credentials নিন ─────────────────────────────
+echo [5/5] প্রথমবার চালু করা হচ্ছে — Quotex credentials দরকার
 echo.
-echo 🚀 সার্ভার শুরু হচ্ছে...
-echo.
-echo 📊 ব্রাউজারে খুলুন: http://localhost:8000
-echo.
-echo ⏹️  বন্ধ করতে: Ctrl+C
+echo ┌──────────────────────────────────────────────────────────────┐
+echo │  আপনার Quotex অ্যাকাউন্টের তথ্য দিন                            │
+echo │  (এটা একবারই দিতে হবে, পরে অটো-কানেক্ট হবে)                   │
+echo └──────────────────────────────────────────────────────────────┘
 echo.
 
+set /p QX_EMAIL="Quotex Email: "
+if "%QX_EMAIL%"=="" (
+    echo ❌ Email দিতে হবে।
+    pause
+    exit /b 1
+)
+
+set /p QX_PASSWORD="Quotex Password: "
+if "%QX_PASSWORD%"=="" (
+    echo ❌ Password দিতে হবে।
+    pause
+    exit /b 1
+)
+
+REM .env ফাইল তৈরি করুন
+(
+    echo QX_EMAIL=%QX_EMAIL%
+    echo QX_PASSWORD=%QX_PASSWORD%
+    echo QX_USE_RAW_WS=1
+    echo PORT=8000
+) > .env
+
+echo.
+echo ✅ .env ফাইল তৈরি হয়েছে
+echo.
+
+:START_SERVER
+echo.
+echo ╔══════════════════════════════════════════════════════════════╗
+echo ║  🚀 সার্ভার চালু হচ্ছে...                                       ║
+echo ║  📊 ব্রাউজার নিজে থেকে খুলবে (৫ সেকেন্ড পরে)                    ║
+echo ║  ⏹️  বন্ধ করতে: Ctrl+C অথবা এই window বন্ধ করুন                ║
+echo ╚══════════════════════════════════════════════════════════════╝
+echo.
+
+REM সার্ভার চালু করুন — browser নিজে থেকে খুলবে (server.py-এ implemented)
 python server.py
 
+REM সার্ভার বন্ধ হলে
+echo.
+echo সার্ভার বন্ধ হয়েছে।
 pause

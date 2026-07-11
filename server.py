@@ -81,10 +81,41 @@ async def broadcast(msg: dict):
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
+def _auto_open_browser():
+    """Open the default browser to the app URL after server starts.
+    Runs in a background thread so it doesn't block the event loop.
+    Waits ~5 seconds for the server to be ready before opening."""
+    import threading
+    import time as _time
+    import webbrowser as _wb
+    import os as _os
+
+    port = _os.environ.get("PORT", "8000")
+    url = f"http://localhost:{port}"
+
+    def _open():
+        _time.sleep(5)  # wait for server to be ready
+        try:
+            _wb.open(url)
+            print(f"[server] browser opened: {url}")
+        except Exception as exc:
+            print(f"[server] could not open browser: {exc}")
+            print(f"[server] manually open: {url}")
+
+    # Skip auto-open if disabled (e.g., on Railway/production)
+    if _os.environ.get("AUTO_OPEN_BROWSER", "1") == "0":
+        return
+
+    threading.Thread(target=_open, daemon=True).start()
+
+
 @app.on_event("startup")
 async def on_startup():
     _db.init()
     asyncio.create_task(feed.run(broadcast))
+    # Auto-open browser 5 seconds after startup (local dev convenience).
+    # Disabled when AUTO_OPEN_BROWSER=0 (set this on Railway/production).
+    _auto_open_browser()
 
 
 @app.on_event("shutdown")
