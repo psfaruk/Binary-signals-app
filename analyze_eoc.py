@@ -139,16 +139,6 @@ def _rsi(closes, period=14):
     return 100 - (100 / (1 + rs))
 
 
-def _classify_regime(candles):
-    """Classify market regime using EMA crossover + RSI + ADX-like trending."""
-    if len(candles) < 10:
-        return {"trend": "SIDEWAYS", "zone": "UNKNOWN"}
-    closes = [c["close"] for c in candles[-30:]]  # More data points
-    ema9  = _ema(closes, 9)
-    ema21 = _ema(closes, 21)
-    rsi_val = _rsi(closes)
-
-
 def _dynamic_thresholds(candles):
     """Compute volatility-adaptive thresholds (2026-07-10 review Issue #3).
 
@@ -287,6 +277,293 @@ def _classify_regime(candles):
 
     return {"trend": trend, "zone": zone, "ema9": round(ema9, 6),
             "ema21": round(ema21, 6), "rsi": round(rsi_val, 1)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ADVANCED MARKET-STATE CLASSIFIER (2026-07-11)
+#  Zigzag swing detection + Wyckoff phase + trend structure
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _detect_swings(candles, lookback=30, k=2):
+    """
+    Detect swing highs and swing lows using the classic N-bar pivot method.
+    A swing high at index i means candles[i]["high"] is STRICTLY the highest
+    among the [i-k, i+k] window (strict comparison avoids flat-plateau
+    detection where consecutive equal highs all register as swings).
+
+    Returns: dict with:
+      swing_highs: list of {"price": float, "idx": int, "time": int}
+      swing_lows:  list of {"price": float, "idx": int, "time": int}
+      last_swing_high: dict or None
+      last_swing_low:  dict or None
+      prev_swing_high: dict or None  (second-to-last)
+      prev_swing_low:  dict or None
+    """
+    if len(candles) < 2 * k + 1:
+        return {"swing_highs": [], "swing_lows": [],
+                "last_swing_high": None, "last_swing_low": None,
+                "prev_swing_high": None, "prev_swing_low": None}
+
+    recent = candles[-lookback:] if len(candles) >= lookback else candles
+    offset = len(candles) - len(recent)  # index offset back into the full list
+
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(k, len(recent) - k):
+        c = recent[i]
+        # Strict comparison: c must be >= all neighbors AND > at least one
+        # on each side. This avoids flat plateaus registering as swings.
+        high_ge = all(c["high"] >= recent[i + j]["high"] for j in range(-k, k + 1) if j != 0)
+        high_gt_left = any(c["high"] > recent[i + j]["high"] for j in range(-k, 0))
+        high_gt_right = any(c["high"] > recent[i + j]["high"] for j in range(1, k + 1))
+        if high_ge and (high_gt_left or high_gt_right):
+            swing_highs.append({"price": c["high"], "idx": i + offset,
+                                "time": c.get("time", 0)})
+
+        low_le = all(c["low"] <= recent[i + j]["low"] for j in range(-k, k + 1) if j != 0)
+        low_lt_left = any(c["low"] < recent[i + j]["low"] for j in range(-k, 0))
+        low_lt_right = any(c["low"] < recent[i + j]["low"] for j in range(1, k + 1))
+        if low_le and (low_lt_left or low_lt_right):
+            swing_lows.append({"price": c["low"], "idx": i + offset,
+                               "time": c.get("time", 0)})
+
+    return {
+        "swing_highs": swing_highs,
+        "swing_lows": swing_lows,
+        "last_swing_high": swing_highs[-1] if swing_highs else None,
+        "last_swing_low": swing_lows[-1] if swing_lows else None,
+        "prev_swing_high": swing_highs[-2] if len(swing_highs) >= 2 else None,
+        "prev_swing_low": swing_lows[-2] if len(swing_lows) >= 2 else None,
+    }
+
+
+def _classify_trend_structure(swings):
+    """
+    Classify trend structure using swing high/low sequence:
+      HH + HL = UPTREND (higher highs + higher lows)
+      LH + LL = DOWNTREND (lower highs + lower lows)
+      HH + LL or LH + HL = RANGE/SIDEWAYS (mixed)
+      Insufficient data = UNKNOWN
+
+    Uses a small tolerance (0.5 pip = 0.00005) when comparing swing prices,
+    so near-equal swings are classified as HH/HL rather than FLAT (which
+    would suppress the directional vote entirely).
+
+    Returns: {
+      "structure": "UPTREND" | "DOWNTREND" | "RANGE" | "UNKNOWN",
+      "pattern": "HH_HL" | "LH_LL" | "HH_LL" | "LH_HL" | "FLAT" | "NONE",
+      "bias": "CALL" | "PUT" | None,
+      "strength": float  # 0..1 — how clean the structure is
+    }
+    """
+    sh_last = swings["last_swing_high"]
+    sh_prev = swings["prev_swing_high"]
+    sl_last = swings["last_swing_low"]
+    sl_prev = swings["prev_swing_low"]
+
+    if not (sh_last and sh_prev and sl_last and sl_prev):
+        return {"structure": "UNKNOWN", "pattern": "NONE",
+                "bias": None, "strength": 0.0}
+
+    # Tolerance: 0.5 pip (5e-5). Swings within this distance are "equal".
+    TOL = 5e-5
+
+    sh_diff = sh_last["price"] - sh_prev["price"]
+    sl_diff = sl_last["price"] - sl_prev["price"]
+
+    hh = sh_diff > TOL    # Higher High (strictly above tolerance)
+    lh = sh_diff < -TOL   # Lower High
+    hl = sl_diff > TOL    # Higher Low
+    ll = sl_diff < -TOL   # Lower Low
+    # Within tolerance = "equal" — neither higher nor lower
+
+    if hh and hl:
+        sh_move = sh_diff / sh_prev["price"] if sh_prev["price"] else 0
+        sl_move = sl_diff / sl_prev["price"] if sl_prev["price"] else 0
+        strength = min(1.0, (abs(sh_move) + abs(sl_move)) * 5000)
+        return {"structure": "UPTREND", "pattern": "HH_HL",
+                "bias": "CALL", "strength": round(strength, 3)}
+    if lh and ll:
+        sh_move = -sh_diff / sh_prev["price"] if sh_prev["price"] else 0
+        sl_move = -sl_diff / sl_prev["price"] if sl_prev["price"] else 0
+        strength = min(1.0, (abs(sh_move) + abs(sl_move)) * 5000)
+        return {"structure": "DOWNTREND", "pattern": "LH_LL",
+                "bias": "PUT", "strength": round(strength, 3)}
+    if hh and ll:
+        # Expansion (volatility breakout, no clear trend yet)
+        return {"structure": "RANGE", "pattern": "HH_LL",
+                "bias": None, "strength": 0.3}
+    if lh and hl:
+        # Contraction (squeeze, breakout pending)
+        return {"structure": "RANGE", "pattern": "LH_HL",
+                "bias": None, "strength": 0.3}
+    # Partial trend: one of HH/HL is set, the other is "equal"
+    # — treat as weak continuation of whichever IS set.
+    if hh and not lh and not ll:
+        # HH + equal-low → weak uptrend
+        return {"structure": "UPTREND", "pattern": "HH_HL",
+                "bias": "CALL", "strength": 0.2}
+    if lh and not hh and not hl:
+        # LH + equal-low → weak downtrend
+        return {"structure": "DOWNTREND", "pattern": "LH_LL",
+                "bias": "PUT", "strength": 0.2}
+    if hl and not hh and not lh:
+        # equal-high + HL → weak uptrend
+        return {"structure": "UPTREND", "pattern": "HH_HL",
+                "bias": "CALL", "strength": 0.2}
+    if ll and not hh and not hl:
+        # equal-high + LL → weak downtrend
+        return {"structure": "DOWNTREND", "pattern": "LH_LL",
+                "bias": "PUT", "strength": 0.2}
+    # Fully flat — equal highs AND equal lows
+    return {"structure": "RANGE", "pattern": "FLAT",
+            "bias": None, "strength": 0.1}
+
+
+def _classify_wyckoff_phase(candles, swings):
+    """
+    Classify Wyckoff market phase:
+      ACCUMULATION: price range-bound after a downtrend, near swing low
+      MARKUP:       uptrend — price making higher highs
+      DISTRIBUTION: price range-bound after an uptrend, near swing high
+      MARKDOWN:     downtrend — price making lower lows
+
+    Uses last 20 candles + swing structure.
+    """
+    if len(candles) < 15:
+        return "UNKNOWN"
+
+    recent = candles[-20:]
+    hi = max(c["high"] for c in recent)
+    lo = min(c["low"] for c in recent)
+    rng = hi - lo
+    if rng <= 0:
+        return "UNKNOWN"
+
+    cur = candles[-1]["close"]
+    pos_in_range = (cur - lo) / rng  # 0 = at low, 1 = at high
+
+    # Trend direction over last 10 candles
+    first_half_avg = sum(c["close"] for c in recent[:10]) / 10
+    second_half_avg = sum(c["close"] for c in recent[10:]) / 10
+    trend_dir = second_half_avg - first_half_avg
+    trend_pct = trend_dir / rng if rng > 0 else 0
+
+    structure = _classify_trend_structure(swings)
+    struct_name = structure["structure"]
+
+    # Decision matrix
+    if struct_name == "UPTREND" and trend_pct > 0.05:
+        return "MARKUP"
+    if struct_name == "DOWNTREND" and trend_pct < -0.05:
+        return "MARKDOWN"
+    # Range-bound near top → distribution
+    if pos_in_range > 0.75 and abs(trend_pct) < 0.10:
+        return "DISTRIBUTION"
+    # Range-bound near bottom → accumulation
+    if pos_in_range < 0.25 and abs(trend_pct) < 0.10:
+        return "ACCUMULATION"
+    # Range-bound mid → no clear phase
+    if abs(trend_pct) < 0.05:
+        return "RANGE_MID"
+    # Fallback
+    return "MARKUP" if trend_dir > 0 else "MARKDOWN"
+
+
+def _classify_market_state(candles):
+    """
+    Unified market-state classifier (2026-07-11).
+
+    Combines:
+      - EMA crossover trend (from _classify_regime)
+      - Swing-structure trend (HH/HL vs LH/LL)
+      - Wyckoff phase (accumulation/markup/distribution/markdown)
+      - Zone (where price sits in recent range)
+      - Volatility regime (quiet/normal/volatile)
+      - Zigzag pattern detection
+
+    Returns dict with:
+      trend:         "UPTREND" | "DOWNTREND" | "SIDEWAYS"
+      zone:          "HIGH" | "MID" | "LOW"
+      phase:         "ACCUMULATION" | "MARKUP" | "DISTRIBUTION" | "MARKDOWN" | "RANGE_MID" | "UNKNOWN"
+      structure:     "HH_HL" | "LH_LL" | "HH_LL" | "LH_HL" | "FLAT" | "NONE"
+      volatility:    "QUIET" | "NORMAL" | "VOLATILE"
+      zigzag_bias:   "CALL" | "PUT" | None  — direction implied by structure
+      bias_strength: float 0..1
+      ema9, ema21, rsi: numeric
+      swings:        dict from _detect_swings
+    """
+    if len(candles) < 10:
+        return {"trend": "SIDEWAYS", "zone": "UNKNOWN", "phase": "UNKNOWN",
+                "structure": "NONE", "volatility": "NORMAL",
+                "zigzag_bias": None, "bias_strength": 0.0,
+                "ema9": 0, "ema21": 0, "rsi": 50, "swings": {}}
+
+    # ── 1. Classic regime (EMA + RSI) ──────────────────────────────────────
+    regime = _classify_regime(candles)
+    trend = regime.get("trend", "SIDEWAYS")
+
+    # ── 2. Swing-structure trend ───────────────────────────────────────────
+    swings = _detect_swings(candles, lookback=30, k=2)
+    structure_info = _classify_trend_structure(swings)
+    struct_trend = structure_info["structure"]
+    zigzag_bias = structure_info["bias"]
+    bias_strength = structure_info["strength"]
+
+    # Reconcile: if EMA says SIDEWAYS but swing structure says UPTREND/DOWNTREND,
+    # trust the swing structure (more reliable for short-term direction).
+    if struct_trend in ("UPTREND", "DOWNTREND") and bias_strength > 0.3:
+        trend = struct_trend
+
+    # ── 3. Wyckoff phase ───────────────────────────────────────────────────
+    phase = _classify_wyckoff_phase(candles, swings)
+
+    # ── 4. Zone (price position in recent range) ───────────────────────────
+    recent = candles[-10:]
+    hi = max(c["high"] for c in recent)
+    lo = min(c["low"] for c in recent)
+    rng = hi - lo
+    if rng == 0:
+        zone = "MID"
+    else:
+        pos = (candles[-1]["close"] - lo) / rng
+        if pos > 0.80:
+            zone = "HIGH"
+        elif pos < 0.20:
+            zone = "LOW"
+        else:
+            zone = "MID"
+
+    # ── 5. Volatility regime ───────────────────────────────────────────────
+    recent_atr = _atr(candles[-5:], 5)
+    older_atr = _atr(candles[-20:-5], 5) if len(candles) >= 20 else recent_atr
+    vol_ratio = recent_atr / older_atr if older_atr > 0 else 1.0
+    if vol_ratio < 0.7:
+        volatility = "QUIET"
+    elif vol_ratio > 1.3:
+        volatility = "VOLATILE"
+    else:
+        volatility = "NORMAL"
+
+    return {
+        "trend":         trend,
+        "zone":          zone,
+        "phase":         phase,
+        "structure":     structure_info["pattern"],
+        "volatility":    volatility,
+        "zigzag_bias":   zigzag_bias,
+        "bias_strength": bias_strength,
+        "ema9":          regime.get("ema9", 0),
+        "ema21":         regime.get("ema21", 0),
+        "rsi":           regime.get("rsi", 50),
+        "swings":        {
+            "last_high": swings["last_swing_high"],
+            "last_low":  swings["last_swing_low"],
+            "prev_high": swings["prev_swing_high"],
+            "prev_low":  swings["prev_swing_low"],
+        },
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2803,6 +3080,7 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                 "market_state": {}}
 
     regime = _classify_regime(candles)
+    market_state = _classify_market_state(candles)
     all_reasons = []
     call_score = 0
     put_score = 0
@@ -2865,14 +3143,21 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
 
     # MST is special — returns (result, market_state)
     # Skip in live_only mode (MST only looks at closed candles)
+    # market_state from _classify_market_state is already populated above
+    # (the new classifier). MST theory still runs for its directional vote,
+    # and its result MERGES into market_state.
     mst_result = None
-    market_state = {}
     if "MST" not in muted and not live_only:
         try:
             mst = _theory_mst(candles, muted)
             if mst:
                 if isinstance(mst, tuple) and len(mst) == 2:
-                    mst_result, market_state = mst
+                    mst_result, mst_state = mst
+                    # Merge MST's state classification on top of the new
+                    # classifier's output (MST's "state" field overrides
+                    # the new classifier's "state" if present).
+                    if isinstance(mst_state, dict):
+                        market_state.update(mst_state)
                 if mst_result:
                     total_fired += 1
                     sig, sc, rs = mst_result
@@ -2884,6 +3169,35 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                     theories_detail.append({"code": "MST", "vote": sig, "score": sc})
         except Exception as e:
             print(f"[analyze] theory MST error: {e}")
+
+    # ── Zigzag structure bias vote (2026-07-11) ───────────────────────────
+    # The new market-state classifier detects HH/HL (uptrend) or LH/LL
+    # (downtrend) structures. When the structure is clean (strength > 0.3),
+    # add a directional vote. This is a NEW theory vote (ZZ = ZigZag).
+    # Skip in live_only mode (swing structure only changes on candle close).
+    if not live_only and market_state.get("zigzag_bias") and market_state.get("bias_strength", 0) > 0.3:
+        try:
+            zz_bias = market_state["zigzag_bias"]
+            zz_strength = market_state["bias_strength"]
+            zz_score = 1 + int(zz_strength * 2)  # 1-3 based on strength
+            zz_pattern = market_state.get("structure", "NONE")
+            zz_trend = market_state.get("trend", "SIDEWAYS")
+            zz_phase = market_state.get("phase", "UNKNOWN")
+            if zz_bias == "CALL":
+                call_score += zz_score
+                all_reasons.append(
+                    f"ZZ:+{zz_score} CALL zigzag-{zz_pattern} trend={zz_trend} "
+                    f"phase={zz_phase} str={zz_strength:.2f}")
+                theories_detail.append({"code": "ZZ", "vote": "CALL", "score": zz_score})
+            else:
+                put_score += zz_score
+                all_reasons.append(
+                    f"ZZ:-{zz_score} PUT zigzag-{zz_pattern} trend={zz_trend} "
+                    f"phase={zz_phase} str={zz_strength:.2f}")
+                theories_detail.append({"code": "ZZ", "vote": "PUT", "score": -zz_score})
+            total_fired += 1
+        except Exception as e:
+            print(f"[analyze] zigzag vote error: {e}")
 
     for code, fn in theories:
         try:
