@@ -50,6 +50,17 @@ ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
 # disable (broadcast immediately at EOC, old behavior).
 SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
 
+# ── Event-driven pipeline tuning (2026-07-11) ──────────────────────────────
+# MICRO_RECALC_EVERY: recompute _analyze_microstructure() every N ticks. The
+# common OTC case is close-only updates (price moves but high/low don't), so
+# the cached micro stays valid. Set to 1 to disable caching (legacy behavior).
+MICRO_RECALC_EVERY = int(os.environ.get("MICRO_RECALC_EVERY", "3"))
+# SKIP_REDUNDANT_BROADCAST: when True, skip the tick broadcast if the running
+# candle's high/low/close are all unchanged since the last broadcast AND no
+# prediction change happened. Cuts JSON serialize + WS send for repeated
+# ticks (common in OTC sparse feeds). Set to 0 to disable.
+SKIP_REDUNDANT_BROADCAST = os.environ.get("SKIP_REDUNDANT_BROADCAST", "1") == "1"
+
 # ── Fallback display-name helper ─────────────────────────────────────────────
 def _api_to_display(api_name: str) -> str:
     """Convert a Quotex forex asset code to a readable display string, e.g.
@@ -287,6 +298,36 @@ class _AssetStream:
     # broadcast থেকে বাদ দেওয়া হয় (candle data যাবে, prediction যাবে না)।
     # যখন delay শেষ হয়, প্রথম tick-এ prediction broadcast হয়।
     signal_delay_until: float = 0.0  # wall-time when signal can be broadcast
+
+    # ── Event-driven tick pipeline (2026-07-11) ──────────────────────────
+    # When the raw-WS backend is active, the WS reader pushes ticks directly
+    # into this queue via register_tick_callback(). _stream_loop awaits
+    # queue.get() with a 50ms timeout — eliminating the legacy 50ms polling
+    # loop and shaving ~25-50ms off every tick → browser-render hop.
+    # Empty queue (legacy pyquotex backend, no callback support) means the
+    # stream loop falls back to polling get_realtime_price() as before.
+    tick_queue: "asyncio.Queue" = field(default_factory=asyncio.Queue)
+    tick_callback: object = None  # registered callback (for unregister on stop)
+
+    # ── Microstructure caching (2026-07-11) ──────────────────────────────
+    # _analyze_microstructure() is O(n) over stream.ticks — expensive when
+    # called on every single tick (was). Cache the last result and only
+    # recompute every MICRO_RECALC_EVERY ticks, or when high/low change
+    # (those are the only OHLC values that can change a cached micro).
+    # Close-only updates (the common case in OTC) reuse the cache.
+    _micro_cache: dict | None = None
+    _micro_cache_at_tick: int = 0  # len(stream.ticks) when cache was built
+    _micro_cache_high: float = 0.0
+    _micro_cache_low: float = 0.0
+
+    # ── Skip-redundant-broadcast (2026-07-11) ────────────────────────────
+    # Snapshot of the last-broadcast candle (high/low/close). If the next
+    # tick produces the same high/low/close AND pred_changed is False,
+    # skip the broadcast entirely — no JSON serialize, no WS send. Common
+    # when ticks are sparse and the same price repeats for a few cycles.
+    _last_bcast_high: float = 0.0
+    _last_bcast_low: float = 0.0
+    _last_bcast_close: float = 0.0
 
 
 # ── Feed ──────────────────────────────────────────────────────────────────────
@@ -704,6 +745,38 @@ class QuotexFeed:
             print(f"[feed] could not clear stale token: {_e}")
 
     def _make_client(self, ua: str, root: str):
+        """
+        Build a Quotex client.
+
+        Two backends are supported, gated by QX_USE_RAW_WS:
+
+          QX_USE_RAW_WS=1  →  quotex_ws.QuotexWSClient (raw Socket.IO v3
+                              WebSocket, bypasses pyquotex entirely).
+                              Required when Cloudflare is blocking pyquotex's
+                              httpx login (403) — see quotex-smooth-candle-
+                              mystery.txt for the protocol spec.
+
+          default          →  pyquotex.stable_api.Quotex (original behavior).
+
+        Both backends expose the same API surface that feed.py consumes:
+          connect(), set_session(), start_candles_stream(),
+          stop_candles_stream(), get_realtime_price(), get_instruments(),
+          get_payout_by_asset(), get_candles(), get_historical_candles(),
+          close(), session_data.
+        """
+        # ── Raw WebSocket backend (recommended — bypasses Cloudflare) ──
+        if os.environ.get("QX_USE_RAW_WS", "1") == "1":
+            from quotex_ws import QuotexWSClient
+            print("[feed] using RAW WebSocket backend (quotex_ws.QuotexWSClient)")
+            return QuotexWSClient(
+                email    = os.environ.get("QX_EMAIL",    ""),
+                password = os.environ.get("QX_PASSWORD", ""),
+                host     = "market-qx.trade",
+                lang     = "en",
+                root_path= root,
+            )
+
+        # ── pyquotex backend (legacy fallback) ──────────────────────────
         from pyquotex.stable_api import Quotex
         from pyquotex.types import ReconnectPolicy
         # pyquotex's Login class hardcodes qxbroker.com and ignores the host=
@@ -712,6 +785,7 @@ class QuotexFeed:
         from pyquotex.network.login import Login
         Login.base_url = "market-qx.trade"
         Login.https_base_url = "https://market-qx.trade"
+        print("[feed] using pyquotex backend (legacy)")
         return Quotex(
             email    = os.environ.get("QX_EMAIL",    ""),
             password = os.environ.get("QX_PASSWORD", ""),
@@ -739,7 +813,11 @@ class QuotexFeed:
 
     async def _connect(self) -> bool:
         try:
-            from pyquotex.types import ReconnectPolicy  # noqa: ensure importable
+            # pyquotex is optional when QX_USE_RAW_WS=1 — don't import it
+            # unconditionally (was breaking on systems without pyquotex).
+            _USE_RAW_WS = os.environ.get("QX_USE_RAW_WS", "1") == "1"
+            if not _USE_RAW_WS:
+                from pyquotex.types import ReconnectPolicy  # noqa: ensure importable
             # Cross-platform default (was a hardcoded Windows path — broke
             # immediately on any Linux deployment, e.g. Railway).
             import tempfile
@@ -803,37 +881,48 @@ class QuotexFeed:
             except Exception as _ble:
                 print(f"[feed] browser-login error: {_ble}")
 
-            # ── Attempt 3: FRESH client, email/password only ──────────────────
+            # ── Attempt 3: FRESH client, email/password only (pyquotex only) ─
             # A brand-new Quotex instance has no leftover WebSocket state from
             # the failed token attempt, so pyquotex does a clean HTTP login.
-            print("[feed] connecting via email/password (fresh client)...")
-            self._client = self._make_client(ua, root)
-            ok, reason = await asyncio.wait_for(
-                self._client.connect(), timeout=45)
-            print(f"[feed] connect -> ok={ok}  reason={reason}")
-            if ok:
-                self._remember_token()
-                return True
-            if reason and "reject" in str(reason).lower():
-                self._clear_stale_token()
+            # SKIP for the raw WS backend: it has no HTTP login — without an
+            # ssid from Attempt 1/2, it cannot authorize at all.
+            if not _USE_RAW_WS:
+                print("[feed] connecting via email/password (fresh client)...")
+                self._client = self._make_client(ua, root)
+                ok, reason = await asyncio.wait_for(
+                    self._client.connect(), timeout=45)
+                print(f"[feed] connect -> ok={ok}  reason={reason}")
+                if ok:
+                    self._remember_token()
+                    return True
+                if reason and "reject" in str(reason).lower():
+                    self._clear_stale_token()
 
-            # ── Attempt 3: auth may have succeeded internally but connect()
-            #    returned False (pyquotex race condition). If session_data now
-            #    holds a fresh token, one more connect() often succeeds. ────────
-            new_tok = (self._client.session_data or {}).get("token", "")
-            if new_tok and new_tok != env_token:
-                print(f"[feed] retrying with fresh token={new_tok[:8]}...")
-                try:
-                    ok, reason = await asyncio.wait_for(
-                        self._client.connect(), timeout=30)
-                    print(f"[feed] retry -> ok={ok}  reason={reason}")
-                    if ok:
-                        self._remember_token()
-                        return True
-                    if reason and "reject" in str(reason).lower():
-                        self._clear_stale_token()
-                except Exception as _re:
-                    print(f"[feed] retry error: {_re}")
+                # ── Attempt 3b: auth may have succeeded internally but connect()
+                #    returned False (pyquotex race condition). If session_data
+                #    now holds a fresh token, one more connect() often succeeds.
+                new_tok = (self._client.session_data or {}).get("token", "")
+                if new_tok and new_tok != env_token:
+                    print(f"[feed] retrying with fresh token={new_tok[:8]}...")
+                    try:
+                        ok, reason = await asyncio.wait_for(
+                            self._client.connect(), timeout=30)
+                        print(f"[feed] retry -> ok={ok}  reason={reason}")
+                        if ok:
+                            self._remember_token()
+                            return True
+                        if reason and "reject" in str(reason).lower():
+                            self._clear_stale_token()
+                    except Exception as _re:
+                        print(f"[feed] retry error: {_re}")
+            else:
+                # Raw WS backend — both Attempt 1 (token) and Attempt 2
+                # (qx_login.fetch_session) have already failed. There is no
+                # third path: the WS client literally cannot auth without an
+                # ssid. Surface the browser-login error to the operator.
+                print("[feed] raw-WS backend: both token and browser-login "
+                      "failed — check QX_EMAIL/QX_PASSWORD or set QX_TOKEN "
+                      "to a fresh ssid from your browser's Quotex session.")
 
             return False
         except Exception as exc:
@@ -1499,6 +1588,18 @@ class QuotexFeed:
         new_pred["_runconf_tag"] = gate_tag
         return new_pred
 
+    def _reset_micro_cache(self, stream: _AssetStream) -> None:
+        """Clear the microstructure cache + last-broadcast snapshot. Call
+        whenever stream.ticks is cleared (candle boundary, re-anchor, etc.)
+        so the next broadcast forces a fresh compute."""
+        stream._micro_cache = None
+        stream._micro_cache_at_tick = 0
+        stream._micro_cache_high = 0.0
+        stream._micro_cache_low = 0.0
+        stream._last_bcast_high = 0.0
+        stream._last_bcast_low = 0.0
+        stream._last_bcast_close = 0.0
+
     def _running_candle(self, stream: _AssetStream) -> dict:
         op = stream.candle_open_price
         ticks = list(stream.ticks)
@@ -1586,6 +1687,8 @@ class QuotexFeed:
         stream.candle_open_is_real = open_is_real
         stream.ticks.clear()
         stream.ticks.append(first_tick)
+        # Invalidate caches — new candle, fresh compute needed.
+        self._reset_micro_cache(stream)
 
         return accuracy
 
@@ -1612,6 +1715,31 @@ class QuotexFeed:
 
         await self._client.start_candles_stream(asset, period)
         stream.sub_started = True
+
+        # ── Register event-driven tick callback (raw-WS backend only) ──
+        # When the raw-WS backend is active, register a callback that pushes
+        # each tick directly into this stream's asyncio.Queue. _stream_loop
+        # then awaits queue.get() with a 50ms timeout — eliminating the
+        # legacy 50ms polling loop and shaving ~25-50ms latency off every
+        # tick → browser-render hop.
+        # Legacy pyquotex backend has no register_tick_callback(), so the
+        # stream loop falls back to polling get_realtime_price() as before.
+        if hasattr(self._client, 'register_tick_callback'):
+            def _on_tick(tick_dict, _stream=stream):
+                try:
+                    _stream.tick_queue.put_nowait(tick_dict)
+                except asyncio.QueueFull:
+                    # Queue grew too large (stream loop stuck?) — drop oldest
+                    # to make room. Better than blocking the WS reader.
+                    try:
+                        _stream.tick_queue.get_nowait()
+                        _stream.tick_queue.put_nowait(tick_dict)
+                    except Exception:
+                        pass
+            self._client.register_tick_callback(asset, _on_tick)
+            stream.tick_callback = _on_tick
+            print(f"[feed] event-driven ticks enabled for {asset}@{period}s")
+
         await asyncio.sleep(1)  # let first ticks arrive
 
         # Payout is informational only (breakeven display) — never affects
@@ -1648,6 +1776,10 @@ class QuotexFeed:
         stream.ticks.append(last["close"])
         stream.candle_open_is_real = False
         stream.last_tick_ts         = 0.0
+        # Fresh stream — clear caches so the first broadcast forces a fresh
+        # micro compute instead of serving a stale cache from a previous
+        # (now-dead) stream that reused this _AssetStream instance.
+        self._reset_micro_cache(stream)
         # Generate initial prediction from history so the ghost candle
         # appears immediately without waiting for the first EOC.
         stream.prediction = await self._run_eoc(stream, actual_open=last["close"])
@@ -1731,31 +1863,60 @@ class QuotexFeed:
                     await asyncio.sleep(1)
                     continue
 
-                # ── Poll in-memory tick buffer (no extra WS request) ──────────
-                price_data = await self._client.get_realtime_price(stream.asset)
-
-                if not price_data:
-                    await self._smart_sleep(stream)
-                    continue
+                # ── Collect new ticks (event-driven OR polling fallback) ──────
+                # Event-driven path (raw-WS backend): wait on the per-stream
+                # asyncio.Queue with a 50ms timeout. Ticks arrive immediately
+                # when the WS reader fires the registered callback — NO 50ms
+                # polling delay. The timeout doubles as the timer-close
+                # check cadence (the loop falls through to the top next
+                # iteration, where the timer-close block runs).
+                #
+                # Polling fallback (legacy pyquotex): poll get_realtime_price()
+                # every ~50ms as before.
+                if stream.tick_callback is not None:
+                    # ── Event-driven: wait on queue ────────────────────────
+                    try:
+                        first = await asyncio.wait_for(
+                            stream.tick_queue.get(), timeout=0.05)
+                        new_ticks = [first]
+                        # Drain any additional ticks that arrived in the same
+                        # wakeup window — batches them into one broadcast.
+                        while not stream.tick_queue.empty():
+                            try:
+                                new_ticks.append(stream.tick_queue.get_nowait())
+                            except Exception:
+                                break
+                    except asyncio.TimeoutError:
+                        # No ticks this 50ms window — fall through to top of
+                        # loop so timer-close + stale checks can run. NO sleep
+                        # here: the wait_for already waited 50ms.
+                        continue
+                else:
+                    # ── Legacy polling fallback ────────────────────────────
+                    price_data = await self._client.get_realtime_price(stream.asset)
+                    if not price_data:
+                        await self._smart_sleep(stream)
+                        continue
+                    new_ticks = list(price_data)
 
                 # ── Collect EVERY new tick since last processed ───────────────
                 if stream.last_tick_ts <= 0.0:
                     # Fresh subscribe / reconnect: process the current buffer once
                     # so the first live tick can seed the running candle without
                     # reusing stale data from a previous feed session.
-                    new_ticks = list(price_data)
                     stream.last_tick_ts = max(
                         (float(p["time"]) for p in new_ticks if float(p["time"]) > 0),
                         default=0.0,
                     )
                 else:
                     new_ticks = [
-                        p for p in price_data
+                        p for p in new_ticks
                         if float(p["time"]) > stream.last_tick_ts
                     ]
 
                 if not new_ticks:
-                    await self._smart_sleep(stream)
+                    if stream.tick_callback is None:
+                        await self._smart_sleep(stream)
                     continue
 
                 # Mark all these ticks as seen
@@ -1836,6 +1997,7 @@ class QuotexFeed:
                             stream.ticks.clear()
                             stream.ticks.append(real_open)
                             cur_ticks = cur_ticks[1:]
+                            self._reset_micro_cache(stream)
                             if stream.prediction:
                                 stream.prediction["candle"] = _pred_candle(
                                     stream.candles, stream.prediction["signal"],
@@ -1895,6 +2057,7 @@ class QuotexFeed:
                         stream.ticks.clear()
                         stream.ticks.append(real_open)
                         new_ticks = new_ticks[1:]   # first tick became the open
+                        self._reset_micro_cache(stream)
                         if stream.prediction:
                             stream.prediction["candle"] = _pred_candle(
                                 stream.candles, stream.prediction["signal"],
@@ -2120,15 +2283,31 @@ class QuotexFeed:
                     # Skip broadcast if open price is still 0 (no valid tick yet)
                     # — prevents LightweightCharts "Value is null" on the client
                     if stream.candle_open_price > 0:
-                        msg = {
-                            "type":          "tick",
-                            "asset":         stream.asset,
-                            "period":        stream.period,
-                            "candle":        running,
-                            "running_conf":  self._running_confirmation(stream),
-                            "micro":         self._analyze_microstructure(
-                                                 stream.ticks, stream.candle_open_price),
-                        }
+                        # ── Microstructure caching (2026-07-11) ──────────────
+                        # _analyze_microstructure() is O(n) over stream.ticks.
+                        # Recomputing on every tick was the biggest per-tick CPU
+                        # cost in the loop (after LIVE re-eval). Cache the
+                        # result and only recompute when:
+                        #   1. N ticks have passed since the last compute
+                        #      (MICRO_RECALC_EVERY, default 3), OR
+                        #   2. The candle's high or low changed (those are the
+                        #      only OHLC values that can change a cached micro —
+                        #      close-only updates leave micro unchanged for
+                        #      buy_pct/sell_pct/pressure/hold_price/etc.).
+                        cur_high = running["high"]
+                        cur_low  = running["low"]
+                        tick_n   = len(stream.ticks)
+                        if (stream._micro_cache is None
+                                or (tick_n - stream._micro_cache_at_tick) >= MICRO_RECALC_EVERY
+                                or cur_high != stream._micro_cache_high
+                                or cur_low  != stream._micro_cache_low):
+                            stream._micro_cache = self._analyze_microstructure(
+                                stream.ticks, stream.candle_open_price)
+                            stream._micro_cache_at_tick = tick_n
+                            stream._micro_cache_high    = cur_high
+                            stream._micro_cache_low     = cur_low
+                        micro_snap = stream._micro_cache
+
                         # ── Signal delay gate (2026-07-10) ──────────────────
                         # While the opening-tick confirmation window is still
                         # active, do NOT broadcast the prediction. Candle data,
@@ -2137,6 +2316,7 @@ class QuotexFeed:
                         # waits. Once the gate passes, the FIRST eligible tick
                         # broadcasts the prediction (pred_changed = True).
                         now_ts = time.time()
+                        gate_opened_this_tick = False
                         if stream.signal_delay_until > 0 and now_ts < stream.signal_delay_until:
                             # Still in delay window — withhold prediction
                             delay_left = stream.signal_delay_until - now_ts
@@ -2154,10 +2334,45 @@ class QuotexFeed:
                                 # Gate just opened — clear it and force broadcast
                                 stream.signal_delay_until = 0.0
                                 pred_changed = True  # force prediction in this msg
-                            # Carry the re-anchored/re-evaluated/gated prediction
-                            # so the client redraws its signal panel from it.
-                            if reanchored or pred_changed:
-                                msg["prediction"] = stream.prediction
+                                gate_opened_this_tick = True
+
+                        # ── Skip-redundant-broadcast (2026-07-11) ───────────
+                        # If the running candle's high/low/close are unchanged
+                        # since the last broadcast AND no prediction change
+                        # happened AND no signal-delay gate just opened — skip
+                        # the broadcast entirely. Saves JSON serialize + WS
+                        # send on every connected client. Common when ticks
+                        # are sparse (OTC) and the same price repeats.
+                        cur_close = running["close"]
+                        if (SKIP_REDUNDANT_BROADCAST
+                                and not reanchored
+                                and not pred_changed
+                                and not gate_opened_this_tick
+                                and cur_high  == stream._last_bcast_high
+                                and cur_low   == stream._last_bcast_low
+                                and cur_close == stream._last_bcast_close):
+                            # No change at all — skip
+                            continue
+
+                        msg = {
+                            "type":          "tick",
+                            "asset":         stream.asset,
+                            "period":        stream.period,
+                            "candle":        running,
+                            "running_conf":  self._running_confirmation(stream),
+                            "micro":         micro_snap,
+                        }
+                        # Carry the re-anchored/re-evaluated/gated prediction
+                        # so the client redraws its signal panel from it.
+                        if reanchored or pred_changed:
+                            msg["prediction"] = stream.prediction
+
+                        # Update the last-broadcast snapshot for the next
+                        # skip-redundant-broadcast check.
+                        stream._last_bcast_high  = cur_high
+                        stream._last_bcast_low   = cur_low
+                        stream._last_bcast_close = cur_close
+
                         await self._broadcast(msg)
 
             except asyncio.CancelledError:
@@ -2171,7 +2386,11 @@ class QuotexFeed:
                 await asyncio.sleep(2)
                 continue
 
-            await self._smart_sleep(stream)
+            # Sleep ONLY in legacy polling mode. Event-driven mode uses
+            # asyncio.wait_for(queue.get(), timeout=0.05) which is itself
+            # the wait — adding _smart_sleep on top would double the latency.
+            if stream.tick_callback is None:
+                await self._smart_sleep(stream)
 
     async def _run_stream(self, stream: _AssetStream) -> None:
         """Owns one _AssetStream for its whole life: start, run, clean up.
@@ -2203,6 +2422,18 @@ class QuotexFeed:
             traceback.print_exc()
             self._record_stream_error()
         finally:
+            # Unregister the event-driven tick callback before tearing down
+            # the stream — otherwise the WS reader would keep pushing ticks
+            # into a dead queue. Safe to call even if no callback was ever
+            # registered (legacy pyquotex backend).
+            try:
+                if (self._client and stream.tick_callback is not None
+                        and hasattr(self._client, 'unregister_tick_callback')):
+                    self._client.unregister_tick_callback(
+                        stream.asset, stream.tick_callback)
+                    stream.tick_callback = None
+            except Exception:
+                pass
             try:
                 if self._client and stream.sub_started:
                     await self._client.stop_candles_stream(stream.asset)

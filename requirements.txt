@@ -1,11 +1,24 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-websockets==14.1
+websockets>=12.0
 python-dotenv>=1.0.0
 ntplib>=0.4.0
-# pyquotex is NOT on PyPI — install directly from GitHub:
-#   pip install "git+https://github.com/cleitonleonel/pyquotex.git"
-# or add as a pip extra-index / VCS dependency. See README for instructions.
-# Without pyquotex installed, the app falls back to sim_feed.py (random-walk
-# simulated data) which will NOT match the real Quotex broker's candle data.
-pyquotex @ git+https://github.com/cleitonleonel/pyquotex.git
+curl_cffi>=0.6.0
+# ── Quotex backend ──────────────────────────────────────────────────────────
+# Two backends are supported (see quotex_ws.py + feed.py:_make_client):
+#
+#   QX_USE_RAW_WS=1  (DEFAULT — recommended)
+#     Uses quotex_ws.QuotexWSClient — raw Socket.IO v3 WebSocket to Quotex.
+#     Bypasses pyquotex entirely. Required when Cloudflare is blocking
+#     pyquotex's httpx login (403). pyquotex is NOT required.
+#
+#   QX_USE_RAW_WS=0  (legacy)
+#     Uses pyquotex.stable_api.Quotex. Requires the pyquotex package, which
+#     is NOT on PyPI — install separately:
+#       pip install "git+https://github.com/cleitonleonel/pyquotex.git"
+#
+# Both backends need a valid Quotex ssid. The raw-WS backend obtains it via
+# qx_login.fetch_session() (curl_cffi Chrome TLS impersonation) — see
+# qx_login.py for details. Set QX_EMAIL + QX_PASSWORD in .env, OR set
+# QX_TOKEN directly to a ssid string copied from your browser's Quotex
+# session (DevTools → Application → Cookies → "session").

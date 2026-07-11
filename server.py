@@ -25,6 +25,11 @@ import db as _db
 
 # Auto-detect: use real feed.py if pyquotex is available, else sim_feed.
 # Set USE_SIM=1 to force the simulated feed even when pyquotex is installed.
+#
+# QX_USE_RAW_WS=1 (default) enables the raw WebSocket backend (quotex_ws.py)
+# which bypasses pyquotex entirely and speaks Socket.IO v3 directly to
+# Quotex — see quotex-smooth-candle-mystery.txt for the protocol spec.
+# When QX_USE_RAW_WS=1, pyquotex does NOT need to be installed.
 _HAS_PYQUOTEX = False
 try:
     import pyquotex  # noqa
@@ -32,16 +37,23 @@ try:
 except ImportError:
     pass
 
+_USE_RAW_WS = os.environ.get("QX_USE_RAW_WS", "1") == "1"
+if _USE_RAW_WS:
+    # Raw WebSocket backend — pyquotex not required
+    _HAS_PYQUOTEX = True
+    print("[server] QX_USE_RAW_WS=1 — raw WebSocket backend "
+          "(pyquotex optional)")
+
 if os.environ.get("USE_SIM") == "1":
     _HAS_PYQUOTEX = False
     print("[server] USE_SIM=1 — forcing simulated feed")
 
 if _HAS_PYQUOTEX:
     from feed import QuotexFeed as _Feed
-    print("[server] pyquotex available — using REAL Quotex feed")
+    print("[server] real feed available — using REAL Quotex feed")
 else:
     from sim_feed import QuotexFeed as _Feed
-    print("[server] pyquotex NOT available — using SIMULATED feed")
+    print("[server] real feed NOT available — using SIMULATED feed")
 
 app = FastAPI()
 static_dir = Path(__file__).parent / "static"
