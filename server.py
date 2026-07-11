@@ -14,7 +14,20 @@ from fastapi.staticfiles import StaticFiles
 
 # Load .env from project root
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / ".env")
+_env_path = Path(__file__).parent / ".env"
+if not _env_path.exists():
+    print("[server] ⚠️ .env ফাইল নেই! এটি তৈরি করা হচ্ছে...")
+    # Create a minimal .env so the app can at least start
+    _env_path.write_text(
+        "QX_EMAIL=\n"
+        "QX_PASSWORD=\n"
+        "QX_USE_RAW_WS=1\n"
+        "PORT=8000\n",
+        encoding="utf-8")
+    print(f"[server] .env ফাইল তৈরি হয়েছে: {_env_path}")
+    print("[server] দয়া করে এই ফাইলে আপনার Quotex email + password দিন।")
+    print("[server] অথবা start.bat চালান — সেটি আপনাকে জিজ্ঞেস করবে।")
+load_dotenv(_env_path)
 
 # Ensure QX_ROOT points to a valid temp dir on Linux/Mac
 if sys.platform != "win32":

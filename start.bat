@@ -55,13 +55,27 @@ if exist "session.json" (
 REM ── ধাপ ৪: .env চেক (email/password দিয়ে auto-login করবে) ────────
 echo [4/5] session.json নেই — .env চেক হচ্ছে...
 if exist ".env" (
-    REM .env আছে কিন্তু session.json নেই — অ্যাপ নিজে থেকে login করবে
-    echo ✅ .env পাওয়া গেছে — অ্যাপ নিজে থেকে login করবে
-    goto :START_SERVER
+    REM .env ফাইল আছে, কিন্তু তাতে কি আসল email/password আছে কিনা চেক করুন
+    findstr /C:"QX_EMAIL=" /C:"QX_PASSWORD=" .env >nul 2>&1
+    if not errorlevel 1 (
+        REM QX_EMAIL এবং QX_PASSWORD পাওয়া গেছে — চেক করুন placeholder না
+        findstr /C:"your_email" /C:"your_password" /C:"example.com" .env >nul 2>&1
+        if errorlevel 1 (
+            echo ✅ .env পাওয়া গেছে — অ্যাপ নিজে থেকে login করবে
+            goto :START_SERVER
+        ) else (
+            echo ⚠️ .env ফাইলে placeholder আছে — নতুন করে তথ্য দিন
+            goto :ASK_CREDENTIALS
+        )
+    ) else (
+        echo ⚠️ .env ফাইলে QX_EMAIL/QX_PASSWORD নেই — নতুন করে তথ্য দিন
+        goto :ASK_CREDENTIALS
+    )
 )
 
+:ASK_CREDENTIALS
 REM ── ধাপ ৫: প্রথমবার — credentials নিন ─────────────────────────────
-echo [5/5] প্রথমবার চালু করা হচ্ছে — Quotex credentials দরকার
+echo [5/5] Quotex credentials দরকার
 echo.
 echo ┌──────────────────────────────────────────────────────────────┐
 echo │  আপনার Quotex অ্যাকাউন্টের তথ্য দিন                            │
