@@ -853,9 +853,11 @@ class QuotexFeed:
             # pyquotex's own httpx login gets 403 from Cloudflare on the
             # mirrors; qx_login uses curl_cffi (Chrome TLS fingerprint) to log
             # in with email/password and hand us a fresh ssid + cookies.
+            # If curl_cffi also gets 403, falls back to Playwright (real browser).
+            sess = None
             try:
                 from qx_login import fetch_session
-                print("[feed] browser-login: fetching session via curl_cffi...")
+                print("[feed] browser-login: trying curl_cffi...")
                 sess = await asyncio.wait_for(
                     asyncio.to_thread(
                         fetch_session,
@@ -863,23 +865,53 @@ class QuotexFeed:
                         os.environ.get("QX_PASSWORD", ""),
                         "market-qx.trade", ua),
                     timeout=90)
-                if sess.get("ssid"):
-                    print(f"[feed] browser-login ok — ssid={sess['ssid'][:8]}...")
-                    self._client = self._make_client(ua, root)
-                    self._client.set_session(user_agent=ua,
-                                             cookies=sess.get("cookies"),
-                                             ssid=sess["ssid"])
-                    ok, reason = await asyncio.wait_for(
-                        self._client.connect(), timeout=30)
-                    print(f"[feed] connect -> ok={ok}  reason={reason}")
-                    if ok:
-                        self._remember_token()
-                        return True
-                    await self._close_client(self._client)
-                else:
-                    print(f"[feed] browser-login failed: {sess.get('error')}")
             except Exception as _ble:
-                print(f"[feed] browser-login error: {_ble}")
+                print(f"[feed] browser-login: curl_cffi error: {_ble}")
+
+            # If curl_cffi was Cloudflare-blocked, try Playwright (real browser)
+            if not sess or (not sess.get("ssid") and "403" in str(sess.get("error", ""))):
+                try:
+                    from browser_login import fetch_session_browser
+                    print("[feed] browser-login: curl_cffi blocked, "
+                          "launching real Chrome (Playwright)...")
+                    headless = os.environ.get("HEADLESS", "0") != "0"
+                    sess = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            fetch_session_browser,
+                            os.environ.get("QX_EMAIL", ""),
+                            os.environ.get("QX_PASSWORD", ""),
+                            "market-qx.trade", ua, headless),
+                        timeout=120)
+                except ImportError:
+                    print("[feed] browser-login: Playwright not installed — "
+                          "pip install playwright && playwright install chromium")
+                except Exception as _ple:
+                    print(f"[feed] browser-login: Playwright error: {_ple}")
+
+            if sess and sess.get("ssid"):
+                print(f"[feed] browser-login ok — ssid={sess['ssid'][:8]}...")
+                self._client = self._make_client(ua, root)
+                self._client.set_session(user_agent=ua,
+                                         cookies=sess.get("cookies"),
+                                         ssid=sess["ssid"])
+                ok, reason = await asyncio.wait_for(
+                    self._client.connect(), timeout=30)
+                print(f"[feed] connect -> ok={ok}  reason={reason}")
+                if ok:
+                    self._remember_token()
+                    # Save working token to .env + session.json
+                    try:
+                        from quotex_ws import QuotexWSClient
+                        QuotexWSClient.save_session_json(
+                            os.environ.get("QX_EMAIL", "user"),
+                            sess["ssid"], sess.get("cookies", ""), ua)
+                    except Exception:
+                        pass
+                    self._save_token_to_env(sess["ssid"])
+                    return True
+                await self._close_client(self._client)
+            elif sess:
+                print(f"[feed] browser-login failed: {sess.get('error')}")
 
             # ── Attempt 3: FRESH client, email/password only (pyquotex only) ─
             # A brand-new Quotex instance has no leftover WebSocket state from
@@ -2664,60 +2696,109 @@ class QuotexFeed:
     async def _do_browser_login(self, email: str, password: str,
                                 save_to_env: bool = False) -> bool:
         """Do a browser-impersonated login via qx_login.fetch_session().
+        On Cloudflare block (HTTP 403), falls back to browser_login.py
+        which opens a REAL Chrome browser (Playwright) — Cloudflare
+        can't tell it from a human user.
+
         On success:
           - Sets QX_TOKEN + QX_COOKIES env vars (for immediate use)
           - Saves to .env (so subsequent restarts read it)
           - Saves to session.json (so pyquotex-style persistence works too)
         Returns True on success, False on failure."""
+        ua = os.environ.get("QX_UA", "").strip() or (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+        # ── Method 1: curl_cffi (fast, but Cloudflare blocks some IPs) ────
+        sess = None
         try:
             from qx_login import fetch_session
-            ua = os.environ.get("QX_UA", "").strip() or (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-            print("[feed] browser-login: fetching session via curl_cffi...")
+            print("[feed] browser-login: trying curl_cffi (fast)...")
             sess = await asyncio.wait_for(
                 asyncio.to_thread(
                     fetch_session, email, password, "market-qx.trade", ua),
                 timeout=90)
+        except ImportError:
+            print("[feed] browser-login: curl_cffi not installed, skipping to Playwright")
+        except asyncio.TimeoutError:
+            print("[feed] browser-login: curl_cffi timed out, trying Playwright")
+        except Exception as exc:
+            print(f"[feed] browser-login: curl_cffi error ({exc}), trying Playwright")
 
-            if not sess.get("ssid"):
-                err = sess.get("error", "unknown")
-                print(f"[feed] browser-login failed: {err}")
-                if "PIN" in err or "keep_code" in err:
-                    print("[feed]   → Quotex wants PIN verification for new device.")
-                    print("[feed]     Log in once from a browser on this machine,")
-                    print("[feed]     or run: python setup.py")
+        # Check curl_cffi result
+        if sess and sess.get("ssid"):
+            # curl_cffi succeeded!
+            pass
+        elif sess and "403" in str(sess.get("error", "")):
+            # Cloudflare blocked curl_cffi — fall through to Playwright
+            print(f"[feed] browser-login: curl_cffi blocked by Cloudflare "
+                  f"({sess.get('error')}), falling back to real browser...")
+            sess = None  # reset so we try Playwright
+        elif sess and sess.get("error"):
+            # Other error (PIN, wrong password, etc.) — don't try Playwright
+            err = sess["error"]
+            print(f"[feed] browser-login failed: {err}")
+            if "PIN" in err or "keep_code" in err:
+                print("[feed]   → Quotex wants PIN verification for new device.")
+                print("[feed]     Log in once from a browser on this machine,")
+                print("[feed]     or run: python setup.py")
+            return False
+
+        # ── Method 2: Playwright real browser (Cloudflare bypass) ──────────
+        if not sess or not sess.get("ssid"):
+            try:
+                from browser_login import fetch_session_browser
+                print("[feed] browser-login: launching real Chrome browser "
+                      "(Playwright) to bypass Cloudflare...")
+                # Use headless=False on first login so user can solve any CAPTCHA
+                # Set HEADLESS=1 in .env for production (faster, no window)
+                headless = os.environ.get("HEADLESS", "0") != "0"
+                sess = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        fetch_session_browser,
+                        email, password, "market-qx.trade", ua, headless),
+                    timeout=120)
+            except ImportError:
+                print("[feed] browser-login: Playwright not installed — pip install playwright && playwright install chromium")
+                if sess and sess.get("error"):
+                    print(f"[feed]   (curl_cffi error was: {sess['error']})")
+                return False
+            except asyncio.TimeoutError:
+                print("[feed] browser-login: Playwright timed out (120s)")
+                return False
+            except Exception as exc:
+                print(f"[feed] browser-login: Playwright error: {exc}")
                 return False
 
-            ssid = sess["ssid"]
-            cookies = sess.get("cookies", "")
-            print(f"[feed] browser-login ok — ssid={ssid[:8]}...")
-            os.environ["QX_TOKEN"] = ssid
-            if cookies:
-                os.environ["QX_COOKIES"] = cookies
+        # Check final result
+        if not sess or not sess.get("ssid"):
+            err = (sess or {}).get("error", "unknown")
+            print(f"[feed] browser-login failed (both methods): {err}")
+            return False
 
-            # Save to .env so subsequent restarts use it directly
-            if save_to_env:
-                self._save_token_to_env(ssid)
+        # ── Success! Save everything ───────────────────────────────────────
+        ssid = sess["ssid"]
+        cookies = sess.get("cookies", "")
+        print(f"[feed] browser-login ok — ssid={ssid[:8]}...")
+        os.environ["QX_TOKEN"] = ssid
+        if cookies:
+            os.environ["QX_COOKIES"] = cookies
 
-            # Also save to session.json (pyquotex-style persistence)
+        # Save to .env so subsequent restarts use it directly
+        if save_to_env:
+            self._save_token_to_env(ssid)
+
+        # Also save to session.json (pyquotex-style persistence)
+        try:
+            from quotexWSClient_save import QuotexWSClient_save as _save_fn
+        except ImportError:
             try:
                 from quotex_ws import QuotexWSClient
                 QuotexWSClient.save_session_json(email, ssid, cookies or "", ua)
             except Exception as exc:
                 print(f"[feed] could not save session.json: {exc}")
 
-            return True
-
-        except ImportError:
-            print("[feed] browser-login: curl_cffi not installed — pip install curl_cffi")
-            return False
-        except asyncio.TimeoutError:
-            print("[feed] browser-login: timed out (90s) — network slow or blocked")
-            return False
-        except Exception as exc:
-            print(f"[feed] browser-login error: {exc}")
-            return False
+        return True
 
     def _save_token_to_env(self, ssid: str) -> None:
         """Append/update QX_TOKEN in .env file so subsequent restarts use it."""
