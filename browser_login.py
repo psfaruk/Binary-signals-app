@@ -52,17 +52,36 @@ def fetch_session_browser(email: str, password: str,
 
     try:
         with sync_playwright() as p:
-            # Launch Chromium with realistic settings to bypass Cloudflare
-            browser = p.chromium.launch(
-                headless=headless,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                ]
-            )
+            # Launch Chromium with stealth settings to bypass Cloudflare
+            # Using channel="chrome" if available (more realistic than chromium)
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process,VizDisplayCompositor",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+                "--enable-features=NetworkService,NetworkServiceInProcess",
+                "--disable-extensions",
+                "--disable-default-apps",
+                "--no-first-run",
+                "--password-store=basic",
+                "--use-mock-keychain",
+            ]
+
+            try:
+                browser = p.chromium.launch(
+                    headless=headless,
+                    channel="chrome",  # Try real Chrome first
+                    args=launch_args
+                )
+            except Exception:
+                # Fall back to bundled chromium
+                browser = p.chromium.launch(
+                    headless=headless,
+                    args=launch_args
+                )
 
             context = browser.new_context(
                 user_agent=user_agent or (
@@ -73,56 +92,93 @@ def fetch_session_browser(email: str, password: str,
                 viewport={"width": 1920, "height": 1080},
                 locale="en-US",
                 timezone_id="America/New_York",
-                # Realistic screen + hardware concurrency
                 device_scale_factor=1,
+                has_touch=False,
+                is_mobile=False,
+                java_script_enabled=True,
+                extra_http_headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                },
             )
 
-            # Add script to make navigator.webdriver false (Cloudflare check)
-            context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-            """)
+            # Apply playwright-stealth if available (better Cloudflare bypass)
+            try:
+                from playwright_stealth import Stealth
+                stealth = Stealth()
+                stealth.apply_stealth_sync(context)
+                print("[browser_login] playwright-stealth applied")
+            except ImportError:
+                print("[browser_login] playwright-stealth not installed, using manual stealth")
+                # Manual stealth script as fallback
+                context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [{name: 'PDF Viewer', filename: 'internal-pdf-viewer'}]
+                    });
+                    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+                    Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+                    Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+                    window.chrome = { runtime: {} };
+                """)
+            except Exception as exc:
+                print(f"[browser_login] stealth apply error: {exc}")
 
             page = context.new_page()
 
             # ── Step 1: Navigate to login page ─────────────────────────────
             try:
+                # First navigate to base URL to establish session
+                page.goto(base_url, timeout=30000, wait_until="domcontentloaded")
+                time.sleep(5)  # Wait for Cloudflare challenge
+
+                # Now navigate to login page
                 page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
+                time.sleep(5)  # Wait for any Cloudflare challenge
             except Exception as exc:
                 return {"error": f"failed to load login page: {exc}"}
 
-            # Wait for Cloudflare challenge to pass (if any)
-            time.sleep(3)
+            # Check if Cloudflare challenge is present
+            content = page.content()
+            if "challenge" in content.lower() or "cf-browser-verification" in content.lower():
+                # Wait longer for Cloudflare to clear
+                print("[browser_login] Cloudflare challenge detected, waiting 15s...")
+                time.sleep(15)
+                page.reload(timeout=30000)
+                time.sleep(5)
 
             # Check if we're on the login page or got redirected
             current_url = page.url
-            if "sign-in" not in current_url and "login" not in current_url:
-                # Maybe already logged in or Cloudflare blocked
-                if "trade" in current_url:
-                    # Already logged in — go straight to extraction
-                    return _extract_session(page, context, browser, email)
-                # Cloudflare might have blocked — wait longer and retry
-                time.sleep(5)
-                page.goto(login_url, timeout=30000, wait_until="domcontentloaded")
-                time.sleep(3)
+            if "trade" in current_url:
+                # Already logged in — go straight to extraction
+                return _extract_session(page, context, browser, email)
 
             # ── Step 2: Fill login form ────────────────────────────────────
             try:
-                # Quotex login form fields
+                # Quotex login form fields — try multiple selectors
                 email_input = page.wait_for_selector(
-                    'input[name="email"], input[type="email"], input#email',
-                    timeout=10000)
+                    'input[name="email"], input[type="email"], input#email, #email',
+                    timeout=15000)
                 email_input.fill(email)
 
                 password_input = page.wait_for_selector(
-                    'input[name="password"], input[type="password"], input#password',
-                    timeout=5000)
+                    'input[name="password"], input[type="password"], input#password, #password',
+                    timeout=10000)
                 password_input.fill(password)
 
                 # Submit the form
                 submit_btn = page.query_selector(
-                    'button[type="submit"], input[type="submit"], button.login-btn')
+                    'button[type="submit"], input[type="submit"], button.login-btn, button:has-text("Sign in")')
                 if submit_btn:
                     submit_btn.click()
                 else:
@@ -130,6 +186,14 @@ def fetch_session_browser(email: str, password: str,
                     password_input.press("Enter")
 
             except Exception as exc:
+                # Take screenshot for debugging (if possible)
+                try:
+                    page.screenshot(path="/tmp/login_failed.png")
+                    print(f"[browser_login] screenshot saved: /tmp/login_failed.png")
+                    print(f"[browser_login] page title: {page.title()}")
+                    print(f"[browser_login] page URL: {page.url}")
+                except Exception:
+                    pass
                 return {"error": f"login form fill failed: {exc}"}
 
             # ── Step 3: Wait for redirect to /trade (success) ──────────────
