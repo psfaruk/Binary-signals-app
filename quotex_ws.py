@@ -494,9 +494,27 @@ class QuotexWSClient:
         while time.time() < deadline:
             if getattr(self, "_auth_result", None) is not None:
                 return self._auth_result
-            if self._ws is None or self._ws.closed:
+            if not self._ws_is_open():
                 return False
             await asyncio.sleep(0.05)
+
+    def _ws_is_open(self) -> bool:
+        """Check if the WebSocket connection is open.
+        Handles both old (v10-) and new (v12+) websockets library APIs.
+        In v16+, the .closed attribute was removed — use .protocol.state."""
+        if self._ws is None:
+            return False
+        # Try new API (websockets v12+)
+        try:
+            from websockets.protocol import State
+            return self._ws.protocol.state == State.OPEN
+        except (AttributeError, ImportError):
+            pass
+        # Try old API (websockets v10-)
+        try:
+            return not self._ws.closed
+        except AttributeError:
+            return False
         return False
 
     async def _reader_loop(self) -> None:
@@ -678,9 +696,9 @@ class QuotexWSClient:
         """Send Socket.IO pings to keep the connection alive. The server's
         pingInterval is usually 25s; we ping every PING_INTERVAL seconds."""
         try:
-            while self._ws and not self._ws.closed:
+            while self._ws and self._ws_is_open():
                 await asyncio.sleep(PING_INTERVAL)
-                if self._ws and not self._ws.closed:
+                if self._ws and self._ws_is_open():
                     try:
                         await self._ws.send("2")
                     except Exception:
@@ -693,7 +711,7 @@ class QuotexWSClient:
             self._reader_task.cancel()
         if self._ping_task and not self._ping_task.done():
             self._ping_task.cancel()
-        if self._ws and not self._ws.closed:
+        if self._ws and self._ws_is_open():
             try:
                 await self._ws.close()
             except Exception:
@@ -711,7 +729,7 @@ class QuotexWSClient:
     async def _fetch_instruments(self) -> None:
         """Request the full instruments list. Response comes async via
         the 'instruments/list' event."""
-        if not self._ws or self._ws.closed:
+        if not self._ws or not self._ws_is_open():
             return
         try:
             await self._ws.send(_socket_io_event("instruments/list", {}))
@@ -761,7 +779,7 @@ class QuotexWSClient:
             42["chart_notification/get", {"asset":asset,"version":"1.0.0"}]
             42["depth/follow", asset]   ← depth/follow takes a STRING payload
         """
-        if not self._ws or self._ws.closed:
+        if not self._ws or not self._ws_is_open():
             raise RuntimeError("WebSocket not connected")
 
         # Step 1: register interest in (asset, period)
@@ -787,7 +805,7 @@ class QuotexWSClient:
         # Always clear callbacks — even if the WS is gone, feed.py may still
         # be holding a stream it needs to release.
         self._tick_callbacks.pop(asset, None)
-        if not self._ws or self._ws.closed:
+        if not self._ws or not self._ws_is_open():
             self._subscribed.discard(asset)
             self._realtime.pop(asset, None)
             return
@@ -830,7 +848,7 @@ class QuotexWSClient:
         offset: total seconds of history to fetch (candles * period).
         period: candle period in seconds.
         """
-        if not self._ws or self._ws.closed:
+        if not self._ws or not self._ws_is_open():
             return []
 
         if end_from_time is None:
