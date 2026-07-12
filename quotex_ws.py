@@ -577,9 +577,13 @@ class QuotexWSClient:
 
         if name in ("authorization/accept", "authorization/success"):
             self._auth_result = True
+            self._authorized = True
         elif name in ("authorization/reject", "authorization/error"):
             self._auth_result = False
-            print(f"[quotex_ws] authorization rejected: {args}")
+            self._authorized = False
+            print(f"[quotex_ws] ⚠️  authorization rejected: {args}")
+            print(f"[quotex_ws]    Token has expired or is invalid.")
+            print(f"[quotex_ws]    App will auto-relogin on next retry cycle.")
         elif name == "instruments/update":
             # Per-instrument update — usually a list with one entry
             if args and isinstance(args[0], list):
@@ -693,16 +697,44 @@ class QuotexWSClient:
                     pass
 
     async def _ping_loop(self) -> None:
-        """Send Socket.IO pings to keep the connection alive. The server's
-        pingInterval is usually 25s; we ping every PING_INTERVAL seconds."""
+        """Send Socket.IO pings to keep the connection alive AND refresh the
+        session token periodically.
+
+        Quotex's session token expires after inactivity. As long as the
+        WebSocket is connected and we send pings, the token stays alive.
+        This is the KEY to never needing manual token refresh on Railway:
+        once connected, the app stays connected forever.
+
+        Every 5 minutes, also send a re-authorization frame as a keepalive
+        signal — this refreshes the server-side session timer.
+        """
+        last_reauth = time.time()
+        REAUTH_INTERVAL = 300  # 5 minutes
+
         try:
             while self._ws and self._ws_is_open():
                 await asyncio.sleep(PING_INTERVAL)
                 if self._ws and self._ws_is_open():
                     try:
+                        # Engine.IO ping
                         await self._ws.send("2")
                     except Exception:
                         break
+
+                    # Periodic re-authorization to refresh session
+                    now = time.time()
+                    if now - last_reauth > REAUTH_INTERVAL and self._ssid:
+                        try:
+                            reauth_frame = _socket_io_event(
+                                "authorization",
+                                {"session": self._ssid,
+                                 "isDemo": IS_DEMO,
+                                 "tournamentId": TOURNAMENT_ID})
+                            await self._ws.send(reauth_frame)
+                            last_reauth = now
+                            # Silent — don't log every 5 min
+                        except Exception:
+                            pass
         except asyncio.CancelledError:
             pass
 
