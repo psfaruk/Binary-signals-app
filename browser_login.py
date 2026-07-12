@@ -41,6 +41,16 @@ def fetch_session_browser(email: str, password: str,
     if headless is None:
         headless = os.environ.get("HEADLESS", "1") == "1"
 
+    # ── Railway/memory guard (2026-07-12) ──────────────────────────────────
+    # Playwright Chromium needs ~500MB RAM. On Railway's free 512MB plan,
+    # launching it can OOM-crash the whole container. If QX_TOKEN is set
+    # (user provided a manual token), skip Playwright entirely — the
+    # WebSocket connection itself uses <50MB and runs fine on free tier.
+    if os.environ.get("QX_TOKEN", "").strip():
+        return {"error": "QX_TOKEN is set — skipping browser login "
+                         "(use the token directly via WebSocket). "
+                         "Unset QX_TOKEN to force browser login."}
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
