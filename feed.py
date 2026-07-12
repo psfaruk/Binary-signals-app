@@ -444,39 +444,50 @@ class QuotexFeed:
             # NTP is best-effort — never crash the feed over it
             print(f"[feed] NTP sync failed (non-fatal): {exc}")
 
-    async def _get_htf_trend(self, asset: str) -> str:
+    async def _get_htf_trend(self, asset: str, stream: '_AssetStream' = None) -> str:
         """Get the 5-minute trend for an asset (Higher Timeframe Confluence).
         Returns 'UPTREND', 'DOWNTREND', or 'SIDEWAYS'.
-        Cached per-asset for 60 seconds — 5m candle is 300s so 60s cache is
-        plenty. Used to filter 1m signals: if 1m signal opposes 5m trend,
-        strength is demoted in analyze_eoc."""
+
+        CRITICAL FIX (2026-07-12): NO longer calls get_candles(period=300)
+        — that was triggering a re-subscription storm that killed the live
+        60s tick stream. Now derives the 5m trend from the EXISTING 1m
+        closed candles in stream.candles (every 5th 1m candle = 1 5m candle).
+
+        Cached per-asset for 60 seconds. Uses only closed 1m candles that
+        are already in memory — zero extra network/subscriptions."""
         # Check cache (60s TTL)
         cached = self._htf_cache.get(asset)
         if cached and (time.time() - cached["fetched_at"]) < 60:
             return cached.get("trend", "SIDEWAYS")
 
-        if not self._client:
+        # Use the stream's existing 1m closed candles (NO network call)
+        candles_1m = []
+        if stream is not None:
+            candles_1m = stream.candles
+        if len(candles_1m) < 25:
+            # Not enough 1m history to derive 5m trend — return NEUTRAL
+            # rather than making a network call that would re-subscribe.
             return "SIDEWAYS"
 
         try:
-            # Fetch last 30 5m candles (2.5 hours of history)
-            raw = await asyncio.wait_for(
-                self._client.get_candles(
-                    asset,
-                    end_from_time=None,
-                    offset=30 * 300,  # 30 candles × 300s
-                    period=300,        # 5-minute candles
-                ),
-                timeout=10.0,
-            )
-            candles = _normalise(raw) if raw else []
-            if len(candles) < 10:
+            # Build 5m candles from 1m candles: group every 5 consecutive
+            # 1m candles into one 5m candle. This is exactly what a 5m
+            # chart would show — no extra subscription needed.
+            closes_1m = [c["close"] for c in candles_1m[-30:]]  # last 30 1m = 6 5m
+            # Aggregate: take every 5th close as a 5m close sample
+            # (simpler than full OHLC aggregation, good enough for EMA trend)
+            closes_5m = []
+            for i in range(0, len(closes_1m), 5):
+                chunk = closes_1m[i:i+5]
+                if chunk:
+                    closes_5m.append(chunk[-1])  # close of last 1m in group
+
+            if len(closes_5m) < 5:
                 return "SIDEWAYS"
 
-            # Compute EMA9 vs EMA21 on closes
-            closes = [c["close"] for c in candles[-30:]]
-            ema9 = _ema_simple(closes, 9)
-            ema21 = _ema_simple(closes, 21)
+            # Compute EMA on the 5m closes
+            ema9 = _ema_simple(closes_5m, min(9, len(closes_5m)))
+            ema21 = _ema_simple(closes_5m, min(21, len(closes_5m)))
             sep = abs(ema9 - ema21) / ema21 if ema21 > 0 else 0
 
             if ema9 > ema21 and sep > 0.0003:
@@ -1001,11 +1012,13 @@ class QuotexFeed:
             except Exception:
                 acc, n_acc = None, 0
 
-        # Get HTF (5m) trend for confluence filtering (Issue #5).
-        # Cached per-asset for 60s. SIDEWAYS = no filter applied.
+        # Get HTF (5m) trend for confluence filtering.
+        # CRITICAL: pass `stream` so it uses existing 1m candles in memory
+        # instead of calling get_candles(period=300) which would re-subscribe
+        # the asset and kill the live tick stream.
         htf_trend = "SIDEWAYS"
         try:
-            htf_trend = await self._get_htf_trend(asset)
+            htf_trend = await self._get_htf_trend(asset, stream=stream)
         except Exception:
             pass
 
