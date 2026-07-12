@@ -3268,39 +3268,61 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
     if (recent_accuracy is not None
             and recent_n >= 8
             and recent_accuracy < flip_threshold):
-        # Theories that vote CONTINUATION by default — these get inverted
+        # ONLY truly continuation-biased theories get inverted.
+        # MICRO, SHIFT, MEAN are REVERSAL theories — flipping them would
+        # turn correct votes into wrong ones. MOMENTUM/CONTINUITY/HISTORY
+        # have mixed sub-cases — flipping their reversal votes is also wrong.
         CONTINUATION_BIASED = {
-            "CON", "MST", "RUN", "MICRO", "GAP", "MOMENTUM", "CONTINUITY",
-            "HISTORY",  # HISTORY inherits whatever direction it saw = continuation
-            "SHIFT",    # SHIFT also inherits direction = continuation
+            "CON",          # pure continuation: 3 same-dir → continue
+            "MST",          # trend continuation: trend → continue
+            "RUN",          # pressure continuation: buyer pressure → continue
+            "GAP",          # gap fill/rejection — mostly continuation
+            "ZZ",           # zigzag structure — trend continuation
         }
-        # Invert the per-theory votes (only continuation-biased ones)
+        # Invert ONLY the continuation-biased theories
+        did_flip = False
         for td in theories_detail:
             if td["code"] in CONTINUATION_BIASED:
                 td["vote"] = "PUT" if td["vote"] == "CALL" else "CALL"
                 td["score"] = -td["score"]
-        # Recompute the blend from the (partially) inverted theories_detail
-        call_score = sum(abs(td["score"]) for td in theories_detail
-                         if td["vote"] == "CALL")
-        put_score = sum(abs(td["score"]) for td in theories_detail
-                        if td["vote"] == "PUT")
-        net = call_score - put_score
-        total = call_score + put_score
-        if total > 0:
-            agree = max(call_score, put_score)
-            confidence = round(agree / total * 100)
-            majority = "CALL" if net > 0 else "PUT"
-            # Recompute strength
-            if confidence >= 65 and abs(net) >= 5:
-                strength = "STRONG"
-            elif confidence >= 52:
-                strength = "MEDIUM"
-            else:
-                strength = "WEAK"
-        flipped = True
-        all_reasons.append(
-            f"INVERT:+1 {majority} targeted-flip-continuation-theories "
-            f"(recent_acc={recent_accuracy:.0%} over n={recent_n})")
+                did_flip = True
+        if not did_flip:
+            # No continuation-biased theory fired — don't set flipped flag
+            pass
+        else:
+            # Recompute the blend from the (partially) inverted theories_detail
+            call_score = sum(abs(td["score"]) for td in theories_detail
+                             if td["vote"] == "CALL")
+            put_score = sum(abs(td["score"]) for td in theories_detail
+                            if td["vote"] == "PUT")
+            net = call_score - put_score
+            total = call_score + put_score
+            if total > 0:
+                agree = max(call_score, put_score)
+                confidence = round(agree / total * 100)
+                # Dead-band recheck after flip: if signal is now too weak,
+                # return NEUTRAL instead of forcing a weak CALL/PUT.
+                if abs(net) < 1 or confidence < 40:
+                    return {"signal": "NEUTRAL", "score": net,
+                            "confidence": confidence, "strength": "WEAK",
+                            "agree": agree, "total": total_fired,
+                            "reasons": all_reasons, "regime": regime,
+                            "market_state": market_state,
+                            "theories_detail": theories_detail,
+                            "_flipped": True}
+                majority = "CALL" if net > 0 else "PUT"
+                # Recompute strength
+                if confidence >= 65 and abs(net) >= 5:
+                    strength = "STRONG"
+                elif confidence >= 52:
+                    strength = "MEDIUM"
+                else:
+                    strength = "WEAK"
+            flipped = True
+            all_reasons.append(
+                f"_INVERT targeted-flip-continuation-theories "
+                f"(recent_acc={recent_accuracy:.0%} over n={recent_n}) "
+                f"→ {majority}")
 
     # ── HIGHER TIMEFRAME CONFLUENCE (2026-07-10 review Issue #5) ─────────
     # If the 1m signal direction OPPOSES the 5m trend, demote strength.
@@ -3313,18 +3335,18 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
             # Aligned with HTF trend — small confidence boost
             confidence = min(100, confidence + 3)
             all_reasons.append(
-                f"HTF_CONFLUENCE:+1 {majority} aligned-with-5m-{htf_trend}")
+                f"_HTF_CONFLUENCE aligned-with-5m-{htf_trend}")
             htf_applied = True
         else:
             # Opposes HTF trend — demote strength
             if strength == "STRONG":
                 strength = "MEDIUM"
                 all_reasons.append(
-                    f"HTF_CONFLICT:-1 STRONG->MEDIUM opposes-5m-{htf_trend}")
+                    f"_HTF_CONFLICT STRONG->MEDIUM opposes-5m-{htf_trend}")
             elif strength == "MEDIUM":
                 strength = "WEAK"
                 all_reasons.append(
-                    f"HTF_CONFLICT:-1 MEDIUM->WEAK opposes-5m-{htf_trend}")
+                    f"_HTF_CONFLICT MEDIUM->WEAK opposes-5m-{htf_trend}")
             htf_applied = True
 
     # ── LAST-SECONDS SPIKE FILTER (2026-07-10 review Issue #4) ───────────
@@ -3341,7 +3363,7 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
             elif strength == "MEDIUM":
                 strength = "WEAK"
             all_reasons.append(
-                f"SPIKE_FILTER:-1 {strength} last-3s-spike "
+                f"_SPIKE_FILTER {strength} last-3s-spike "
                 f"mag={spike_info['spike_magnitude']}xATR "
                 f"dir={spike_info['spike_direction']}")
 

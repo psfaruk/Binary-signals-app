@@ -714,51 +714,21 @@ function updateLastCandle(candle){
   const last = candleData[candleData.length-1];
   if(candle.time < last.time) return;
   if(candle.time !== last.time){
-    // New candle opened — snap instantly, nothing to animate from yet.
+    // New candle opened — add it directly.
     const bar = { time: candle.time, open: candle.open, high: candle.high, low: candle.low, close: candle.close };
     candleData.push(bar);
     if(candleData.length > 500) candleData.shift();
     candleSeries.update(bar);
-    liveTarget = { ...bar };
-    liveDisplay = { ...bar };
-    lastRealTickAt = null;
     return;
   }
-  // Same candle: record the real values as the animation TARGET. The rAF
-  // loop (animateLiveCandle) eases the on-screen close toward this every
-  // frame, so the candle flows smoothly even though real ticks arrive
-  // irregularly. liveTau adapts to the actual gap between real ticks so the
-  // ease takes about as long as the real gap — always moving, never frozen.
-  const now = performance.now();
-  if(lastRealTickAt != null){
-    const gapSec = (now - lastRealTickAt) / 1000;
-    liveTau = Math.min(LIVE_TAU_MAX, Math.max(LIVE_TAU_MIN, gapSec * 0.9));
-  }
-  lastRealTickAt = now;
+  // Same candle: update directly with real tick values — NO smoothing.
+  // This matches Quotex exactly: the candle moves on every real tick,
+  // no animation lag. Previous smoothing caused ~35% permanent lag.
   last.high = Math.max(last.high, candle.high);
   last.low = Math.min(last.low, candle.low);
   last.close = candle.close;
-  liveTarget = { time: last.time, open: last.open, high: last.high, low: last.low, close: last.close };
-  if(!liveDisplay || liveDisplay.time !== last.time){
-    liveDisplay = { ...liveTarget };
-  }
+  candleSeries.update({ time: last.time, open: last.open, high: last.high, low: last.low, close: last.close });
 }
-
-let _liveAnimLastTs = null;
-function animateLiveCandle(ts){
-  requestAnimationFrame(animateLiveCandle);
-  if(_liveAnimLastTs == null){ _liveAnimLastTs = ts; return; }
-  const dt = (ts - _liveAnimLastTs) / 1000;
-  _liveAnimLastTs = ts;
-  if(!liveTarget || !liveDisplay || !candleSeries) return;
-  const alpha = 1 - Math.exp(-dt / liveTau);
-  liveDisplay.close += (liveTarget.close - liveDisplay.close) * alpha;
-  if(Math.abs(liveDisplay.close - liveTarget.close) < 1e-8) liveDisplay.close = liveTarget.close;
-  const high = Math.max(liveTarget.high, liveDisplay.close);
-  const low = Math.min(liveTarget.low, liveDisplay.close);
-  candleSeries.update({ time: liveDisplay.time, open: liveDisplay.open, high, low, close: liveDisplay.close });
-}
-requestAnimationFrame(animateLiveCandle);
 
 /* ─── SIGNAL DISPLAY ─── */
 /* renderPending — shown when the prediction is being withheld during the
@@ -928,8 +898,8 @@ function renderMicro(micro){
   const phases = micro.phases || [];
   ['early','mid','late'].forEach((p, i) => {
     const el = [phEarly, phMid, phLate][i];
-    const ph = phases[i] || {};
-    const dir = (ph.dir || '—').toUpperCase();
+    const ph = phases[i];
+    const dir = (typeof ph === 'string' ? ph : (ph && ph.dir ? ph.dir : '—')).toUpperCase();
     const arrows = dir === 'UP' ? '↑↑' : dir === 'DOWN' ? '↓↓' : '→';
     el.textContent = (dir !== '—' ? dir + ' ' : '') + arrows;
     el.className = 'phase-dir ' + (dir === 'UP' ? 'up' : dir === 'DOWN' ? 'down' : 'flat');
@@ -1258,10 +1228,10 @@ function onEoc(msg){
     // a subsequent tick message.
     renderPending();
   }
-  // Record previous signal accuracy
-  if(signalHistory.length > 0 && msg.accuracy){
-    signalHistory[0].accuracy = msg.accuracy;
-  }
+  // NOTE: Do NOT overwrite signalHistory[0].accuracy here — it belongs to
+  // the PREVIOUS signal, not the current one. addHistory below pairs the
+  // current signal with the current accuracy correctly, and loadServerHistory
+  // refreshes everything from the server 500ms later.
   if(lastPrediction){
     addHistory(lastPrediction.signal || 'NEUTRAL', msg.accuracy || 'draw');
     // Refresh full history from server so the new entry gets its detail

@@ -1168,9 +1168,13 @@ class QuotexFeed:
                 votes.append((code, "CALL" if voted_up else "PUT",
                               abs(net), outcome))
 
-            # NEUTRAL final — shadow-grade the votes, skip the postmortem.
+            # Log theory votes for ALL predictions (CALL/PUT/NEUTRAL).
+            # Previously only NEUTRAL votes were logged, which meant the
+            # theory muting system was based on a biased sample.
+            _db.log_theory_votes(asset, period, closed["time"], votes)
+
+            # NEUTRAL final — skip the postmortem (no direction to grade).
             if not accuracy:
-                _db.log_theory_votes(asset, period, closed["time"], votes)
                 return accuracy
 
             # ── Postmortem: WHY did this trade win or lose ─────────────

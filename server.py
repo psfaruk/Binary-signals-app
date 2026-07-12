@@ -74,16 +74,22 @@ cid_counter = 0
 
 
 async def broadcast(msg: dict):
-    """Push a message to every connected client."""
+    """Push a message to every connected client — PARALLEL sends.
+    Uses asyncio.gather so one slow client doesn't block others."""
+    if not clients:
+        return
     data = json.dumps(msg)
-    dead = []
-    for cid, ws in clients.items():
-        try:
-            await ws.send_text(data)
-        except Exception:
-            dead.append(cid)
-    for cid in dead:
-        clients.pop(cid, None)
+    # Send to ALL clients in parallel — no head-of-line blocking
+    tasks = []
+    cids = []
+    for cid, ws in list(clients.items()):
+        cids.append(cid)
+        tasks.append(ws.send_text(data))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # Remove dead clients
+    for cid, result in zip(cids, results):
+        if isinstance(result, Exception):
+            clients.pop(cid, None)
 
 
 # ── Lifespan handler (modern FastAPI — replaces deprecated on_event) ───────
