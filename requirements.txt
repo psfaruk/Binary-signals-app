@@ -4,8 +4,6 @@ websockets>=12.0
 python-dotenv>=1.0.0
 ntplib>=0.4.0
 curl_cffi>=0.6.0
-playwright>=1.40.0
-playwright-stealth>=2.0.0
 # ── Quotex backend ──────────────────────────────────────────────────────────
 # Two backends are supported (see quotex_ws.py + feed.py:_make_client):
 #

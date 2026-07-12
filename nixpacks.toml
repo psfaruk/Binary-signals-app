@@ -1,23 +1,14 @@
-# Railway build configuration (Nixpacks)
-# Playwright needs system-level browser dependencies that pip alone
-# can't install. This config tells Railway to install them at build time.
+# Railway build configuration (Nixpacks) — LIGHTWEIGHT version
+# No Playwright, no Chromium, no system deps needed.
+# Pure Python + WebSocket app, <50MB RAM usage.
 
 setup:
   - python: "3.11"
 
 phases:
   install:
-    dependencies:
-      - apt-get update && apt-get install -y --no-install-recommends
-          libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2
-          libdbus-1-3 libxcb1 libxkbcommon0 libx11-6 libxcomposite1
-          libxdamage1 libxext6 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0
-          libcairo2 libasound2 libatspi2.0-0 libxshmfence1 fonts-liberation
-          wget gnupg ca-certificates
     commands:
       - pip install -r requirements.txt
-      - playwright install-deps chromium
-      - playwright install chromium
 
 start:
   command: python server.py

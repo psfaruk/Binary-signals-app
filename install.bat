@@ -88,23 +88,13 @@ echo ✅ App আপ-টু-ডেট
 
 REM ── Dependencies ইনস্টল ───────────────────────────────────────────
 echo [4/4] Python dependencies ইনস্টল হচ্ছে...
-echo এতে ২-৩ মিনিট সময় লাগতে পারে...
+echo কয়েক সেকেন্ড সময় লাগবে...
 python -m pip install -r requirements.txt
 if errorlevel 1 (
     echo ⚠️ কিছু dependency install করতে সমস্যা, আবার চেষ্টা করা হচ্ছে...
     python -m pip install --user -r requirements.txt
 )
 echo ✅ Python dependencies ইনস্টল সম্পূর্ণ
-
-REM ── Playwright browser ইনস্টল (Cloudflare bypass এর জন্য) ──────────
-echo 📦 Playwright Chrome browser ইনস্টল হচ্ছে...
-echo এতে ১-২ মিনিট সময় লাগতে পারে (প্রথমবার)...
-python -m playwright install chromium
-if errorlevel 1 (
-    echo ⚠️ Playwright browser install এ সমস্যা, কিন্তু চালিয়ে যাওয়া হচ্ছে...
-    echo    curl_cffi দিয়ে চেষ্টা করা হবে প্রথমে।
-)
-echo ✅ Playwright browser প্রস্তুত
 
 echo.
 echo ╔══════════════════════════════════════════════════════════════╗

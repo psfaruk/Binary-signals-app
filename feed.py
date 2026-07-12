@@ -849,47 +849,26 @@ class QuotexFeed:
                 # Invalidate the stale token so next reconnect skips this path
                 os.environ.pop("QX_TOKEN", None)
 
-            # ── Attempt 2: browser-impersonated HTTP login (Cloudflare-safe) ──
-            # pyquotex's own httpx login gets 403 from Cloudflare on the
-            # mirrors; qx_login uses curl_cffi (Chrome TLS fingerprint) to log
-            # in with email/password and hand us a fresh ssid + cookies.
-            # If curl_cffi also gets 403, falls back to Playwright (real browser).
+            # ── Attempt 2: curl_cffi login (Chrome TLS fingerprint) ──────────
+            # Lightweight: pure HTTP, no browser. Works on residential IPs.
+            # On Railway/datacenter IPs where Cloudflare blocks, returns 403
+            # and the app falls back to QX_TOKEN env var (set manually).
             sess = None
             try:
                 from qx_login import fetch_session
-                print("[feed] browser-login: trying curl_cffi...")
+                print("[feed] login: trying curl_cffi...")
                 sess = await asyncio.wait_for(
                     asyncio.to_thread(
                         fetch_session,
                         os.environ.get("QX_EMAIL", ""),
                         os.environ.get("QX_PASSWORD", ""),
                         "market-qx.trade", ua),
-                    timeout=90)
+                    timeout=60)
             except Exception as _ble:
-                print(f"[feed] browser-login: curl_cffi error: {_ble}")
-
-            # If curl_cffi was Cloudflare-blocked, try Playwright (real browser)
-            if not sess or (not sess.get("ssid") and "403" in str(sess.get("error", ""))):
-                try:
-                    from browser_login import fetch_session_browser
-                    print("[feed] browser-login: curl_cffi blocked, "
-                          "launching real Chrome (Playwright)...")
-                    headless = os.environ.get("HEADLESS", "0") != "0"
-                    sess = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            fetch_session_browser,
-                            os.environ.get("QX_EMAIL", ""),
-                            os.environ.get("QX_PASSWORD", ""),
-                            "market-qx.trade", ua, headless),
-                        timeout=120)
-                except ImportError:
-                    print("[feed] browser-login: Playwright not installed — "
-                          "pip install playwright && playwright install chromium")
-                except Exception as _ple:
-                    print(f"[feed] browser-login: Playwright error: {_ple}")
+                print(f"[feed] login: curl_cffi error: {_ble}")
 
             if sess and sess.get("ssid"):
-                print(f"[feed] browser-login ok — ssid={sess['ssid'][:8]}...")
+                print(f"[feed] login ok — ssid={sess['ssid'][:8]}...")
                 self._client = self._make_client(ua, root)
                 self._client.set_session(user_agent=ua,
                                          cookies=sess.get("cookies"),
@@ -911,7 +890,10 @@ class QuotexFeed:
                     return True
                 await self._close_client(self._client)
             elif sess:
-                print(f"[feed] browser-login failed: {sess.get('error')}")
+                err = sess.get("error", "unknown")
+                print(f"[feed] login failed: {err}")
+                if "403" in str(err):
+                    print("[feed]   → Cloudflare blocked. Set QX_TOKEN manually.")
 
             # ── Attempt 3: FRESH client, email/password only (pyquotex only) ─
             # A brand-new Quotex instance has no leftover WebSocket state from
@@ -2661,14 +2643,12 @@ class QuotexFeed:
     async def _auto_relogin(self) -> bool:
         """Re-login after connection failure — NEVER GIVES UP (2026-07-12).
 
-        Tries ALL login methods in sequence, repeating forever until one works:
-          1. curl_cffi (Chrome TLS fingerprint — works on residential IPs)
-          2. Playwright headless (real browser — works if Cloudflare allows)
-          3. Wait 60s and retry everything
+        Lightweight: tries curl_cffi (Chrome TLS fingerprint). If Cloudflare
+        blocks (HTTP 403), returns False so the manager loop retries in 60s.
+        The user can update QX_TOKEN in Railway Variables anytime — the next
+        retry will pick it up automatically.
 
-        On Railway/datacenter IPs where Cloudflare blocks HTTP login, this
-        loop will keep retrying. The user can update QX_TOKEN in Railway
-        Variables anytime — the next retry will pick it up.
+        NO Playwright, NO browser — pure HTTP. App stays lightweight (<50MB RAM).
 
         Returns True on success, False if this attempt failed (will retry).
         """
@@ -2722,10 +2702,11 @@ class QuotexFeed:
 
     async def _do_browser_login(self, email: str, password: str,
                                 save_to_env: bool = False) -> bool:
-        """Do a browser-impersonated login via qx_login.fetch_session().
-        On Cloudflare block (HTTP 403), falls back to browser_login.py
-        which opens a REAL Chrome browser (Playwright) — Cloudflare
-        can't tell it from a human user.
+        """Lightweight login via curl_cffi (Chrome TLS fingerprint).
+        NO Playwright, NO browser — pure HTTP request.
+
+        On Cloudflare block (HTTP 403), returns False so the caller can
+        retry later OR the user can manually set QX_TOKEN.
 
         On success:
           - Sets QX_TOKEN + QX_COOKIES env vars (for immediate use)
@@ -2736,71 +2717,35 @@ class QuotexFeed:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
-        # ── Method 1: curl_cffi (fast, but Cloudflare blocks some IPs) ────
+        # ── curl_cffi (Chrome TLS fingerprint) ─────────────────────────────
         sess = None
         try:
             from qx_login import fetch_session
-            print("[feed] browser-login: trying curl_cffi (fast)...")
+            print("[feed] login: trying curl_cffi...")
             sess = await asyncio.wait_for(
                 asyncio.to_thread(
                     fetch_session, email, password, "market-qx.trade", ua),
-                timeout=90)
+                timeout=60)
         except ImportError:
-            print("[feed] browser-login: curl_cffi not installed, skipping to Playwright")
+            print("[feed] login: curl_cffi not installed")
+            return False
         except asyncio.TimeoutError:
-            print("[feed] browser-login: curl_cffi timed out, trying Playwright")
+            print("[feed] login: curl_cffi timed out (60s)")
+            return False
         except Exception as exc:
-            print(f"[feed] browser-login: curl_cffi error ({exc}), trying Playwright")
-
-        # Check curl_cffi result
-        if sess and sess.get("ssid"):
-            # curl_cffi succeeded!
-            pass
-        elif sess and "403" in str(sess.get("error", "")):
-            # Cloudflare blocked curl_cffi — fall through to Playwright
-            print(f"[feed] browser-login: curl_cffi blocked by Cloudflare "
-                  f"({sess.get('error')}), falling back to real browser...")
-            sess = None  # reset so we try Playwright
-        elif sess and sess.get("error"):
-            # Other error (PIN, wrong password, etc.) — don't try Playwright
-            err = sess["error"]
-            print(f"[feed] browser-login failed: {err}")
-            if "PIN" in err or "keep_code" in err:
-                print("[feed]   → Quotex wants PIN verification for new device.")
-                print("[feed]     Log in once from a browser on this machine,")
-                print("[feed]     or run: python setup.py")
+            print(f"[feed] login: curl_cffi error: {exc}")
             return False
 
-        # ── Method 2: Playwright real browser (Cloudflare bypass) ──────────
-        if not sess or not sess.get("ssid"):
-            try:
-                from browser_login import fetch_session_browser
-                print("[feed] browser-login: launching real Chrome browser "
-                      "(Playwright) to bypass Cloudflare...")
-                # Use headless=False on first login so user can solve any CAPTCHA
-                # Set HEADLESS=1 in .env for production (faster, no window)
-                headless = os.environ.get("HEADLESS", "0") != "0"
-                sess = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        fetch_session_browser,
-                        email, password, "market-qx.trade", ua, headless),
-                    timeout=120)
-            except ImportError:
-                print("[feed] browser-login: Playwright not installed — pip install playwright && playwright install chromium")
-                if sess and sess.get("error"):
-                    print(f"[feed]   (curl_cffi error was: {sess['error']})")
-                return False
-            except asyncio.TimeoutError:
-                print("[feed] browser-login: Playwright timed out (120s)")
-                return False
-            except Exception as exc:
-                print(f"[feed] browser-login: Playwright error: {exc}")
-                return False
-
-        # Check final result
+        # Check result
         if not sess or not sess.get("ssid"):
             err = (sess or {}).get("error", "unknown")
-            print(f"[feed] browser-login failed (both methods): {err}")
+            print(f"[feed] login failed: {err}")
+            if "403" in str(err):
+                print("[feed]   → Cloudflare blocked this IP.")
+                print("[feed]     Set QX_TOKEN manually (browser → F12 → Cookies → session)")
+            elif "PIN" in str(err) or "keep_code" in str(err):
+                print("[feed]   → Quotex wants PIN verification.")
+                print("[feed]     Log in once from a browser on this machine.")
             return False
 
         # ── Success! Save everything ───────────────────────────────────────
