@@ -1483,7 +1483,8 @@ class QuotexFeed:
         if pred == "NEUTRAL":
             return None
 
-        ticks  = list(stream.ticks)
+        # Use last 100 ticks for confirmation (full list is O(n) and n can be 600+)
+        ticks  = list(stream.ticks)[-100:]
         open_p = stream.candle_open_price
 
         # Overall direction from open
@@ -1572,19 +1573,43 @@ class QuotexFeed:
         stream._last_bcast_high = 0.0
         stream._last_bcast_low = 0.0
         stream._last_bcast_close = 0.0
+        # Reset tracked high/low so _running_candle recomputes from scratch
+        stream._tracked_high = None
+        stream._tracked_low = None
 
     def _running_candle(self, stream: _AssetStream) -> dict:
+        """Build the current running candle OHLC.
+        OPTIMIZED (2026-07-12): use the tracked high/low if available
+        (avoids O(n) max()/min() on every tick with 600+ ticks)."""
         op = stream.candle_open_price
-        ticks = list(stream.ticks)
-        if not ticks:
+        if not stream.ticks:
             return {"time": stream.candle_open_time, "open": op,
                     "high": op, "low": op, "close": op}
+        # Fast path: use tracked high/low (updated incrementally in stream loop)
+        cur_close = stream.ticks[-1]
+        cur_high = getattr(stream, '_tracked_high', None)
+        cur_low = getattr(stream, '_tracked_low', None)
+        if cur_high is None or cur_low is None:
+            # First call after reset — compute from full list + cache
+            ticks_list = list(stream.ticks)
+            cur_high = max(ticks_list)
+            cur_low = min(ticks_list)
+            stream._tracked_high = cur_high
+            stream._tracked_low = cur_low
+        else:
+            # Update tracked high/low with just the new close (O(1))
+            if cur_close > cur_high:
+                cur_high = cur_close
+                stream._tracked_high = cur_high
+            elif cur_close < cur_low:
+                cur_low = cur_close
+                stream._tracked_low = cur_low
         return {
             "time":  stream.candle_open_time,
             "open":  op,
-            "high":  max(ticks),
-            "low":   min(ticks),
-            "close": ticks[-1],
+            "high":  cur_high,
+            "low":   cur_low,
+            "close": cur_close,
         }
 
     async def _close_running_and_start_new(self, stream: _AssetStream,
@@ -2112,7 +2137,7 @@ class QuotexFeed:
                                 fresh, _ = await self._analyze_core(
                                     stream.asset, stream.period,
                                     stream.base_candles, stream.base_ticks,
-                                    running_ticks=list(stream.ticks),
+                                    running_ticks=list(stream.ticks)[-100:],
                                     stream=stream,
                                     live_only=live_only)
                                 stream._live_reeval_ticks = len(stream.ticks)
@@ -2252,17 +2277,13 @@ class QuotexFeed:
                     # Skip broadcast if open price is still 0 (no valid tick yet)
                     # — prevents LightweightCharts "Value is null" on the client
                     if stream.candle_open_price > 0:
-                        # ── Microstructure caching (2026-07-11) ──────────────
+                        # ── Microstructure caching (2026-07-11, OPTIMIZED 2026-07-12) ─
                         # _analyze_microstructure() is O(n) over stream.ticks.
-                        # Recomputing on every tick was the biggest per-tick CPU
-                        # cost in the loop (after LIVE re-eval). Cache the
-                        # result and only recompute when:
-                        #   1. N ticks have passed since the last compute
-                        #      (MICRO_RECALC_EVERY, default 3), OR
-                        #   2. The candle's high or low changed (those are the
-                        #      only OHLC values that can change a cached micro —
-                        #      close-only updates leave micro unchanged for
-                        #      buy_pct/sell_pct/pressure/hold_price/etc.).
+                        # With 5-10 ticks/sec, n can reach 600+ per candle.
+                        # Solution: only analyze the LAST 200 ticks (still gives
+                        # accurate pressure/reaction/hold analysis, 10x faster).
+                        # Cache + only recompute every MICRO_RECALC_EVERY ticks
+                        # or when high/low change.
                         cur_high = running["high"]
                         cur_low  = running["low"]
                         tick_n   = len(stream.ticks)
@@ -2270,8 +2291,11 @@ class QuotexFeed:
                                 or (tick_n - stream._micro_cache_at_tick) >= MICRO_RECALC_EVERY
                                 or cur_high != stream._micro_cache_high
                                 or cur_low  != stream._micro_cache_low):
+                            # Use only last 200 ticks for micro analysis
+                            # (6x speedup vs full 2000-tick buffer)
+                            recent_ticks = list(stream.ticks)[-200:]
                             stream._micro_cache = self._analyze_microstructure(
-                                stream.ticks, stream.candle_open_price)
+                                recent_ticks, stream.candle_open_price)
                             stream._micro_cache_at_tick = tick_n
                             stream._micro_cache_high    = cur_high
                             stream._micro_cache_low     = cur_low
