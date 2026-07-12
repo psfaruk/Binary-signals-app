@@ -814,20 +814,18 @@ class QuotexFeed:
 
     async def _connect(self) -> bool:
         try:
-            # pyquotex is optional when QX_USE_RAW_WS=1 — don't import it
-            # unconditionally (was breaking on systems without pyquotex).
             _USE_RAW_WS = os.environ.get("QX_USE_RAW_WS", "0") == "1"
             if not _USE_RAW_WS:
                 from pyquotex.types import ReconnectPolicy  # noqa: ensure importable
-            # Cross-platform default (was a hardcoded Windows path — broke
-            # immediately on any Linux deployment, e.g. Railway).
             import tempfile
             root = os.environ.get(
                 "QX_ROOT", os.path.join(tempfile.gettempdir(), "plybit_cache")
             )
+            # Firefox UA — matches the Firefox TLS cipher suite in ssl_utils.py
+            # so Cloudflare sees a consistent Firefox fingerprint.
             ua = os.environ.get("QX_UA", "").strip() or (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) "
+                "Gecko/20100101 Firefox/119.0")
 
             # ── Attempt 1: TOKEN (fast path, skipped if no token) ─────────────
             env_token = os.environ.get("QX_TOKEN", "").strip()
@@ -845,64 +843,19 @@ class QuotexFeed:
                     print(f"[feed] token auth failed ({reason}) — trying login")
                 except Exception as _te:
                     print(f"[feed] token attempt error: {_te}")
-                # Token failed — close this client cleanly before making a new one
                 await self._close_client(self._client)
-                # Invalidate the stale token so next reconnect skips this path
                 os.environ.pop("QX_TOKEN", None)
 
-            # ── Attempt 2: curl_cffi login (Chrome TLS fingerprint) ──────────
-            # Lightweight: pure HTTP, no browser. Works on residential IPs.
-            # On Railway/datacenter IPs where Cloudflare blocks, returns 403
-            # and the app falls back to QX_TOKEN env var (set manually).
-            sess = None
-            try:
-                from qx_login import fetch_session
-                print("[feed] login: trying curl_cffi...")
-                sess = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        fetch_session,
-                        os.environ.get("QX_EMAIL", ""),
-                        os.environ.get("QX_PASSWORD", ""),
-                        "market-qx.trade", ua),
-                    timeout=60)
-            except Exception as _ble:
-                print(f"[feed] login: curl_cffi error: {_ble}")
-
-            if sess and sess.get("ssid"):
-                print(f"[feed] login ok — ssid={sess['ssid'][:8]}...")
-                self._client = self._make_client(ua, root)
-                self._client.set_session(user_agent=ua,
-                                         cookies=sess.get("cookies"),
-                                         ssid=sess["ssid"])
-                ok, reason = await asyncio.wait_for(
-                    self._client.connect(), timeout=30)
-                print(f"[feed] connect -> ok={ok}  reason={reason}")
-                if ok:
-                    self._remember_token()
-                    # Save working token to .env + session.json
-                    try:
-                        from quotex_ws import QuotexWSClient
-                        QuotexWSClient.save_session_json(
-                            os.environ.get("QX_EMAIL", "user"),
-                            sess["ssid"], sess.get("cookies", ""), ua)
-                    except Exception:
-                        pass
-                    self._save_token_to_env(sess["ssid"])
-                    return True
-                await self._close_client(self._client)
-            elif sess:
-                err = sess.get("error", "unknown")
-                print(f"[feed] login failed: {err}")
-                if "403" in str(err):
-                    print("[feed]   → Cloudflare blocked. Set QX_TOKEN manually.")
-
-            # ── Attempt 3: FRESH client, email/password only (pyquotex only) ─
-            # A brand-new Quotex instance has no leftover WebSocket state from
-            # the failed token attempt, so pyquotex does a clean HTTP login.
-            # SKIP for the raw WS backend: it has no HTTP login — without an
-            # ssid from Attempt 1/2, it cannot authorize at all.
+            # ── Attempt 2: Fresh client, email/password (vendored pyquotex) ────
+            # This is the MAIN login path. Vendored pyquotex uses Firefox TLS
+            # cipher suite (ssl_utils.py) which bypasses Cloudflare. After
+            # successful login, pyquotex auto-saves token to session.json via
+            # update_session() in login.py — NO manual QX_TOKEN needed.
+            #
+            # SKIP for raw WS backend (it has no HTTP login).
             if not _USE_RAW_WS:
-                print("[feed] connecting via email/password (fresh client)...")
+                print("[feed] connecting via email/password "
+                      "(vendored pyquotex + Firefox TLS)...")
                 self._client = self._make_client(ua, root)
                 ok, reason = await asyncio.wait_for(
                     self._client.connect(), timeout=45)
@@ -913,7 +866,7 @@ class QuotexFeed:
                 if reason and "reject" in str(reason).lower():
                     self._clear_stale_token()
 
-                # ── Attempt 3b: auth may have succeeded internally but connect()
+                # ── Attempt 2b: auth may have succeeded internally but connect()
                 #    returned False (pyquotex race condition). If session_data
                 #    now holds a fresh token, one more connect() often succeeds.
                 new_tok = (self._client.session_data or {}).get("token", "")
@@ -930,14 +883,6 @@ class QuotexFeed:
                             self._clear_stale_token()
                     except Exception as _re:
                         print(f"[feed] retry error: {_re}")
-            else:
-                # Raw WS backend — both Attempt 1 (token) and Attempt 2
-                # (qx_login.fetch_session) have already failed. There is no
-                # third path: the WS client literally cannot auth without an
-                # ssid. Surface the browser-login error to the operator.
-                print("[feed] raw-WS backend: both token and browser-login "
-                      "failed — check QX_EMAIL/QX_PASSWORD or set QX_TOKEN "
-                      "to a fresh ssid from your browser's Quotex session.")
 
             return False
         except Exception as exc:
@@ -2585,81 +2530,50 @@ class QuotexFeed:
     # ── Manager loop ──────────────────────────────────────────────────────────
 
     async def _auto_login_startup(self) -> None:
-        """Startup auto-login (2026-07-11, updated 2026-07-12).
-
-        Auto-connect priority (mirrors the real production app's logic):
-          1. QX_TOKEN env var (fastest — set by previous run or .env)
-          2. session.json token (persisted by pyquotex or this app's save)
-          3. Fresh browser-login via qx_login.fetch_session() (email + password)
-
-        This makes the app FULLY auto-connecting:
-          - First run: needs email + password in .env → does browser-login → saves token
-          - Subsequent runs: reads token from session.json or QX_TOKEN → instant connect
-          - Token expired: auto-clears → does fresh browser-login → saves new token
+        """Startup: check for existing token in session.json (fast path).
+        
+        With vendored pyquotex (QX_USE_RAW_WS=0), the actual login happens
+        inside _connect() → pyquotex.connect() → Firefox TLS login. This
+        method just checks if a saved token exists so we can skip login.
+        
+        NO curl_cffi, NO Playwright — pyquotex handles everything with
+        Firefox TLS cipher suite that bypasses Cloudflare.
         """
-        # ── Priority 1: QX_TOKEN env var ──────────────────────────────────
-        env_token = os.environ.get("QX_TOKEN", "").strip()
-        if env_token:
-            print(f"[feed] startup: QX_TOKEN present ({env_token[:8]}...) — using it")
-            return
-
-        # ── Priority 2: session.json ──────────────────────────────────────
-        # Read token + cookies + user_agent from session.json (same format
-        # pyquotex uses, so a session.json created by pyquotex works here too).
+        # ── Check session.json for saved token ────────────────────────────
         try:
             from quotex_ws import QuotexWSClient
             sess_data = QuotexWSClient.load_session_json()
             if sess_data and sess_data.get("token"):
                 token = sess_data["token"]
-                cookies = sess_data.get("cookies", "")
-                ua = sess_data.get("user_agent", "")
-                print(f"[feed] startup: found token in session.json "
-                      f"({token[:8]}...) — using it")
-                # Set env vars so _connect() picks them up
+                print(f"[feed] startup: found saved token in session.json "
+                      f"({token[:8]}...) — will try it first")
                 os.environ["QX_TOKEN"] = token
-                if cookies:
-                    os.environ["QX_COOKIES"] = cookies
-                if ua:
-                    os.environ["QX_UA"] = ua
                 return
-        except Exception as exc:
-            print(f"[feed] startup: session.json read failed: {exc}")
-
-        # ── Priority 3: Fresh browser-login ───────────────────────────────
+        except Exception:
+            pass
+        
         email = os.environ.get("QX_EMAIL", "").strip()
-        password = os.environ.get("QX_PASSWORD", "").strip()
-
-        if not email or not password:
-            print("[feed] startup: no token anywhere, and QX_EMAIL/QX_PASSWORD not set.")
-            print("[feed]   Options:")
-            print("[feed]   1. Run: python setup.py  (interactive credential entry)")
-            print("[feed]   2. Or place a session.json file in the project root")
-            print("[feed]   3. Or set QX_TOKEN in .env from your browser's Quotex session")
-            return
-
-        print(f"[feed] startup: no token anywhere, doing fresh browser-login "
-              f"for {email[:3]}***@{email.split('@')[-1] if '@' in email else '?'}")
-        await self._do_browser_login(email, password, save_to_env=True)
+        if email:
+            print(f"[feed] startup: no saved token — will login with "
+                  f"email/password ({email[:3]}***@{email.split('@')[-1]})")
+            print("[feed]   vendored pyquotex + Firefox TLS will handle login")
+        else:
+            print("[feed] startup: no token AND no QX_EMAIL/QX_PASSWORD set")
+            print("[feed]   Set QX_EMAIL + QX_PASSWORD in Railway Variables")
 
     async def _auto_relogin(self) -> bool:
-        """Re-login after connection failure — NEVER GIVES UP (2026-07-12).
-
-        Lightweight: tries curl_cffi (Chrome TLS fingerprint). If Cloudflare
-        blocks (HTTP 403), returns False so the manager loop retries in 60s.
-        The user can update QX_TOKEN in Railway Variables anytime — the next
-        retry will pick it up automatically.
-
-        NO Playwright, NO browser — pure HTTP. App stays lightweight (<50MB RAM).
-
-        Returns True on success, False if this attempt failed (will retry).
+        """Re-login after connection failure — clears stale tokens so
+        _connect() does a fresh login on next retry.
+        
+        With vendored pyquotex, _connect() handles the actual login via
+        Firefox TLS. This method just clears stale state.
+        
+        Returns True to signal 'retry _connect() now'.
         """
-        email = os.environ.get("QX_EMAIL", "").strip()
-        password = os.environ.get("QX_PASSWORD", "").strip()
-
         # Clear stale QX_TOKEN env var
         old_token = os.environ.get("QX_TOKEN", "").strip()
         if old_token:
-            print(f"[feed] auto-relogin: clearing stale QX_TOKEN ({old_token[:8]}...)")
+            print(f"[feed] auto-relogin: clearing stale token ({old_token[:8]}...)")
             os.environ.pop("QX_TOKEN", None)
 
         # Clear stale token in session.json
@@ -2669,37 +2583,8 @@ class QuotexFeed:
         except Exception:
             pass
 
-        # Check if user manually updated QX_TOKEN (e.g., via Railway Variables)
-        # This gives the user an escape hatch: update the env var, app picks it up
-        new_token = os.environ.get("QX_TOKEN", "").strip()
-        if new_token and new_token != old_token:
-            print(f"[feed] auto-relogin: detected new QX_TOKEN ({new_token[:8]}...) "
-                  f"— will use it on next connect attempt")
-            return True  # signal success so _connect() retries with new token
-
-        if not email or not password:
-            print("[feed] auto-relogin: no email/password set.")
-            print("[feed]   ⚠️  To fix this on Railway:")
-            print("[feed]   1. Go to Railway → Variables")
-            print("[feed]   2. Set QX_TOKEN = <token from your browser's Quotex session>")
-            print("[feed]   3. App will auto-restart with new token")
-            print("[feed]   Retrying in 60s...")
-            return False
-
-        # Try all login methods
-        print(f"[feed] auto-relogin: trying all login methods for "
-              f"{email[:3]}***@{email.split('@')[-1] if '@' in email else '?'}")
-        success = await self._do_browser_login(email, password, save_to_env=True)
-        if success:
-            print("[feed] auto-relogin: ✅ SUCCESS — new token obtained")
-            return True
-
-        print("[feed] auto-relogin: ❌ all login methods failed this attempt")
-        print("[feed]   Will retry in 60s. To fix immediately:")
-        print("[feed]   1. Open https://market-qx.trade in your browser")
-        print("[feed]   2. F12 → Application → Cookies → 'session' value copy")
-        print("[feed]   3. Railway → Variables → QX_TOKEN = <paste>")
-        return False
+        # Signal _connect() to retry — it will do fresh login via pyquotex
+        return True
 
     async def _do_browser_login(self, email: str, password: str,
                                 save_to_env: bool = False) -> bool:
