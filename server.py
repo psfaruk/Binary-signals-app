@@ -20,15 +20,8 @@ if _env_path.exists():
     print("[server] .env ফাইল loaded")
 else:
     print("[server] .env ফাইল নেই — Railway env vars ব্যবহার করা হচ্ছে")
-# Try to create .env only if directory is writable (NOT on Railway)
-if not _env_path.exists():
-    try:
-        _env_path.write_text(
-            "QX_EMAIL=\nQX_PASSWORD=\nQX_USE_RAW_WS=1\nPORT=8000\n",
-            encoding="utf-8")
-        print(f"[server] .env ফাইল তৈরি হয়েছে: {_env_path}")
-    except (PermissionError, OSError):
-        print("[server] .env তৈরি করা যায়নি (read-only dir) — env vars ব্যবহার করা হচ্ছে")
+# NOTE: Do NOT try to create .env on Railway (read-only filesystem).
+# Railway injects env vars directly — .env file is for local dev only.
 
 # Ensure QX_ROOT points to a valid temp dir on Linux/Mac
 if sys.platform != "win32":

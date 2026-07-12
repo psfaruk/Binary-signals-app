@@ -10,3 +10,4 @@ qx_cache*/
 *.log
 .tmp/
 upload/
+settings/
