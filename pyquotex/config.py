@@ -6,7 +6,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from fake_useragent import UserAgent
+# fake-useragent downloads a user-agent list from the internet at import
+# time. On Railway (no internet at build) or if the download fails, this
+# crashes the whole app. Wrap in try/except so the app still starts.
+try:
+    from fake_useragent import UserAgent
+except Exception:
+    UserAgent = None
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) "
@@ -54,7 +60,12 @@ def resource_path(relative_path: str | Path) -> Path:
 def load_session(email: str, user_agent: str | None = None) -> dict[str, Any]:
     """Load session data for a specific email."""
     if user_agent is None:
-        user_agent = UserAgent().random
+        # Fall back to the hardcoded Firefox UA if fake-useragent is missing
+        # (Railway build environment, offline, etc.)
+        try:
+            user_agent = UserAgent().random if UserAgent else USER_AGENT
+        except Exception:
+            user_agent = USER_AGENT
 
     output_file = Path(resource_path("session.json"))
     with session_lock:
