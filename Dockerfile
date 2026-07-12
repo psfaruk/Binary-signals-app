@@ -13,13 +13,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── Copy application code ─────────────────────────────────────────────────
 COPY . .
 
-# ── Railway sets PORT env var; server.py reads it ─────────────────────────
-EXPOSE 8000
-
-# ── Railway environment defaults ──────────────────────────────────────────
+# ── Railway sets PORT env var dynamically — server.py reads it ────────────
+# Don't hardcode EXPOSE — Railway injects its own PORT
+ENV PYTHONUNBUFFERED=1
 ENV AUTO_OPEN_BROWSER=0
 ENV HEADLESS=1
 ENV QX_USE_RAW_WS=1
-ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "server.py"]
+# Use shell form so $PORT is interpolated at runtime (not build time)
+CMD python server.py

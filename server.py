@@ -12,22 +12,23 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-# Load .env from project root
+# Load .env from project root (if it exists — Railway uses env vars directly)
 from dotenv import load_dotenv
 _env_path = Path(__file__).parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+    print("[server] .env ফাইল loaded")
+else:
+    print("[server] .env ফাইল নেই — Railway env vars ব্যবহার করা হচ্ছে")
+# Try to create .env only if directory is writable (NOT on Railway)
 if not _env_path.exists():
-    print("[server] ⚠️ .env ফাইল নেই! এটি তৈরি করা হচ্ছে...")
-    # Create a minimal .env so the app can at least start
-    _env_path.write_text(
-        "QX_EMAIL=\n"
-        "QX_PASSWORD=\n"
-        "QX_USE_RAW_WS=1\n"
-        "PORT=8000\n",
-        encoding="utf-8")
-    print(f"[server] .env ফাইল তৈরি হয়েছে: {_env_path}")
-    print("[server] দয়া করে এই ফাইলে আপনার Quotex email + password দিন।")
-    print("[server] অথবা start.bat চালান — সেটি আপনাকে জিজ্ঞেস করবে।")
-load_dotenv(_env_path)
+    try:
+        _env_path.write_text(
+            "QX_EMAIL=\nQX_PASSWORD=\nQX_USE_RAW_WS=1\nPORT=8000\n",
+            encoding="utf-8")
+        print(f"[server] .env ফাইল তৈরি হয়েছে: {_env_path}")
+    except (PermissionError, OSError):
+        print("[server] .env তৈরি করা যায়নি (read-only dir) — env vars ব্যবহার করা হচ্ছে")
 
 # Ensure QX_ROOT points to a valid temp dir on Linux/Mac
 if sys.platform != "win32":
@@ -68,12 +69,6 @@ else:
     from sim_feed import QuotexFeed as _Feed
     print("[server] real feed NOT available — using SIMULATED feed")
 
-app = FastAPI()
-static_dir = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-# ── Global feed + client manager ─────────────────────────────────────────────
-
 feed = _Feed()
 clients: dict[str, WebSocket] = {}   # cid -> ws
 cid_counter = 0
@@ -90,6 +85,36 @@ async def broadcast(msg: dict):
             dead.append(cid)
     for cid in dead:
         clients.pop(cid, None)
+
+
+# ── Lifespan handler (modern FastAPI — replaces deprecated on_event) ───────
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup + shutdown lifecycle (replaces @app.on_event)."""
+    print("[server] lifespan: startup beginning")
+    _db.init()
+    # Start feed in background task
+    feed_task = asyncio.create_task(feed.run(broadcast))
+    print("[server] lifespan: feed task started")
+    # Auto-open browser (local dev only — disabled on Railway via env var)
+    _auto_open_browser()
+    print("[server] lifespan: startup complete")
+    yield
+    print("[server] lifespan: shutdown beginning")
+    await feed.shutdown()
+    feed_task.cancel()
+    try:
+        await feed_task
+    except asyncio.CancelledError:
+        pass
+    print("[server] lifespan: shutdown complete")
+
+
+app = FastAPI(lifespan=lifespan)
+static_dir = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -122,18 +147,7 @@ def _auto_open_browser():
     threading.Thread(target=_open, daemon=True).start()
 
 
-@app.on_event("startup")
-async def on_startup():
-    _db.init()
-    asyncio.create_task(feed.run(broadcast))
-    # Auto-open browser 5 seconds after startup (local dev convenience).
-    # Disabled when AUTO_OPEN_BROWSER=0 (set this on Railway/production).
-    _auto_open_browser()
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await feed.shutdown()
+# (lifespan handler above replaces the deprecated @app.on_event startup/shutdown)
 
 
 # ── HTTP routes ───────────────────────────────────────────────────────────────
