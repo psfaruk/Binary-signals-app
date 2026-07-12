@@ -240,4 +240,9 @@ async def ws_endpoint(ws: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
+    # Railway detection: disable auto browser open, force headless
+    if os.environ.get("RAILWAY_PROJECT_ID") or os.environ.get("RAILWAY_SERVICE_ID"):
+        os.environ.setdefault("AUTO_OPEN_BROWSER", "0")
+        os.environ.setdefault("HEADLESS", "1")
+        print("[server] Railway environment detected — headless mode, no browser auto-open")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

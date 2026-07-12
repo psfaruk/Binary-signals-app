@@ -2,6 +2,11 @@
 __pycache__/
 *.pyc
 .env
+.env.backup
 session.json
 signals.db
+*.db
 qx_cache*/
+*.log
+.tmp/
+upload/
