@@ -54,7 +54,7 @@ SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
 # MICRO_RECALC_EVERY: recompute _analyze_microstructure() every N ticks. The
 # common OTC case is close-only updates (price moves but high/low don't), so
 # the cached micro stays valid. Set to 1 to disable caching (legacy behavior).
-MICRO_RECALC_EVERY = int(os.environ.get("MICRO_RECALC_EVERY", "3"))
+MICRO_RECALC_EVERY = int(os.environ.get("MICRO_RECALC_EVERY", "5"))
 # SKIP_REDUNDANT_BROADCAST: when True, skip the tick broadcast if the running
 # candle's high/low/close are all unchanged since the last broadcast AND no
 # prediction change happened. Cuts JSON serialize + WS send for repeated
@@ -251,7 +251,7 @@ class _AssetStream:
     asset: str
     period: int
     candles: list = field(default_factory=list)
-    ticks: deque = field(default_factory=lambda: deque(maxlen=500))
+    ticks: deque = field(default_factory=lambda: deque(maxlen=2000))
     candle_open_time: int = 0
     candle_open_price: float = 0.0
     candle_open_is_real: bool = False
@@ -2057,35 +2057,31 @@ class QuotexFeed:
                     # _run_eoc at candle-open — stream.ticks now holds the NEW
                     # (still-open) candle's ticks instead.
                     #
-                    # Priority 1 update (2026-07-10): ADAPTIVE refresh rate.
-                    #   - Last 10 seconds of candle: re-eval every 3 ticks
-                    #     (the close is the most predictive moment)
-                    #   - Last 30 seconds: every 10 ticks
-                    #   - Earlier: every 30 ticks (cheap baseline)
-                    #
-                    # Priority 3 update (2026-07-10): PHASE-AWARE refinement.
-                    #   - "Critical zone" (last 5s) goes even faster: every 2 ticks
-                    #   - High-recent-volatility window (last 3 ticks' range
-                    #     > 0.5 ATR) → cut interval in half — fast move =
-                    #     potential signal change, re-eval immediately
+                    # LIVE theory re-eval — OPTIMIZED (2026-07-12):
+                    # OTC ticks come at 5-10/sec. Re-evaluating theories on
+                    # every tick was burning CPU and delaying broadcasts.
+                    # New intervals are 5x higher to match tick density:
+                    #   - Last 5s (critical): every 10 ticks (~1-2s)
+                    #   - Last 10s: every 15 ticks (~2-3s)
+                    #   - Last 30s: every 30 ticks (~3-6s)
+                    #   - Mid-candle: every 100 ticks (~10-20s)
                     pred_changed = False
                     if (ENABLE_LIVE_THEORY and stream.base_candles
                             and len(stream.ticks) >= 15):
-                        # Compute adaptive re-eval interval
-                        time_to_close = -1  # default: unknown, mid-candle
+                        time_to_close = -1
                         if stream.candle_open_time > 0:
                             time_to_close = (stream.candle_open_time
                                              + stream.period) - time.time()
                             if time_to_close < 5:
-                                reeval_interval = 2   # Priority 3: last 5s = critical
+                                reeval_interval = 10  # critical zone
                             elif time_to_close < 10:
-                                reeval_interval = 3   # last 10s
+                                reeval_interval = 15  # last 10s
                             elif time_to_close < 30:
-                                reeval_interval = 10  # last 30s
+                                reeval_interval = 30  # last 30s
                             else:
-                                reeval_interval = 30  # mid-candle
+                                reeval_interval = 100  # mid-candle
                         else:
-                            reeval_interval = 30
+                            reeval_interval = 100
                         # Live-only fast path (2026-07-10 review Next Action #1):
                         # In the last 30s (where LIVE re-eval actually matters),
                         # only run the 4 theories that use running_ticks.
