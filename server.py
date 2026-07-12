@@ -42,8 +42,11 @@ import db as _db
 #
 # QX_USE_RAW_WS=1 (default) enables the raw WebSocket backend (quotex_ws.py)
 # which bypasses pyquotex entirely and speaks Socket.IO v3 directly to
-# Quotex — see quotex-smooth-candle-mystery.txt for the protocol spec.
-# When QX_USE_RAW_WS=1, pyquotex does NOT need to be installed.
+# ── Quotex backend selection ────────────────────────────────────────────────
+# QX_USE_RAW_WS=0 (DEFAULT): vendored pyquotex with Firefox TLS cipher suite
+#                             → bypasses Cloudflare without Playwright/curl_cffi
+# QX_USE_RAW_WS=1:           raw WebSocket backend (quotex_ws.py)
+#                             → lighter but Cloudflare blocks login on datacenter IPs
 _HAS_PYQUOTEX = False
 try:
     import pyquotex  # noqa
@@ -51,12 +54,15 @@ try:
 except ImportError:
     pass
 
-_USE_RAW_WS = os.environ.get("QX_USE_RAW_WS", "1") == "1"
+_USE_RAW_WS = os.environ.get("QX_USE_RAW_WS", "0") == "1"
 if _USE_RAW_WS:
     # Raw WebSocket backend — pyquotex not required
     _HAS_PYQUOTEX = True
     print("[server] QX_USE_RAW_WS=1 — raw WebSocket backend "
           "(pyquotex optional)")
+else:
+    print("[server] QX_USE_RAW_WS=0 — vendored pyquotex with Firefox TLS "
+          "(Cloudflare bypass)")
 
 if os.environ.get("USE_SIM") == "1":
     _HAS_PYQUOTEX = False
@@ -151,6 +157,12 @@ def _auto_open_browser():
 
 
 # ── HTTP routes ───────────────────────────────────────────────────────────────
+
+@app.get("/healthz")
+async def healthz():
+    """Railway healthcheck endpoint — returns 200 if the process is up."""
+    return {"ok": True}
+
 
 @app.get("/")
 async def index():

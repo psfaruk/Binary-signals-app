@@ -764,8 +764,8 @@ class QuotexFeed:
           get_payout_by_asset(), get_candles(), get_historical_candles(),
           close(), session_data.
         """
-        # ── Raw WebSocket backend (recommended — bypasses Cloudflare) ──
-        if os.environ.get("QX_USE_RAW_WS", "1") == "1":
+        # ── Raw WebSocket backend (lighter but Cloudflare blocks login) ──
+        if os.environ.get("QX_USE_RAW_WS", "0") == "1":
             from quotex_ws import QuotexWSClient
             print("[feed] using RAW WebSocket backend (quotex_ws.QuotexWSClient)")
             return QuotexWSClient(
@@ -776,16 +776,17 @@ class QuotexFeed:
                 root_path= root,
             )
 
-        # ── pyquotex backend (legacy fallback) ──────────────────────────
+        # ── Vendored pyquotex (DEFAULT — Firefox TLS bypasses Cloudflare) ──
+        # The ./pyquotex folder is a vendored copy from otc-live-trading with:
+        #   - ssl_utils.py: Firefox cipher suite → Cloudflare sees Firefox, not bot
+        #   - login.py: honors host param (not hardcoded qxbroker.com)
+        #   - cookie-jar + token parsing fixes
         from pyquotex.stable_api import Quotex
         from pyquotex.types import ReconnectPolicy
-        # pyquotex's Login class hardcodes qxbroker.com and ignores the host=
-        # param for the sign-in flow; qxbroker.com doesn't resolve on some
-        # networks, so point login at the same mirror we connect to.
         from pyquotex.network.login import Login
         Login.base_url = "market-qx.trade"
         Login.https_base_url = "https://market-qx.trade"
-        print("[feed] using pyquotex backend (legacy)")
+        print("[feed] using vendored pyquotex (Firefox TLS — Cloudflare bypass)")
         return Quotex(
             email    = os.environ.get("QX_EMAIL",    ""),
             password = os.environ.get("QX_PASSWORD", ""),
@@ -815,7 +816,7 @@ class QuotexFeed:
         try:
             # pyquotex is optional when QX_USE_RAW_WS=1 — don't import it
             # unconditionally (was breaking on systems without pyquotex).
-            _USE_RAW_WS = os.environ.get("QX_USE_RAW_WS", "1") == "1"
+            _USE_RAW_WS = os.environ.get("QX_USE_RAW_WS", "0") == "1"
             if not _USE_RAW_WS:
                 from pyquotex.types import ReconnectPolicy  # noqa: ensure importable
             # Cross-platform default (was a hardcoded Windows path — broke

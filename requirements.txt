@@ -1,24 +1,19 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-websockets>=12.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
 python-dotenv>=1.0.0
 ntplib>=0.4.0
-curl_cffi>=0.6.0
-# ── Quotex backend ──────────────────────────────────────────────────────────
-# Two backends are supported (see quotex_ws.py + feed.py:_make_client):
-#
-#   QX_USE_RAW_WS=1  (DEFAULT — recommended)
-#     Uses quotex_ws.QuotexWSClient — raw Socket.IO v3 WebSocket to Quotex.
-#     Bypasses pyquotex entirely. Required when Cloudflare is blocking
-#     pyquotex's httpx login (403). pyquotex is NOT required.
-#
-#   QX_USE_RAW_WS=0  (legacy)
-#     Uses pyquotex.stable_api.Quotex. Requires the pyquotex package, which
-#     is NOT on PyPI — install separately:
-#       pip install "git+https://github.com/cleitonleonel/pyquotex.git"
-#
-# Both backends need a valid Quotex ssid. The raw-WS backend obtains it via
-# qx_login.fetch_session() (curl_cffi Chrome TLS impersonation) — see
-# qx_login.py for details. Set QX_EMAIL + QX_PASSWORD in .env, OR set
-# QX_TOKEN directly to a ssid string copied from your browser's Quotex
-# session (DevTools → Application → Cookies → "session").
+
+# ── pyquotex dependencies (vendored copy in ./pyquotex/) ───────────────────
+# The ./pyquotex folder is a vendored copy with local fixes:
+#   - Firefox TLS cipher suite (ssl_utils.py) → bypasses Cloudflare
+#   - Cookie-jar handling fixes
+#   - Token parsing fixes
+#   - Reconnect policy improvements
+# NO curl_cffi, NO Playwright needed — httpx + Firefox TLS does the job.
+beautifulsoup4>=4.12.0
+certifi>=2024.0.0
+fake-useragent>=1.5.0
+httpx>=0.27.0
+pyfiglet>=1.0.0
+rich>=13.0.0
+websockets>=12.0
