@@ -1801,7 +1801,13 @@ class QuotexFeed:
         """Runs 'forever' for one (asset, period) — timer-close fallback,
         tick polling, tick-based close, same-candle updates. Direct per-asset
         port of what used to be the single shared run() loop's body."""
-        TIMER_GRACE = 1.5   # seconds past boundary before forcing close
+        # TIMER_GRACE: how long past the candle boundary to wait for a real
+        # tick before forcing a timer-close with a placeholder open.
+        # Was 1.5s — too short for OTC where tick gaps can be 5-10s.
+        # At 1.5s, most candles closed with a fake open, then the real
+        # first tick arrived "late" and got dropped — corrupting OHLC.
+        # 7.0s gives OTC ticks enough time to arrive naturally.
+        TIMER_GRACE = float(os.environ.get("TIMER_GRACE", "7.0"))
         STALE_SECS  = 90
 
         while True:
