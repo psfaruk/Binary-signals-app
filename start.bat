@@ -34,7 +34,7 @@ echo ✅ Python পাওয়া গেছে
 
 REM ── ধাপ ২: Dependencies চেক/ইনস্টল ────────────────────────────────
 echo [2/5] Dependencies চেক হচ্ছে...
-python -c "import fastapi, uvicorn, websockets, ntplib, curl_cffi" >nul 2>&1
+python -c "import fastapi, uvicorn, websockets" >nul 2>&1
 if errorlevel 1 (
     echo 📦 Dependencies ইনস্টল করা হচ্ছে... একটু সময় লাগবে...
     python -m pip install -r requirements.txt >nul 2>&1

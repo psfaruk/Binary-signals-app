@@ -1,7 +1,6 @@
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 python-dotenv>=1.0.0
-ntplib>=0.4.0
 
 # ── pyquotex dependencies (vendored copy in ./pyquotex/) ───────────────────
 # The ./pyquotex folder is a vendored copy with local fixes:
@@ -10,10 +9,14 @@ ntplib>=0.4.0
 #   - Token parsing fixes
 #   - Reconnect policy improvements
 # NO curl_cffi, NO Playwright needed — httpx + Firefox TLS does the job.
+# FIX (2026-07-13):
+#   - removed `ntplib` (NTP subsystem deleted — was dead code, see feed.py)
+#   - removed `pyfiglet` (no imports anywhere — dead dependency)
+#   - removed `rich`     (no imports anywhere — dead dependency)
+#   - added   `typing_extensions` (real dep of pyquotex/network/navigator.py)
 beautifulsoup4>=4.12.0
 certifi>=2024.0.0
 fake-useragent>=1.5.0
 httpx>=0.27.0
-pyfiglet>=1.0.0
-rich>=13.0.0
+typing_extensions>=4.0.0
 websockets>=12.0

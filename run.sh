@@ -45,7 +45,7 @@ fi
 # ── Python dependencies চেক ─────────────────────────────────────────────────
 echo ""
 echo "📦 Python dependencies চেক হচ্ছে..."
-python3 -c "import fastapi, uvicorn, websockets, ntplib, curl_cffi" 2>/dev/null || {
+python3 -c "import fastapi, uvicorn, websockets" 2>/dev/null || {
     echo "❌ কিছু dependency missing। ইনস্টল করা হচ্ছে..."
     pip3 install -r requirements.txt
 }

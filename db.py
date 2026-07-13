@@ -229,6 +229,10 @@ def recent_accuracy(asset, period, n=20):
 
 
 def cleanup(days=7):
+    # NOTE (2026-07-13): this is a synchronous blocking sqlite3 call.
+    # feed.py's run() calls it once at startup (acceptable — one-time prune
+    # before the event loop is busy), while periodic 6-hour cleanups go
+    # through asyncio.to_thread(_db.cleanup) to avoid blocking the loop.
     cutoff = time.time() - days * 86400
     with _cursor() as c:
         c.execute("DELETE FROM candle_micro WHERE ctime < ?", (int(cutoff),))

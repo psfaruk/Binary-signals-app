@@ -1,5 +1,11 @@
 from pyquotex.ws.objects.base import Base
 
+# NOTE: ``Profile`` is retained (not stubbed) because pyquotex/api.py
+# still imports it (``from .ws.objects.profile import Profile``) and
+# ``Quotex.get_profile()`` actively populates its properties. Reducing
+# it to a stub would break api.py. Kept verbatim per the conservative
+# cleanup policy ("a broken import is worse than dead code").
+
 
 class Profile(Base):
     """Class for Quotex Profile websocket object."""

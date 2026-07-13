@@ -4,7 +4,6 @@ Same message protocol as feed.py: snapshot, tick, eoc.
 When pyquotex is available, the real feed.py takes over.
 """
 import asyncio
-import math
 import os
 import random
 import time
@@ -65,7 +64,6 @@ class _AssetStream:
     prediction: dict | None = None
     zone_streak: dict = field(default_factory=lambda: {"regime": None, "zone": None, "losses": 0})
     payout: int | None = None
-    sub_started: bool = False
     task: object = None
     always_on: bool = False
     interested_cids: set = field(default_factory=set)
@@ -76,9 +74,7 @@ class _AssetStream:
     _live_reeval_ticks: int = 0
     # Last-10s optimization (2026-07-10)
     cached_accuracy: tuple = field(default_factory=lambda: (None, 0))
-    cached_accuracy_at: float = 0.0
     inverted: bool = False   # adaptive-inversion hysteresis, mirrors feed.py
-    live_signal_history: list = field(default_factory=list)
     # Signal delay (2026-07-10)
     signal_delay_until: float = 0.0
     # Sim-specific
@@ -89,6 +85,7 @@ class _AssetStream:
 
 class QuotexFeed:
     def __init__(self):
+        """Initialize simulated feed with default OTC pair list."""
         self._connected = False
         self._broadcast = None
         self._streams: dict[tuple[str, int], _AssetStream] = {}
@@ -100,9 +97,11 @@ class QuotexFeed:
         self._last_pairs_refresh = 0.0
 
     def available_pairs(self) -> dict:
+        """Return the sim pair list + payout floor."""
         return {"pairs": self._pairs_list, "payout_floor": PAYOUT_FLOOR}
 
     def snapshot(self, asset: str, period: int) -> dict | None:
+        """Return current candle history + prediction for an asset."""
         stream = self._streams.get((asset, period))
         if not stream or not stream.candles:
             return None
@@ -112,6 +111,11 @@ class QuotexFeed:
         }
 
     async def ensure_stream(self, asset: str, period: int, cid: str | None = None) -> dict:
+        """Start a sim stream for (asset, period) and register the viewer cid.
+
+        If the stream already exists, just add the cid to interested_cids
+        (and remove it from any other stream). Otherwise create the stream,
+        generate history, and launch the _run_stream task."""
         key = (asset, period)
         stream = self._streams.get(key)
         if stream is not None:
@@ -145,10 +149,12 @@ class QuotexFeed:
         return {"ok": True, "status": "starting"}
 
     async def drop_interest(self, cid: str) -> None:
+        """Remove a viewer from all streams (on WS disconnect)."""
         for s in self._streams.values():
             s.interested_cids.discard(cid)
 
     def stream_status(self) -> dict:
+        """Return active stream count + capacity info."""
         now = time.time()
         return {
             "active": [{"asset": s.asset, "period": s.period,
@@ -160,18 +166,25 @@ class QuotexFeed:
         }
 
     async def shutdown(self) -> None:
+        """Cancel all stream tasks (on server shutdown)."""
         for s in list(self._streams.values()):
             if s.task:
                 s.task.cancel()
 
     # ── Simulated history generation ────────────────────────────────────────
 
-    def _gen_history(self, asset: str, n: int = 120) -> list[dict]:
-        """Generate realistic 1m candle history."""
+    def _gen_history(self, asset: str, period: int = 60, n: int = 120) -> list[dict]:
+        """Generate realistic candle history.
+        FIX (2026-07-13): period was hardcoded to 60 — for 5-minute streams
+        (period=300), history candles were 60s apart but the stream loop
+        floors to 300s, causing a spurious candle-close on iteration 1 and
+        misaligned timestamps for the rest of the stream."""
         base = _BASE_PRICES.get(asset, 1.0)
         pip = _PIP.get(asset, 0.0001)
         now = int(time.time())
-        period = 60
+        # Floor `now` to the period boundary so the last history candle's
+        # time is aligned with the stream loop's `_floor_to_period(now, period)`.
+        now = (now // period) * period
         start = now - n * period
         candles = []
         price = base
@@ -218,6 +231,9 @@ class QuotexFeed:
 
         # Volatility clustering
         stream._sim_volatility = stream._sim_volatility * 0.95 + abs(random.gauss(0, pip * 0.3)) * 0.05
+        # FIX (2026-07-13): re-seed if volatility decayed too low (steady-state ~24%)
+        if stream._sim_volatility < pip * 0.3:
+            stream._sim_volatility = pip * random.uniform(0.5, 1.5)
         vol = max(pip * 0.2, stream._sim_volatility)
 
         # Mean reversion
@@ -383,7 +399,10 @@ class QuotexFeed:
         if result is None:
             return None
         stream.inverted = result.get("_flipped", False)
-        stream.base_candles = closed
+        # FIX (2026-07-13): list(closed) makes a SHALLOW COPY — same bug as
+        # feed.py had. Without this, base_candles aliases stream.candles and
+        # the LIVE re-eval scores against the mutated list, not the snapshot.
+        stream.base_candles = list(closed)
         stream.base_ticks = base_ticks
         stream._live_reeval_ticks = 0
 
@@ -545,6 +564,7 @@ class QuotexFeed:
         return new_pred
 
     def _running_candle(self, stream):
+        """Build the current running candle OHLC from ticks."""
         op = stream.candle_open_price
         ticks = list(stream.ticks)
         if not ticks:
@@ -553,6 +573,8 @@ class QuotexFeed:
                 "high": max(ticks), "low": min(ticks), "close": ticks[-1]}
 
     async def _close_running_and_start_new(self, stream, new_open_time, first_tick, open_is_real=True):
+        """Close the running candle (grade + log + save micro), then start a
+        new candle at new_open_time with first_tick as its open price."""
         if new_open_time <= stream.candle_open_time:
             return None
         closed = self._running_candle(stream)
@@ -590,17 +612,23 @@ class QuotexFeed:
         return (int(ts) // period) * period
 
     async def _run_stream(self, stream):
+        """Simulated stream main loop: generate history, then tick ~10x/sec,
+        closing+opening candles at period boundaries, running LIVE theory
+        re-eval + strength gates, and broadcasting snapshot/tick/eoc msgs."""
         key = (stream.asset, stream.period)
         try:
-            # Generate history
-            history = self._gen_history(stream.asset, 120)
+            # Generate history (pass stream.period — see _gen_history fix)
+            history = self._gen_history(stream.asset, stream.period, 120)
             stream.candles = history
             last = history[-1]
             stream._sim_price = last["close"]
             stream._sim_momentum = 0.0
             pip = _PIP.get(stream.asset, 0.0001)
             stream._sim_volatility = pip * 1.0
-            stream.candle_open_time = last["time"] + stream.period
+            # FIX (2026-07-13): floor candle_open_time to the period boundary.
+            # `last["time"] + stream.period` was not period-aligned (last["time"]
+            # was already floored, so this is OK — but be explicit and robust).
+            stream.candle_open_time = self._floor_to_period(last["time"] + stream.period, stream.period)
             stream.candle_open_price = last["close"]
             stream.ticks.clear()
             stream.ticks.append(last["close"])
@@ -612,7 +640,10 @@ class QuotexFeed:
             stream.signal_delay_until = 0.0
             await self._broadcast({
                 "type": "snapshot", "asset": stream.asset, "period": stream.period,
-                "candles": history, "prediction": stream.prediction,
+                # FIX (2026-07-13): cap to last 300 candles for consistency
+                # with feed.py (history gen is 120, but cap guards future growth).
+                "candles": history[-300:] if len(history) > 300 else history,
+                "prediction": stream.prediction,
             })
             print(f"[sim] started {stream.asset} with {len(history)} candles, price={stream._sim_price}")
 

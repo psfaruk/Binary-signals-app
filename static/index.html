@@ -101,7 +101,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .running-conf{font-size:12px;font-weight:700}
 .running-conf.confirming{color:var(--green)}.running-conf.opposing{color:var(--red)}.running-conf.none{color:var(--text-dim)}
 /* THEORIES */
-#theories-toggle{cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;padding:4px 0}
+#theories-toggle{cursor:pointer;user-select:none;display:flex;align-items:center;justify-content:space-between;padding:4px 0;background:none;border:none;color:inherit;font:inherit;width:100%;text-align:left}
 #theories-toggle .arrow{transition:transform .2s;font-size:10px}
 #theories-toggle.open .arrow{transform:rotate(90deg)}
 #theories-list{display:none;margin-top:4px}
@@ -265,14 +265,13 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
   color:var(--text);
   padding:4px 8px;
 }
-#pair-select option.locked{color:var(--text-dim)}
 #pair-select option:disabled{color:var(--text-dim);background:#161b22}
 /* CANDLE COUNTDOWN — sits at the right edge of the chart, aligned with the
    price-scale label area so it visually pairs with the running price line. */
 #candle-countdown{
   position:absolute;
   top:8px;
-  right:72px;             /* offset past the price-scale (chart's right gutter) */
+  right:72px;             /* Magic offset to clear the price scale — if price labels widen, adjust this */
   z-index:5;
   pointer-events:none;
   font-family:'Inter',system-ui,sans-serif;
@@ -301,12 +300,12 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <span class="pair-arrow">▼</span>
     </div>
     <span class="payout" id="payout-label">—</span>
-    <span id="conn-dot" class="disconnected"></span>
-    <span id="conn-label">Disconnected</span>
+    <span id="conn-dot" class="disconnected" role="status" aria-live="polite"></span>
+    <span id="conn-label" role="status" aria-live="polite">Disconnected</span>
     <span class="badge badge-gray" id="pairs-count">Pairs: —</span>
     <span class="badge badge-gray" id="otc-badge">—</span>
     <span class="spacer"></span>
-    <button id="sound-btn" title="Toggle sound">🔇</button>
+    <button id="sound-btn" title="Toggle sound" aria-pressed="false" aria-label="Toggle sound alerts">🔇</button>
   </header>
   <!-- MAIN -->
   <div id="main">
@@ -425,10 +424,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
         </div>
         <!-- THEORIES -->
         <div style="margin-top:8px">
-          <div id="theories-toggle" role="button" tabindex="0" aria-expanded="false">
+          <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
             <span class="section-title" style="margin:0">Theories</span>
             <span class="arrow">▶</span>
-          </div>
+          </button>
           <div id="theories-list"></div>
         </div>
       </div>
@@ -447,7 +446,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
   </footer>
 </div>
 <!-- Signal detail modal (win/loss reason popup) -->
-<div id="signal-detail-overlay">
+<div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title">
   <div id="signal-detail-modal">
     <h3><span id="detail-title">Signal Detail</span><span class="detail-close" id="detail-close">×</span></h3>
     <div id="detail-body"></div>
@@ -492,17 +491,12 @@ let countdownEl = null;
 let alertedCandleOpenTime = 0;
 let alertedSignalDirection = null;
 /* ── SIGNAL HISTORY (server-backed) ── */
-let serverSignals = [];   // full signal list from DB (with details)
+// FIX (2026-07-13): removed `serverSignals` (assigned but never read),
+// `liveTarget`, `liveDisplay`, `lastRealTickAt`, `liveTau`, `LIVE_TAU_MIN`,
+// `LIVE_TAU_MAX` — all leftover from an older exponential-smoothing approach
+// that was replaced by the _rafFrame easeOutCubic tween. The tween doesn't
+// use these variables.
 let detailOverlay = null, detailBody = null, detailTitle = null;
-// Live-candle smoothing: real ticks land irregularly (Quotex OTC pairs
-// typically send 2-4/sec, sometimes with multi-second gaps), so we animate
-// the displayed close toward the latest real value every rAF frame instead
-// of snapping. The ease duration ADAPTS to the observed gap between real
-// ticks (liveTau), so the motion keeps flowing right up until the next real
-// value replaces it, instead of converging early and sitting still.
-let liveTarget = null, liveDisplay = null;
-let lastRealTickAt = null, liveTau = 0.2;
-const LIVE_TAU_MIN = 0.08, LIVE_TAU_MAX = 1.2;
 
 /* ─── DOM ─── */
 const $ = id => document.getElementById(id);
@@ -557,6 +551,7 @@ detailOverlay.addEventListener('click', (e) => {
 const accPct = $('acc-pct');
 const accDetail = $('acc-detail');
 const staleOverlay = $('stale-overlay');
+const staleMsg = $('stale-msg');
 const chartLoadingOverlay = $('chart-loading-overlay');
 let chartLoadingTimeout = null;
 function showChartLoading(){
@@ -759,7 +754,7 @@ function updateChart(candles, predCandle, resetView){
   refreshPriceLines();
   // Full redraw already painted the true values — drop any in-flight
   // animation so it doesn't fight the fresh authoritative state.
-  liveTarget = null; liveDisplay = null;
+  // (Removed liveTarget/liveDisplay nulling — variables deleted 2026-07-13)
 }
 
 // ── Smooth candle — ease-out cubic tween (from otc-live-trading) ───────────
@@ -794,6 +789,19 @@ function _rafFrame(ts) {
         candleSeries.update({ time: _rTime, open: _rOpen, high: safeHigh, low: safeLow, close: safeClose });
       } catch (_) {}
     }
+    // FIX (2026-07-13): stop the rAF loop when the tween has converged.
+    // Previously _rafActive was set to true in _startRaf and NEVER set to
+    // false — the loop ran forever on every frame even when idle. Now we
+    // check if progress reached 1.0 (tween complete) and stop the loop.
+    // The next _setTarget call will re-start it via _startRaf.
+    if (progress >= 1.0) {
+      _rafActive = false;
+      return;   // don't request another frame
+    }
+  } else {
+    // No valid candle to animate — stop the loop.
+    _rafActive = false;
+    return;
   }
   requestAnimationFrame(_rafFrame);
 }
@@ -830,7 +838,16 @@ function _resetRaf(candle) {
 }
 
 function updateLastCandle(candle){
-  if(!candleData.length) return;
+  // If history was unavailable (snapshot returned candles:[]), seed the
+  // chart from the first live tick instead of staying blank for up to
+  // period+TIMER_GRACE seconds.
+  if(!candleData.length){
+    const bar = { time: candle.time, open: candle.open, high: candle.high, low: candle.low, close: candle.close };
+    candleData.push(bar);
+    if(candleSeries) candleSeries.setData(candleData);
+    _resetRaf(bar);
+    return;
+  }
   const last = candleData[candleData.length-1];
   if(candle.time < last.time) return;
   if(candle.time !== last.time){
@@ -995,7 +1012,8 @@ function renderSignal(pred){
 function renderMicro(micro){
   if(!micro) return;
   currentMicro = micro;
-  const buyPct = Math.round((micro.buy_pct || 50) * 100);
+  // Server sends buy_pct already in 0-100 range (feed.py:1354). Don't *100.
+  const buyPct = Math.max(0, Math.min(100, Math.round(micro.buy_pct || 50)));
   const sellPct = 100 - buyPct;
   bsBuy.style.width = buyPct + '%';
   bsSell.style.width = sellPct + '%';
@@ -1082,10 +1100,9 @@ function renderTape(){
 function addHistory(signal, accuracy, detail){
   // signalHistory stays OLDEST→NEWEST internally. renderHistory() draws
   // in REVERSE so the newest signal is at the TOP of the vertical list.
-  // accuracy = 'draw' here is a PLACEHOLDER — the real accuracy arrives
-  // at the NEXT candle's EOC (the prediction is FOR the next candle).
-  // loadServerHistory() will replace it with the correct value.
-  signalHistory.push({ signal, accuracy: 'pending', detail: detail || null });
+  // Honor the accuracy argument passed by onEoc — the just-closed candle's
+  // prediction is graded immediately, no need to wait for loadServerHistory.
+  signalHistory.push({ signal, accuracy: accuracy || 'pending', detail: detail || null });
   if(signalHistory.length > HISTORY_MAX) signalHistory.shift();
   // Don't count 'pending' accuracy toward totals
   renderHistory();
@@ -1099,14 +1116,19 @@ function loadServerHistory(){
   send({ type: 'signals', asset: currentAsset, period: currentPeriod });
 }
 
-function onServerSignals(sigs){
+function onServerSignals(sigs, asset, period){
   /* Server sent us the full history (with details). Merge into our list.
      signalHistory is stored OLDEST→NEWEST; renderHistory() reverses it so
-     the newest signal is shown at the TOP of the vertical list. */
+     the newest signal is shown at the TOP of the vertical list.
+     NOTE: db.get_recent_signals uses ORDER BY ctime DESC then Python
+     reversed() → server actually sends OLDEST→NEWEST. So we slice the LAST
+     HISTORY_MAX entries (the newest ones) and DO NOT reverse. */
   if(!sigs || !sigs.length) return;
-  serverSignals = sigs;
-  // Server sends most-recent-first, so reverse to get oldest-first internally.
-  signalHistory = sigs.slice(0, HISTORY_MAX).reverse().map(s => ({
+  // Drop stale responses from a previous pair switch.
+  if(asset && asset !== currentAsset) return;
+  if(period && period !== currentPeriod) return;
+  // (Removed serverSignals assignment — variable deleted 2026-07-13)
+  signalHistory = sigs.slice(-HISTORY_MAX).map(s => ({
     signal: s.signal,
     accuracy: s.accuracy,
     detail: s
@@ -1281,6 +1303,7 @@ function connect(){
     setTimeout(loadServerHistory, 800);
   };
   ws.onmessage = e => {
+    lastMessageAt = Date.now();   // any frame proves the connection is alive
     try { handleMsg(JSON.parse(e.data)); } catch(err){ console.error('msg parse error', err); }
   };
   ws.onclose = () => { setStatus('disconnected'); scheduleReconnect(); };
@@ -1311,20 +1334,34 @@ function handleMsg(msg){
   if(carriesAsset && (msg.asset !== currentAsset || (msg.period != null && msg.period !== currentPeriod))){
     return;
   }
-  clearStale();
+  // Only clear stale overlay for data-carrying messages — pairs/status
+  // pings arrive even when the feed is dead, so they must NOT clear it.
+  if(['snapshot','tick','eoc'].includes(msg.type)) clearStale();
   switch(msg.type){
     case 'snapshot': onSnapshot(msg); break;
     case 'tick': onTick(msg); break;
     case 'eoc': onEoc(msg); break;
-    case 'signals': onServerSignals(msg.signals); break;
+    case 'signals': onServerSignals(msg.signals, msg.asset, msg.period); break;
     case 'pairs': renderPairs(msg.pairs); break;
     case 'stale': onStale(msg); break;
+    // status response (keepalive pong) — silently consume, no UI action.
+    case 'status': break;
+    // subscribe_result with ok:false — surface the error to the user.
+    default:
+      if(msg.ok === false && msg.status){
+        showChartLoading();
+        if(staleOverlay){
+          staleOverlay.classList.add('show');
+          if(staleMsg) staleMsg.textContent = '⚠ ' + (msg.status.toUpperCase()) + (msg.reason ? (': ' + msg.reason) : '');
+        }
+      }
+      break;
   }
 }
 
 function onSnapshot(msg){
   const c = msg.candles || [];
-  updateChart(c, null, true);
+  updateChart(c, msg.prediction?.candle || null, true);
   if(c.length) addTapeTick(c[c.length-1].close);
   // Snapshot's last candle is the running candle — track its open time for
   // the countdown timer. (Each candle's `time` field = its open time.)
@@ -1361,7 +1398,7 @@ function onTick(msg){
 
 function onEoc(msg){
   const c = msg.candles || [];
-  updateChart(c);
+  updateChart(c, msg.prediction?.candle || null);
   if(c.length) addTapeTick(c[c.length-1].close);
   // EOC fires when a new candle opens. The last candle in the array is now
   // the NEW running candle — its open time restarts the countdown.
@@ -1399,17 +1436,28 @@ function onStale(msg){
   staleMsg.textContent = '⚠ ' + (msg.asset || '') + ' FEED STALE';
 }
 
+// clearStale is now called ONLY for data-carrying messages (tick/snapshot/eoc),
+// not for pairs/status/signals. No 1s timeout — that prematurely hid a real
+// stale state on every keepalive pong.
 function clearStale(){
   staleOverlay.classList.remove('show');
-  if(staleTimeout) clearTimeout(staleTimeout);
-  staleTimeout = setTimeout(()=>{ staleOverlay.classList.remove('show'); }, 1000);
+  if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
 }
 
 /* ─── HELPERS ─── */
+// FIX (2026-07-13): fmtPrice used to always use toFixed(5), which printed
+// JPY pairs (~150) as "150.12345" — way too many decimals. Now adapts the
+// decimal count to the price magnitude (5 for forex ~1.05, 3 for JPY ~150,
+// 2 for crypto ~60000).
 function fmtPrice(v){
   if(v == null) return '—';
   const n = parseFloat(v);
   if(isNaN(n)) return '—';
+  if(n === 0) return '0.00000';
+  const abs = Math.abs(n);
+  if(abs >= 1000) return n.toFixed(2);
+  if(abs >= 100)  return n.toFixed(3);
+  if(abs >= 10)   return n.toFixed(4);
   return n.toFixed(5);
 }
 
@@ -1440,7 +1488,7 @@ pairSelect.addEventListener('change', () => {
   signalHistory = []; totalCorrect = 0; totalSignals = 0;
   renderHistory(); renderAccuracy();
   candleData = []; tapePrices = []; tapeDir = [];
-  liveTarget = null; liveDisplay = null; lastRealTickAt = null;
+  // (Removed liveTarget/liveDisplay/lastRealTickAt nulling — variables deleted 2026-07-13)
   if(candleSeries) candleSeries.setData([]);
   if(ghostSeries) ghostSeries.setData([]);
   showChartLoading();
@@ -1465,6 +1513,7 @@ pairSelect.addEventListener('change', () => {
 soundBtn.addEventListener('click', () => {
   soundEnabled = !soundEnabled;
   soundBtn.textContent = soundEnabled ? '🔔' : '🔇';
+  soundBtn.setAttribute('aria-pressed', String(soundEnabled));
   if(soundEnabled){
     // Create AudioContext inside the user gesture (click) — required by
     // browser autoplay policies. Without this, browsers keep the context
@@ -1559,19 +1608,49 @@ function updateCandleCountdown(){
 // die anyway, but storing the IDs is best practice and future-proof.
 const _countdownInterval = setInterval(updateCandleCountdown, 200);
 
-// Ping to keep alive
+// Ping to keep alive + dead-connection detection.
+// FIX (2026-07-13): the old keepalive just sent {type:'status'} every 15s
+// but never checked if a response came back. A dead-but-open TCP connection
+// (NAT/proxy hold-open) would keep ws.send() succeeding silently while no
+// data ever arrived. Now: track lastMessageAt — if no WS message in 45s,
+// force-close the socket and let scheduleReconnect() fire.
+let lastMessageAt = Date.now();
 const _keepaliveInterval = setInterval(()=>{
-  if(ws && ws.readyState === WebSocket.OPEN) send({ type: 'status' });
+  if(ws && ws.readyState === WebSocket.OPEN){
+    send({ type: 'status' });
+    // Dead-connection check: if no message in 45s (3× the 15s keepalive),
+    // the connection is dead — force-close to trigger reconnect.
+    if(Date.now() - lastMessageAt > 45000){
+      console.warn('[ws] no message in 45s — force-closing dead connection');
+      try{ ws.close(); }catch(_){}
+    }
+  }
 }, 15000);
+
+// Update lastMessageAt on every WS message (not just data messages — any
+// frame proves the connection is alive). Hooked into ws.onmessage in connect().
 
 // Clean up on page hide (covers reload, navigation, mobile tab switch).
 // 'pagehide' fires more reliably than 'beforeunload' on mobile browsers.
+// FIX (2026-07-13): now also stops the rAF loop and disposes the chart
+// instance to prevent memory leaks across SPA mount/unmount cycles.
 window.addEventListener('pagehide', () => {
   try {
     clearInterval(_countdownInterval);
     clearInterval(_keepaliveInterval);
+    if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
+    if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
+    if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+    // Stop the rAF loop
+    _rafActive = false;
+    // Close the WebSocket
     if(ws){
       try{ ws.close(); }catch(_){}
+    }
+    // Dispose the chart instance to free memory + remove listeners
+    if(chart){
+      try{ chart.remove(); }catch(_){}
+      chart = null;
     }
   } catch(_) {}
 });

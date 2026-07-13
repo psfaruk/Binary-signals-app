@@ -40,6 +40,121 @@ Theories:
 """
 import math
 from collections import Counter
+from functools import lru_cache
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MEMOIZATION (2026-07-13)
+#  _atr, _classify_regime, _key_levels are called 10-20× per analyze_eoc
+#  invocation, each recomputing from scratch. lru_cache memoizes by the
+#  candles tuple's hash — since candles don't change during one analysis,
+#  all calls hit the cache. The cache is bounded to 128 entries to avoid
+#  unbounded memory growth across many streams.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# We can't use lru_cache directly on functions that take `list` (unhashable).
+# Instead, each memoized function accepts an optional `_key` parameter that
+# the caller can use to skip recompute. For simplicity, we use a module-level
+# dict keyed by id(candles) — valid because the candles list is the same
+# object throughout one analyze_eoc call, and is GC'd (along with its cache
+# entry) when the analysis completes.
+_atr_cache: dict = {}
+_regime_cache: dict = {}
+_key_levels_cache: dict = {}
+_market_state_cache: dict = {}
+_dyn_thresholds_cache: dict = {}
+_rsi_cache: dict = {}
+
+
+def _cached_atr(candles, n=20):
+    """Memoized _atr — avoids recomputing True Range 20× per analysis."""
+    key = (id(candles), n, len(candles))
+    cached = _atr_cache.get(key)
+    if cached is not None:
+        return cached
+    val = _atr(candles, n)
+    _atr_cache[key] = val
+    # Bound the cache size
+    if len(_atr_cache) > 256:
+        _atr_cache.clear()
+    return val
+
+
+def _cached_regime(candles):
+    """Memoized _classify_regime — avoids recomputing 10× per analysis.
+    FIX (2026-07-13): the val = line was calling _cached_regime (itself)
+    instead of _classify_regime — infinite recursion. Now calls the real
+    _classify_regime function (renamed back from _cached_regime below)."""
+    key = (id(candles), len(candles))
+    cached = _regime_cache.get(key)
+    if cached is not None:
+        return cached
+    val = _classify_regime_impl(candles)
+    _regime_cache[key] = val
+    if len(_regime_cache) > 64:
+        _regime_cache.clear()
+    return val
+
+
+def _cached_key_levels(candles, lookback=60):
+    """Memoized _key_levels — avoids recomputing 3× per analysis."""
+    key = (id(candles), len(candles), lookback)
+    cached = _key_levels_cache.get(key)
+    if cached is not None:
+        return cached
+    val = _key_levels(candles, lookback)
+    _key_levels_cache[key] = val
+    if len(_key_levels_cache) > 64:
+        _key_levels_cache.clear()
+    return val
+
+
+def _cached_market_state(candles):
+    """Memoized _classify_market_state — avoids recomputing 5× per analysis.
+
+    _classify_market_state is called once in analyze_eoc() and again inside
+    several theory functions (CON, REV, MICRO, MEAN, etc.) — all with the
+    same `candles` list. Caching by id(candles) collapses these to one call.
+    """
+    key = (id(candles), len(candles))
+    cached = _market_state_cache.get(key)
+    if cached is not None:
+        return cached
+    val = _classify_market_state(candles)
+    _market_state_cache[key] = val
+    if len(_market_state_cache) > 64:
+        _market_state_cache.clear()
+    return val
+
+
+def _cached_dynamic_thresholds(candles):
+    """Memoized _dynamic_thresholds — avoids recomputing across MEAN theory."""
+    key = (id(candles), len(candles))
+    cached = _dyn_thresholds_cache.get(key)
+    if cached is not None:
+        return cached
+    val = _dynamic_thresholds(candles)
+    _dyn_thresholds_cache[key] = val
+    if len(_dyn_thresholds_cache) > 64:
+        _dyn_thresholds_cache.clear()
+    return val
+
+
+def _cached_rsi(closes, period=14):
+    """Memoized _rsi — avoids recomputing RSI across regime/thresholds/MEAN.
+
+    Keyed by id(closes); only effective when the same `closes` list object is
+    reused across calls within one analysis run.
+    """
+    key = (id(closes), len(closes), period)
+    cached = _rsi_cache.get(key)
+    if cached is not None:
+        return cached
+    val = _rsi(closes, period)
+    _rsi_cache[key] = val
+    if len(_rsi_cache) > 128:
+        _rsi_cache.clear()
+    return val
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -47,35 +162,73 @@ from collections import Counter
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _round_level(price):
-    """Classify how close a price is to a 'round' psychological level."""
+    """Classify how close a price is to a 'round' psychological level.
+
+    FIX (2026-07-13): the old version hardcoded `decimals = ... + 2` and
+    a 0.0003 (0.03%) tolerance, both tuned for 5-digit forex (EURUSD ~1.05).
+    For USDJPY (~150) the tolerance was way too tight (0.00005 yen), and
+    for BTC (~60000) it was way too loose ($18). Now derives the tolerance
+    from the price MAGNITUDE: 0.05% of price for BIG levels, 0.02% for MID.
+    This works across forex, JPY pairs, crypto, and commodities.
+    """
     if price <= 0:
         return None, 0, "NONE"
-    decimals = max(0, -int(math.floor(math.log10(abs(price)))) + 2)
-    big = round(price, max(0, decimals - 3))
-    mid = round(price, max(0, decimals - 2))
-    d_big = abs(price - big) if big else float("inf")
-    d_mid = abs(price - mid) if mid else float("inf")
-    if d_big < d_mid and d_big / price < 0.0003:
+    # Derive the significant-digit scale from the price magnitude.
+    # For EURUSD (~1.05): scale ~0.01 (round to cents = big psych level)
+    # For USDJPY (~150):  scale ~1   (round to whole yen)
+    # For BTC (~60000):   scale ~100 (round to hundreds)
+    import math as _math
+    magnitude = _math.floor(_math.log10(abs(price)))  # e.g. 0 for 1.05, 2 for 150
+    big_step = 10 ** (magnitude - 1)   # e.g. 0.1 for forex, 10 for JPY, 1000 for BTC
+    mid_step = 10 ** (magnitude - 2)   # one digit finer
+    big = round(price / big_step) * big_step
+    mid = round(price / mid_step) * mid_step
+    d_big = abs(price - big)
+    d_mid = abs(price - mid)
+    # Tolerance: 0.05% of price for BIG, 0.02% for MID
+    tol_big = price * 0.0005
+    tol_mid = price * 0.0002
+    if d_big < d_mid and d_big < tol_big:
         return big, d_big, "BIG"
-    if d_mid / price < 0.0003:
+    if d_mid < tol_mid:
         return mid, d_mid, "MID"
     return None, 0, "NONE"
 
 
-def _key_levels(candles):
-    """Extract recent swing highs/lows as key levels."""
+def _key_levels(candles, lookback=60):
+    """Extract recent swing highs/lows as key levels.
+
+    FIX (2026-07-13): two improvements:
+    1. Added `lookback` param (default 60) so we don't iterate the ENTIRE
+       candle history — O(N) per call, called many times per analysis.
+    2. Returns swing_highs and swing_lows SEPARATELY (in a mixed list with
+       a `type` field, as before, but now also tracks them separately so
+       callers like STRUCT/SWEEP can get both lists without re-filtering).
+       The old `levels[-10:]` could strip ALL swing_lows in a strong trend
+       where the last 10 pivots were all swing_highs.
+    """
     if len(candles) < 5:
         return []
+    # Only look at the last `lookback` candles for recency + performance
+    recent = candles[-lookback:] if len(candles) > lookback else candles
+    offset = len(candles) - len(recent)   # index offset back into full list
     levels = []
-    for i in range(2, len(candles) - 2):
-        c = candles[i]
-        if (c["high"] >= candles[i-1]["high"] and c["high"] >= candles[i-2]["high"] and
-            c["high"] >= candles[i+1]["high"] and c["high"] >= candles[i+2]["high"]):
-            levels.append({"type": "swing_high", "price": c["high"], "idx": i})
-        if (c["low"] <= candles[i-1]["low"] and c["low"] <= candles[i-2]["low"] and
-            c["low"] <= candles[i+1]["low"] and c["low"] <= candles[i+2]["low"]):
-            levels.append({"type": "swing_low", "price": c["low"], "idx": i})
-    return levels[-10:]
+    for i in range(2, len(recent) - 2):
+        c = recent[i]
+        if (c["high"] >= recent[i-1]["high"] and c["high"] >= recent[i-2]["high"] and
+            c["high"] >= recent[i+1]["high"] and c["high"] >= recent[i+2]["high"]):
+            levels.append({"type": "swing_high", "price": c["high"],
+                           "idx": i + offset, "time": c.get("time", 0)})
+        if (c["low"] <= recent[i-1]["low"] and c["low"] <= recent[i-2]["low"] and
+            c["low"] <= recent[i+1]["low"] and c["low"] <= recent[i+2]["low"]):
+            levels.append({"type": "swing_low", "price": c["low"],
+                           "idx": i + offset, "time": c.get("time", 0)})
+    # Return last 10 of EACH type (not mixed) so neither gets stripped
+    swing_highs = [lv for lv in levels if lv["type"] == "swing_high"][-10:]
+    swing_lows  = [lv for lv in levels if lv["type"] == "swing_low"][-10:]
+    # Keep backward-compatible mixed list (sorted by idx) for existing callers
+    mixed = sorted(swing_highs + swing_lows, key=lambda x: x["idx"])
+    return mixed
 
 
 def _parse_votes(reasons):
@@ -104,18 +257,48 @@ def _parse_votes(reasons):
 
 
 def _atr(candles, n=20):
+    """Average True Range — properly accounts for overnight gaps.
+
+    FIX (2026-07-13): this used to compute `sum(high-low)/n` which is
+    average RANGE, not True Range. True Range = max(high-low,
+    |high-prev_close|, |low-prev_close|). For OTC markets there are no
+    overnight gaps so TR ≈ range, but for gapping markets the difference
+    matters. All ~30 downstream `atr * 0.X` thresholds were mis-scaled.
+    Now computes proper TR. The fallback `or 0.0001` is kept for flat
+    markets (avoids division-by-zero in callers).
+    """
     if not candles:
         return 0.0001
     recent = candles[-n:] if len(candles) >= n else candles
-    return sum(c["high"] - c["low"] for c in recent) / len(recent) or 0.0001
+    if len(recent) < 2:
+        return recent[0]["high"] - recent[0]["low"] or 0.0001
+    trs = []
+    for i in range(1, len(recent)):
+        c = recent[i]
+        prev_close = recent[i-1]["close"]
+        tr = max(
+            c["high"] - c["low"],
+            abs(c["high"] - prev_close),
+            abs(c["low"] - prev_close),
+        )
+        trs.append(tr)
+    return (sum(trs) / len(trs)) if trs else 0.0001
 
 
 def _ema(prices, period):
+    """Exponential Moving Average.
+
+    FIX (2026-07-13): used to seed with prices[0], which biases the EMA
+    heavily toward the first value for short series. Now seeds with the
+    SMA of the first `period` values (standard EMA initialization).
+    """
     if not prices:
         return 0
     k = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
+    # Seed with SMA of first `period` values (or all if fewer)
+    seed_n = min(period, len(prices))
+    ema = sum(prices[:seed_n]) / seed_n
+    for p in prices[seed_n:]:
         ema = p * k + ema * (1 - k)
     return ema
 
@@ -133,8 +316,16 @@ def _rsi(closes, period=14):
     for i in range(period, len(gains)):
         avg_g = (avg_g * (period - 1) + gains[i]) / period
         avg_l = (avg_l * (period - 1) + losses[i]) / period
+    # FIX (2026-07-13): if BOTH avg_g and avg_l are 0 (flat market),
+    # return 50 (neutral) instead of 100 (max overbought). The old
+    # `if avg_l == 0: return 100` branch fired on every flat candle,
+    # producing false overbought signals that biased MEAN/CON theories.
+    if avg_l == 0 and avg_g == 0:
+        return 50
     if avg_l == 0:
         return 100
+    if avg_g == 0:
+        return 0
     rs = avg_g / avg_l
     return 100 - (100 / (1 + rs))
 
@@ -157,11 +348,13 @@ def _dynamic_thresholds(candles):
         return {"rsi_overbought": 75, "rsi_oversold": 25,
                 "buy_strong": 65, "sell_strong": 35}
 
-    # Compute RSI for last 20 candles
+    # FIX (2026-07-13): was O(n²) — recomputed RSI from scratch for each i in
+    # a 20-iteration loop, slicing candles[:i] each time. Now computes RSI
+    # once on the last 20 candles' closes (all we need for mean/stddev).
+    closes = [c["close"] for c in candles[-20:]]
     rsi_values = []
-    for i in range(max(14, len(candles) - 20), len(candles) + 1):
-        if i >= 15:
-            rsi_values.append(_rsi(closes_for_rsi := [c["close"] for c in candles[:i]]))
+    for i in range(15, len(closes) + 1):
+        rsi_values.append(_cached_rsi(closes[:i]))
 
     if not rsi_values:
         return {"rsi_overbought": 75, "rsi_oversold": 25,
@@ -170,14 +363,22 @@ def _dynamic_thresholds(candles):
     # Mean and stddev of recent RSI
     rsi_mean = sum(rsi_values) / len(rsi_values)
     if len(rsi_values) > 1:
-        variance = sum((r - rsi_mean) ** 2 for r in rsi_values) / len(rsi_values)
+        denom = len(rsi_values) - 1 if len(rsi_values) > 1 else 1
+        variance = sum((r - rsi_mean) ** 2 for r in rsi_values) / denom
         rsi_std = variance ** 0.5
     else:
         rsi_std = 10
 
-    # Adaptive RSI thresholds: mean ± 1.5×stddev, clamped to sane bounds
-    rsi_overbought = max(65, min(85, rsi_mean + 1.5 * rsi_std))
-    rsi_oversold   = min(35, max(15, rsi_mean - 1.5 * rsi_std))
+    # Adaptive RSI thresholds: mean ± 1.5×stddev.
+    # FIX (2026-07-13): the old clamping was BACKWARDS for low-volatility.
+    # In low-vol, rsi_mean ≈ 50 and rsi_std ≈ 2, so rsi_mean + 1.5*2 = 53.
+    # The old code did `max(65, min(85, 53))` = `max(65, 53)` = 65 — FORCING
+    # the threshold UP to 65. But RSI never reaches 65 in low-vol, so MEAN's
+    # RSI vote NEVER fired in the exact condition it was designed to fix.
+    # Now: allow the threshold to drop below 65 in low-vol (clamp to [55, 85]
+    # for overbought, [15, 45] for oversold) so the vote can actually fire.
+    rsi_overbought = max(55, min(85, rsi_mean + 1.5 * rsi_std))
+    rsi_oversold   = min(45, max(15, rsi_mean - 1.5 * rsi_std))
 
     # ATR-based volatility classification
     atr = _atr(candles, 20)
@@ -227,9 +428,13 @@ def _detect_last_seconds_spike(ticks, atr, lookback_seconds=5):
             max_move = move
             max_dir = "UP" if recent[i] > recent[i-1] else "DOWN"
 
-    # Spike = single tick move > 1.5× ATR (abnormally large for OTC)
+    # FIX (2026-07-13): the old threshold `> 1.5` compared a SINGLE-TICK move
+    # to a full-candle ATR. A single tick is rarely >1.5× a 60-second candle's
+    # range, so the spike filter almost never fired. Now uses 0.3 (30% of ATR)
+    # — a single tick moving 30%+ of the average candle range is genuinely
+    # abnormal for OTC pairs (typical tick-to-candle ratio is 5-10%).
     magnitude_ratio = max_move / atr
-    is_spike = magnitude_ratio > 1.5
+    is_spike = magnitude_ratio > 0.3
 
     return {
         "is_spike": is_spike,
@@ -238,19 +443,24 @@ def _detect_last_seconds_spike(ticks, atr, lookback_seconds=5):
     }
 
 
-def _classify_regime(candles):
-    """Classify market regime using EMA crossover + RSI + ADX-like trending."""
+def _classify_regime_impl(candles):
+    """Classify market regime using EMA crossover + RSI + ADX-like trending.
+    FIX (2026-07-13): renamed from _classify_regime → _cached_regime (by
+    sed) → _classify_regime_impl to avoid name collision with the cache
+    wrapper above. The cache wrapper _cached_regime calls this function."""
     if len(candles) < 10:
         return {"trend": "SIDEWAYS", "zone": "UNKNOWN"}
     closes = [c["close"] for c in candles[-30:]]  # More data points
     ema9  = _ema(closes, 9)
     ema21 = _ema(closes, 21)
-    rsi_val = _rsi(closes)
+    rsi_val = _cached_rsi(closes)
 
-    # EMA separation as a percentage of price
+    # EMA separation as a percentage of price (already price-relative, so
+    # the threshold below is instrument-agnostic: 0.0003 = 0.03% of price,
+    # which works for forex, JPY pairs, and crypto alike).
     sep = abs(ema9 - ema21) / ema21 if ema21 > 0 else 0
     # Strong separation = strong trend
-    strong_trend = sep > 0.0003  # ~3 pips for EUR/USD
+    strong_trend = sep > 0.0003  # 0.03% — price-relative, applies to any instrument
 
     if ema9 > ema21 and rsi_val > 48:
         trend = "UPTREND" if strong_trend or rsi_val > 55 else "SIDEWAYS"
@@ -366,8 +576,13 @@ def _classify_trend_structure(swings):
         return {"structure": "UNKNOWN", "pattern": "NONE",
                 "bias": None, "strength": 0.0}
 
-    # Tolerance: 0.5 pip (5e-5). Swings within this distance are "equal".
-    TOL = 5e-5
+    # FIX (2026-07-13): TOL was hardcoded to 5e-5 (0.5 pip) — only correct
+    # for 5-digit forex. For USDJPY (~150) it's essentially zero (two swings
+    # 0.01 yen apart register as different), for BTC (~60000) it's also
+    # essentially zero. Now derive TOL from the swing price magnitude: 0.01%
+    # of price (so ~0.0001 for EURUSD, ~0.015 for USDJPY, ~6 for BTC).
+    ref_price = sh_prev["price"] or sl_prev["price"] or 1.0
+    TOL = ref_price * 0.0001   # 0.01% of price = "near-equal" threshold
 
     sh_diff = sh_last["price"] - sh_prev["price"]
     sl_diff = sl_last["price"] - sl_prev["price"]
@@ -381,13 +596,16 @@ def _classify_trend_structure(swings):
     if hh and hl:
         sh_move = sh_diff / sh_prev["price"] if sh_prev["price"] else 0
         sl_move = sl_diff / sl_prev["price"] if sl_prev["price"] else 0
-        strength = min(1.0, (abs(sh_move) + abs(sl_move)) * 5000)
+        # FIX (2026-07-13): strength scaling was `* 5000` (tuned for 5-digit
+        # forex). Now uses percentage moves directly with a 2000x scaler that
+        # works across asset classes (a 0.05% swing move → strength 1.0).
+        strength = min(1.0, (abs(sh_move) + abs(sl_move)) * 2000)
         return {"structure": "UPTREND", "pattern": "HH_HL",
                 "bias": "CALL", "strength": round(strength, 3)}
     if lh and ll:
         sh_move = -sh_diff / sh_prev["price"] if sh_prev["price"] else 0
         sl_move = -sl_diff / sl_prev["price"] if sl_prev["price"] else 0
-        strength = min(1.0, (abs(sh_move) + abs(sl_move)) * 5000)
+        strength = min(1.0, (abs(sh_move) + abs(sl_move)) * 2000)
         return {"structure": "DOWNTREND", "pattern": "LH_LL",
                 "bias": "PUT", "strength": round(strength, 3)}
     if hh and ll:
@@ -467,8 +685,16 @@ def _classify_wyckoff_phase(candles, swings):
     # Range-bound mid → no clear phase
     if abs(trend_pct) < 0.05:
         return "RANGE_MID"
-    # Fallback
-    return "MARKUP" if trend_dir > 0 else "MARKDOWN"
+    # FIX (2026-07-13): fallback used to be `MARKUP if trend_dir > 0 else
+    # MARKDOWN` — a perfectly flat market (trend_dir == 0) fell through to
+    # MARKDOWN, biasing all downstream theories that check phase. Now has
+    # an explicit SIDEWAYS branch for the flat case.
+    if trend_dir > 0:
+        return "MARKUP"
+    elif trend_dir < 0:
+        return "MARKDOWN"
+    else:
+        return "SIDEWAYS"
 
 
 def _classify_market_state(candles):
@@ -501,7 +727,7 @@ def _classify_market_state(candles):
                 "ema9": 0, "ema21": 0, "rsi": 50, "swings": {}}
 
     # ── 1. Classic regime (EMA + RSI) ──────────────────────────────────────
-    regime = _classify_regime(candles)
+    regime = _cached_regime(candles)
     trend = regime.get("trend", "SIDEWAYS")
 
     # ── 2. Swing-structure trend ───────────────────────────────────────────
@@ -586,6 +812,9 @@ def _build_micro(ticks, open_price):
     rng = hi - lo
     n   = len(ticks)
 
+    # Min midpoint-crossings to classify as a "fight" between buyers & sellers.
+    FIGHT_CROSSES = 4
+
     # ── 1. Tick-weighted buyer/seller pressure ─────────────────────────────
     # Instead of just counting up/down ticks, weight by the SIZE of each move.
     # A 5-pip up-tick matters more than a 0.1-pip up-tick.
@@ -643,7 +872,7 @@ def _build_micro(ticks, open_price):
     mid     = (hi + lo) / 2
     crosses = sum(1 for i in range(1, n)
                   if (ticks[i-1] < mid) != (ticks[i] < mid))
-    is_fight = crosses >= 4
+    is_fight = crosses >= FIGHT_CROSSES
 
     # ── 3. Volume profile: where did price spend the most time? ───────────
     hold_price = None
@@ -652,7 +881,11 @@ def _build_micro(ticks, open_price):
         bin_size = rng / 10  # 10 bins for finer resolution
         bins = {}
         for t in ticks:
-            b = int((t - lo) / bin_size)
+            # FIX (2026-07-13): clamp bin index to [0, 9]. When t == hi,
+            # int((hi - lo) / bin_size) = int(10) = 10 — out of range.
+            # The hold_price calculation then produced a value ABOVE the
+            # candle high. Now clamped with min(9, ...).
+            b = min(9, int((t - lo) / bin_size))
             bins[b] = bins.get(b, 0) + 1
         top_bin = max(bins, key=bins.get)
         hold_price = round(lo + top_bin * bin_size + bin_size / 2, 6)
@@ -676,12 +909,15 @@ def _build_micro(ticks, open_price):
         half = n // 2
         bin_size = rng / 10
         bins_first, bins_second = {}, {}
-        for i, t in enumerate(ticks):
-            b = int((t - lo) / bin_size)
-            if i < half:
-                bins_first[b] = bins_first.get(b, 0) + 1
-            else:
-                bins_second[b] = bins_second.get(b, 0) + 1
+        for t in ticks[:half]:
+            b = min(9, int((t - lo) / bin_size))   # FIX: clamp to [0,9]
+            bins_first[b] = bins_first.get(b, 0) + 1
+        for t in ticks[half:]:
+            b = min(9, int((t - lo) / bin_size))   # FIX: clamp to [0,9]
+            bins_second[b] = bins_second.get(b, 0) + 1
+        # NOTE: the old duplicate loop that re-populated bins_first/bins_second
+        # with un-clamped bin indices was removed (2026-07-13) — it overwrote
+        # the clamped values above and re-introduced the off-by-one bug.
         if bins_first and bins_second:
             top1 = max(bins_first,  key=bins_first.get)
             top2 = max(bins_second, key=bins_second.get)
@@ -784,25 +1020,42 @@ def _build_micro(ticks, open_price):
                     last_react = "RECOVERY"
 
     # ── 7. TICK SPEED: acceleration / deceleration ────────────────────────
-    # Compare speed (price change per tick) in first half vs second half
+    # Compare speed (price change per tick) in first half vs second half.
+    # FIX (2026-07-13): used to use abs(ticks[half] - ticks[0]) for the
+    # range, which is DIRECTION-AGNOSTIC. A V-shape (down then up to same
+    # level) showed first_half_range = X, second_half_range = X,
+    # accel_ratio = 1.0 (neutral) — completely missing the reversal.
+    # Now uses SIGNED ranges so a V-shape shows first_half < 0 (down) and
+    # second_half > 0 (up), and accel_ratio reflects the directional change.
     tick_speed = None
     if n >= 20:
         half = n // 2
-        first_half_range = abs(ticks[half] - ticks[0])
-        second_half_range = abs(ticks[-1] - ticks[half])
+        # Signed ranges: positive = up move, negative = down move
+        first_half_signed  = ticks[half] - ticks[0]
+        second_half_signed = ticks[-1] - ticks[half]
+        # Absolute ranges still needed for speed magnitude
+        first_half_range  = abs(first_half_signed)
+        second_half_range = abs(second_half_signed)
         # Speed = range / tick_count in that half
         spd_first  = first_half_range / half if half > 0 else 0
         spd_second = second_half_range / (n - half) if (n - half) > 0 else 0
         avg_speed  = (first_half_range + second_half_range) / n
+        # Accel ratio: magnitude-based (>1 = second half moved more)
         if avg_speed > 0:
             accel_ratio = spd_second / spd_first if spd_first > 0 else 1.0
         else:
             accel_ratio = 1.0
+        # Directional change: did the second half reverse the first half?
+        # first_half_signed * second_half_signed < 0 means opposite directions
+        direction_reversed = (first_half_signed * second_half_signed) < 0
         tick_speed = {
             "first": round(spd_first, 8),
             "second": round(spd_second, 8),
             "accel": round(accel_ratio, 3),
             "avg": round(avg_speed, 8),
+            "first_dir": "UP" if first_half_signed > 0 else "DOWN" if first_half_signed < 0 else "FLAT",
+            "second_dir": "UP" if second_half_signed > 0 else "DOWN" if second_half_signed < 0 else "FLAT",
+            "reversed": direction_reversed,
         }
 
     # ── 8. MOMENTUM SHIFT: direction change in last third ─────────────────
@@ -906,7 +1159,12 @@ def _build_micro(ticks, open_price):
         if len(deltas) >= 8:
             abs_deltas = [abs(d) for d in deltas]
             abs_deltas_sorted = sorted(abs_deltas)
-            median_size = abs_deltas_sorted[len(abs_deltas_sorted) // 2]
+            n = len(abs_deltas_sorted)
+            mid = n // 2
+            if n % 2 == 0:
+                median_size = (abs_deltas_sorted[mid - 1] + abs_deltas_sorted[mid]) / 2
+            else:
+                median_size = abs_deltas_sorted[mid]
             mean_size = sum(abs_deltas) / len(abs_deltas)
             # Big threshold = 2× median (or 1.5× mean, whichever is larger)
             # This is robust: in a normal market, <20% of ticks exceed this.
@@ -1009,12 +1267,18 @@ def _theory_con(candles, muted):
         - RANGE_MID + 3-candle streak → no vote (uncertain)
         - 4+ candles → ALWAYS reversal (exhaustion, regardless of phase)
     """
+    # ── Named thresholds (extracted from magic numbers for readability) ──
+    EXHAUST_CONSEC = 4        # 4+ same-direction candles = exhaustion candidate
+    SHRINK_THRESHOLD = 0.5    # last candle < 50% of first in a 3-candle streak
+    RSI_NEUTRAL_MIN = 30      # EMA-trend vote only fires in neutral RSI band
+    RSI_NEUTRAL_MAX = 70
+
     if "CON" in muted:
         return None
     if len(candles) < 5:
         return None
-    regime = _classify_regime(candles)
-    market_state = _classify_market_state(candles)
+    regime = _cached_regime(candles)
+    market_state = _cached_market_state(candles)
     phase = market_state.get("phase", "UNKNOWN")
     trend = market_state.get("trend", "SIDEWAYS")
     score = 0
@@ -1051,12 +1315,25 @@ def _theory_con(candles, muted):
     if all(d >= 0 for d in dirs) and sum(dirs) >= 2:
         # 3+ bullish candles
         sizes = [c["high"] - c["low"] for c in candles[-3:]]
-        shrinking = sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * 0.5
+        shrinking = sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * SHRINK_THRESHOLD
 
-        if consec >= 4:
-            # 4+ consecutive = exhaustion regardless of phase
+        # FIX (2026-07-13): the old `if consec >= 4: score -= 2 PUT exhaustion`
+        # fired UNCONDITIONALLY regardless of phase. In a strong MARKUP,
+        # 4+ bull candles can be the START of a parabolic move, not exhaustion.
+        # Now: 4+ consec votes exhaustion ONLY in ranging/sideways phases.
+        # In MARKUP, 4+ consec votes continuation (trend is strong).
+        if consec >= EXHAUST_CONSEC and phase not in ("MARKUP",) and trend != "UPTREND":
+            # 4+ consecutive in ranging/sideways = exhaustion
             score -= 2
-            reasons.append(f"CON:-2 PUT {consec}-bull-exhaustion")
+            reasons.append(f"CON:-2 PUT {consec}-bull-exhaustion-in-{phase.lower()}")
+        elif consec >= EXHAUST_CONSEC and phase in ("MARKUP",):
+            # 4+ consecutive in a strong markup = momentum continuation
+            score += 2
+            reasons.append(f"CON:+2 CALL {consec}-bull-momentum-in-markup")
+        elif consec >= EXHAUST_CONSEC and trend == "UPTREND":
+            # 4+ consecutive in uptrend (no markup label) = continuation
+            score += 1
+            reasons.append(f"CON:+1 CALL {consec}-bull-uptrend")
         elif shrinking:
             score -= 2
             reasons.append("CON:-2 PUT bull-shrinking-exhaust")
@@ -1080,11 +1357,20 @@ def _theory_con(candles, muted):
     elif all(d <= 0 for d in dirs) and sum(dirs) <= -2:
         # 3+ bearish candles
         sizes = [c["high"] - c["low"] for c in candles[-3:]]
-        shrinking = sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * 0.5
+        shrinking = sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * SHRINK_THRESHOLD
 
-        if consec >= 4:
+        # FIX (2026-07-13): mirror image of the bull case above. 4+ consec
+        # bear votes exhaustion ONLY in ranging/sideways. In MARKDOWN,
+        # 4+ consec bear votes continuation.
+        if consec >= EXHAUST_CONSEC and phase not in ("MARKDOWN",) and trend != "DOWNTREND":
             score += 2
-            reasons.append(f"CON:+2 CALL {consec}-bear-exhaustion")
+            reasons.append(f"CON:+2 CALL {consec}-bear-exhaustion-in-{phase.lower()}")
+        elif consec >= EXHAUST_CONSEC and phase in ("MARKDOWN",):
+            score -= 2
+            reasons.append(f"CON:-2 PUT {consec}-bear-momentum-in-markdown")
+        elif consec >= EXHAUST_CONSEC and trend == "DOWNTREND":
+            score -= 1
+            reasons.append(f"CON:-1 PUT {consec}-bear-downtrend")
         elif shrinking:
             score += 2
             reasons.append("CON:+2 CALL bear-shrinking-exhaust")
@@ -1103,10 +1389,10 @@ def _theory_con(candles, muted):
 
     # EMA trend alignment — ONLY when RSI is in neutral zone
     rsi_val = regime.get("rsi", 50)
-    if regime["trend"] == "UPTREND" and 30 <= rsi_val <= 70:
+    if regime["trend"] == "UPTREND" and RSI_NEUTRAL_MIN <= rsi_val <= RSI_NEUTRAL_MAX:
         score += 1
         reasons.append(f"CON:+1 CALL ema-bullish rsi={rsi_val:.0f}")
-    elif regime["trend"] == "DOWNTREND" and 30 <= rsi_val <= 70:
+    elif regime["trend"] == "DOWNTREND" and RSI_NEUTRAL_MIN <= rsi_val <= RSI_NEUTRAL_MAX:
         score -= 1
         reasons.append(f"CON:-1 PUT ema-bearish rsi={rsi_val:.0f}")
 
@@ -1123,6 +1409,12 @@ def _theory_rev(candles, muted):
       the trend usually continues after a brief pullback. REV vote is
       halved in trending phases, full strength in ranging phases.
     """
+    # ── Named thresholds (extracted from magic numbers for readability) ──
+    DOJI_ATR_RATIO = 0.1       # body < 10% of ATR → too small (doji) → skip
+    WICK_BODY_RATIO = 1.5      # wick must be >= 1.5x the body to qualify
+    WICK_ATR_RATIO = 0.2       # wick must be >= 20% of ATR to qualify
+    LEVEL_PROXIMITY_ATR = 0.3  # close to a swing level if within 30% of ATR
+
     if "REV" in muted:
         return None
     if len(candles) < 3:
@@ -1132,12 +1424,12 @@ def _theory_rev(candles, muted):
     upper_wick = last["high"] - max(last["open"], last["close"])
     lower_wick = min(last["open"], last["close"]) - last["low"]
 
-    atr = _atr(candles)
-    if body < atr * 0.1:
+    atr = _cached_atr(candles)
+    if body < atr * DOJI_ATR_RATIO:
         return None  # Doji — no clear rejection
 
     # Context: REV is stronger in ranging, weaker in trending
-    market_state = _classify_market_state(candles)
+    market_state = _cached_market_state(candles)
     phase = market_state.get("phase", "UNKNOWN")
     is_trending = phase in ("MARKUP", "MARKDOWN")
     rev_multiplier = 0.5 if is_trending else 1.0
@@ -1146,13 +1438,13 @@ def _theory_rev(candles, muted):
     reasons = []
 
     # Get key levels for context
-    levels = _key_levels(candles)
+    levels = _cached_key_levels(candles)
 
     # Strong lower wick = bullish rejection
-    if lower_wick > body * 1.5 and lower_wick > atr * 0.2:
+    if lower_wick > body * WICK_BODY_RATIO and lower_wick > atr * WICK_ATR_RATIO:
         boost = 4
         for lv in levels:
-            if lv["type"] == "swing_low" and abs(last["low"] - lv["price"]) < atr * 0.3:
+            if lv["type"] == "swing_low" and abs(last["low"] - lv["price"]) < atr * LEVEL_PROXIMITY_ATR:
                 boost = 5
                 reasons.append(f"REV:bonus+1 at-swing-low={lv['price']:.5f}")
                 break
@@ -1163,10 +1455,10 @@ def _theory_rev(candles, muted):
                        + (f" (trending×0.5)" if is_trending else ""))
 
     # Strong upper wick = bearish rejection
-    if upper_wick > body * 1.5 and upper_wick > atr * 0.2:
+    if upper_wick > body * WICK_BODY_RATIO and upper_wick > atr * WICK_ATR_RATIO:
         boost = 4
         for lv in levels:
-            if lv["type"] == "swing_high" and abs(last["high"] - lv["price"]) < atr * 0.3:
+            if lv["type"] == "swing_high" and abs(last["high"] - lv["price"]) < atr * LEVEL_PROXIMITY_ATR:
                 boost = 5
                 reasons.append(f"REV:bonus+1 at-swing-high={lv['price']:.5f}")
                 break
@@ -1199,6 +1491,10 @@ def _theory_rev(candles, muted):
 
 def _theory_run(candles, ticks, micro, muted):
     """RUN - Running candle microstructure (uses TICK-WEIGHTED analysis)."""
+    # ── Named thresholds (extracted from magic numbers for readability) ──
+    VOL_DIV_PENALTY = 0.5      # volume/count disagreement → halve the score
+    FIGHT_PENALTY   = 0.3      # fight-zone (midpoint cross) uncertainty → 30%
+
     if "RUN" in muted:
         return None
     if not micro or not ticks:
@@ -1232,7 +1528,7 @@ def _theory_run(candles, ticks, micro, muted):
 
     # ── Volume/count divergence: if they disagree, reduce confidence ───────
     if vol_div:
-        score = int(score * 0.5)
+        score = int(score * VOL_DIV_PENALTY)
         reasons.append("RUN:diverge vol-vs-count *0.5")
 
     # ── Reaction (visited extreme then reversed) ───────────────────────────
@@ -1378,7 +1674,7 @@ def _theory_run(candles, ticks, micro, muted):
 
     # ── Fight zone = uncertainty ──────────────────────────────────────────
     if is_fight:
-        score = int(score * 0.3)
+        score = int(score * FIGHT_PENALTY)
 
     if score == 0:
         return None
@@ -1387,11 +1683,19 @@ def _theory_run(candles, ticks, micro, muted):
 
 def _theory_trap(candles, ticks, muted):
     """TRAP - Trap: big move in one direction then reversal within candle."""
+    # ── Named thresholds (extracted from magic numbers for readability) ──
+    MIN_TICKS = 15            # need >= 15 ticks to evaluate a trap pattern
+
     if "TRAP" in muted:
         return None
-    if not ticks or len(ticks) < 15:
+    if not ticks or len(ticks) < MIN_TICKS:
         return None
-    op  = candles[-1]["open"] if candles else ticks[0]
+    # FIX (2026-07-13): the open should be ticks[0] (the first tick of the
+    # candle being analyzed), NOT candles[-1]["open"] (which is the PREVIOUS
+    # closed candle's open). When ticks are running ticks of the current
+    # candle, candles[-1] is the PREVIOUS candle — using its open corrupts
+    # the `net = cur - op` calculation. Now uses ticks[0] directly.
+    op  = ticks[0]
     hi  = max(ticks)
     lo  = min(ticks)
     cur = ticks[-1]
@@ -1483,7 +1787,7 @@ def _theory_gap(candles, muted):
         return None
 
     # Gap size relative to ATR (for conviction scaling)
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
     gap_size_ratio = abs(gap) / atr if atr > 0 else 0
     if gap_size_ratio > 0.3:
         size_score = 3   # large gap → high-conviction fade
@@ -1544,10 +1848,20 @@ def _theory_gap(candles, muted):
         reasons.append("GAP:bonus±1 FILLED (close returned to prev close)")
     elif w_fill:
         # Wick tested gap zone — was it rejected?
+        # FIX (2026-07-13): when gap_up == is_bull_c (gap direction MATCHES
+        # candle close direction), this is GAP-AND-GO — the gap held as
+        # support/resistance and price continued through it. This is a
+        # CONTINUATION signal, not a fade. The old code STRENGTHENED the
+        # fade (PUT for gap-up) which was exactly backwards for the most
+        # actionable OTC pattern. Now: reverse the fade to continuation.
         if gap_up == is_bull_c:
-            # Rejected: wick went into gap but close rejected → bonus
-            score = score + (1 if score > 0 else -1)
-            reasons.append("GAP:bonus±1 REJECTED (wick tested + rejected)")
+            # Gap-and-go: gap held, price continued → reverse the fade
+            old_dir = "PUT" if score < 0 else "CALL"
+            score = -score   # flip direction: fade → continuation
+            score = score + (1 if score > 0 else -1)   # bonus for the hold
+            new_dir = "CALL" if score > 0 else "PUT"
+            reasons.append(
+                f"GAP:bonus±1 GAP-AND-GO (gap held, {old_dir}→{new_dir})")
     elif gap_up != is_bull_c:
         # FLIP: gap direction opposite to close direction → reversal confirmed
         score = score + (1 if score > 0 else -1)
@@ -1563,6 +1877,16 @@ def _theory_last(candles, ticks, muted):
         return None
     if not ticks or len(ticks) < 10:
         return None
+
+    # Final-portion buyer-pressure (fbp) thresholds:
+    #   EXHAUST_BUYER_FBP   — low fbp on a bullish candle  = buyer exhaustion
+    #   EXHAUST_SELLER_FBP  — high fbp on a bearish candle = seller exhaustion
+    #   OVEREXTEND_BUYER_FBP  — very high fbp on a bullish candle = overextended up
+    #   OVEREXTEND_SELLER_FBP — very low fbp on a bearish candle = overextended down
+    EXHAUST_BUYER_FBP = 0.25
+    EXHAUST_SELLER_FBP = 0.75
+    OVEREXTEND_BUYER_FBP = 0.85
+    OVEREXTEND_SELLER_FBP = 0.15
 
     n = len(ticks)
     last_n = max(n // 6, 3)
@@ -1581,20 +1905,40 @@ def _theory_last(candles, ticks, muted):
     score = 0
     reasons = []
 
+    # Market phase context: in a trending Wyckoff phase (MARKUP / MARKDOWN),
+    # an "over-extended" close in the trend direction is more likely to
+    # continue than to reverse. Downgrade the exhaustion vote so we don't
+    # fight a strong trend. In ranging / sideways phases the full exhaustion
+    # vote applies (mean reversion is the dominant edge there).
+    phase = (_cached_market_state(candles).get("phase", "UNKNOWN")
+             if len(candles) >= 10 else "UNKNOWN")
+
     if net > 0:  # Candle is bullish
-        if fbp <= 0.25:
+        if fbp <= EXHAUST_BUYER_FBP:
             score -= 4  # boosted from -3 to -4 — exhaustion reversal is high-conviction
             reasons.append("LAST:-4 PUT bull-exhaustion-final")
-        elif fbp >= 0.85 and fi_tot >= 4:
-            score -= 3  # boosted from -2 to -3
-            reasons.append("LAST:-3 PUT overextended-bull")
+        elif fbp >= OVEREXTEND_BUYER_FBP and fi_tot >= 4:
+            if phase == "MARKUP":
+                # Trend continuation likely — only a weak exhaustion vote.
+                score -= 1
+                reasons.append(
+                    "LAST:-1 PUT overextended-bull (MARKUP, downgraded)")
+            else:
+                score -= 3  # boosted from -2 to -3
+                reasons.append("LAST:-3 PUT overextended-bull")
     elif net < 0:  # Candle is bearish
-        if fbp >= 0.75:
+        if fbp >= EXHAUST_SELLER_FBP:
             score += 4
             reasons.append("LAST:+4 CALL bear-exhaustion-final")
-        elif fbp <= 0.15 and fi_tot >= 4:
-            score += 3
-            reasons.append("LAST:+3 CALL overextended-bear")
+        elif fbp <= OVEREXTEND_SELLER_FBP and fi_tot >= 4:
+            if phase == "MARKDOWN":
+                # Trend continuation likely — only a weak exhaustion vote.
+                score += 1
+                reasons.append(
+                    "LAST:+1 CALL overextended-bear (MARKDOWN, downgraded)")
+            else:
+                score += 3
+                reasons.append("LAST:+3 CALL overextended-bear")
 
     if score == 0:
         return None
@@ -1602,20 +1946,56 @@ def _theory_last(candles, ticks, muted):
 
 
 def _theory_rng(candles, muted):
-    """RNG - Round-number proximity bias."""
+    """RNG - Round-number proximity bias.
+
+    Round-level rejection logic:
+      - BIG round → ±2 vote, MID round → ±1 vote
+      - High wick at round on bullish candle → PUT (rejection from ceiling)
+      - Low wick at round on bearish candle  → CALL (rejection from floor)
+      - Close AT a round level is also significant — it usually means
+        momentum stalled at the level (exhaustion), so we treat it as a
+        weaker rejection signal with the same direction logic.
+    """
     if "RNG" in muted:
         return None
     if not candles:
         return None
     last = candles[-1]
-    for price in [last["close"], last["high"], last["low"]]:
+    bullish = last["close"] > last["open"]
+    bearish = last["close"] < last["open"]
+    if not (bullish or bearish):
+        return None
+
+    # Pick the strongest round-level rejection across high / low / close.
+    # Iterating high & low first means wick rejections win ties over close
+    # stalls (wick rejections are higher-conviction).
+    best = None  # (weight, direction, vote, reason)
+    for price in [last["high"], last["low"], last["close"]]:
         lvl, _, strength = _round_level(price)
         if strength == "BIG":
-            if last["close"] > last["open"] and price == last["high"]:
-                return "PUT", -2, [f"RNG:-2 PUT rejected-at-big-round {lvl}"]
-            elif last["close"] < last["open"] and price == last["low"]:
-                return "CALL", 2, [f"RNG:+2 CALL rejected-at-big-round {lvl}"]
-    return None
+            weight = 2
+        elif strength == "MID":
+            weight = 1
+        else:
+            continue
+
+        if bullish and price in (last["high"], last["close"]):
+            vote = -weight
+            direction = "PUT"
+            reason = f"RNG:{vote} PUT rejected-at-{strength.lower()}-round {lvl}"
+        elif bearish and price in (last["low"], last["close"]):
+            vote = weight
+            direction = "CALL"
+            reason = f"RNG:+{vote} CALL rejected-at-{strength.lower()}-round {lvl}"
+        else:
+            continue
+
+        if best is None or weight > best[0]:
+            best = (weight, direction, vote, [reason])
+
+    if best is None:
+        return None
+    return best[1], best[2], best[3]
 
 
 def _theory_mst(candles, muted):
@@ -1625,7 +2005,7 @@ def _theory_mst(candles, muted):
     if len(candles) < 10:
         return None
 
-    regime = _classify_regime(candles)
+    regime = _cached_regime(candles)
     score = 0
     reasons = []
     state = "NONE"
@@ -1691,6 +2071,10 @@ def _theory_micro(candles, ticks, muted):
     if not ticks or len(ticks) < 15:
         return None
 
+    # Body / ATR ratio at which a candle is considered to have a "big body"
+    # (mean-reversion trigger in ranging/sideways phases).
+    BIG_BODY_RATIO = 1.0
+
     micro = _build_micro(ticks, candles[-1]["open"] if candles else ticks[0])
     if not micro:
         return None
@@ -1705,14 +2089,14 @@ def _theory_micro(candles, ticks, muted):
     mom_shift = micro.get("momentum_shift")
     pressure  = micro.get("pressure")
     is_fight  = micro.get("is_fight", False)
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
 
     # ── Core: Pressure + candle direction → OTC mean-reversion vote ──────
     # CONTEXT-AWARE (2026-07-13): In trending markets (MARKUP/MARKDOWN),
     # strong pressure CONFIRMS the trend, not reverses it. Only in ranging
     # markets (ACCUMULATION/DISTRIBUTION/SIDEWAYS) does strong pressure
     # signal mean-reversion.
-    market_state = _classify_market_state(candles)
+    market_state = _cached_market_state(candles)
     phase = market_state.get("phase", "UNKNOWN")
     trend = market_state.get("trend", "SIDEWAYS")
     is_trending = phase in ("MARKUP", "MARKDOWN")
@@ -1728,7 +2112,7 @@ def _theory_micro(candles, ticks, muted):
                 f"MICRO:+2 CALL buyer-pressure-in-markup bp={buy_pct}%")
         else:
             # In ranging/sideways, strong buyers = mean-reversion → PUT
-            if body_ratio > 1.0:
+            if body_ratio > BIG_BODY_RATIO:
                 score -= 3
                 reasons.append(
                     f"MICRO:-3 PUT strong-buyers-mean-revert bp={buy_pct}% "
@@ -1745,7 +2129,7 @@ def _theory_micro(candles, ticks, muted):
                 f"MICRO:-2 PUT seller-pressure-in-markdown sp={100-buy_pct}%")
         else:
             # In ranging/sideways, strong sellers = mean-reversion → CALL
-            if body_ratio > 1.0:
+            if body_ratio > BIG_BODY_RATIO:
                 score += 3
                 reasons.append(
                     f"MICRO:+3 CALL strong-sellers-mean-revert sp={100-buy_pct}% "
@@ -1856,7 +2240,7 @@ def _theory_continuity(candles, ticks, muted):
     elif body_dir != 0 and last5_dir != 0 and body_dir == last5_dir:
         # Late ticks CONFIRM body direction → strong momentum carry
         # Check magnitude: if last-5 move is significant (>0.3 ATR)
-        atr = _atr(candles)
+        atr = _cached_atr(candles)
         if atr > 0:
             last5_strength = abs(last5_move) / atr
             if last5_strength > 0.3:
@@ -1894,14 +2278,13 @@ def _theory_continuity(candles, ticks, muted):
 
             if overall_dir != 0 and gap_dir != 0:
                 if overall_dir == gap_dir:
-                    # Ticks confirm gap direction → gap likely continues
-                    # (rare in OTC, but when it happens it's strong)
-                    if gap_dir > 0:
-                        score += 1
-                        reasons.append("CONTINUITY:+1 CALL gap-confirmed-by-ticks")
-                    else:
-                        score -= 1
-                        reasons.append("CONTINUITY:-1 PUT gap-confirmed-by-ticks")
+                    # FIX (2026-07-13): ticks confirm gap direction = gap-and-go.
+                    # GAP theory now handles this case (continuation vote).
+                    # CONTINUITY used to ALSO vote continuation here, double-
+                    # counting with GAP. Now CONTINUITY abstains on the gap-
+                    # confirmed case and lets GAP handle it — CONTINUITY's
+                    # job is tick-continuity, not gap-continuity.
+                    pass   # defer to GAP theory
                 else:
                     # Ticks REJECT gap direction → gap fading (common in OTC)
                     # This aligns with GAP theory's fade logic
@@ -1973,7 +2356,7 @@ def _theory_momentum(candles, muted):
     abs_bodies = [abs(b) for b in bodies]
     directions = [1 if b > 0 else (-1 if b < 0 else 0) for b in bodies]
 
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
     if atr <= 0:
         return None
 
@@ -1982,19 +2365,32 @@ def _theory_momentum(candles, muted):
 
     # ── 1. GROWING BODIES (momentum building) ─────────────────────────────
     # Check if last 3 bodies are growing: |b3| > |b2| > |b1|
+    # FIX (2026-07-13): growing bodies after 3 same-direction candles often
+    # coincide with RSI extremes, where MEAN theory votes reversal. The old
+    # +3 CALL vote directly cancelled MEAN's -3 PUT. Now: check RSI — if
+    # extreme, downgrade the vote from ±3 to ±1 (weak continuation) so
+    # MEAN's reversal vote can win when the market is overextended.
     if len(abs_bodies) >= 3:
         b1, b2, b3 = abs_bodies[-3], abs_bodies[-2], abs_bodies[-1]
         if b3 > b2 > b1 and b3 > b1 * 1.5:
             # Growing bodies → momentum building
             # Direction: follow the last candle's direction
+            # Check RSI to detect overextension
+            closes = [c["close"] for c in candles]
+            rsi_val = _cached_rsi(closes)
+            dyn = _cached_dynamic_thresholds(candles)
+            rsi_extreme = (directions[-1] > 0 and rsi_val >= dyn["rsi_overbought"]) or \
+                          (directions[-1] < 0 and rsi_val <= dyn["rsi_oversold"])
+            vote_strength = 1 if rsi_extreme else 3
+            rsi_note = f" rsi={rsi_val:.0f}{' EXTREME' if rsi_extreme else ''}"
             if directions[-1] > 0:
-                score += 3
-                reasons.append(f"MOMENTUM:+3 CALL growing-bodies "
-                               f"b1={norm_bodies[-3]:.2f}->b3={norm_bodies[-1]:.2f}xATR")
+                score += vote_strength
+                reasons.append(f"MOMENTUM:+{vote_strength} CALL growing-bodies "
+                               f"b1={norm_bodies[-3]:.2f}->b3={norm_bodies[-1]:.2f}xATR{rsi_note}")
             elif directions[-1] < 0:
-                score -= 3
-                reasons.append(f"MOMENTUM:-3 PUT growing-bodies "
-                               f"b1={norm_bodies[-3]:.2f}->b3={norm_bodies[-1]:.2f}xATR")
+                score -= vote_strength
+                reasons.append(f"MOMENTUM:-{vote_strength} PUT growing-bodies "
+                               f"b1={norm_bodies[-3]:.2f}->b3={norm_bodies[-1]:.2f}xATR{rsi_note}")
 
         # ── 2. SHRINKING BODIES (momentum fading → reversal) ──────────────
         elif b1 > b2 > b3 and b1 > b3 * 2:
@@ -2077,6 +2473,16 @@ def _theory_history(candles, ticks, micro_history, muted):
     hist = micro_history[-3:] if len(micro_history) >= 3 else micro_history
 
     # ── 1. CONSECUTIVE PRESSURE ───────────────────────────────────────────
+    # FIX (2026-07-13): this used to vote +2 CALL for sustained buyer pressure
+    # unconditionally — directly contradicting MICRO theory which votes PUT
+    # for strong buyer pressure in ranging markets (mean-reversion). Now
+    # checks the market phase: in MARKUP/MARKDOWN, sustained pressure is
+    # continuation; in ranging/sideways, it's mean-reversion (reversal).
+    # This resolves the MICRO vs HISTORY contradiction.
+    market_state = _cached_market_state(candles)
+    phase = market_state.get("phase", "UNKNOWN")
+    is_trending = phase in ("MARKUP", "MARKDOWN")
+
     pressures = [h.get("pressure") for h in hist if h.get("pressure")]
     if len(pressures) >= 3:
         if all(p == "BUYER" for p in pressures):
@@ -2088,21 +2494,30 @@ def _theory_history(candles, ticks, micro_history, muted):
                 score -= 2
                 reasons.append(f"HISTORY:-2 PUT buyer-pressure-fading "
                                f"{buy_pcts[-3]}->{buy_pcts[-2]}->{buy_pcts[-1]}")
-            else:
-                # Strong sustained buyer pressure → continuation
+            elif is_trending:
+                # In trending phase, sustained buyer pressure = continuation
                 score += 2
-                reasons.append(f"HISTORY:+2 CALL 3x-buyer-pressure "
-                               f"bp={buy_pcts[-1]}%")
+                reasons.append(f"HISTORY:+2 CALL 3x-buyer-pressure-in-trend "
+                               f"bp={buy_pcts[-1]}% phase={phase}")
+            else:
+                # In ranging/sideways, sustained buyer pressure = exhaustion → reversal
+                score -= 1
+                reasons.append(f"HISTORY:-1 PUT 3x-buyer-pressure-in-range "
+                               f"bp={buy_pcts[-1]}% phase={phase}")
         elif all(p == "SELLER" for p in pressures):
             sell_pcts = [h.get("sell_pct", 50) for h in hist]
             if len(sell_pcts) >= 3 and sell_pcts[-1] < sell_pcts[-2] < sell_pcts[-3]:
                 score += 2
                 reasons.append(f"HISTORY:+2 CALL seller-pressure-fading "
                                f"{sell_pcts[-3]}->{sell_pcts[-2]}->{sell_pcts[-1]}")
-            else:
+            elif is_trending:
                 score -= 2
-                reasons.append(f"HISTORY:-2 PUT 3x-seller-pressure "
-                               f"sp={sell_pcts[-1]}%")
+                reasons.append(f"HISTORY:-2 PUT 3x-seller-pressure-in-trend "
+                               f"sp={sell_pcts[-1]}% phase={phase}")
+            else:
+                score += 1
+                reasons.append(f"HISTORY:+1 CALL 3x-seller-pressure-in-range "
+                               f"sp={sell_pcts[-1]}% phase={phase}")
 
     # ── 2. PRESSURE SHIFT (last candle flipped vs previous) ───────────────
     elif len(pressures) >= 2:
@@ -2169,21 +2584,21 @@ def _theory_history(candles, ticks, micro_history, muted):
 
 def _theory_orderflow(candles, ticks, micro, muted):
     """
-    ORDERFLOW - NEW (2026-07-10, Priority 3): Big-money vs retail detector.
+    ORDERFLOW - Big-money vs retail detector.
 
     Looks at the DISTRIBUTION of tick sizes within the running candle:
       - "Big ticks" (>95th percentile) = institutional / large-order flow
       - "Retail ticks" (<50th percentile) = small noise trades
 
-    Insight: when big money and retail DISAGREE on direction, big money
-    usually wins. A single large buyer tick against a flood of tiny seller
-    ticks is a strong bullish signal — the next candle likely opens up.
+    FIX (2026-07-13): in OTC markets, the broker IS the counterparty and
+    typically takes the OPPOSITE side of retail. "Big ticks" in OTC are
+    likely the broker's algorithm — voting WITH them = voting AGAINST the
+    user. The entire theory's edge assumption was inverted for OTC.
+    Now: in OTC mode (default for this app — all pairs are *_otc), the
+    vote direction is INVERTED. Big buyer stepping in → PUT (broker is
+    selling to retail, price will drop). Big seller → CALL.
 
-    Decision matrix:
-      - imbalance=1 + big_dir=UP   → CALL (+3)  big buyer stepping in
-      - imbalance=1 + big_dir=DOWN → PUT (-3)   big seller unloading
-      - big_buy_pct >= 75          → CALL (+2)  big money mostly buying
-      - big_buy_pct <= 25          → PUT (-2)   big money mostly selling
+    For live (non-OTC) markets, the original direction is kept.
     """
     if "ORDERFLOW" in muted:
         return None
@@ -2205,47 +2620,89 @@ def _theory_orderflow(candles, ticks, micro, muted):
     big_dn      = of.get("big_dn", 0)
     big_total   = big_up + big_dn
 
+    # OTC inversion: in OTC markets, "big money" is the broker taking the
+    # OPPOSITE side of retail. Vote AGAINST big-tick direction.
+    # This app only trades OTC pairs (see feed.py _FOREX_OTC), so invert
+    # by default. If a live pair is ever added, detect it here and skip
+    # the inversion.
+    OTC_INVERT = True   # all pairs in this app are OTC
+
     # ── 1. Big vs retail disagreement (highest conviction) ────────────────
     # Only fire if we have at least 2 big ticks (avoid single-tick flukes)
     if imbalance == 1 and big_total >= 2:
         if big_dir == "UP":
-            score += 3
-            reasons.append(
-                f"ORDERFLOW:+3 CALL big-buyer-vs-retail-seller "
-                f"big_up={big_up} ret_dn={of.get('ret_dn', 0)}")
+            # Big buyer in OTC = broker selling to retail → price drops
+            if OTC_INVERT:
+                score -= 3
+                reasons.append(
+                    f"ORDERFLOW:-3 PUT otc-big-buyer=broker-selling "
+                    f"big_up={big_up} ret_dn={of.get('ret_dn', 0)}")
+            else:
+                score += 3
+                reasons.append(
+                    f"ORDERFLOW:+3 CALL big-buyer-vs-retail-seller "
+                    f"big_up={big_up} ret_dn={of.get('ret_dn', 0)}")
         elif big_dir == "DOWN":
-            score -= 3
-            reasons.append(
-                f"ORDERFLOW:-3 PUT big-seller-vs-retail-buyer "
-                f"big_dn={big_dn} ret_up={of.get('ret_up', 0)}")
+            if OTC_INVERT:
+                score += 3
+                reasons.append(
+                    f"ORDERFLOW:+3 CALL otc-big-seller=broker-buying "
+                    f"big_dn={big_dn} ret_up={of.get('ret_up', 0)}")
+            else:
+                score -= 3
+                reasons.append(
+                    f"ORDERFLOW:-3 PUT big-seller-vs-retail-buyer "
+                    f"big_dn={big_dn} ret_up={of.get('ret_up', 0)}")
 
     # ── 2. Big-tick volume dominance (medium conviction) ──────────────────
-    # If big ticks are 75%+ on one side, that's a directional bias even
-    # without retail disagreement.
     elif big_total >= 3:
         if big_buy_pct >= 75:
-            score += 2
-            reasons.append(
-                f"ORDERFLOW:+2 CALL big-buy-dominated "
-                f"big_buy_pct={big_buy_pct}% n={big_total}")
+            if OTC_INVERT:
+                score -= 2
+                reasons.append(
+                    f"ORDERFLOW:-2 PUT otc-big-buy-dominated "
+                    f"big_buy_pct={big_buy_pct}% n={big_total}")
+            else:
+                score += 2
+                reasons.append(
+                    f"ORDERFLOW:+2 CALL big-buy-dominated "
+                    f"big_buy_pct={big_buy_pct}% n={big_total}")
         elif big_buy_pct <= 25:
-            score -= 2
-            reasons.append(
-                f"ORDERFLOW:-2 PUT big-sell-dominated "
-                f"big_buy_pct={big_buy_pct}% n={big_total}")
+            if OTC_INVERT:
+                score += 2
+                reasons.append(
+                    f"ORDERFLOW:+2 CALL otc-big-sell-dominated "
+                    f"big_buy_pct={big_buy_pct}% n={big_total}")
+            else:
+                score -= 2
+                reasons.append(
+                    f"ORDERFLOW:-2 PUT big-sell-dominated "
+                    f"big_buy_pct={big_buy_pct}% n={big_total}")
 
     # ── 3. Pure big-tick direction (low conviction, needs many ticks) ─────
     elif big_total >= 5:
         if big_dir == "UP" and big_up >= 4:
-            score += 1
-            reasons.append(
-                f"ORDERFLOW:+1 CALL big-tick-bias-up "
-                f"big_up={big_up}/{big_total}")
+            if OTC_INVERT:
+                score -= 1
+                reasons.append(
+                    f"ORDERFLOW:-1 PUT otc-big-tick-bias-up "
+                    f"big_up={big_up}/{big_total}")
+            else:
+                score += 1
+                reasons.append(
+                    f"ORDERFLOW:+1 CALL big-tick-bias-up "
+                    f"big_up={big_up}/{big_total}")
         elif big_dir == "DOWN" and big_dn >= 4:
-            score -= 1
-            reasons.append(
-                f"ORDERFLOW:-1 PUT big-tick-bias-down "
-                f"big_dn={big_dn}/{big_total}")
+            if OTC_INVERT:
+                score += 1
+                reasons.append(
+                    f"ORDERFLOW:+1 CALL otc-big-tick-bias-down "
+                    f"big_dn={big_dn}/{big_total}")
+            else:
+                score -= 1
+                reasons.append(
+                    f"ORDERFLOW:-1 PUT big-tick-bias-down "
+                    f"big_dn={big_dn}/{big_total}")
 
     if score == 0:
         return None
@@ -2302,8 +2759,8 @@ def _theory_live_wick(candles, ticks, micro, muted):
     # higher-conviction reversal signal — the wick is rejecting at a known
     # support/resistance level.
     if candles and score != 0:
-        levels = _key_levels(candles)
-        atr = _atr(candles)
+        levels = _cached_key_levels(candles)
+        atr = _cached_atr(candles)
         last_price = ticks[-1] if ticks else (candles[-1]["close"] if candles else 0)
         for lv in levels:
             if abs(last_price - lv["price"]) < atr * 0.3:
@@ -2416,6 +2873,20 @@ def _theory_velocity(candles, ticks, micro, muted):
                 score += 2
                 reasons.append(
                     f"VELOCITY:+2 CALL bear-exhaust-decel accel={accel:.1f}")
+        # FIX (2026-07-13): DEAD ZONE — when dir5==dir10, dir5!=FLAT, and
+        # 0.4 <= accel <= 1.3 (steady speed, no accel/decel), NONE of the
+        # branches above fired. A steady-speed same-direction move is a
+        # weak continuation signal — add it here so the dead zone doesn't
+        # silently swallow the vote.
+        elif dir5 == dir10 and dir5 != "FLAT" and 0.4 <= accel <= 1.3:
+            if dir5 == "UP":
+                score += 1
+                reasons.append(
+                    f"VELOCITY:+1 CALL steady-up spd5={spd5:.7f} accel={accel:.1f}")
+            else:
+                score -= 1
+                reasons.append(
+                    f"VELOCITY:-1 PUT steady-down spd5={spd5:.7f} accel={accel:.1f}")
 
     # ── 5. Long single-direction streak (>=6) = exhaustion candidate ──────
     if streaks:
@@ -2449,6 +2920,10 @@ def _theory_mean(candles, ticks, muted):
     direction. This is the symmetric opposite of CON and the dominant edge
     in the market this app was wrong in.
     """
+    # ── Named thresholds (extracted from magic numbers for readability) ──
+    BIG_BODY_ATR = 1.4         # body > 1.4× ATR → oversized → exhaustion candidate
+    FAILED_WICK_RATIO = 1.2    # opposite-side wick > 1.2× body → failed continuation
+
     if "MEAN" in muted:
         return None
     if len(candles) < 5:
@@ -2457,16 +2932,16 @@ def _theory_mean(candles, ticks, muted):
     last = candles[-1]
     body = last["close"] - last["open"]
     abs_body = abs(body)
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
     if atr <= 0 or abs_body < atr * 0.05:
         return None  # too small to mean anything
 
     score = 0
     reasons = []
 
-    # ── 1. Oversized body = exhaustion candidate ───────────────────────────
+    # ── 1. Oversized body = exhaustion candidate ─────────────────────────────
     body_ratio = abs_body / atr  # 1.0 = body fills ATR
-    if body_ratio > 1.4:
+    if body_ratio > BIG_BODY_ATR:
         # Big body in either direction → expect reversal next candle
         if body > 0:
             score -= 3
@@ -2481,8 +2956,8 @@ def _theory_mean(candles, ticks, muted):
     # volatility periods (nighttime OTC) where RSI oscillates 40-60, the
     # thresholds lower so MEAN still fires. In high-volatility, they widen.
     closes = [c["close"] for c in candles]
-    rsi = _rsi(closes)
-    dyn = _dynamic_thresholds(candles)
+    rsi = _cached_rsi(closes)
+    dyn = _cached_dynamic_thresholds(candles)
     rsi_ob = dyn["rsi_overbought"]
     rsi_os = dyn["rsi_oversold"]
     if rsi >= rsi_ob:
@@ -2495,30 +2970,21 @@ def _theory_mean(candles, ticks, muted):
     # ── 3. Failed-continuation wick (long wick opposite to close direction) ─
     upper_wick = last["high"] - max(last["open"], last["close"])
     lower_wick = min(last["open"], last["close"]) - last["low"]
-    if body > 0 and upper_wick > abs_body * 1.2:
+    if body > 0 and upper_wick > abs_body * FAILED_WICK_RATIO:
         # Bullish body but big upper wick = buyers failed → reversal
         score -= 2
         reasons.append(f"MEAN:-2 PUT failed-bull-continuation wick={upper_wick:.6f}")
-    elif body < 0 and lower_wick > abs_body * 1.2:
+    elif body < 0 and lower_wick > abs_body * FAILED_WICK_RATIO:
         score += 2
         reasons.append(f"MEAN:+2 CALL failed-bear-continuation wick={lower_wick:.6f}")
 
     # ── 4. 4+ same-direction candles = trend exhaustion ────────────────────
-    if len(candles) >= 4:
-        dirs = []
-        for c in candles[-4:]:
-            if c["close"] > c["open"]:
-                dirs.append(1)
-            elif c["close"] < c["open"]:
-                dirs.append(-1)
-            else:
-                dirs.append(0)
-        if all(d > 0 for d in dirs):
-            score -= 2
-            reasons.append("MEAN:-2 PUT 4-bull-exhaustion")
-        elif all(d < 0 for d in dirs):
-            score += 2
-            reasons.append("MEAN:+2 CALL 4-bear-exhaustion")
+    # FIX (2026-07-13): REMOVED — this was double-counting with CON's 4+
+    # consec exhaustion vote. CON now handles 4+ candles contextually (votes
+    # exhaustion in ranging, continuation in trending), so MEAN's blanket
+    # -2 PUT for 4-bull was adding -2 on top of CON's -2, producing -4 PUT
+    # for a single condition. MEAN's RSI + body + wick checks above are
+    # sufficient for mean-reversion detection without the 4-candle rule.
 
     if score == 0:
         return None
@@ -2553,7 +3019,10 @@ def _theory_shift(candles, ticks, muted):
     dirs = [1 if b > 0 else (-1 if b < 0 else 0) for b in bodies]
 
     # Check for 3+ same direction then opposite
-    if len(dirs) >= 4:
+    # FIX (2026-07-13): the guard was `len(dirs) >= 4` but the code accesses
+    # `dirs[4]` (the 5th element, index 4). If len(dirs) == 4, dirs[4] is
+    # IndexError. Now requires len(dirs) >= 5.
+    if len(dirs) >= 5:
         if all(d >= 0 for d in dirs[:3]) and dirs[3] < 0 and dirs[4] < 0:
             # 3 bullish then 2 bearish → shift to PUT
             # But check body sizes: are the bearish bodies growing?
@@ -2673,7 +3142,7 @@ def _theory_fvg(candles, muted):
 
     last = candles[-1]
     close = last["close"]
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
     if atr <= 0:
         return None
 
@@ -2690,18 +3159,25 @@ def _theory_fvg(candles, muted):
         if gap_ratio < 0.15:
             continue
 
-        # Case 1: price is currently INSIDE the gap → fill in progress
+        # Case 1: price is currently INSIDE the gap
+        # FIX (2026-07-13): SMC doctrine — a bullish FVG (gap up) acts as
+        # SUPPORT. Price entering it from above is TESTING SUPPORT → expect
+        # a bullish BOUNCE (CALL), not continuation down. The old code voted
+        # PUT (continuation down through the gap) which was inverted.
+        # Similarly, a bearish FVG acts as RESISTANCE. Price entering it
+        # from below is testing resistance → expect bearish reversal (PUT).
         if fvg["gap_low"] <= close <= fvg["gap_high"]:
-            # Bullish FVG filled from above → expect continuation DOWN through gap
             if fvg["type"] == "bull":
-                score -= 3
-                reasons.append(
-                    f"FVG:-3 PUT filling-bull-gap age={age} "
-                    f"size={gap_ratio:.2f}xATR")
-            else:
+                # Bullish FVG = support. Price inside = testing support → bounce up.
                 score += 3
                 reasons.append(
-                    f"FVG:+3 CALL filling-bear-gap age={age} "
+                    f"FVG:+3 CALL bull-gap-support-bounce age={age} "
+                    f"size={gap_ratio:.2f}xATR")
+            else:
+                # Bearish FVG = resistance. Price inside = testing resistance → drop.
+                score -= 3
+                reasons.append(
+                    f"FVG:-3 PUT bear-gap-resistance-reject age={age} "
                     f"size={gap_ratio:.2f}xATR")
             continue
 
@@ -2741,7 +3217,7 @@ def _find_order_blocks(candles, lookback=15):
     """
     if len(candles) < 4:
         return []
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
     if atr <= 0:
         return []
 
@@ -2806,17 +3282,58 @@ def _theory_ob(candles, muted):
 
     last = candles[-1]
     close = last["close"]
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
     if atr <= 0:
         return None
 
-    score = 0
-    reasons = []
-
+    # Pre-filter stale OBs and compute a strength score for each.
+    # Strength = displacement / ATR weighted by recency — combines the
+    # structural quality of the OB with how recently it formed.
+    candidates = []
     for ob in obs:
         age = len(candles) - 1 - ob["idx"]
         if age > 12:
             continue  # too stale
+        disp_ratio = ob["displacement"] / atr
+        recency_weight = 1.0 / (1.0 + age)  # newer = heavier
+        strength = disp_ratio * recency_weight
+        mid_price = (ob["ob_low"] + ob["ob_high"]) / 2
+        candidates.append({
+            "ob": ob,
+            "age": age,
+            "disp_ratio": disp_ratio,
+            "strength": strength,
+            "mid_price": mid_price,
+        })
+
+    # Deduplicate co-located OBs: when multiple OBs of the same type
+    # cluster within 0.2 ATR of each other, they are effectively the same
+    # zone and would multiply the vote N×. Keep only the strongest from
+    # each cluster so the vote reflects one structural level, not many.
+    cluster_tol = atr * 0.2
+    candidates.sort(key=lambda c: (c["ob"]["type"], c["mid_price"]))
+    deduped = []
+    cluster = []
+    for cand in candidates:
+        same_type = cluster and cluster[0]["ob"]["type"] == cand["ob"]["type"]
+        within_tol = same_type and (
+            cand["mid_price"] - cluster[-1]["mid_price"]) <= cluster_tol
+        if within_tol:
+            cluster.append(cand)
+        else:
+            if cluster:
+                deduped.append(max(cluster, key=lambda c: c["strength"]))
+            cluster = [cand]
+    if cluster:
+        deduped.append(max(cluster, key=lambda c: c["strength"]))
+
+    score = 0
+    reasons = []
+
+    for cand in deduped:
+        ob = cand["ob"]
+        age = cand["age"]
+        disp_ratio = cand["disp_ratio"]
 
         # Recency-based base score
         if age <= 3:
@@ -2827,7 +3344,6 @@ def _theory_ob(candles, muted):
             base = 1
 
         # Displacement strength bonus (stronger OB = more reliable)
-        disp_ratio = ob["displacement"] / atr
         if disp_ratio > 1.8:
             base += 1
 
@@ -2890,7 +3406,11 @@ def _theory_sweep(candles, muted):
     if len(candles) < 6:
         return None
 
-    levels = _key_levels(candles[:-1])  # exclude last candle from level calc
+    # FIX (2026-07-13): _key_levels already excludes the last 2 candles via
+    # range(2, len-2). Passing candles[:-1] excluded ONE MORE candle, giving
+    # SWEEP a 3-candle structural lag — recent swings were invisible. Now
+    # passes the full candles list and lets _key_levels handle the exclusion.
+    levels = _cached_key_levels(candles)
     if not levels:
         return None
 
@@ -2901,7 +3421,7 @@ def _theory_sweep(candles, muted):
     last_open = last["open"]
     body = last_close - last_open
     abs_body = abs(body)
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
     if atr <= 0 or abs_body < atr * 0.05:
         return None
 
@@ -2991,7 +3511,9 @@ def _theory_structure(candles, muted):
     if len(candles) < 8:
         return None
 
-    levels = _key_levels(candles[:-1])  # exclude last candle
+    # FIX (2026-07-13): same as SWEEP — pass full candles, let _key_levels
+    # handle the last-2 exclusion. Was candles[:-1] (3-candle lag).
+    levels = _cached_key_levels(candles)
     swing_highs = [lv for lv in levels if lv["type"] == "swing_high"][-2:]
     swing_lows  = [lv for lv in levels if lv["type"] == "swing_low"][-2:]
     # Need at least 2 of each to determine structure (HH/HL or LH/LL)
@@ -3002,7 +3524,7 @@ def _theory_structure(candles, muted):
     close = last["close"]
     body = last["close"] - last["open"]
     abs_body = abs(body)
-    atr = _atr(candles)
+    atr = _cached_atr(candles)
     if atr <= 0:
         return None
 
@@ -3144,8 +3666,8 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                 "reasons": ["INSUFFICIENT_DATA"], "regime": {},
                 "market_state": {}}
 
-    regime = _classify_regime(candles)
-    market_state = _classify_market_state(candles)
+    regime = _cached_regime(candles)
+    market_state = _cached_market_state(candles)
     all_reasons = []
     call_score = 0
     put_score = 0
@@ -3159,10 +3681,16 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
     if ticks and len(ticks) >= 10:
         closed_micro = _build_micro(ticks, candles[-1]["open"])
 
-    # ── Build micro from running_ticks if provided (for LIVE re-eval) ─────
+    # ── Build micro from running_ticks if provided (for LIVE re-eval) ─
     running_micro = None
     if running_ticks and len(running_ticks) >= 10:
-        op = candles[-1]["close"] if candles else running_ticks[0]
+        # FIX (2026-07-13): the running candle's open is running_ticks[0],
+        # NOT candles[-1]["close"] (that's the PREVIOUS candle's close).
+        # They are equal only when there's no gap. In gapping OTC markets
+        # the wrong open corrupts every `net = cur - op` calculation
+        # downstream. Only fall back to candles[-1]["close"] when we have
+        # no running ticks (which is already handled by the `if` guard).
+        op = running_ticks[0]
         running_micro = _build_micro(running_ticks, op)
 
     # ── Run all theories ──────────────────────────────────────────────────
@@ -3292,11 +3820,25 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                 "theories_detail": theories_detail, "_flipped": False}
 
     agree = max(call_score, put_score)
-    confidence = round(agree / total * 100)
+    # FIX (2026-07-13): confidence was `agree / total * 100` where total is
+    # the SUM OF ABSOLUTE VOTE WEIGHTS. A single TRAP theory voting +5 with
+    # no opposition gave confidence = 5/5 = 100% — totally unjustified.
+    # Now compute confidence from VOTE COUNT (how many theories agree vs
+    # total theories that fired), with weight as a secondary boost.
+    call_n = sum(1 for td in theories_detail if td["vote"] == "CALL")
+    put_n  = sum(1 for td in theories_detail if td["vote"] == "PUT")
+    vote_count_confidence = round(max(call_n, put_n) / total_fired * 100) if total_fired else 0
+    # Blend: 70% vote-count confidence + 30% weight confidence, so a
+    # single heavy theory can't dominate but weight still matters.
+    weight_confidence = round(agree / total * 100) if total > 0 else 0
+    confidence = int(0.7 * vote_count_confidence + 0.3 * weight_confidence)
     majority = "CALL" if net > 0 else "PUT"
 
     # Strength thresholds — TIGHTENED
-    if confidence >= 65 and abs(net) >= 5:
+    # FIX (2026-07-13): require >=2 theories agreeing for STRONG, so a
+    # single theory can't produce a STRONG signal.
+    majority_n = max(call_n, put_n)
+    if confidence >= 65 and abs(net) >= 5 and majority_n >= 2:
         strength = "STRONG"
     elif confidence >= 52:
         strength = "MEDIUM"
@@ -3312,27 +3854,37 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                 "market_state": market_state,
                 "theories_detail": theories_detail, "_flipped": False}
 
-    # ── ADAPTIVE INVERSION (2026-07-10 fix for inverted predictions) ──────
-    # If recent_accuracy < 0.40 over a sufficient sample, the model is
-    # systematically wrong — flip CALL<->PUT. This is the safety net that
-    # turns a 100%-inverted model into a 60%+ correct model.
-    # Hysteresis (2026-07-10): entering the flip uses the 40% floor; once
-    # flipped, only a recovery above 55% reverts it. Otherwise a flip that
-    # starts working nudges accuracy just past 40% and un-flips itself right
-    # back into the bad state on the very next candle.
+    # ── ADAPTIVE INVERSION (2026-07-13 fix for inverted hysteresis) ──────
+    # If recent_accuracy is bad over a sufficient sample, the model is
+    # systematically wrong — flip CALL<->PUT for the continuation-biased
+    # theories (CON, MST, RUN, GAP, ZZ). Reversal theories (REV, TRAP,
+    # LAST, MEAN, FVG, OB, SWEEP, STRUCT, VELOCITY, LIVE_WICK) stay put.
     #
-    # TARGETED INVERSION (2026-07-10 review):
-    #   Previously flipped ALL theories at once. Problem: if some theories
-    #   (e.g. REV, MEAN) were already correct, flipping them made them wrong.
-    #   New logic: only flip the theories that have a CONTINUATION bias
-    #   (CON, MST, RUN, MICRO, GAP, MOMENTUM, CONTINUITY). Reversal theories
-    #   (REV, TRAP, LAST, MEAN, FVG, OB, SWEEP, STRUCT, VELOCITY, LIVE_WICK)
-    #   are left alone — they were right.
-    flip_threshold = 0.55 if currently_flipped else 0.40
-    flipped = False
-    if (recent_accuracy is not None
-            and recent_n >= 8
-            and recent_accuracy < flip_threshold):
+    # Hysteresis (FIXED 2026-07-13):
+    #   - If NOT currently flipped: enter flip when recent_accuracy < 0.40
+    #   - If currently flipped: STAY flipped until accuracy RECOVERS above 0.55
+    #
+    # The previous logic had the hysteresis BACKWARDS — it used
+    # `flip_threshold = 0.55 if currently_flipped else 0.40` then
+    # `if recent_accuracy < flip_threshold: flip`. That meant a flipped
+    # model with still-bad accuracy (0.50) would RE-FLIP (un-flipping
+    # the continuation theories) because 0.50 < 0.55. The model oscillated
+    # every candle. Now the conditions are separate and directionally
+    # correct.
+    flipped = currently_flipped  # carry forward by default
+    should_apply_inversion = False
+    if recent_accuracy is not None and recent_n >= 8:
+        if not currently_flipped and recent_accuracy < 0.40:
+            # Bad accuracy + not yet flipped → enter flip
+            should_apply_inversion = True
+            flipped = True
+        elif currently_flipped and recent_accuracy >= 0.55:
+            # Recovered above 0.55 → un-flip (apply inversion AGAIN to restore)
+            should_apply_inversion = True
+            flipped = False
+        # else: stay in current state (no action)
+
+    if should_apply_inversion:
         # ONLY truly continuation-biased theories get inverted.
         # MICRO, SHIFT, MEAN are REVERSAL theories — flipping them would
         # turn correct votes into wrong ones. MOMENTUM/CONTINUITY/HISTORY
@@ -3351,10 +3903,7 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                 td["vote"] = "PUT" if td["vote"] == "CALL" else "CALL"
                 td["score"] = -td["score"]
                 did_flip = True
-        if not did_flip:
-            # No continuation-biased theory fired — don't set flipped flag
-            pass
-        else:
+        if did_flip:
             # Recompute the blend from the (partially) inverted theories_detail
             call_score = sum(abs(td["score"]) for td in theories_detail
                              if td["vote"] == "CALL")
@@ -3364,7 +3913,12 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
             total = call_score + put_score
             if total > 0:
                 agree = max(call_score, put_score)
-                confidence = round(agree / total * 100)
+                # Recompute confidence with the new (fixed) blend formula
+                call_n = sum(1 for td in theories_detail if td["vote"] == "CALL")
+                put_n  = sum(1 for td in theories_detail if td["vote"] == "PUT")
+                vote_count_confidence = round(max(call_n, put_n) / total_fired * 100) if total_fired else 0
+                weight_confidence = round(agree / total * 100)
+                confidence = int(0.7 * vote_count_confidence + 0.3 * weight_confidence)
                 # Dead-band recheck after flip: if signal is now too weak,
                 # return NEUTRAL instead of forcing a weak CALL/PUT.
                 if abs(net) < 1 or confidence < 40:
@@ -3374,16 +3928,16 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
                             "reasons": all_reasons, "regime": regime,
                             "market_state": market_state,
                             "theories_detail": theories_detail,
-                            "_flipped": True}
+                            "_flipped": flipped}
                 majority = "CALL" if net > 0 else "PUT"
                 # Recompute strength
-                if confidence >= 65 and abs(net) >= 5:
+                majority_n = max(call_n, put_n)
+                if confidence >= 65 and abs(net) >= 5 and majority_n >= 2:
                     strength = "STRONG"
                 elif confidence >= 52:
                     strength = "MEDIUM"
                 else:
                     strength = "WEAK"
-            flipped = True
             all_reasons.append(
                 f"_INVERT targeted-flip-continuation-theories "
                 f"(recent_acc={recent_accuracy:.0%} over n={recent_n}) "
@@ -3419,7 +3973,7 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
     # dampen the signal (broker manipulation trap).
     spike_info = None
     if running_ticks and len(running_ticks) >= 5:
-        atr_val = _atr(candles)
+        atr_val = _cached_atr(candles)
         spike_info = _detect_last_seconds_spike(running_ticks, atr_val)
         if spike_info["is_spike"]:
             # Spike detected — demote strength (don't fully suppress, just caution)

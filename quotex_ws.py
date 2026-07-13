@@ -36,7 +36,7 @@ import json
 import os
 import time
 from collections import defaultdict, deque
-from typing import Any, Iterable
+from typing import Any    # FIX (2026-07-13): removed Iterable (unused)
 
 # websockets is already a transitive dep of uvicorn[standard]; we add it
 # explicitly to requirements.txt too so non-uvicorn callers can import this.
@@ -297,6 +297,10 @@ class QuotexWSClient:
         # Last error / reason for connect()'s return value
         self._last_reason: str = ""
 
+        # Pong-tracking (FIX 2026-07-13): timestamp of the last pong received
+        # from the server. _ping_loop checks this to detect dead connections.
+        self._last_pong: float = time.time()
+
     # ── Session / auth ────────────────────────────────────────────────────
 
     def set_session(self,
@@ -462,8 +466,11 @@ class QuotexWSClient:
             await self._cleanup()
             return False, f"failed to send auth: {exc}"
 
-        # Wait for either authorization/accept OR authorization/reject
-        ok = await asyncio.wait_for(self._wait_for_auth(), timeout=15)
+        # Wait for either authorization/accept OR authorization/reject.
+        # FIX (2026-07-13): removed outer asyncio.wait_for(...) — _wait_for_auth
+        # already has an internal 15s deadline and explicitly returns False on
+        # timeout, so the double wrap was redundant.
+        ok = await self._wait_for_auth()
         if not ok:
             await self._cleanup()
             return False, "authorization rejected"
@@ -489,7 +496,13 @@ class QuotexWSClient:
 
     async def _wait_for_auth(self) -> bool:
         """Wait for the authorization/accept event (handled inside the
-        reader loop, which sets _authorized_event)."""
+        reader loop, which sets _authorized_event).
+
+        FIX (2026-07-13): used to fall off the end (returning None) on
+        timeout. The caller did `if not ok: ... "authorization rejected"`,
+        and `not None` is True, so a TIMEOUT was misreported as "rejected".
+        Now explicitly returns False on timeout.
+        """
         deadline = time.time() + 15
         while time.time() < deadline:
             if getattr(self, "_auth_result", None) is not None:
@@ -497,25 +510,39 @@ class QuotexWSClient:
             if not self._ws_is_open():
                 return False
             await asyncio.sleep(0.05)
+        # Explicit timeout — caller can distinguish via _last_reason if needed
+        return False
 
     def _ws_is_open(self) -> bool:
         """Check if the WebSocket connection is open.
-        Handles both old (v10-) and new (v12+) websockets library APIs.
-        In v16+, the .closed attribute was removed — use .protocol.state."""
+        Handles websockets v10- (legacy), v12-15 (protocol.state),
+        and v13+ / v16+ (ClientConnection with close_code).
+
+        FIX (2026-07-13): in websockets v13+, WebSocketClientProtocol was
+        replaced with ClientConnection, which has neither .protocol.state
+        nor .closed. Both old try-blocks raised AttributeError, so the
+        method returned False even on a live connection — _ping_loop exited,
+        _cleanup skipped ws.close(), stop_candles_stream took the early
+        return, get_candles returned []. Now tries close_code (v13+) too.
+        """
         if self._ws is None:
             return False
-        # Try new API (websockets v12+)
+        # Try v13+ / ClientConnection API first (close_code is None while open)
+        try:
+            return self._ws.close_code is None
+        except AttributeError:
+            pass
+        # Try v12-15 API (protocol.state)
         try:
             from websockets.protocol import State
             return self._ws.protocol.state == State.OPEN
         except (AttributeError, ImportError):
             pass
-        # Try old API (websockets v10-)
+        # Try old v10- API (.closed)
         try:
             return not self._ws.closed
         except AttributeError:
             return False
-        return False
 
     async def _reader_loop(self) -> None:
         """Background task: read frames, dispatch by type, push ticks into
@@ -553,6 +580,11 @@ class QuotexWSClient:
                 await self._ws.send("3")
             except Exception:
                 pass
+        elif kind == "pong":
+            # FIX (2026-07-13): server responded to our ping — record the
+            # timestamp so _ping_loop can detect a dead connection (no pong
+            # for > 2× PING_INTERVAL → break and trigger reconnect).
+            self._last_pong = time.time()
         elif kind == "connect":
             # Socket.IO connect ack — nothing to do
             pass
@@ -611,9 +643,18 @@ class QuotexWSClient:
         # Tick data is delivered as a list of [asset, ts, price, direction]
         # tuples — sent under various event names depending on Quotex version.
         # We detect by shape: a list whose first element is a list of 4 items.
-        if (args and isinstance(args[0], list)
+        # FIX (2026-07-13): this used to be a standalone `if` (not `elif`)
+        # that ran after EVERY event handler. `instruments/list` payloads are
+        # `[[id, "EURUSD_otc", ...], ...]` — each instrument is a list with
+        # ≥3 elements, so the shape check matched and every instrument was
+        # passed to _ingest_tick (which silently failed on float(name_string)).
+        # Now guard with `elif` so known non-tick events don't fall through.
+        elif (args and isinstance(args[0], list)
                 and args[0] and isinstance(args[0][0], (list, tuple))
-                and len(args[0][0]) >= 3):
+                and len(args[0][0]) >= 3
+                and name not in ("instruments/list", "instruments/update",
+                                 "history/load", "chart_notification/update",
+                                 "timesync")):
             for tick in args[0]:
                 self._ingest_tick(tick)
 
@@ -690,31 +731,45 @@ class QuotexWSClient:
                 body = payload[1] or {}
                 asset = body.get("asset") or body.get("instrument")
                 if asset and asset in self._pending_history:
-                    # The binary attachment will follow in the next frame;
-                    # _handle_binary(bytes) above will collect it. We resolve
-                    # the future lazily — see get_candles() which polls the
-                    # buffer.
-                    pass
+                    # FIX (2026-07-13): the binary attachment will follow in
+                    # the next frame; _handle_binary(bytes) above collects it
+                    # into _binary_history_buf. The old code did `pass` here
+                    # and claimed get_candles() would "poll the buffer" — but
+                    # get_candles() does `await fut`, not poll, so it timed
+                    # out after 15s and returned [] without ever checking the
+                    # buffer. Now we resolve the future with an empty list so
+                    # get_candles() unblocks and falls through to the binary
+                    # buffer check at the end of the method.
+                    fut = self._pending_history[asset]
+                    if not fut.done():
+                        fut.set_result([])   # unblock get_candles — it'll
+                                             # read the binary buffer next
 
     async def _ping_loop(self) -> None:
         """Send Socket.IO pings to keep the connection alive AND refresh the
         session token periodically.
 
-        Quotex's session token expires after inactivity. As long as the
-        WebSocket is connected and we send pings, the token stays alive.
-        This is the KEY to never needing manual token refresh on Railway:
-        once connected, the app stays connected forever.
-
-        Every 5 minutes, also send a re-authorization frame as a keepalive
-        signal — this refreshes the server-side session timer.
+        FIX (2026-07-13): added pong-timeout detection. The old loop sent
+        pings every 25s but never checked if a pong came back. If the
+        server silently dropped the connection (no TCP FIN — common with
+        cloud LBs), the reader loop blocked forever and the ping loop
+        kept sending into the void. Now: if no pong in 2× PING_INTERVAL,
+        break the loop and let _reader_loop's finally block clean up.
         """
         last_reauth = time.time()
         REAUTH_INTERVAL = 300  # 5 minutes
+        self._last_pong = time.time()   # initialize so the first check passes
 
         try:
             while self._ws and self._ws_is_open():
                 await asyncio.sleep(PING_INTERVAL)
                 if self._ws and self._ws_is_open():
+                    # Pong-timeout check: if no pong in 2× PING_INTERVAL, the
+                    # connection is dead — break out and let cleanup fire.
+                    if time.time() - self._last_pong > PING_INTERVAL * 2.5:
+                        print(f"[quotex_ws] no pong in {PING_INTERVAL * 2.5:.0f}s — "
+                              f"connection presumed dead, breaking ping loop")
+                        break
                     try:
                         # Engine.IO ping
                         await self._ws.send("2")
@@ -849,7 +904,10 @@ class QuotexWSClient:
         except Exception as exc:
             print(f"[quotex_ws] depth/unfollow error for {asset}: {exc}")
         self._subscribed.discard(asset)
-        # Clear the tick buffer so a re-subscribe doesn't replay stale ticks
+        # Clear the tick buffer so a re-subscribe doesn't replay stale ticks.
+        # MINOR RACE (2026-07-13): an in-flight _ingest_tick could recreate
+        # the deque via defaultdict after this pop. Harmless — the recreated
+        # deque is never read (callbacks already cleared above on line 891).
         self._realtime.pop(asset, None)
 
     # ── Realtime price polling (in-memory, no WS I/O) ─────────────────────
@@ -942,17 +1000,16 @@ class QuotexWSClient:
 
     @staticmethod
     def _normalize_history(raw, asset: str) -> list[dict]:
-        """Normalize whatever shape Quotex returned into a sorted OHLC list."""
+        """Normalize whatever shape Quotex returned into a sorted OHLC list.
+
+        FIX (2026-07-13): the dict branch below was dead — the only caller
+        (get_candles) receives `raw` from the 'history/load' event handler,
+        which already extracts `args[0].get("data") or args[0].get("candles")
+        or []` (always a list) before resolving the future. Removed.
+        """
         if not raw:
             return []
-        # raw may be a list of dicts, a dict with 'data', or a list of lists
-        if isinstance(raw, dict):
-            for key in ("candles", "data", "history"):
-                if key in raw:
-                    raw = raw[key]
-                    break
-            else:
-                raw = list(raw.values())[0] if raw else []
+        # raw is a list of dicts or a list of lists
         out: list[dict] = []
         for c in raw:
             try:

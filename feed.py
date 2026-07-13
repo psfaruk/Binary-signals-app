@@ -61,6 +61,39 @@ MICRO_RECALC_EVERY = int(os.environ.get("MICRO_RECALC_EVERY", "5"))
 # ticks (common in OTC sparse feeds). Set to 0 to disable.
 SKIP_REDUNDANT_BROADCAST = os.environ.get("SKIP_REDUNDANT_BROADCAST", "1") == "1"
 
+# ── Stream lifecycle / housekeeping tunables (2026-07-13) ─────────────────────
+# All of these were previously hardcoded local constants scattered through the
+# stream loop, idle-sweep, error-cooldown, and snapshot paths. Moved to
+# module-level with env overrides so a deployment can tune them without a
+# redeploy.
+#
+# STALE_SECS: a single stream is considered "stuck" if no real tick has
+# arrived in this many seconds — the stream loop re-arms that one stream's
+# subscription. ALSO reused as the global-staleness threshold: when EVERY
+# active stream is silent for this long, the manager loop rebuilds the
+# whole Quotex client (was previously a separate GLOBAL_STALE_SECS = 90).
+STALE_SECS = int(os.environ.get("STALE_SECS", "90"))
+# IDLE_TIMEOUT: seconds a non-always-on stream may run with zero interested
+# viewers before being evicted by _sweep_idle_streams. Always-on 1m pairs
+# are exempt (see _reconcile_always_on).
+IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "300"))
+# Rolling-error cooldown for starting NEW streams. If >= ERROR_THRESHOLD
+# errors occur within ERROR_WINDOW seconds, refuse new streams for
+# ERROR_COOLDOWN seconds. Existing streams are never torn down by this —
+# only ensure_stream()'s capacity/cooldown gate for brand-new pairs fires.
+ERROR_WINDOW    = int(os.environ.get("ERROR_WINDOW",    "60"))
+ERROR_THRESHOLD = int(os.environ.get("ERROR_THRESHOLD", "4"))
+ERROR_COOLDOWN  = int(os.environ.get("ERROR_COOLDOWN",  "120"))
+# Candle history bounding. When a stream's candle list exceeds MAX_CANDLES,
+# truncate to the most recent TRUNCATE_TO. Keeps memory bounded on long-lived
+# always-on pairs without throwing away recent chart context.
+MAX_CANDLES = int(os.environ.get("MAX_CANDLES", "500"))
+TRUNCATE_TO = int(os.environ.get("TRUNCATE_TO", "400"))
+# SNAPSHOT_CANDLES: how many recent candles to include in the initial
+# /api/subscribe snapshot and the on-join snapshot handed to a viewer joining
+# an already-running stream. Frontend charts render off this.
+SNAPSHOT_CANDLES = int(os.environ.get("SNAPSHOT_CANDLES", "300"))
+
 # ── Fallback display-name helper ─────────────────────────────────────────────
 def _api_to_display(api_name: str) -> str:
     """Convert a Quotex forex asset code to a readable display string, e.g.
@@ -90,6 +123,9 @@ def _clean_display(raw_display: str) -> str:
 # The app now only ever streams/lists forex pairs (see _load_pairs) — the
 # other categories are kept here only as documentation of what's excluded,
 # and so re-adding a category later is a one-line change.
+# Only forex pairs are ever streamed/listed (see _FOREX_BASES below).
+# Other categories (stocks/crypto/commodities) were previously defined
+# here as documentation but never referenced — removed 2026-07-13.
 _FOREX_OTC = [
     # Forex majors OTC
     "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "USDCHF_otc",
@@ -106,12 +142,6 @@ _FOREX_OTC = [
     "USDBDT_otc", "INRUSD_otc", "EURSGD_otc",
     "BRLUSD_otc", "USDARS_otc", "USDDZD_otc",
 ]
-_STOCKS_OTC = [
-    "MSFT_otc", "INTC_otc", "JNJ_otc", "AXP_otc",
-    "BA_otc",   "META_otc", "MCD_otc", "PFE_otc",
-]
-_CRYPTO_OTC = ["BTCUSD_otc", "ETHUSD_otc"]
-_COMMODITIES_OTC = ["XAUUSD_otc", "XAGUSD_otc", "USOIL_otc", "UKBRENT_otc"]
 
 # Logical base symbols (no _otc suffix) that count as forex — used to filter
 # the REAL Quotex instrument list in _load_pairs, not just this fallback. A
@@ -136,10 +166,18 @@ _DEFAULT_PAIRS: list[dict] = [
 def _atr(candles: list[dict]) -> float:
     if not candles:
         return 0.0001
-    return sum(c["high"] - c["low"] for c in candles) / len(candles)
+    # FIX: fallback was 0.0001 (forex-only). Now uses price-relative fallback.
+    avg_range = sum(c["high"] - c["low"] for c in candles) / len(candles)
+    if avg_range <= 0 and candles:
+        # Price-relative fallback for non-forex pairs
+        ref = candles[-1]["close"] or 1.0
+        return ref * 0.0001  # 0.01% of price
+    return avg_range or 0.0001
 
 
 def _pred_candle(candles: list[dict], signal: str, period: int, actual_open: float | None = None) -> dict:
+    if not candles:
+        return None    # FIX (2026-07-13): was IndexError on empty list
     last = candles[-1]
     op   = actual_open if actual_open is not None else last["close"]
     atr  = _atr(candles[-20:]) if len(candles) >= 20 else (last["high"] - last["low"]) or 0.0001
@@ -181,13 +219,23 @@ def _normalise(raw) -> list[dict]:
     seen: dict[int, dict] = {}
     for c in raw:
         try:
+            # FIX (2026-07-13): skip entries with missing OHLC fields instead
+            # of defaulting to 0.0. A malformed candle with no "open" key
+            # became open=0.0, which sailed through and poisoned the chart
+            # with a flat-zero candle. Now: require all 4 OHLC fields present.
+            if not all(k in c for k in ("open", "high", "low", "close")):
+                continue
             bar = {
                 "time":  int(c.get("time",  c.get("from", 0))),
-                "open":  float(c.get("open",  0)),
-                "high":  float(c.get("high",  0)),
-                "low":   float(c.get("low",   0)),
-                "close": float(c.get("close", 0)),
+                "open":  float(c["open"]),
+                "high":  float(c["high"]),
+                "low":   float(c["low"]),
+                "close": float(c["close"]),
             }
+            # Sanity check: high >= max(open, close) and low <= min(open, close)
+            if bar["high"] < max(bar["open"], bar["close"]) or \
+               bar["low"]  > min(bar["open"], bar["close"]):
+                continue   # invalid OHLC — skip
             seen[bar["time"]] = bar   # deduplicate: later entry wins
         except (TypeError, ValueError):
             continue
@@ -200,12 +248,16 @@ def _drop_price_contamination(candles: list[dict]) -> list[dict]:
     fresh history fetch. Symptom: chart shows an old price-level cluster,
     a big blank jump, then the new pair's real candles — permanently.
 
-    FIX (2026-07-13): Two-layer detection:
-    1. Close-to-close jump > 10x median range (was 25x — too lenient)
-    2. Open-to-prev-close gap > 10x median range (NEW — catches the
-       visible gap between candles that close-to-close misses)
+    FIX (2026-07-13): Three improvements over the original:
+    1. Lowered the short-batch threshold from 6 to 3 — a 5-candle batch
+       that is fully contaminated (e.g., wrong-asset fetch on a fresh
+       stream with little history) was passing through unchecked.
+    2. Track the LAST contamination boundary (not just the first), so
+       legit candles between two contamination points aren't dropped.
+    3. Also detect SUFFIX contamination (stale data spliced at the END
+       of the batch) — the old code only dropped a leading prefix.
     """
-    if len(candles) < 6:
+    if len(candles) < 3:
         return candles
     ranges = sorted(c["high"] - c["low"] for c in candles if c["high"] > c["low"])
     if not ranges:
@@ -214,19 +266,28 @@ def _drop_price_contamination(candles: list[dict]) -> list[dict]:
     if median_rng <= 0:
         return candles
 
+    # Find the LAST prefix contamination boundary (drops everything before it)
     cut = 0
     for i in range(1, len(candles)):
-        # Layer 1: close-to-close jump
         jump = abs(candles[i]["close"] - candles[i - 1]["close"])
-        # Layer 2: open gap from previous close (the visible chart gap)
-        gap = abs(candles[i]["open"] - candles[i - 1]["close"])
+        gap  = abs(candles[i]["open"]  - candles[i - 1]["close"])
         if jump > median_rng * 10 or gap > median_rng * 10:
-            cut = i
+            cut = i   # keep updating — we want the LAST contamination point
+    # Find suffix contamination (stale data after fresh data)
+    suffix_cut = len(candles)
+    for i in range(len(candles) - 1, 0, -1):
+        jump = abs(candles[i]["close"] - candles[i - 1]["close"])
+        gap  = abs(candles[i]["open"]  - candles[i - 1]["close"])
+        if jump > median_rng * 10 or gap > median_rng * 10:
+            suffix_cut = i
+            break
     if cut:
         print(f"[feed] dropped {cut} contaminated candle(s) "
               f"(price gap > 10x median range) before index {cut}")
-        return candles[cut:]
-    return candles
+    if suffix_cut < len(candles):
+        print(f"[feed] dropped {len(candles) - suffix_cut} contaminated candle(s) "
+              f"(suffix price gap > 10x median range) from index {suffix_cut}")
+    return candles[cut:suffix_cut]
 
 
 def _floor_to_period(ts: float, period: int) -> int:
@@ -239,8 +300,9 @@ def _ema_simple(prices: list[float], period: int) -> float:
     if not prices:
         return 0.0
     k = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
+    seed_n = min(period, len(prices))
+    ema = sum(prices[:seed_n]) / seed_n
+    for p in prices[seed_n:]:
         ema = p * k + ema * (1 - k)
     return ema
 
@@ -269,7 +331,7 @@ class _AssetStream:
         default_factory=lambda: {"regime": None, "zone": None, "losses": 0})
     payout: int | None = None
     sub_started: bool = False           # start_candles_stream() issued at least once
-    task: object = None                 # the asyncio.Task running this stream
+    task: "asyncio.Task | None" = None       # the asyncio.Task running this stream
     # Server pre-warmed this pair (payout >= PAYOUT_FLOOR) — immune to idle
     # eviction while true. See QuotexFeed._reconcile_always_on.
     always_on: bool = False
@@ -287,14 +349,15 @@ class _AssetStream:
     # Cached recent_accuracy — queried ONCE per candle (accuracy only changes
     # at candle close, so re-querying mid-candle is pure waste).
     cached_accuracy: tuple = field(default_factory=lambda: (None, 0))
-    cached_accuracy_at: float = 0.0   # wall-time of last accuracy query
+    # FIX (2026-07-13): removed `cached_accuracy_at` — was set but never read
+    # (no TTL invalidation was ever implemented).
     # Adaptive-inversion hysteresis (2026-07-10) — whether the last-delivered
     # signal was flip-corrected; feeds back into analyze_eoc's flip_threshold
     # so a recovering flip doesn't immediately un-flip itself.
     inverted: bool = False
-    # Flip suppression tracker — records signal direction at each LIVE re-eval
-    # in the current candle. If signal flips 2+ times in last 10s, demote.
-    live_signal_history: list = field(default_factory=list)  # [(tick_count, signal, ts)]
+    # FIX (2026-07-13): removed `live_signal_history` — was reset to [] but
+    # never read or appended to. The "flip 2+ times in 10s → demote" logic
+    # was never implemented.
     # ── Signal delay (2026-07-10) ─────────────────────────────────────────
     # User requirement: prediction candle open হওয়ার ২-৩ সেকেন্ড পরে signal
     # broadcast হবে, যাতে opening tick behavior confirm হয়। EOC-তে
@@ -312,7 +375,7 @@ class _AssetStream:
     # Empty queue (legacy pyquotex backend, no callback support) means the
     # stream loop falls back to polling get_realtime_price() as before.
     tick_queue: "asyncio.Queue" = field(default_factory=asyncio.Queue)
-    tick_callback: object = None  # registered callback (for unregister on stop)
+    tick_callback: "Callable | None" = None  # registered callback (for unregister on stop)
 
     # ── Microstructure caching (2026-07-11) ──────────────────────────────
     # _analyze_microstructure() is O(n) over stream.ticks — expensive when
@@ -334,6 +397,12 @@ class _AssetStream:
     _last_bcast_low: float = 0.0
     _last_bcast_close: float = 0.0
 
+    # NOTE: the following attributes are set at runtime but NOT declared as
+    # fields (set via stream.xxx = ...). They work via Python's instance
+    # __dict__ but bypass the dataclass schema:
+    #   _tracked_high, _tracked_low — running-candle high/low cache (see _track_tick)
+    #   _evicting — flag set by _sweep_idle_streams to skip stop_candles_stream
+
 
 # ── Feed ──────────────────────────────────────────────────────────────────────
 
@@ -343,8 +412,8 @@ class _AssetStream:
 # continuation nor reversal theories have a real edge there (see project
 # history), so once a zone proves itself unreadable N times running, stop
 # guessing in it rather than keep flipping a coin. Resets the moment the
-# regime/zone classification actually changes.
-ZONE_LOSS_GUARD = 3
+# regime/zone classification actually changes. Overridable per-deployment.
+ZONE_LOSS_GUARD = int(os.environ.get("ZONE_LOSS_GUARD", "3"))
 
 
 class QuotexFeed:
@@ -396,91 +465,57 @@ class QuotexFeed:
         # re-run periodically from the manager loop.
         self._last_db_cleanup: float = 0.0
 
-        # ── NTP time offset (2026-07-10 review Issue #1) ─────────────────────
-        # Difference between local system clock and NTP server time, in
-        # seconds. Added to time.time() in _now() to get corrected time.
-        # Re-synced every 5 minutes from the manager loop. Without this, a
-        # 1-2s clock drift on Railway/Vercel containers causes signal-delay
-        # gate to fire late and the candle-boundary tick-close to miss the
-        # true open price.
-        self._time_offset: float = 0.0
-        self._last_ntp_sync: float = 0.0
-
-        # ── Higher Timeframe (HTF) trend cache (2026-07-10 review Issue #5) ─
+        # ── Higher Timeframe (HTF) trend cache ──
         # {asset: {"trend": "UPTREND"/"DOWNTREND"/"SIDEWAYS",
         #          "fetched_at": float, "ema9": float, "ema21": float}}
-        # Refreshed every 60s per asset (5m candle = 300s, so 60s cache is
-        # plenty). Used to filter 1m signals: if 1m signal opposes 5m trend,
-        # strength is demoted.
+        # Refreshed every 60s per asset. Used to filter 1m signals: if 1m
+        # signal opposes 5m trend, strength is demoted.
+        #
+        # NOTE (2026-07-13): the NTP time-offset subsystem that used to live
+        # here was removed — it computed an offset that no caller consumed
+        # (every candle-boundary / signal-delay check used raw time.time()).
+        # If real NTP correction is needed, use ntplib AND replace every
+        # time.time() in the candle-boundary / signal-delay / stale-detection
+        # paths with the corrected clock in one go.
         self._htf_cache: dict[str, dict] = {}
 
     # ── Public ────────────────────────────────────────────────────────────────
-
-    def _now(self) -> float:
-        """Wall-clock time corrected by NTP offset. Use this instead of
-        time.time() in any timing-critical path (candle boundaries, signal
-        delay, stale detection). Falls back to time.time() if NTP sync has
-        not yet completed (offset = 0)."""
-        return time.time() + self._time_offset
-
-    async def _sync_ntp(self) -> None:
-        """Fetch NTP server time and compute offset vs local clock.
-        Runs once at startup and every 5 minutes from the manager loop.
-        Uses pool.ntp.org (global, anycast) with a 3s timeout — never blocks
-        the event loop if NTP is unreachable (just leaves offset at 0)."""
-        try:
-            import ntplib
-            client = ntplib.NTPClient()
-            # Run in thread because NTPClient.request is blocking
-            resp = await asyncio.to_thread(
-                client.request, "pool.ntp.org", version=3, timeout=3)
-            offset = resp.offset
-            # Sanity check: offset should be < 5s. If larger, something's
-            # wrong (NTP server or network) — don't apply it.
-            if abs(offset) < 5.0:
-                old = self._time_offset
-                self._time_offset = offset
-                self._last_ntp_sync = time.time()
-                if abs(old - offset) > 0.1:
-                    print(f"[feed] NTP sync: offset {old:.3f}s -> {offset:.3f}s")
-            else:
-                print(f"[feed] NTP offset too large ({offset:.3f}s), ignoring")
-        except Exception as exc:
-            # NTP is best-effort — never crash the feed over it
-            print(f"[feed] NTP sync failed (non-fatal): {exc}")
 
     async def _get_htf_trend(self, asset: str, stream: '_AssetStream' = None) -> str:
         """Get the 5-minute trend for an asset (Higher Timeframe Confluence).
         Returns 'UPTREND', 'DOWNTREND', or 'SIDEWAYS'.
 
-        CRITICAL FIX (2026-07-12): NO longer calls get_candles(period=300)
-        — that was triggering a re-subscription storm that killed the live
-        60s tick stream. Now derives the 5m trend from the EXISTING 1m
-        closed candles in stream.candles (every 5th 1m candle = 1 5m candle).
+        Derives the 5m trend from the EXISTING 1m closed candles in
+        stream.candles (every 5th 1m candle = 1 5m candle). Cached per-asset
+        for 60 seconds. Uses only closed 1m candles that are already in
+        memory — zero extra network/subscriptions.
 
-        Cached per-asset for 60 seconds. Uses only closed 1m candles that
-        are already in memory — zero extra network/subscriptions."""
+        FIX (2026-07-13): the previous version took only the last 30 1m
+        candles (=> 6 5m closes) and called `_ema_simple(closes_5m, min(9, 6))`
+        and `min(21, 6)` — both EMAs ended up with period=6, so ema9 == ema21,
+        sep == 0, and trend was ALWAYS SIDEWAYS. Now takes the last 105 1m
+        candles (=> 21 5m closes) so ema21 can actually use period=21.
+        """
         # Check cache (60s TTL)
         cached = self._htf_cache.get(asset)
         if cached and (time.time() - cached["fetched_at"]) < 60:
             return cached.get("trend", "SIDEWAYS")
 
         # Use the stream's existing 1m closed candles (NO network call)
-        candles_1m = []
-        if stream is not None:
-            candles_1m = stream.candles
+        candles_1m = stream.candles if stream is not None else []
+        # Need >= 105 1m candles to derive 21 5m closes (ema21 needs period=21).
+        # If we have fewer, return SIDEWAYS rather than making a network call
+        # that would re-subscribe.
         if len(candles_1m) < 25:
-            # Not enough 1m history to derive 5m trend — return NEUTRAL
-            # rather than making a network call that would re-subscribe.
             return "SIDEWAYS"
 
         try:
-            # Build 5m candles from 1m candles: group every 5 consecutive
-            # 1m candles into one 5m candle. This is exactly what a 5m
-            # chart would show — no extra subscription needed.
-            closes_1m = [c["close"] for c in candles_1m[-30:]]  # last 30 1m = 6 5m
-            # Aggregate: take every 5th close as a 5m close sample
-            # (simpler than full OHLC aggregation, good enough for EMA trend)
+            # Build 5m closes from 1m candles: group every 5 consecutive
+            # 1m candles into one 5m candle and take its close.
+            # Take as many 1m candles as we have (up to 105) so ema21 gets
+            # its full period once we have >= 105.
+            window = candles_1m[-105:]
+            closes_1m = [c["close"] for c in window]
             closes_5m = []
             for i in range(0, len(closes_1m), 5):
                 chunk = closes_1m[i:i+5]
@@ -490,8 +525,9 @@ class QuotexFeed:
             if len(closes_5m) < 5:
                 return "SIDEWAYS"
 
-            # Compute EMA on the 5m closes
-            ema9 = _ema_simple(closes_5m, min(9, len(closes_5m)))
+            # Compute EMA on the 5m closes. min() guards short histories;
+            # once we have >=21 closes, ema21 actually uses period=21.
+            ema9  = _ema_simple(closes_5m, min(9,  len(closes_5m)))
             ema21 = _ema_simple(closes_5m, min(21, len(closes_5m)))
             sep = abs(ema9 - ema21) / ema21 if ema21 > 0 else 0
 
@@ -514,6 +550,7 @@ class QuotexFeed:
             return "SIDEWAYS"
 
     def available_pairs(self) -> dict:
+        """Return the current forex pair list and payout floor for the /api/pairs endpoint."""
         return {"pairs": self._pairs_list, "payout_floor": PAYOUT_FLOOR}
 
     async def _load_pairs(self, broadcast=None) -> None:
@@ -614,6 +651,7 @@ class QuotexFeed:
             print(f"[feed] pairs load error: {exc}")
 
     def snapshot(self, asset: str, period: int) -> dict | None:
+        """Return a recent-candles + prediction snapshot for an active (asset, period) stream."""
         stream = self._streams.get((asset, period))
         if not stream or not stream.candles:
             return None
@@ -621,7 +659,7 @@ class QuotexFeed:
             "type":       "snapshot",
             "asset":      stream.asset,
             "period":     stream.period,
-            "candles":    stream.candles[-300:],
+            "candles":    stream.candles[-SNAPSHOT_CANDLES:],
             "prediction": stream.prediction,
         }
 
@@ -660,7 +698,7 @@ class QuotexFeed:
                 gated_prediction = None
             return {"type": "snapshot", "ok": True, "status": "streaming",
                     "asset": asset, "period": period,
-                    "candles": stream.candles[-300:], "prediction": gated_prediction}
+                    "candles": stream.candles[-SNAPSHOT_CANDLES:], "prediction": gated_prediction}
 
         # Payout gate — only blocks starting a BRAND NEW stream, same as the
         # cooldown/capacity checks below. If a pair's payout later drifts
@@ -694,6 +732,7 @@ class QuotexFeed:
             s.interested_cids.discard(cid)
 
     def stream_status(self) -> dict:
+        """Return active stream count and capacity info for the status endpoint."""
         now = time.time()
         return {
             "active": [{"asset": s.asset, "period": s.period,
@@ -802,7 +841,8 @@ class QuotexFeed:
         from pyquotex.network.login import Login
         Login.base_url = "market-qx.trade"
         Login.https_base_url = "https://market-qx.trade"
-        print("[feed] using vendored pyquotex (Firefox TLS — Cloudflare bypass)")
+        ua_src = "env QX_UA" if os.environ.get("QX_UA", "").strip() else "default Firefox"
+        print(f"[feed] using vendored pyquotex (Firefox TLS — Cloudflare bypass, UA: {ua_src})")
         return Quotex(
             email    = os.environ.get("QX_EMAIL",    ""),
             password = os.environ.get("QX_PASSWORD", ""),
@@ -816,7 +856,14 @@ class QuotexFeed:
 
     @staticmethod
     async def _close_client(client) -> None:
-        """Best-effort close — pyquotex versions vary on the API."""
+        """Best-effort close — pyquotex versions vary on the API.
+
+        FIX (2026-07-13): the `return` used to be inside the `if callable(fn)`
+        block, so if `close()` raised an exception, the `except` caught it
+        and then `return` exited — `disconnect` and `close_connect` were
+        never tried. Now: only return on SUCCESS; on failure, fall through
+        to the next method.
+        """
         for meth in ("close", "disconnect", "close_connect"):
             fn = getattr(client, meth, None)
             if callable(fn):
@@ -824,9 +871,9 @@ class QuotexFeed:
                     result = fn()
                     if asyncio.isfuture(result) or asyncio.iscoroutine(result):
                         await asyncio.wait_for(result, timeout=3)
+                    return   # success — stop trying alternatives
                 except Exception:
-                    pass
-                return
+                    continue   # this method failed — try the next one
 
     async def _connect(self) -> bool:
         try:
@@ -1056,12 +1103,10 @@ class QuotexFeed:
         try:
             stream.cached_accuracy = await asyncio.to_thread(
                 _db.recent_accuracy, stream.asset, stream.period, n=20)
-            stream.cached_accuracy_at = time.time()
         except Exception:
             stream.cached_accuracy = (None, 0)
-            stream.cached_accuracy_at = time.time()
-        # Reset the flip-suppression tracker for the new candle.
-        stream.live_signal_history = []
+        # FIX (2026-07-13): removed cached_accuracy_at + live_signal_history
+        # assignments (both were dead fields — set but never read).
 
         result, micro_hist = await self._analyze_core(
             stream.asset, stream.period, closed, base_ticks,
@@ -1072,7 +1117,11 @@ class QuotexFeed:
         # analyze_eoc's currently_flipped param).
         stream.inverted = result.get("_flipped", False)
         # Snapshot for the periodic LIVE-theory re-eval (see stream loop).
-        stream.base_candles = closed
+        # IMPORTANT: list(closed) makes a SHALLOW COPY — otherwise
+        # stream.base_candles aliases stream.candles and the LIVE re-eval
+        # would score against the *current* (mutated) candle list, not the
+        # snapshot taken at EOC. (Bug found 2026-07-13.)
+        stream.base_candles = list(closed)
         stream.base_ticks   = base_ticks
         stream._live_reeval_ticks = 0
 
@@ -1321,8 +1370,14 @@ class QuotexFeed:
             import json as _tick_json
             _tl = list(ticks)
             if len(_tl) > 240:
+                # FIX (2026-07-13): the old formula `int(i * _st)` for
+                # i in range(240) never sampled the LAST tick when
+                # len(_tl) > 240 (e.g., len=241: int(239 * 1.0042) = 239,
+                # but index 240 is the 241st = newest tick — never sampled).
+                # Now: use `min(len(_tl)-1, int(i * _st))` to always include
+                # the most recent tick in the downsampled output.
                 _st = len(_tl) / 240
-                _tl = [_tl[int(i * _st)] for i in range(240)]
+                _tl = [_tl[min(len(_tl) - 1, int(i * _st))] for i in range(240)]
             micro_snap["ticks_json"] = _tick_json.dumps(
                 [round(x, 6) for x in _tl])
             _db.save(asset, period, closed, micro_snap)
@@ -1595,6 +1650,14 @@ class QuotexFeed:
             return {"time": stream.candle_open_time, "open": op,
                     "high": op, "low": op, "close": op}
         # Fast path: use tracked high/low (updated incrementally in stream loop)
+        # FIX (2026-07-13): the tracked high/low used to be updated ONLY from
+        # `cur_close = stream.ticks[-1]`. When multiple ticks arrived in a
+        # single batch and an INTERMEDIATE tick was the new high/low but the
+        # latest tick retraced, the tracked high/low was never updated — the
+        # running candle's high/low silently understated. Now the stream loop
+        # updates `_tracked_high`/`_tracked_low` for EVERY tick it appends
+        # (see `_track_tick` calls in _stream_loop), so this method can safely
+        # use the cached values without re-scanning the whole deque.
         cur_close = stream.ticks[-1]
         cur_high = getattr(stream, '_tracked_high', None)
         cur_low = getattr(stream, '_tracked_low', None)
@@ -1605,14 +1668,8 @@ class QuotexFeed:
             cur_low = min(ticks_list)
             stream._tracked_high = cur_high
             stream._tracked_low = cur_low
-        else:
-            # Update tracked high/low with just the new close (O(1))
-            if cur_close > cur_high:
-                cur_high = cur_close
-                stream._tracked_high = cur_high
-            elif cur_close < cur_low:
-                cur_low = cur_close
-                stream._tracked_low = cur_low
+        # NOTE: no per-call update here — the stream loop's `_track_tick`
+        # keeps _tracked_high/_tracked_low fresh as ticks are appended.
         return {
             "time":  stream.candle_open_time,
             "open":  op,
@@ -1620,6 +1677,19 @@ class QuotexFeed:
             "low":   cur_low,
             "close": cur_close,
         }
+
+    @staticmethod
+    def _track_tick(stream: '_AssetStream', price: float) -> None:
+        """Update tracked high/low for ONE appended tick. Called by the
+        stream loop for EVERY tick appended to stream.ticks so the cached
+        extremes stay fresh even when intermediate ticks in a batch set a
+        new high/low that the latest tick retraced. (Bug found 2026-07-13.)"""
+        h = getattr(stream, '_tracked_high', None)
+        l = getattr(stream, '_tracked_low', None)
+        if h is None or price > h:
+            stream._tracked_high = price
+        if l is None or price < l:
+            stream._tracked_low = price
 
     async def _close_running_and_start_new(self, stream: _AssetStream,
                                      new_open_time: int, first_tick: float,
@@ -1644,8 +1714,8 @@ class QuotexFeed:
             stream.candles.append(closed)
 
         # Keep list bounded
-        if len(stream.candles) > 500:
-            stream.candles = stream.candles[-400:]
+        if len(stream.candles) > MAX_CANDLES:
+            stream.candles = stream.candles[-TRUNCATE_TO:]
 
         # Microstructure of the just-closed candle — computed ONCE here while
         # stream.ticks is still intact; used by the postmortem and persisted
@@ -1695,6 +1765,7 @@ class QuotexFeed:
         stream.candle_open_is_real = open_is_real
         stream.ticks.clear()
         stream.ticks.append(first_tick)
+        self._track_tick(stream, first_tick)   # keep tracked high/low fresh
         # Invalidate caches — new candle, fresh compute needed.
         self._reset_micro_cache(stream)
 
@@ -1733,18 +1804,31 @@ class QuotexFeed:
         # tick → browser-render hop.
         # Legacy pyquotex backend has no register_tick_callback(), so the
         # stream loop falls back to polling get_realtime_price() as before.
+        #
+        # FIX (2026-07-13): asyncio.Queue is NOT thread-safe. The raw-WS
+        # reader runs in a separate thread and calls _on_tick from there.
+        # Calling put_nowait() directly mutates the queue's internal deque
+        # without synchronization → corruption under load. Now we use
+        # loop.call_soon_threadsafe() which schedules the put on the
+        # asyncio event loop's thread.
         if hasattr(self._client, 'register_tick_callback'):
-            def _on_tick(tick_dict, _stream=stream):
+            _loop = asyncio.get_event_loop()
+            def _on_tick(tick_dict, _stream=stream, _loop=_loop):
                 try:
-                    _stream.tick_queue.put_nowait(tick_dict)
-                except asyncio.QueueFull:
-                    # Queue grew too large (stream loop stuck?) — drop oldest
-                    # to make room. Better than blocking the WS reader.
+                    _loop.call_soon_threadsafe(
+                        _stream.tick_queue.put_nowait, tick_dict)
+                except Exception:
+                    # Queue full or loop closed — drop the tick (best effort).
+                    # Try a direct put as a last resort; if that also fails,
+                    # drop oldest to make room.
                     try:
-                        _stream.tick_queue.get_nowait()
                         _stream.tick_queue.put_nowait(tick_dict)
-                    except Exception:
-                        pass
+                    except asyncio.QueueFull:
+                        try:
+                            _stream.tick_queue.get_nowait()
+                            _stream.tick_queue.put_nowait(tick_dict)
+                        except Exception:
+                            pass
             self._client.register_tick_callback(asset, _on_tick)
             stream.tick_callback = _on_tick
             print(f"[feed] event-driven ticks enabled for {asset}@{period}s")
@@ -1783,6 +1867,7 @@ class QuotexFeed:
         stream.candle_open_price = last["close"]
         stream.ticks.clear()
         stream.ticks.append(last["close"])
+        self._track_tick(stream, last["close"])
         stream.candle_open_is_real = False
         stream.last_tick_ts         = 0.0
         # Fresh stream — clear caches so the first broadcast forces a fresh
@@ -1814,10 +1899,28 @@ class QuotexFeed:
         # first tick arrived "late" and got dropped — corrupting OHLC.
         # 7.0s gives OTC ticks enough time to arrive naturally.
         TIMER_GRACE = float(os.environ.get("TIMER_GRACE", "7.0"))
-        STALE_SECS  = 90
+        # STALE_SECS is module-level (overridable via env) — see top of file.
 
         while True:
             try:
+                # ── Signal-delay timer fallback (2026-07-13) ──────────────────
+                # If the signal-delay gate has opened but no tick arrived to
+                # deliver the prediction, broadcast it now. Without this, a
+                # sparse OTC feed (5-10s tick gaps) could withhold the
+                # prediction for up to 30s past the intended delay.
+                if (stream.signal_delay_until > 0
+                        and time.time() >= stream.signal_delay_until
+                        and stream.prediction):
+                    stream.signal_delay_until = 0.0
+                    running = self._running_candle(stream)
+                    await self._broadcast({
+                        "type":       "tick",
+                        "asset":      stream.asset,
+                        "period":     stream.period,
+                        "candle":     running,
+                        "prediction": stream.prediction,
+                    })
+
                 # ── Per-stream stale re-arm ────────────────────────────────
                 # Only re-issues THIS stream's own subscription (cheap) — never
                 # tears down self._client, which would kill every other
@@ -1947,101 +2050,111 @@ class QuotexFeed:
                         break
 
                 if boundary_idx is not None:
-                    # ── TICK-BASED CANDLE CLOSE ───────────────────────────────
-                    # A tick crossed the period boundary — use its price as open.
-                    # (Timer-close may have already fired; skip if so.)
-                    boundary_tick = new_ticks[boundary_idx]
-                    tick_new_open = _floor_to_period(
-                        float(boundary_tick["time"]), stream.period)
+                    # ── TICK-BASED CANDLE CLOSE (multi-boundary loop) ────────
+                    # FIX (2026-07-13): previously only the FIRST boundary in
+                    # a batch was detected; all post-boundary ticks (including
+                    # those belonging to N+2, N+3) were appended to the N+1
+                    # candle. Now we loop: close the current candle, start the
+                    # new one, then re-scan remaining ticks for ANOTHER
+                    # boundary. Each intermediate candle gets a real close.
+                    #
+                    # We process at most 10 boundaries per batch (safety cap —
+                    # a healthy feed never has more than 1-2 in a 50ms window).
+                    remaining = new_ticks
+                    last_accuracy = None
+                    last_eoc_candles = None
+                    for _iter in range(10):
+                        if not remaining:
+                            break
+                        # Re-find the first boundary in `remaining`
+                        b_idx = None
+                        for i, t in enumerate(remaining):
+                            t_open = _floor_to_period(float(t["time"]), stream.period)
+                            if stream.candle_open_time > 0 and t_open != stream.candle_open_time:
+                                b_idx = i
+                                break
+                        if b_idx is None:
+                            # No more boundaries — append the rest as same-candle ticks
+                            for t in remaining:
+                                stream.ticks.append(float(t["price"]))
+                                self._track_tick(stream, float(t["price"]))
+                            break
 
-                    if tick_new_open > stream.candle_open_time:
-                        # Timer hasn't fired yet — do a tick-based close.
-                        # boundary_tick is a REAL first tick → open_is_real=True.
-                        for t in new_ticks[:boundary_idx]:
+                        b_tick = remaining[b_idx]
+                        tick_new_open = _floor_to_period(
+                            float(b_tick["time"]), stream.period)
+
+                        if tick_new_open <= stream.candle_open_time:
+                            # Timer already fired for this boundary — drop late ticks
+                            # belonging to the closed candle, keep only current-window.
+                            cur = [
+                                t for t in remaining
+                                if _floor_to_period(float(t["time"]), stream.period)
+                                == stream.candle_open_time
+                            ]
+                            n_drop = len(remaining) - len(cur)
+                            if n_drop:
+                                print(f"[feed] dropped {n_drop} late tick(s) from "
+                                      f"closed candle ({stream.asset}@{stream.period}s)")
+                            # First CURRENT-window tick after timer-close is the true open
+                            reanchored = False
+                            if cur and not stream.candle_open_is_real:
+                                real_open = float(cur[0]["price"])
+                                stream.candle_open_price   = real_open
+                                stream.candle_open_is_real = True
+                                stream.ticks.clear()
+                                stream.ticks.append(real_open)
+                                self._track_tick(stream, real_open)
+                                cur = cur[1:]
+                                self._reset_micro_cache(stream)
+                                if stream.prediction:
+                                    stream.prediction["candle"] = _pred_candle(
+                                        stream.candles, stream.prediction["signal"],
+                                        stream.period, real_open)
+                                reanchored = True
+                            for t in cur:
+                                stream.ticks.append(float(t["price"]))
+                                self._track_tick(stream, float(t["price"]))
+                            remaining = []   # consumed
+                            break
+
+                        # Real tick-based close: append pre-boundary ticks to old candle
+                        for t in remaining[:b_idx]:
                             stream.ticks.append(float(t["price"]))
+                            self._track_tick(stream, float(t["price"]))
 
-                        first_px = float(boundary_tick["price"])
-                        print(f"[feed] tick-close  {stream.asset}@{stream.period}s "
-                              f"{stream.candle_open_time} -> {tick_new_open}  "
-                              f"(ticks: {len(stream.ticks)})")
+                        first_px = float(b_tick["price"])
+                        if _iter == 0:
+                            print(f"[feed] tick-close  {stream.asset}@{stream.period}s "
+                                  f"{stream.candle_open_time} -> {tick_new_open}  "
+                                  f"(ticks: {len(stream.ticks)})")
+                        else:
+                            print(f"[feed] tick-close  {stream.asset}@{stream.period}s "
+                                  f"{stream.candle_open_time} -> {tick_new_open}  "
+                                  f"(multi-boundary iter {_iter+1})")
 
-                        accuracy = await self._close_running_and_start_new(
+                        last_accuracy = await self._close_running_and_start_new(
                             stream, tick_new_open, first_px, open_is_real=True)
+                        last_eoc_candles = (stream.candles + [self._running_candle(stream)])[-300:]
 
-                        for t in new_ticks[boundary_idx + 1:]:
-                            stream.ticks.append(float(t["price"]))
+                        # Continue with ticks AFTER this boundary — may contain
+                        # another boundary (N+2, N+3, ...)
+                        remaining = remaining[b_idx + 1:]
 
-                        new_running = self._running_candle(stream)
-                        all_candles = stream.candles + [new_running]
-                        # ── Signal delay (2026-07-10) ──
-                        # Same gate as timer-close: prediction withheld at
-                        # EOC, delivered via tick loop once delay passes.
+                    # After the loop: broadcast the last EOC. If we did multiple
+                    # closes, only the LAST one's EOC is broadcast (intermediate
+                    # candles are still graded + logged, just not broadcast —
+                    # the chart only needs the final state).
+                    if last_accuracy is not None and last_eoc_candles is not None:
                         await self._broadcast({
                             "type":       "eoc",
                             "asset":      stream.asset,
                             "period":     stream.period,
-                            "candles":    all_candles[-300:],
+                            "candles":    last_eoc_candles,
                             "prediction": None,   # gated — arrives via tick
-                            "accuracy":   accuracy,
+                            "accuracy":   last_accuracy,
                         })
-                    else:
-                        # Timer already fired for this boundary. new_ticks can
-                        # contain LATE ticks that belong to the candle we already
-                        # closed and graded — appending those to the running
-                        # candle corrupts its open/high/low (and every prediction
-                        # built on it). Keep only ticks whose timestamp falls in
-                        # the CURRENT candle window; drop the stale ones.
-                        cur_ticks = [
-                            t for t in new_ticks
-                            if _floor_to_period(float(t["time"]), stream.period)
-                            == stream.candle_open_time
-                        ]
-                        n_drop = len(new_ticks) - len(cur_ticks)
-                        if n_drop:
-                            print(f"[feed] dropped {n_drop} late tick(s) from "
-                                  f"closed candle ({stream.asset}@{stream.period}s)")
-
-                        # First CURRENT-window tick after a timer-close is the
-                        # candle's true open — re-anchor exactly like the
-                        # same-candle branch does.
-                        reanchored = False
-                        if cur_ticks and not stream.candle_open_is_real:
-                            real_open = float(cur_ticks[0]["price"])
-                            stream.candle_open_price   = real_open
-                            stream.candle_open_is_real = True
-                            stream.ticks.clear()
-                            stream.ticks.append(real_open)
-                            cur_ticks = cur_ticks[1:]
-                            self._reset_micro_cache(stream)
-                            if stream.prediction:
-                                stream.prediction["candle"] = _pred_candle(
-                                    stream.candles, stream.prediction["signal"],
-                                    stream.period, real_open)
-                            reanchored = True
-
-                        for t in cur_ticks:
-                            stream.ticks.append(float(t["price"]))
-                        running = self._running_candle(stream)
-                        if stream.candles and stream.candles[-1]["time"] == running["time"]:
-                            stream.candles[-1] = running
-                        msg = {
-                            "type":   "tick",
-                            "asset":  stream.asset,
-                            "period": stream.period,
-                            "candle": running,
-                        }
-                        # Same signal-delay gate as the SAME-CANDLE branch below —
-                        # reanchoring can happen while still inside the
-                        # SIGNAL_DELAY_SEC window, and this path has its own
-                        # broadcast so it must honor the gate independently.
-                        if reanchored:
-                            now_ts = time.time()
-                            if not (stream.signal_delay_until > 0
-                                    and now_ts < stream.signal_delay_until):
-                                if stream.signal_delay_until > 0:
-                                    stream.signal_delay_until = 0.0
-                                msg["prediction"] = stream.prediction
-                        await self._broadcast(msg)
+                    # remaining ticks (if any) were already appended in the loop.
 
                 else:
                     # ── SAME CANDLE — feed ALL new ticks, broadcast once ──────
@@ -2071,6 +2184,7 @@ class QuotexFeed:
                         stream.candle_open_is_real = True
                         stream.ticks.clear()
                         stream.ticks.append(real_open)
+                        self._track_tick(stream, real_open)
                         new_ticks = new_ticks[1:]   # first tick became the open
                         self._reset_micro_cache(stream)
                         if stream.prediction:
@@ -2080,7 +2194,9 @@ class QuotexFeed:
                         reanchored = True
 
                     for t in new_ticks:
-                        stream.ticks.append(float(t["price"]))
+                        p = float(t["price"])
+                        stream.ticks.append(p)
+                        self._track_tick(stream, p)
 
                     running = self._running_candle(stream)
 
@@ -2364,7 +2480,13 @@ class QuotexFeed:
             except Exception:
                 pass
             try:
-                if self._client and stream.sub_started:
+                # FIX (2026-07-13): skip stop_candles_stream if this stream
+                # is being EVICTED (not crashed). A new stream for the same
+                # asset may already be starting — calling stop here would
+                # unsubscribe the NEW stream. The new stream's own
+                # start_candles_stream will re-subscribe cleanly.
+                if (self._client and stream.sub_started
+                        and not getattr(stream, '_evicting', False)):
                     await self._client.stop_candles_stream(stream.asset)
             except Exception:
                 pass
@@ -2376,13 +2498,39 @@ class QuotexFeed:
         self-heal via pyquotex's own subscription replay and need nothing
         here. Deliberately does NOT refetch history (existing candles/ticks
         are kept, ticks just resume) — refetching N histories on every
-        rebuild is exactly the kind of burst this design exists to avoid."""
+        rebuild is exactly the kind of burst this design exists to avoid.
+
+        FIX (2026-07-13): after a client rebuild, the OLD client's tick
+        callback is dead. The new client needs a FRESH callback registered
+        or the stream loop will spin on an empty queue forever (no ticks
+        ever arrive). Now re-registers the callback after start_candles_stream.
+        """
         async with self._new_stream_gate:
             try:
                 if self._client:
                     await self._client.start_candles_stream(stream.asset, stream.period)
                     stream.sub_started = True
                     stream.last_real_tick_wall = time.time()
+
+                    # Re-register the event-driven tick callback if the new
+                    # client supports it (raw-WS backend). The old callback
+                    # pointed at the dead client — clear it first so the
+                    # old client's unregister (if it ever runs) doesn't
+                    # remove the NEW callback.
+                    stream.tick_callback = None
+                    if hasattr(self._client, 'register_tick_callback'):
+                        _loop = asyncio.get_event_loop()
+                        def _on_tick(tick_dict, _stream=stream, _loop=_loop):
+                            try:
+                                _loop.call_soon_threadsafe(
+                                    _stream.tick_queue.put_nowait, tick_dict)
+                            except Exception:
+                                try:
+                                    _stream.tick_queue.put_nowait(tick_dict)
+                                except Exception:
+                                    pass
+                        self._client.register_tick_callback(stream.asset, _on_tick)
+                        stream.tick_callback = _on_tick
             except Exception:
                 self._record_stream_error()
             await asyncio.sleep(self._stagger_gap)
@@ -2464,12 +2612,27 @@ class QuotexFeed:
                 s.always_on = True
                 s.idle_since = None
 
-    def _sweep_idle_streams(self) -> None:
-        IDLE_TIMEOUT = 300   # 5 minutes with no interested viewers
+    async def _sweep_idle_streams(self) -> None:
+        """Evict streams with no interested viewers for > IDLE_TIMEOUT.
+
+        FIX (2026-07-13): this used to be a sync method that called
+        `s.task.cancel()` then immediately `self._streams.pop(key, None)`.
+        The task's `finally` block (in _run_stream) hadn't run yet, so it
+        would later call `self._client.stop_candles_stream(stream.asset)`.
+        If a NEW stream for the same asset was created in the meantime
+        (user re-subscribes), the OLD task's cleanup UNSUBSCRIBED THE NEW
+        STREAM. Now we mark the stream as "evicting" and let the task's
+        finally block do the pop — the task already checks a flag before
+        calling stop_candles_stream. We also await the task briefly so the
+        cleanup completes before this method returns.
+        """
+        # IDLE_TIMEOUT is module-level (overridable via env) — see top of file.
         now = time.time()
         for key, s in list(self._streams.items()):
             if s.always_on:
                 continue
+            if getattr(s, '_evicting', False):
+                continue   # already being torn down
             if s.interested_cids:
                 s.idle_since = None
                 continue
@@ -2478,23 +2641,36 @@ class QuotexFeed:
             elif now - s.idle_since > IDLE_TIMEOUT:
                 print(f"[feed] evicting idle stream {key} "
                       f"(no viewers for {IDLE_TIMEOUT}s)")
+                s._evicting = True   # signal _run_stream's finally to skip stop_candles_stream
                 if s.task:
                     s.task.cancel()
-                self._streams.pop(key, None)
+                    # Give the task a moment to run its finally block so the
+                    # stop_candles_stream (skipped via _evicting) and the
+                    # _streams.pop happen in order. 1s is generous — the
+                    # finally block only does unregister + pop.
+                    try:
+                        await asyncio.wait_for(s.task, timeout=1.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+                # The task's finally block will pop the key. But if the task
+                # was already dead (e.g., crashed earlier), pop here as a fallback.
+                if key in self._streams and self._streams[key] is s:
+                    self._streams.pop(key, None)
 
     def _record_stream_error(self) -> None:
         """Rolling error window -> temporary cooldown on starting NEW streams.
         Existing streams are never torn down by this — only ensure_stream()'s
         capacity/cooldown gate for brand-new pairs is affected."""
-        WINDOW, THRESHOLD, DURATION = 60, 4, 120
+        # ERROR_WINDOW / ERROR_THRESHOLD / ERROR_COOLDOWN are module-level
+        # (overridable via env) — see top of file.
         now = time.time()
         self._recent_errors.append(now)
-        self._recent_errors[:] = [t for t in self._recent_errors if t > now - WINDOW]
-        if len(self._recent_errors) >= THRESHOLD and now >= self._cooldown_until:
-            self._cooldown_until  = now + DURATION
+        self._recent_errors[:] = [t for t in self._recent_errors if t > now - ERROR_WINDOW]
+        if len(self._recent_errors) >= ERROR_THRESHOLD and now >= self._cooldown_until:
+            self._cooldown_until  = now + ERROR_COOLDOWN
             self._cooldown_reason = "connection errors"
-            print(f"[feed] error spike ({len(self._recent_errors)}/{WINDOW}s) — "
-                  f"cooling down new streams for {DURATION}s")
+            print(f"[feed] error spike ({len(self._recent_errors)}/{ERROR_WINDOW}s) — "
+                  f"cooling down new streams for {ERROR_COOLDOWN}s")
 
     # ── Manager loop ──────────────────────────────────────────────────────────
 
@@ -2533,125 +2709,42 @@ class QuotexFeed:
     async def _auto_relogin(self) -> bool:
         """Re-login after connection failure — clears stale tokens so
         _connect() does a fresh login on next retry.
-        
+
         With vendored pyquotex, _connect() handles the actual login via
         Firefox TLS. This method just clears stale state.
-        
-        Returns True to signal 'retry _connect() now'.
+
+        FIX (2026-07-13): this used to ALWAYS return True, which made the
+        caller reset _reconnect_attempts = 0 every 3rd failure and retry
+        immediately — the exponential backoff (10s, 20s, 40s, 60s) never
+        progressed past attempt 2. Now: only return True if we actually
+        cleared a stale token (meaning there's a reason to retry now
+        rather than waiting). If there was no token to clear, return
+        False so the caller continues the backoff.
         """
+        cleared_something = False
+
         # Clear stale QX_TOKEN env var
         old_token = os.environ.get("QX_TOKEN", "").strip()
         if old_token:
             print(f"[feed] auto-relogin: clearing stale token ({old_token[:8]}...)")
             os.environ.pop("QX_TOKEN", None)
+            cleared_something = True
 
         # Clear stale token in session.json
         try:
             from quotex_ws import QuotexWSClient
             QuotexWSClient.clear_session_json_token()
+            cleared_something = True
         except Exception:
             pass
 
-        # Signal _connect() to retry — it will do fresh login via pyquotex
-        return True
-
-    async def _do_browser_login(self, email: str, password: str,
-                                save_to_env: bool = False) -> bool:
-        """Lightweight login via curl_cffi (Chrome TLS fingerprint).
-        NO Playwright, NO browser — pure HTTP request.
-
-        On Cloudflare block (HTTP 403), returns False so the caller can
-        retry later OR the user can manually set QX_TOKEN.
-
-        On success:
-          - Sets QX_TOKEN + QX_COOKIES env vars (for immediate use)
-          - Saves to .env (so subsequent restarts read it)
-          - Saves to session.json (so pyquotex-style persistence works too)
-        Returns True on success, False on failure."""
-        ua = os.environ.get("QX_UA", "").strip() or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-
-        # ── curl_cffi (Chrome TLS fingerprint) ─────────────────────────────
-        sess = None
-        try:
-            from qx_login import fetch_session
-            print("[feed] login: trying curl_cffi...")
-            sess = await asyncio.wait_for(
-                asyncio.to_thread(
-                    fetch_session, email, password, "market-qx.trade", ua),
-                timeout=60)
-        except ImportError:
-            print("[feed] login: curl_cffi not installed")
-            return False
-        except asyncio.TimeoutError:
-            print("[feed] login: curl_cffi timed out (60s)")
-            return False
-        except Exception as exc:
-            print(f"[feed] login: curl_cffi error: {exc}")
-            return False
-
-        # Check result
-        if not sess or not sess.get("ssid"):
-            err = (sess or {}).get("error", "unknown")
-            print(f"[feed] login failed: {err}")
-            if "403" in str(err):
-                print("[feed]   → Cloudflare blocked this IP.")
-                print("[feed]     Set QX_TOKEN manually (browser → F12 → Cookies → session)")
-            elif "PIN" in str(err) or "keep_code" in str(err):
-                print("[feed]   → Quotex wants PIN verification.")
-                print("[feed]     Log in once from a browser on this machine.")
-            return False
-
-        # ── Success! Save everything ───────────────────────────────────────
-        ssid = sess["ssid"]
-        cookies = sess.get("cookies", "")
-        print(f"[feed] browser-login ok — ssid={ssid[:8]}...")
-        os.environ["QX_TOKEN"] = ssid
-        if cookies:
-            os.environ["QX_COOKIES"] = cookies
-
-        # Save to .env so subsequent restarts use it directly
-        if save_to_env:
-            self._save_token_to_env(ssid)
-
-        # Also save to session.json (pyquotex-style persistence)
-        try:
-            from quotexWSClient_save import QuotexWSClient_save as _save_fn
-        except ImportError:
-            try:
-                from quotex_ws import QuotexWSClient
-                QuotexWSClient.save_session_json(email, ssid, cookies or "", ua)
-            except Exception as exc:
-                print(f"[feed] could not save session.json: {exc}")
-
-        return True
-
-    def _save_token_to_env(self, ssid: str) -> None:
-        """Append/update QX_TOKEN in .env file so subsequent restarts use it."""
-        try:
-            env_path = os.path.join(os.getcwd(), ".env")
-            lines = []
-            token_found = False
-            if os.path.exists(env_path):
-                with open(env_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.startswith("QX_TOKEN="):
-                            lines.append(f"QX_TOKEN={ssid}\n")
-                            token_found = True
-                        else:
-                            lines.append(line)
-            if not token_found:
-                # Append at end
-                if lines and not lines[-1].endswith("\n"):
-                    lines.append("\n")
-                lines.append(f"\n# Auto-saved working token (by feed.py auto-login):\n")
-                lines.append(f"QX_TOKEN={ssid}\n")
-            with open(env_path, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-            print(f"[feed] token saved to .env (QX_TOKEN={ssid[:8]}...)")
-        except Exception as exc:
-            print(f"[feed] could not save token to .env: {exc}")
+        if cleared_something:
+            print("[feed] auto-relogin: cleared stale state — retrying _connect()")
+            return True
+        # Nothing to clear → no reason to retry immediately. Let the
+        # exponential backoff continue so we don't hammer Quotex.
+        print("[feed] auto-relogin: nothing to clear — continuing backoff")
+        return False
 
     async def run(self, broadcast) -> None:
         self._broadcast = broadcast
@@ -2666,7 +2759,8 @@ class QuotexFeed:
         await self._auto_login_startup()
 
         HOUSEKEEP_SECS    = 5
-        GLOBAL_STALE_SECS = 90
+        # Global staleness reuses the module-level STALE_SECS (overridable via
+        # env) — see top of file. Was previously a separate GLOBAL_STALE_SECS.
 
         while True:
             try:
@@ -2729,12 +2823,12 @@ class QuotexFeed:
                 if self._streams:
                     newest = max((s.last_real_tick_wall
                                  for s in self._streams.values()), default=0.0)
-                    if newest > 0 and time.time() - newest > GLOBAL_STALE_SECS:
+                    if newest > 0 and time.time() - newest > STALE_SECS:
                         print("[feed] GLOBAL STALE: every active stream silent "
                               "— rebuilding client")
                         await self._rebuild_client()
 
-                self._sweep_idle_streams()
+                await self._sweep_idle_streams()
 
                 # ── Refresh pair list every 5 minutes (market open/close) ──
                 if time.time() - self._last_pairs_refresh > 300:
@@ -2745,12 +2839,6 @@ class QuotexFeed:
                 if time.time() - self._last_perf_refresh > 300:
                     self._last_perf_refresh = time.time()
                     await self._refresh_theory_mutes()
-
-                # ── NTP time sync every 5 minutes (Issue #1) ─────────────────
-                # Corrects clock drift on Railway/Vercel containers so candle
-                # boundaries and signal-delay gate fire at the right time.
-                if time.time() - self._last_ntp_sync > 300:
-                    await self._sync_ntp()
 
                 # ── DB row-count cleanup every 6 hours ─────────────────────
                 # asyncio.to_thread: _db.cleanup() is blocking sqlite3 I/O

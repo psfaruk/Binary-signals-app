@@ -1,7 +1,15 @@
-import datetime
 import time
 
 from pyquotex.ws.objects.base import Base
+
+# NOTE: The following TimeSync properties were removed as dead code
+# (no external accessor anywhere in the codebase):
+#   - server_datetime
+#   - expiration_time (getter + setter)
+#   - expiration_datetime
+#   - expiration_timestamp
+# Only ``server_timestamp`` (getter + setter) remains — it is used by
+# pyquotex/api.py to sync the server clock.
 
 
 class TimeSync(Base):
@@ -11,7 +19,6 @@ class TimeSync(Base):
         super().__init__()
         self.__name = "timeSync"
         self.__server_timestamp: float = time.time()
-        self.__expiration_time_minutes: float | int = 1
 
     @property
     def server_timestamp(self) -> float:
@@ -30,50 +37,3 @@ class TimeSync(Base):
         if not isinstance(timestamp, (int, float)):
             raise ValueError("The timestamp must be a number.")
         self.__server_timestamp = float(timestamp)
-
-    @property
-    def server_datetime(self) -> datetime.datetime:
-        """Get the server date and time based on the timestamp.
-
-        :returns: The server date and time.
-        """
-        return datetime.datetime.fromtimestamp(self.server_timestamp)
-
-    @property
-    def expiration_time(self) -> float | int:
-        """Get the expiration time in minutes.
-
-        :returns: The expiration time in minutes.
-        """
-        return self.__expiration_time_minutes
-
-    @expiration_time.setter
-    def expiration_time(self, minutes: float | int) -> None:
-        """Set the expiration time in minutes.
-
-        :param minutes: Expiration time in minutes.
-        """
-        if not isinstance(minutes, (int, float)) or minutes <= 0:
-            raise ValueError("The expiration time must be a positive number.")
-        self.__expiration_time_minutes = minutes
-
-    @property
-    def expiration_datetime(self) -> datetime.datetime:
-        """Get the expiration date and time based on the expiration time
-        and server timestamp.
-
-        :returns: The expiration date and time.
-        """
-        return (
-                self.server_datetime
-                + datetime.timedelta(minutes=self.expiration_time)
-        )
-
-    @property
-    def expiration_timestamp(self) -> float:
-        """Get the expiration timestamp.
-
-        :returns: The expiration timestamp.
-        """
-        return time.mktime(self.expiration_datetime.timetuple())
-
