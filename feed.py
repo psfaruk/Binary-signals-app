@@ -2152,138 +2152,57 @@ class QuotexFeed:
                                     stream=stream,
                                     live_only=live_only)
                                 stream._live_reeval_ticks = len(stream.ticks)
-                                if fresh and fresh.get("signal") in ("CALL", "PUT"):
-                                    # ── Flip suppression (2026-07-10) ──────
-                                    # Track this re-eval's signal direction.
-                                    # If the signal has flipped 2+ times in
-                                    # the last 10s, the model is uncertain →
-                                    # demote to WEAK. 3+ flips → NEUTRAL
-                                    # (suppress the trade entirely).
-                                    sig = fresh["signal"]
-                                    stream.live_signal_history.append(
-                                        (len(stream.ticks), sig, time.time()))
-                                    # Keep only last 10s of history
-                                    cutoff = time.time() - 10
-                                    stream.live_signal_history = [
-                                        h for h in stream.live_signal_history
-                                        if h[2] >= cutoff]
-                                    # Count direction changes
-                                    dirs = [h[1] for h in stream.live_signal_history]
-                                    flips = 0
-                                    for i in range(1, len(dirs)):
-                                        if dirs[i] != dirs[i-1]:
-                                            flips += 1
-                                    if flips >= 3 and len(dirs) >= 4:
-                                        # Heavy flipping → NEUTRAL (suppress)
-                                        fresh = dict(fresh)
-                                        fresh["signal"] = "NEUTRAL"
-                                        fresh["strength"] = "WEAK"
-                                        fresh.setdefault("reasons", []).append(
-                                            f"FLIP_SUPPRESS: {flips} flips in "
-                                            f"last 10s → NEUTRAL (uncertain)")
+
+                                # ── ONE SIGNAL PER CANDLE (2026-07-13) ──────
+                                # The signal direction is LOCKED at EOC.
+                                # LIVE re-eval can only update score/confidence/
+                                # strength — it can NEVER change CALL↔PUT.
+                                # This prevents the "signal flipping on same
+                                # candle" problem the user reported.
+                                if fresh and stream.prediction:
+                                    locked_dir = stream.prediction.get("signal")
+                                    fresh_dir = fresh.get("signal")
+                                    if locked_dir in ("CALL", "PUT"):
+                                        if fresh_dir == locked_dir:
+                                            # Same direction → silently update
+                                            # score/confidence/strength only.
+                                            # Do NOT set pred_changed (no
+                                            # rebroadcast — signal is stable).
+                                            stream.prediction = {
+                                                **stream.prediction,
+                                                "score": fresh.get("score",
+                                                    stream.prediction.get("score")),
+                                                "confidence": fresh.get("confidence",
+                                                    stream.prediction.get("confidence")),
+                                                "agree": fresh.get("agree",
+                                                    stream.prediction.get("agree")),
+                                                "total": fresh.get("total",
+                                                    stream.prediction.get("total")),
+                                            }
+                                        # else: different direction → IGNORE.
+                                        # The original EOC signal stays.
+                                    elif locked_dir == "NEUTRAL" and fresh_dir in ("CALL", "PUT"):
+                                        # Original was NEUTRAL but live data
+                                        # now shows a clear direction → allow
+                                        # upgrade to CALL/PUT (one-time only).
                                         stream.prediction = fresh
                                         pred_changed = True
-                                        # NOTE: do NOT `continue` here — that
-                                        # would skip the tick broadcast below,
-                                        # and the client would never receive the
-                                        # NEUTRAL update. Fall through to the
-                                        # broadcast instead.
-                                    elif flips >= 2 and len(dirs) >= 3:
-                                        # Moderate flipping → demote to WEAK
-                                        fresh = dict(fresh)
-                                        if fresh.get("strength") != "WEAK":
-                                            fresh["strength"] = "WEAK"
-                                            fresh.setdefault("reasons", []).append(
-                                                f"FLIP_DEMOTE: {flips} flips in "
-                                                f"last 10s → WEAK")
-                                        stream.prediction = {
-                                            **(stream.prediction or {}), **fresh}
-                                        pred_changed = True
-                                    else:
-                                        # ── Direction-change gate (2026-07-10) ──
-                                        # Only broadcast if signal DIRECTION
-                                        # actually changed vs current prediction.
-                                        # Without this, mid-candle re-evals that
-                                        # produce the SAME direction (only score
-                                        # / confidence / strength changed) cause
-                                        # the frontend to re-broadcast beep +
-                                        # pop animation — making it LOOK like
-                                        # multiple signals on the same candle.
-                                        prev_sig = (stream.prediction or {}).get("signal")
-                                        if prev_sig != fresh["signal"]:
-                                            stream.prediction = {
-                                                **(stream.prediction or {}), **fresh}
-                                            pred_changed = True
-                                        else:
-                                            # Direction unchanged — update the
-                                            # stored prediction silently (so the
-                                            # latest score/confidence is kept for
-                                            # the next direction change to diff
-                                            # against), but do NOT broadcast.
-                                            stream.prediction = {
-                                                **(stream.prediction or {}), **fresh}
                             except Exception as exc:
                                 print(f"[feed] LIVE re-eval error "
                                       f"({stream.asset}@{stream.period}s): {exc}")
 
-                    # ── Strength gate (Method B, 2026-07-10, untested) ──────────
+                    # ── Strength gate — strength-only, NO direction change ──
+                    # Can upgrade/downgrade strength based on running candle
+                    # confirmation, but NEVER changes CALL↔PUT.
                     if (ENABLE_STRENGTH_GATE and stream.prediction
-                            and stream.prediction.get("signal") != "NEUTRAL"):
+                            and stream.prediction.get("signal") in ("CALL", "PUT")):
                         gated = self._apply_strength_gate(stream, stream.prediction)
                         if gated is not stream.prediction:
-                            # Direction-change gate: only broadcast if the
-                            # gated version's signal DIRECTION differs from
-                            # what's currently stored. Strength-only changes
-                            # (WEAK↔MEDIUM↔STRONG) shouldn't trigger a fresh
-                            # alert on the same candle.
-                            prev_sig = stream.prediction.get("signal")
-                            new_sig = gated.get("signal")
                             stream.prediction = gated
-                            if prev_sig != new_sig:
-                                pred_changed = True
-
-                    # ── Signal Stability Tracker (2026-07-10 review Next Action #2) ─
-                    # If the last 3-4 LIVE re-evals in the last 10s all voted
-                    # the SAME direction (no flips), the model is confident →
-                    # upgrade strength. This is the symmetric opposite of the
-                    # flip-suppression demote above: stable signals get a bonus.
-                    if stream.prediction and stream.prediction.get("signal") in ("CALL","PUT"):
-                        dirs = [h[1] for h in stream.live_signal_history]
-                        if len(dirs) >= 4:
-                            # All 4+ most recent votes are the same direction
-                            last4 = dirs[-4:]
-                            if all(d == last4[0] for d in last4):
-                                cur_strength = stream.prediction.get("strength", "")
-                                # Upgrade WEAK → MEDIUM, MEDIUM → STRONG
-                                if cur_strength == "WEAK":
-                                    gated_pred = dict(stream.prediction)
-                                    gated_pred["strength"] = "MEDIUM"
-                                    gated_pred.setdefault("reasons", []).append(
-                                        f"STABILITY_BONUS: 4+ same-direction votes "
-                                        f"in last 10s → WEAK upgraded to MEDIUM")
-                                    stream.prediction = gated_pred
-                                    pred_changed = True
-                                elif cur_strength == "MEDIUM":
-                                    gated_pred = dict(stream.prediction)
-                                    gated_pred["strength"] = "STRONG"
-                                    gated_pred.setdefault("reasons", []).append(
-                                        f"STABILITY_BONUS: 4+ same-direction votes "
-                                        f"in last 10s → MEDIUM upgraded to STRONG")
-                                    stream.prediction = gated_pred
-                                    pred_changed = True
-                            elif len(dirs) >= 3:
-                                # 3 same-direction votes — smaller bonus
-                                last3 = dirs[-3:]
-                                if all(d == last3[0] for d in last3):
-                                    cur_strength = stream.prediction.get("strength", "")
-                                    if cur_strength == "WEAK":
-                                        gated_pred = dict(stream.prediction)
-                                        gated_pred["strength"] = "MEDIUM"
-                                        gated_pred.setdefault("reasons", []).append(
-                                            f"STABILITY_BONUS: 3 same-direction votes "
-                                            f"in last 10s → WEAK upgraded to MEDIUM")
-                                        stream.prediction = gated_pred
-                                        pred_changed = True
+                            # Don't set pred_changed — strength-only updates
+                            # don't trigger a rebroadcast. The signal panel
+                            # shows the updated strength on the next tick that
+                            # naturally broadcasts.
 
                     # Skip broadcast if open price is still 0 (no valid tick yet)
                     # — prevents LightweightCharts "Value is null" on the client
