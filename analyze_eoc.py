@@ -3831,11 +3831,14 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
         ("RUN",        lambda: _theory_run(candles, ticks, run_micro, muted)),
         ("TRAP",       lambda: _theory_trap(candles, ticks, muted)),
         ("GAP",        lambda: _theory_gap(candles, muted)),
-        ("LAST",       lambda: _theory_last(candles, ticks, muted)),
+        # LAST REMOVED (2026-07-13): 0% win rate over 3 signals. Last-portion
+        # exhaustion/recovery is unreliable in 60s OTC.
+        # VELOCITY + RUN ending-direction already cover this.
+        # ("LAST",       lambda: _theory_last(candles, ticks, muted)),
         ("RNG",        lambda: _theory_rng(candles, muted)),
         ("MICRO",      lambda: _theory_micro(candles, ticks, muted)),
         ("MEAN",       lambda: _theory_mean(candles, ticks, muted)),
-        ("SHIFT",      lambda: _theory_shift(candles, ticks, muted)),
+        # SHIFT REMOVED (2026-07-13): 25% win rate — consistently wrong in OTC.
         ("VELOCITY",   lambda: _theory_velocity(candles, ticks, run_micro, muted)),
         ("LIVE_WICK",  lambda: _theory_live_wick(candles, ticks, run_micro, muted)),
         ("ORDERFLOW",  lambda: _theory_orderflow(candles, ticks, run_micro, muted)),
@@ -3848,7 +3851,10 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
         ("HISTORY",    lambda: _theory_history(candles, ticks, micro_history, muted)),
         # Liquidity / SMC theories (2026-07-10) — price-structure only
         # since OTC has no real volume. See ANALYSIS_running_candle.md.
-        ("FVG",        lambda: _theory_fvg(candles, muted)),
+        # FVG REMOVED (2026-07-13): 29% win rate over 7 signals — consistently
+        # wrong in OTC. Fair Value Gap doctrine doesn't apply to broker-
+        # generated OTC price feeds. HOLD + OB + SWEEP cover S/R better.
+        # ("FVG",        lambda: _theory_fvg(candles, muted)),
         ("OB",         lambda: _theory_ob(candles, muted)),
         ("SWEEP",      lambda: _theory_sweep(candles, muted)),
         ("STRUCT",     lambda: _theory_structure(candles, muted)),
