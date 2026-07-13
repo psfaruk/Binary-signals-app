@@ -870,8 +870,12 @@ function renderSignal(pred){
   sigConfBar.style.width = conf + '%';
   sigConfBar.style.background = s === 'CALL' ? 'var(--green)' : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
   sigAgree.textContent = (pred.agree || 0) + '/' + (pred.total || 0) + ' theories';
-  const regime = pred.regime || '—';
-  sigRegime.textContent = regime;
+  // Regime is a dict {trend, zone, ...} — show trend/zone, not [object Object]
+  const reg = pred.regime || {};
+  const regStr = (typeof reg === 'object' && reg !== null)
+    ? (reg.trend || '—') + '/' + (reg.zone || '—')
+    : String(reg || '—');
+  sigRegime.textContent = regStr;
   // ── Market State panel (2026-07-11) ─────────────────────────────────
   // Display the new market_state fields: trend, zone, phase, structure,
   // volatility, zigzag_bias. These come from _classify_market_state() in
@@ -913,7 +917,9 @@ function renderSignal(pred){
       const vote = (t.vote || 'CALL').toUpperCase();
       const div = document.createElement('div');
       div.className = 'theory-item ' + (vote === 'CALL' ? 'call-vote' : 'put-vote');
-      div.innerHTML = '<span class="theory-name">' + esc(t.name || '—') + '</span><span class="theory-vote ' + vote.toLowerCase() + '">' + vote + (t.score != null ? ' (' + (t.score>=0?'+':'') + t.score + ')' : '') + '</span>';
+      // Backend sends {code, vote, score} — use code as the theory name
+      const name = t.code || t.name || '—';
+      div.innerHTML = '<span class="theory-name">' + esc(name) + '</span><span class="theory-vote ' + vote.toLowerCase() + '">' + vote + (t.score != null ? ' (' + (t.score>=0?'+':'') + t.score + ')' : '') + '</span>';
       theoriesList.appendChild(div);
     });
   } else {
