@@ -37,6 +37,7 @@ Theories:
   SWEEP - Liquidity sweep / stop hunt (wick breaks swing, close reverses)
                                                         [LIQUIDITY, 2026-07-10]
   STRUCT - BOS / CHOCH structure break               [LIQUIDITY, 2026-07-10]
+  HOLD  - Volume-profile hold at key levels           [2026-07-13]
 """
 import math
 from collections import Counter
@@ -3605,6 +3606,125 @@ def _theory_structure(candles, muted):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  HOLD THEORY (2026-07-13) — hold_price was computed but NEVER used by any theory
+#  This fixes the biggest gap: hold_price + hold_visits were display-only.
+#  Now: if price held at a key level with high visits, that's a strong signal.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _theory_hold(candles, ticks, micro, muted):
+    """
+    HOLD — Volume-profile hold at key levels.
+
+    The _build_micro() function computes hold_price (where price spent the
+    most time) and hold_visits (how many ticks were at that price). This
+    theory uses them to detect:
+
+      1. HOLD AT KEY LEVEL: if hold_price is near a swing high/low or round
+         number, that level has real order flow behind it → strong S/R.
+      2. HOLD + PRESSURE COMBO: if price held at a swing LOW and buyer
+         pressure is rising → strong CALL. Held at swing HIGH + seller
+         pressure → strong PUT.
+      3. HOLD DIRECTION: if hold_price is in the upper half of the candle
+         → buyers controlled. Lower half → sellers controlled.
+
+    FIX (2026-07-13): hold_price was computed since 2026-07-10 but NO theory
+    read it — it was display-only. Now it contributes to the signal.
+    """
+    if "HOLD" in muted:
+        return None
+    if not micro or not ticks or len(ticks) < 15:
+        return None
+
+    hold_price = micro.get("hold_price")
+    hold_visits = micro.get("hold_visits", 0)
+    if hold_price is None or hold_visits < 3:
+        return None   # not enough concentration at any single price
+
+    last = candles[-1]
+    close = last["close"]
+    atr = _cached_atr(candles)
+    if atr <= 0:
+        return None
+
+    score = 0
+    reasons = []
+
+    # ── 1. Hold at key level (swing high/low) ──────────────────────────────
+    levels = _cached_key_levels(candles)
+    hold_at_swing_low = False
+    hold_at_swing_high = False
+    for lv in levels:
+        if abs(hold_price - lv["price"]) < atr * 0.3:
+            if lv["type"] == "swing_low":
+                hold_at_swing_low = True
+                # Price holding at swing low = support building → CALL bias
+                score += 2
+                reasons.append(
+                    f"HOLD:+2 CALL hold-at-swing-low={lv['price']:.5f} "
+                    f"visits={hold_visits}")
+                break
+            elif lv["type"] == "swing_high":
+                hold_at_swing_high = True
+                # Price holding at swing high = resistance building → PUT bias
+                score -= 2
+                reasons.append(
+                    f"HOLD:-2 PUT hold-at-swing-high={lv['price']:.5f} "
+                    f"visits={hold_visits}")
+                break
+
+    # ── 2. Hold at round number ────────────────────────────────────────────
+    lvl, _, strength = _round_level(hold_price)
+    if lvl is not None and not hold_at_swing_low and not hold_at_swing_high:
+        boost = 2 if strength == "BIG" else 1
+        # Round number hold = psychological level → mean-reversion bias
+        # If close is ABOVE the round level → resistance → PUT
+        # If close is BELOW the round level → support → CALL
+        if close > hold_price:
+            score -= boost
+            reasons.append(
+                f"HOLD:-{boost} PUT hold-at-round-{strength}={lvl:.5f} "
+                f"close_above visits={hold_visits}")
+        else:
+            score += boost
+            reasons.append(
+                f"HOLD:+{boost} CALL hold-at-round-{strength}={lvl:.5f} "
+                f"close_below visits={hold_visits}")
+
+    # ── 3. Hold + pressure combo ───────────────────────────────────────────
+    pressure = micro.get("pressure")
+    buy_pct = micro.get("buy_pct", 50)
+    if hold_at_swing_low and pressure == "BUYER":
+        # Held at swing low AND buyers dominating → strong bounce signal
+        score += 2
+        reasons.append(
+            f"HOLD:+2 CALL swing-low+buyer-pressure={buy_pct}%")
+    elif hold_at_swing_high and pressure == "SELLER":
+        # Held at swing high AND sellers dominating → strong rejection
+        score -= 2
+        reasons.append(
+            f"HOLD:-2 PUT swing-high+seller-pressure={100-buy_pct}%")
+
+    # ── 4. Hold direction (upper/lower half of candle) ─────────────────────
+    hi = max(ticks)
+    lo = min(ticks)
+    rng = hi - lo
+    if rng > 0:
+        hold_pos = (hold_price - lo) / rng   # 0 = at low, 1 = at high
+        if hold_pos > 0.65 and not hold_at_swing_high:
+            # Price held in upper half → buyers in control
+            score += 1
+            reasons.append(f"HOLD:+1 CALL upper-half-hold pos={hold_pos:.2f}")
+        elif hold_pos < 0.35 and not hold_at_swing_low:
+            # Price held in lower half → sellers in control
+            score -= 1
+            reasons.append(f"HOLD:-1 PUT lower-half-hold pos={hold_pos:.2f}")
+
+    if score == 0:
+        return None
+    return "CALL" if score > 0 else "PUT", score, reasons
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3719,6 +3839,9 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
         ("VELOCITY",   lambda: _theory_velocity(candles, ticks, run_micro, muted)),
         ("LIVE_WICK",  lambda: _theory_live_wick(candles, ticks, run_micro, muted)),
         ("ORDERFLOW",  lambda: _theory_orderflow(candles, ticks, run_micro, muted)),
+        # HOLD theory (2026-07-13) — uses hold_price + hold_visits from micro
+        # FIX: hold_price was computed since 2026-07-10 but NO theory read it.
+        ("HOLD",       lambda: _theory_hold(candles, ticks, run_micro if running_ticks else closed_micro, muted)),
         # Multi-candle theories (2026-07-10)
         ("MOMENTUM",   lambda: _theory_momentum(candles, muted)),
         ("CONTINUITY", lambda: _theory_continuity(candles, ticks, muted)),
