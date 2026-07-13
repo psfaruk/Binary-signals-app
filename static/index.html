@@ -122,39 +122,91 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .tape-price{display:inline-block;margin-right:16px;font-family:var(--mono);font-size:12px}
 .tape-price.up{color:var(--green)}.tape-price.down{color:var(--red)}.tape-price.flat{color:var(--text-dim)}
 .tape-arrow{font-size:10px;margin-right:2px}
-/* Signal history — horizontal row, NEW signals appear on the RIGHT,
-   old signals scroll off to the LEFT. Like a chat: newest at bottom-right. */
-#history-panel{padding:4px 8px;border-top:1px solid var(--border);overflow:hidden}
-#history-panel .section-title{font-size:10px;color:var(--text-dim);padding:0 4px 2px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
-#history-list{display:flex;flex-direction:row;gap:4px;overflow-x:auto;overflow-y:hidden;padding:2px 0;scroll-behavior:smooth}
-#history-list::-webkit-scrollbar{height:4px}
-#history-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-.history-row{display:flex;align-items:center;gap:4px;font-size:11px;padding:3px 6px;border-radius:3px;cursor:pointer;transition:background .15s;flex:0 0 auto;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05)}
-.history-row:hover{background:rgba(255,255,255,.08)}
-/* Most recent signal (last item, rightmost) — visually distinct */
+/* Signal history — VERTICAL list, NEW signals appear at the TOP.
+   Each row is a full-width horizontal bar; the panel scrolls vertically.
+   Row layout (grid):  [Time] [Signal] [Strength] [Score] [Result]
+   Best practice for trading apps: newest on top, scannable at a glance. */
+#history-panel{
+  padding:6px 8px 4px;
+  border-top:1px solid var(--border);
+  display:flex;
+  flex-direction:column;
+  min-height:0;
+  max-height:38vh;          /* never eats more than ~38% of the viewport */
+}
+#history-panel .section-title{
+  font-size:10px;color:var(--text-dim);
+  padding:0 4px 4px;
+  font-weight:600;text-transform:uppercase;letter-spacing:.5px;
+  display:flex;justify-content:space-between;align-items:center;gap:8px;
+  flex:0 0 auto;
+}
+#history-panel .section-title .hint{font-size:10px;color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0}
+#history-list{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+  overflow-y:auto;
+  overflow-x:hidden;
+  padding:2px 2px 4px;
+  scroll-behavior:smooth;
+  flex:1 1 auto;
+  min-height:0;
+}
+#history-list::-webkit-scrollbar{width:6px}
+#history-list::-webkit-scrollbar-track{background:transparent}
+#history-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+#history-list::-webkit-scrollbar-thumb:hover{background:var(--text-dim)}
+/* Each row = full-width bar. 5 columns: time | signal | strength | score | icon */
+.history-row{
+  display:grid;
+  grid-template-columns:46px 1fr auto auto 18px;
+  align-items:center;
+  gap:8px;
+  font-size:12px;
+  padding:6px 10px;
+  border-radius:5px;
+  cursor:pointer;
+  transition:background .15s, border-color .15s, transform .1s;
+  background:rgba(255,255,255,.02);
+  border:1px solid rgba(255,255,255,.05);
+  flex:0 0 auto;
+}
+.history-row:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12)}
+.history-row:active{transform:scale(.995)}
+/* Result tint: full-width subtle background by outcome (green/red/yellow) */
+.history-row.correct{background:rgba(0,200,83,.10);border-color:rgba(0,200,83,.25)}
+.history-row.wrong{background:rgba(255,23,68,.10);border-color:rgba(255,23,68,.25)}
+.history-row.draw{background:rgba(255,193,7,.08);border-color:rgba(255,193,7,.20)}
+.history-row.correct:hover{background:rgba(0,200,83,.16)}
+.history-row.wrong:hover{background:rgba(255,23,68,.16)}
+.history-row.draw:hover{background:rgba(255,193,7,.14)}
+/* Most recent signal (first row, topmost) — subtle directional glow.
+   Background tint comes from .correct/.wrong/.draw above; here we only add
+   the glow so the result color still reads clearly. */
 .history-row-recent{
-  background:rgba(33,150,243,.15) !important;
-  border:1px solid #2196F3 !important;
-  box-shadow:0 0 0 1px rgba(33,150,243,.3), 0 0 8px rgba(33,150,243,.25);
-  font-weight:600;
+  box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 0 10px rgba(255,255,255,.06);
 }
 .history-row-recent.history-call-tint{
-  background:rgba(0,200,83,.18) !important;
-  border:1px solid var(--green) !important;
-  box-shadow:0 0 0 1px rgba(0,200,83,.3), 0 0 8px rgba(0,200,83,.3);
+  box-shadow:0 0 0 1px rgba(0,200,83,.45), 0 0 12px rgba(0,200,83,.28);
 }
 .history-row-recent.history-put-tint{
-  background:rgba(255,23,68,.18) !important;
-  border:1px solid var(--red) !important;
-  box-shadow:0 0 0 1px rgba(255,23,68,.3), 0 0 8px rgba(255,23,68,.3);
+  box-shadow:0 0 0 1px rgba(255,23,68,.45), 0 0 12px rgba(255,23,68,.28);
 }
-.history-icon{font-size:13px;width:14px;text-align:center}
-.history-label{font-family:var(--mono);font-weight:600;font-size:11px;min-width:32px}
-.history-meta{font-size:10px;color:var(--text-dim);font-family:var(--mono)}
-.history-strength{font-size:9px;padding:1px 4px;border-radius:2px;font-weight:700}
+/* Row cells */
+.history-time{font-family:var(--mono);font-size:11px;color:var(--text-dim);letter-spacing:.3px}
+.history-signal{font-family:var(--mono);font-weight:700;font-size:12px;letter-spacing:.5px}
+.history-signal.call{color:var(--green)}
+.history-signal.put{color:var(--red)}
+.history-signal.neutral{color:var(--text-dim)}
+.history-strength{font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700;font-family:var(--mono);min-width:22px;text-align:center}
 .history-strength.STRONG{background:var(--green);color:#000}
 .history-strength.MEDIUM{background:var(--yellow);color:#000}
 .history-strength.WEAK{background:var(--text-dim);color:#fff}
+.history-score{font-family:var(--mono);font-weight:600;font-size:12px;min-width:34px;text-align:right}
+.history-score.pos{color:var(--green)}
+.history-score.neg{color:var(--red)}
+.history-icon{font-size:14px;width:16px;text-align:center;line-height:1}
 /* Signal detail modal */
 #signal-detail-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
 #signal-detail-overlay.show{display:flex}
@@ -188,6 +240,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
   #chart-wrap{min-height:50vh}
   #panel{border-left:none;border-top:1px solid var(--border);overflow:visible}
   #bottom{position:sticky;bottom:0;z-index:10}
+  #history-panel{max-height:30vh}
 }
 /* SIGNAL CHANGE ANIM */
 @keyframes signal-pop{0%{transform:scale(1)}50%{transform:scale(1.08)}100%{transform:scale(1)}}
@@ -387,7 +440,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <div id="accuracy-bar">Accuracy: <span class="pct" id="acc-pct">—</span> <span id="acc-detail"></span></div>
     </div>
     <div id="history-panel">
-      <div class="section-title">Signal History <span style="font-size:10px;color:var(--text-dim);font-weight:400;margin-left:6px">click row for detail</span></div>
+      <div class="section-title"><span>Signal History</span><span class="hint">newest on top · click row for detail</span></div>
       <div id="history-list"></div>
     </div>
   </footer>
@@ -1026,21 +1079,17 @@ function renderTape(){
    modal with everything. */
 
 function addHistory(signal, accuracy, detail){
-  // NEW signals are added to the END (right side) of the list.
-  // Old signals naturally scroll off to the left.
-  // This matches the user's request: "নতুন হিস্টোরি ডান দিকে যোগ হবে,
-  //   বাকি গুলো ডান দিকে দিয়ে বের হতে থাকবে"
-  // (newest on right, old ones exit from the left)
+  // signalHistory stays OLDEST→NEWEST internally (matches server order and
+  // keeps the index-based click handler stable). renderHistory() draws the
+  // array in REVERSE so the newest signal lands at the TOP of the list.
   signalHistory.push({ signal, accuracy, detail: detail || null });
   if(signalHistory.length > HISTORY_MAX) signalHistory.shift();
   totalSignals++;
   if(accuracy === 'correct') totalCorrect++;
   renderHistory();
   renderAccuracy();
-  // Auto-scroll to the right (newest) after adding
-  setTimeout(() => {
-    historyList.scrollLeft = historyList.scrollWidth;
-  }, 50);
+  // Newest is rendered at the TOP — make sure it's visible.
+  setTimeout(() => { historyList.scrollTop = 0; }, 50);
 }
 
 function loadServerHistory(){
@@ -1050,11 +1099,12 @@ function loadServerHistory(){
 }
 
 function onServerSignals(sigs){
-  /* Server sent us the full history (with details). Merge into our list. */
+  /* Server sent us the full history (with details). Merge into our list.
+     signalHistory is stored OLDEST→NEWEST; renderHistory() reverses it so
+     the newest signal is shown at the TOP of the vertical list. */
   if(!sigs || !sigs.length) return;
   serverSignals = sigs;
-  // Rebuild signalHistory: OLDEST first (left), NEWEST last (right).
-  // Server sends most-recent-first, so we reverse to get oldest-first.
+  // Server sends most-recent-first, so reverse to get oldest-first internally.
   signalHistory = sigs.slice(0, HISTORY_MAX).reverse().map(s => ({
     signal: s.signal,
     accuracy: s.accuracy,
@@ -1066,44 +1116,55 @@ function onServerSignals(sigs){
   totalCorrect = graded.filter(s => s.accuracy === 'correct').length;
   renderHistory();
   renderAccuracy();
-  // Auto-scroll to the right (newest)
-  setTimeout(() => {
-    historyList.scrollLeft = historyList.scrollWidth;
-  }, 50);
+  // Newest is at the TOP — keep the list scrolled to the top.
+  setTimeout(() => { historyList.scrollTop = 0; }, 50);
 }
 
 function renderHistory(){
-  let html = '';
   if(!signalHistory.length){
-    html = '<div style="color:var(--text-dim);font-size:11px;padding:4px">No signals yet</div>';
-    historyList.innerHTML = html;
+    historyList.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:8px 4px">No signals yet</div>';
     return;
   }
-  const lastIdx = signalHistory.length - 1;
-  signalHistory.forEach((h, idx) => {
+  const lastIdx = signalHistory.length - 1;   // newest = last item in array
+  // Render NEWEST FIRST (top of the vertical list). Iterate the array in
+  // reverse so the most recent signal is the first row. Array indices are
+  // preserved for the click-to-detail handler.
+  let html = '';
+  for(let i = lastIdx; i >= 0; i--){
+    const h = signalHistory[i];
+    const isRecent = (i === lastIdx);
     const icon = h.accuracy === 'correct' ? '✅' : h.accuracy === 'wrong' ? '❌' : '➖';
-    const color = h.signal === 'CALL' ? 'var(--green)' : h.signal === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
+    const sigCls = h.signal === 'CALL' ? 'call' : h.signal === 'PUT' ? 'put' : 'neutral';
     const strength = h.detail?.strength || '';
     const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
-    const score = h.detail?.score != null ? (h.detail.score >= 0 ? '+' : '') + h.detail.score : '';
-    const clickable = h.detail ? `onclick="window._showSignalDetail(${idx})"` : '';
-    // Most recent signal = LAST item (rightmost) — highlight it
+    const strengthLetter = strength ? strength[0] : '·';
+    const scoreVal = h.detail?.score;
+    const score = scoreVal != null ? ((scoreVal >= 0 ? '+' : '') + scoreVal) : '';
+    const scoreCls = scoreVal != null ? (scoreVal >= 0 ? 'pos' : 'neg') : '';
+    // Full-width result tint (green/red/yellow) for at-a-glance scanning
+    const accCls = h.accuracy === 'correct' ? ' correct'
+                 : h.accuracy === 'wrong'   ? ' wrong'
+                 : h.accuracy === 'draw'    ? ' draw'
+                 : '';
+    // Most recent row gets a directional glow on top of the result tint
     let recentCls = '';
-    if(idx === lastIdx){
+    if(isRecent){
       recentCls = ' history-row-recent';
       if(h.signal === 'CALL') recentCls += ' history-call-tint';
       else if(h.signal === 'PUT') recentCls += ' history-put-tint';
     }
-    // Add time label if available
-    const time = h.detail?.ctime ? new Date(h.detail.ctime * 1000).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false}) : '';
-    html += `<div class="history-row${recentCls}" ${clickable}>`
+    const time = h.detail?.ctime
+      ? new Date(h.detail.ctime * 1000).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false})
+      : '--:--';
+    const clickable = h.detail ? `onclick="window._showSignalDetail(${i})"` : '';
+    html += `<div class="history-row${accCls}${recentCls}" ${clickable}>`
+         +  `<span class="history-time">${time}</span>`
+         +  `<span class="history-signal ${sigCls}">${h.signal}</span>`
+         +  `<span class="history-strength ${strengthCls}">${strengthLetter}</span>`
+         +  `<span class="history-score ${scoreCls}">${score || '—'}</span>`
          +  `<span class="history-icon">${icon}</span>`
-         +  `<span class="history-label" style="color:${color}">${h.signal}</span>`
-         +  (strength ? `<span class="history-strength ${strengthCls}">${strength[0]}</span>` : '')
-         +  (score ? `<span class="history-meta">${score}</span>` : '')
-         +  (time ? `<span style="color:var(--text-dim);font-size:9px;margin-left:2px">${time}</span>` : '')
          +  `</div>`;
-  });
+  }
   historyList.innerHTML = html;
 }
 
