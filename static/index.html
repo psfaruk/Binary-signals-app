@@ -122,19 +122,16 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .tape-price{display:inline-block;margin-right:16px;font-family:var(--mono);font-size:12px}
 .tape-price.up{color:var(--green)}.tape-price.down{color:var(--red)}.tape-price.flat{color:var(--text-dim)}
 .tape-arrow{font-size:10px;margin-right:2px}
-/* Signal history — horizontal row of records under the tick-tape.
-   Fills the previously-empty space, so many records fit on-screen. */
+/* Signal history — horizontal row, NEW signals appear on the RIGHT,
+   old signals scroll off to the LEFT. Like a chat: newest at bottom-right. */
 #history-panel{padding:4px 8px;border-top:1px solid var(--border);overflow:hidden}
 #history-panel .section-title{font-size:10px;color:var(--text-dim);padding:0 4px 2px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
-#history-list{display:flex;flex-direction:row;gap:4px;overflow-x:auto;overflow-y:hidden;padding:2px 0}
+#history-list{display:flex;flex-direction:row;gap:4px;overflow-x:auto;overflow-y:hidden;padding:2px 0;scroll-behavior:smooth}
 #history-list::-webkit-scrollbar{height:4px}
 #history-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 .history-row{display:flex;align-items:center;gap:4px;font-size:11px;padding:3px 6px;border-radius:3px;cursor:pointer;transition:background .15s;flex:0 0 auto;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.05)}
 .history-row:hover{background:rgba(255,255,255,.08)}
-/* Most recent signal — visually distinct so the user can instantly tell
-   this is the current/recent candle's signal. Highlighted with a colored
-   border + subtle background tint matching the signal direction (green for
-   CALL, red for PUT). Border-radius slightly larger to make it pop. */
+/* Most recent signal (last item, rightmost) — visually distinct */
 .history-row-recent{
   background:rgba(33,150,243,.15) !important;
   border:1px solid #2196F3 !important;
@@ -1029,14 +1026,21 @@ function renderTape(){
    modal with everything. */
 
 function addHistory(signal, accuracy, detail){
-  // detail is optional; when present (from EOC msg) we store a stub that
-  // the server-backed load will enrich later.
-  signalHistory.unshift({ signal, accuracy, detail: detail || null });
-  if(signalHistory.length > HISTORY_MAX) signalHistory.pop();
+  // NEW signals are added to the END (right side) of the list.
+  // Old signals naturally scroll off to the left.
+  // This matches the user's request: "নতুন হিস্টোরি ডান দিকে যোগ হবে,
+  //   বাকি গুলো ডান দিকে দিয়ে বের হতে থাকবে"
+  // (newest on right, old ones exit from the left)
+  signalHistory.push({ signal, accuracy, detail: detail || null });
+  if(signalHistory.length > HISTORY_MAX) signalHistory.shift();
   totalSignals++;
   if(accuracy === 'correct') totalCorrect++;
   renderHistory();
   renderAccuracy();
+  // Auto-scroll to the right (newest) after adding
+  setTimeout(() => {
+    historyList.scrollLeft = historyList.scrollWidth;
+  }, 50);
 }
 
 function loadServerHistory(){
@@ -1049,8 +1053,9 @@ function onServerSignals(sigs){
   /* Server sent us the full history (with details). Merge into our list. */
   if(!sigs || !sigs.length) return;
   serverSignals = sigs;
-  // Rebuild signalHistory from server data (most recent first)
-  signalHistory = sigs.slice(0, HISTORY_MAX).map(s => ({
+  // Rebuild signalHistory: OLDEST first (left), NEWEST last (right).
+  // Server sends most-recent-first, so we reverse to get oldest-first.
+  signalHistory = sigs.slice(0, HISTORY_MAX).reverse().map(s => ({
     signal: s.signal,
     accuracy: s.accuracy,
     detail: s
@@ -1061,6 +1066,10 @@ function onServerSignals(sigs){
   totalCorrect = graded.filter(s => s.accuracy === 'correct').length;
   renderHistory();
   renderAccuracy();
+  // Auto-scroll to the right (newest)
+  setTimeout(() => {
+    historyList.scrollLeft = historyList.scrollWidth;
+  }, 50);
 }
 
 function renderHistory(){
@@ -1070,28 +1079,29 @@ function renderHistory(){
     historyList.innerHTML = html;
     return;
   }
+  const lastIdx = signalHistory.length - 1;
   signalHistory.forEach((h, idx) => {
     const icon = h.accuracy === 'correct' ? '✅' : h.accuracy === 'wrong' ? '❌' : '➖';
     const color = h.signal === 'CALL' ? 'var(--green)' : h.signal === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
     const strength = h.detail?.strength || '';
     const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
     const score = h.detail?.score != null ? (h.detail.score >= 0 ? '+' : '') + h.detail.score : '';
-    // Click opens detail modal if we have full detail
     const clickable = h.detail ? `onclick="window._showSignalDetail(${idx})"` : '';
-    // Most recent signal (idx === 0) gets a distinct class so it's visually
-    // identifiable as "this is the current/recent candle's signal".
-    // The tint color follows the signal direction (green=CALL, red=PUT).
+    // Most recent signal = LAST item (rightmost) — highlight it
     let recentCls = '';
-    if(idx === 0){
+    if(idx === lastIdx){
       recentCls = ' history-row-recent';
       if(h.signal === 'CALL') recentCls += ' history-call-tint';
       else if(h.signal === 'PUT') recentCls += ' history-put-tint';
     }
+    // Add time label if available
+    const time = h.detail?.ctime ? new Date(h.detail.ctime * 1000).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false}) : '';
     html += `<div class="history-row${recentCls}" ${clickable}>`
          +  `<span class="history-icon">${icon}</span>`
          +  `<span class="history-label" style="color:${color}">${h.signal}</span>`
          +  (strength ? `<span class="history-strength ${strengthCls}">${strength[0]}</span>` : '')
          +  (score ? `<span class="history-meta">${score}</span>` : '')
+         +  (time ? `<span style="color:var(--text-dim);font-size:9px;margin-left:2px">${time}</span>` : '')
          +  `</div>`;
   });
   historyList.innerHTML = html;
