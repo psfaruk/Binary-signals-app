@@ -997,9 +997,9 @@ class QuotexFeed:
         if live_only:
             micro_hist = []
         else:
-            micro_hist = _db.get_micro_history(
-                asset, period, n=5,
-                before_ctime=candles[-1]["time"])
+            micro_hist = await asyncio.to_thread(
+                _db.get_micro_history,
+                asset, period, 5, candles[-1]["time"])
 
         # Use cached accuracy if a stream is provided (avoids DB query on
         # every LIVE re-eval in the last 10s). Fall back to DB query for
@@ -1651,9 +1651,9 @@ class QuotexFeed:
         # Grade the candle that just closed against the prediction that was
         # made FOR it (stream.prediction, before we overwrite it below) and
         # write the full postmortem row (shared with background trackers).
-        accuracy = self._grade_and_log(stream.asset, stream.period, closed,
-                                       stream.prediction, _micro_snap,
-                                       stream.candles)
+        accuracy = await asyncio.to_thread(
+            self._grade_and_log, stream.asset, stream.period, closed,
+            stream.prediction, _micro_snap, stream.candles)
 
         # Update the chop-guard streak using the regime/zone the JUST-RESOLVED
         # prediction was made under (stream.prediction, before _run_eoc below
@@ -1680,8 +1680,9 @@ class QuotexFeed:
         # Persist microstructure NOW — after EOC (so DB was clean during analysis)
         # but BEFORE ticks.clear() so the tick buffer is still fully intact.
         if _micro_snap:
-            self._save_micro(stream.asset, stream.period, closed, _micro_snap,
-                             stream.candles, list(stream.ticks))
+            await asyncio.to_thread(
+                self._save_micro, stream.asset, stream.period, closed,
+                _micro_snap, stream.candles, list(stream.ticks))
 
         # Start new candle
         stream.candle_open_time    = new_open_time

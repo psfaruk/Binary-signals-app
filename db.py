@@ -14,7 +14,15 @@ _lock = threading.Lock()
 
 
 def _conn():
-    return sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    # WAL mode: allows concurrent reads during writes — critical for
+    # avoiding lock contention when 38 streams close simultaneously.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn
 
 
 @contextmanager
@@ -38,7 +46,7 @@ def init():
             is_fight INT, crosses INT, hold_price REAL, hold_visits INT,
             phases TEXT, reaction TEXT, net REAL, tick_count INT,
             last_react TEXT,
-            round_near TEXT, round_str TEXT,
+            round_near REAL, round_str TEXT,
             gap_pct REAL, gap_type TEXT, key_levels TEXT,
             ticks_json TEXT,
             PRIMARY KEY (asset, period, ctime))""")
@@ -59,8 +67,9 @@ def init():
             asset TEXT, period INT, ctime INT,
             theory TEXT, vote TEXT, mag REAL,
             outcome TEXT, ts REAL DEFAULT (strftime('%s','now')))""")
-        # Indexes
+        # Indexes — added ctime composite for faster recent_accuracy queries
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_asset_period ON signal_log(asset, period)")
+        c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ctime ON signal_log(asset, period, ctime DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ts ON signal_log(ts)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_tv_theory ON theory_votes(theory)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_tv_ts ON theory_votes(ts)")
