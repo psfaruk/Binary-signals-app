@@ -999,17 +999,28 @@ def _theory_con(candles, muted):
           instead of a continuation vote. This was previously the
           domain of MEAN, but CON needs to stop voting continuation
           when the streak is clearly extended.
+
+    CONTEXT-AWARE FIX (2026-07-13):
+      The user reported that continuation/reversal predictions are wrong.
+      Root cause: CON was voting the same regardless of market context.
+      Now uses market_state to decide:
+        - MARKUP/MARKDOWN phase + 3-candle streak → continuation (+2)
+        - ACCUMULATION/DISTRIBUTION + 3-candle streak → reversal (-2)
+        - RANGE_MID + 3-candle streak → no vote (uncertain)
+        - 4+ candles → ALWAYS reversal (exhaustion, regardless of phase)
     """
     if "CON" in muted:
         return None
     if len(candles) < 5:
         return None
     regime = _classify_regime(candles)
+    market_state = _classify_market_state(candles)
+    phase = market_state.get("phase", "UNKNOWN")
+    trend = market_state.get("trend", "SIDEWAYS")
     score = 0
     reasons = []
 
     closes = [c["close"] for c in candles]
-    # Last 3 candles same direction?
     dirs = []
     for c in candles[-3:]:
         if c["close"] > c["open"]:
@@ -1019,9 +1030,6 @@ def _theory_con(candles, muted):
         else:
             dirs.append(0)
 
-    # Count consecutive same-direction candles ending at the last candle.
-    # Looks at most last 8 candles (enough to detect 4+ exhaustion without
-    # counting ancient history).
     consec = 0
     if candles:
         last_dir = 1 if candles[-1]["close"] > candles[-1]["open"] else (
@@ -1035,36 +1043,65 @@ def _theory_con(candles, muted):
                 else:
                     break
 
+    # ── Context-aware continuation/reversal (2026-07-13) ──────────────
+    # In trending phases (MARKUP/MARKDOWN), 3-candle streaks DO continue.
+    # In range phases (ACCUMULATION/DISTRIBUTION), streaks REVERSE.
+    # This is the key fix for the continuation/reversal accuracy problem.
+
     if all(d >= 0 for d in dirs) and sum(dirs) >= 2:
-        # Check for exhaustion: are candles getting SMALLER?
+        # 3+ bullish candles
         sizes = [c["high"] - c["low"] for c in candles[-3:]]
-        if sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * 0.5:
-            # Shrinking bullish candles = momentum dying → DON'T follow
+        shrinking = sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * 0.5
+
+        if consec >= 4:
+            # 4+ consecutive = exhaustion regardless of phase
+            score -= 2
+            reasons.append(f"CON:-2 PUT {consec}-bull-exhaustion")
+        elif shrinking:
             score -= 2
             reasons.append("CON:-2 PUT bull-shrinking-exhaust")
-        elif consec >= 4:
-            # 4+ consecutive bull candles in mean-reverting OTC = exhaustion
-            score -= 1
-            reasons.append(f"CON:-1 PUT {consec}-bull-exhaustion")
+        elif phase in ("MARKUP",):
+            # In a markup phase, 3-bull continuation is valid → stronger vote
+            score += 2
+            reasons.append(f"CON:+2 CALL 3-bull-continue-in-markup")
+        elif phase in ("DISTRIBUTION", "ACCUMULATION"):
+            # In distribution/accumulation, 3-bull = exhaustion → reversal
+            score -= 2
+            reasons.append(f"CON:-2 PUT 3-bull-in-{phase.lower()}")
+        elif trend == "UPTREND":
+            # Uptrend but not in markup phase → weak continuation
+            score += 1
+            reasons.append("CON:+1 CALL 3-bull-uptrend")
         else:
-            # Reduced from +2 to +1 — continuation theories were over-weighted
-            # vs reversal theories in mean-reverting OTC markets.
+            # Sideways/unknown → weak continuation (OTC default)
             score += 1
             reasons.append("CON:+1 CALL 3-bull-continue")
+
     elif all(d <= 0 for d in dirs) and sum(dirs) <= -2:
+        # 3+ bearish candles
         sizes = [c["high"] - c["low"] for c in candles[-3:]]
-        if sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * 0.5:
+        shrinking = sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * 0.5
+
+        if consec >= 4:
+            score += 2
+            reasons.append(f"CON:+2 CALL {consec}-bear-exhaustion")
+        elif shrinking:
             score += 2
             reasons.append("CON:+2 CALL bear-shrinking-exhaust")
-        elif consec >= 4:
-            score += 1
-            reasons.append(f"CON:+1 CALL {consec}-bear-exhaustion")
+        elif phase in ("MARKDOWN",):
+            score -= 2
+            reasons.append(f"CON:-2 PUT 3-bear-continue-in-markdown")
+        elif phase in ("DISTRIBUTION", "ACCUMULATION"):
+            score += 2
+            reasons.append(f"CON:+2 CALL 3-bear-in-{phase.lower()}")
+        elif trend == "DOWNTREND":
+            score -= 1
+            reasons.append("CON:-1 PUT 3-bear-downtrend")
         else:
             score -= 1
             reasons.append("CON:-1 PUT 3-bear-continue")
 
-    # EMA trend alignment — but ONLY when RSI is in neutral zone
-    # (overbought/oversold zones belong to MEAN/REV)
+    # EMA trend alignment — ONLY when RSI is in neutral zone
     rsi_val = regime.get("rsi", 50)
     if regime["trend"] == "UPTREND" and 30 <= rsi_val <= 70:
         score += 1
@@ -1072,7 +1109,6 @@ def _theory_con(candles, muted):
     elif regime["trend"] == "DOWNTREND" and 30 <= rsi_val <= 70:
         score -= 1
         reasons.append(f"CON:-1 PUT ema-bearish rsi={rsi_val:.0f}")
-    # No EMA vote when RSI is in extreme zones — MEAN theory handles those
 
     if score == 0:
         return None
@@ -1080,7 +1116,13 @@ def _theory_con(candles, muted):
 
 
 def _theory_rev(candles, muted):
-    """REV - Reversal: wick rejection at extremes OR at key levels."""
+    """REV - Reversal: wick rejection at extremes OR at key levels.
+
+    CONTEXT-AWARE (2026-07-13):
+      In strong trends (MARKUP/MARKDOWN), wick rejections are WEAKER —
+      the trend usually continues after a brief pullback. REV vote is
+      halved in trending phases, full strength in ranging phases.
+    """
     if "REV" in muted:
         return None
     if len(candles) < 3:
@@ -1094,6 +1136,12 @@ def _theory_rev(candles, muted):
     if body < atr * 0.1:
         return None  # Doji — no clear rejection
 
+    # Context: REV is stronger in ranging, weaker in trending
+    market_state = _classify_market_state(candles)
+    phase = market_state.get("phase", "UNKNOWN")
+    is_trending = phase in ("MARKUP", "MARKDOWN")
+    rev_multiplier = 0.5 if is_trending else 1.0
+
     score = 0
     reasons = []
 
@@ -1101,18 +1149,18 @@ def _theory_rev(candles, muted):
     levels = _key_levels(candles)
 
     # Strong lower wick = bullish rejection
-    # Strengthened from +3/+4 to +4/+5 — reversal theories are the edge in
-    # mean-reverting OTC markets and were being out-voted by CON/MICRO/RUN.
     if lower_wick > body * 1.5 and lower_wick > atr * 0.2:
         boost = 4
-        # Extra weight if the low is near a swing low (double bottom pattern)
         for lv in levels:
             if lv["type"] == "swing_low" and abs(last["low"] - lv["price"]) < atr * 0.3:
-                boost = 5  # Stronger signal at key level
+                boost = 5
                 reasons.append(f"REV:bonus+1 at-swing-low={lv['price']:.5f}")
                 break
+        # Apply context multiplier (halved in trending phases)
+        boost = max(1, int(boost * rev_multiplier))
         score += boost
-        reasons.append(f"REV:+{boost} CALL lower-wick={lower_wick:.6f}")
+        reasons.append(f"REV:+{boost} CALL lower-wick={lower_wick:.6f}"
+                       + (f" (trending×0.5)" if is_trending else ""))
 
     # Strong upper wick = bearish rejection
     if upper_wick > body * 1.5 and upper_wick > atr * 0.2:
@@ -1122,8 +1170,10 @@ def _theory_rev(candles, muted):
                 boost = 5
                 reasons.append(f"REV:bonus+1 at-swing-high={lv['price']:.5f}")
                 break
+        boost = max(1, int(boost * rev_multiplier))
         score -= boost
-        reasons.append(f"REV:-{boost} PUT upper-wick={upper_wick:.6f}")
+        reasons.append(f"REV:-{boost} PUT upper-wick={upper_wick:.6f}"
+                       + (f" (trending×0.5)" if is_trending else ""))
 
     # Also check: is the candle at a RANGE extreme? (HIGH/LOW zone)
     if len(candles) >= 10:
@@ -1658,37 +1708,52 @@ def _theory_micro(candles, ticks, muted):
     atr = _atr(candles)
 
     # ── Core: Pressure + candle direction → OTC mean-reversion vote ──────
-    # Strong buyer pressure + bullish close = exhaustion → expect PUT next
-    # Strong buyer pressure + bearish close = failed move → expect PUT next
-    # Strong seller pressure + bearish close = exhaustion → expect CALL next
-    # Strong seller pressure + bullish close = failed move → expect CALL next
-    # (i.e. STRONG pressure in either direction = mean-reversion signal)
+    # CONTEXT-AWARE (2026-07-13): In trending markets (MARKUP/MARKDOWN),
+    # strong pressure CONFIRMS the trend, not reverses it. Only in ranging
+    # markets (ACCUMULATION/DISTRIBUTION/SIDEWAYS) does strong pressure
+    # signal mean-reversion.
+    market_state = _classify_market_state(candles)
+    phase = market_state.get("phase", "UNKNOWN")
+    trend = market_state.get("trend", "SIDEWAYS")
+    is_trending = phase in ("MARKUP", "MARKDOWN")
+
     body = (candles[-1]["close"] - candles[-1]["open"]) if candles else 0
     body_ratio = abs(body) / atr if atr > 0 else 0
 
     if buy_pct >= 65:
-        # Strong buyer pressure → expect mean reversion down
-        if body_ratio > 1.0:
-            # Big bullish body confirms exhaustion
-            score -= 3
-            reasons.append(
-                f"MICRO:-3 PUT strong-buyers-mean-revert bp={buy_pct}% "
-                f"body={body_ratio:.2f}xATR")
-        else:
-            score -= 2
-            reasons.append(
-                f"MICRO:-2 PUT strong-buyers bp={buy_pct}% net={net:.5f}")
-    elif buy_pct <= 35:
-        # Strong seller pressure → expect mean reversion up
-        if body_ratio > 1.0:
-            score += 3
-            reasons.append(
-                f"MICRO:+3 CALL strong-sellers-mean-revert sp={100-buy_pct}% "
-                f"body={body_ratio:.2f}xATR")
-        else:
+        if is_trending and trend == "UPTREND":
+            # In a markup phase, strong buyer pressure = trend continuation
             score += 2
             reasons.append(
-                f"MICRO:+2 CALL strong-sellers sp={100-buy_pct}% net={net:.5f}")
+                f"MICRO:+2 CALL buyer-pressure-in-markup bp={buy_pct}%")
+        else:
+            # In ranging/sideways, strong buyers = mean-reversion → PUT
+            if body_ratio > 1.0:
+                score -= 3
+                reasons.append(
+                    f"MICRO:-3 PUT strong-buyers-mean-revert bp={buy_pct}% "
+                    f"body={body_ratio:.2f}xATR")
+            else:
+                score -= 2
+                reasons.append(
+                    f"MICRO:-2 PUT strong-buyers bp={buy_pct}% net={net:.5f}")
+    elif buy_pct <= 35:
+        if is_trending and trend == "DOWNTREND":
+            # In a markdown phase, strong seller pressure = trend continuation
+            score -= 2
+            reasons.append(
+                f"MICRO:-2 PUT seller-pressure-in-markdown sp={100-buy_pct}%")
+        else:
+            # In ranging/sideways, strong sellers = mean-reversion → CALL
+            if body_ratio > 1.0:
+                score += 3
+                reasons.append(
+                    f"MICRO:+3 CALL strong-sellers-mean-revert sp={100-buy_pct}% "
+                    f"body={body_ratio:.2f}xATR")
+            else:
+                score += 2
+                reasons.append(
+                    f"MICRO:+2 CALL strong-sellers sp={100-buy_pct}% net={net:.5f}")
 
     # ── Reaction at close ─────────────────────────────────────────────────
     # This catches genuine reversal patterns (wick rejection at end) —
