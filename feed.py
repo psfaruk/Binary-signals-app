@@ -198,10 +198,12 @@ def _drop_price_contamination(candles: list[dict]) -> list[dict]:
     """
     Defend against a stale/wrong-asset candle batch getting spliced into a
     fresh history fetch. Symptom: chart shows an old price-level cluster,
-    a big blank jump, then the new pair's real candles — permanently, since
-    it's baked into the one-shot history snapshot and never self-heals.
-    Detect a jump between consecutive candles far bigger than the local
-    range and keep only the freshest contiguous segment after it.
+    a big blank jump, then the new pair's real candles — permanently.
+
+    FIX (2026-07-13): Two-layer detection:
+    1. Close-to-close jump > 10x median range (was 25x — too lenient)
+    2. Open-to-prev-close gap > 10x median range (NEW — catches the
+       visible gap between candles that close-to-close misses)
     """
     if len(candles) < 6:
         return candles
@@ -214,12 +216,15 @@ def _drop_price_contamination(candles: list[dict]) -> list[dict]:
 
     cut = 0
     for i in range(1, len(candles)):
+        # Layer 1: close-to-close jump
         jump = abs(candles[i]["close"] - candles[i - 1]["close"])
-        if jump > median_rng * 25:
-            cut = i   # a later jump wins — keep only the freshest segment
+        # Layer 2: open gap from previous close (the visible chart gap)
+        gap = abs(candles[i]["open"] - candles[i - 1]["close"])
+        if jump > median_rng * 10 or gap > median_rng * 10:
+            cut = i
     if cut:
         print(f"[feed] dropped {cut} contaminated candle(s) "
-              f"(price jump > 25x median range) before index {cut}")
+              f"(price gap > 10x median range) before index {cut}")
         return candles[cut:]
     return candles
 
