@@ -687,6 +687,8 @@ function refreshPriceLines(){
 function updateChart(candles, predCandle, resetView){
   candleData = candles.map(c=>({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
   candleSeries.setData(candleData);
+  // Sync the tween engine to the last candle so animation continues smoothly
+  if(candleData.length) _resetRaf(candleData[candleData.length-1]);
   // Real candle data has painted — the loading spinner's job is done.
   if(candleData.length) hideChartLoading();
   // Only snap the view back to the latest bars on a genuine fresh load
@@ -709,25 +711,93 @@ function updateChart(candles, predCandle, resetView){
   liveTarget = null; liveDisplay = null;
 }
 
+// ── Smooth candle — ease-out cubic tween (from otc-live-trading) ───────────
+// One tick every ~500ms arrives from the server. We tween the rendered
+// candle from its current position to the new target over TWEEN_MS ms
+// using easeOutCubic — fast start, smooth deceleration. When the next
+// tick arrives mid-tween we restart from wherever we are, giving
+// continuous fluid movement with no jumps. Runs at 60fps (browser cap).
+const TWEEN_MS = 480;
+
+let _fromClose = 0, _fromHigh = 0, _fromLow = 0;
+let _toClose = 0,   _toHigh = 0,   _toLow = 0;
+let _rTime = 0, _rOpen = 0, _rClose = 0, _rHigh = 0, _rLow = 0;
+let _tweenStart = 0, _rafActive = false;
+
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+function _rafFrame(ts) {
+  if (!_rafActive) return;
+  if (_rTime > 0 && _rOpen > 0 && candleSeries) {
+    const elapsed = ts - _tweenStart;
+    const progress = Math.min(elapsed / TWEEN_MS, 1.0);
+    const eased = easeOutCubic(progress);
+    _rClose = _fromClose + (_toClose - _fromClose) * eased;
+    _rHigh  = _fromHigh  + (_toHigh  - _fromHigh)  * eased;
+    _rLow   = _fromLow   + (_toLow   - _fromLow)   * eased;
+    const safeHigh = Math.max(_rHigh, _rClose, _rOpen);
+    const safeLow  = Math.min(_rLow,  _rClose, _rOpen);
+    const safeClose = Math.min(safeHigh, Math.max(safeLow, _rClose));
+    if (!isNaN(safeHigh) && !isNaN(safeLow) && !isNaN(safeClose)) {
+      try {
+        candleSeries.update({ time: _rTime, open: _rOpen, high: safeHigh, low: safeLow, close: safeClose });
+      } catch (_) {}
+    }
+  }
+  requestAnimationFrame(_rafFrame);
+}
+
+function _startRaf() {
+  if (_rafActive) return;
+  _rafActive = true;
+  _tweenStart = performance.now();
+  requestAnimationFrame(_rafFrame);
+}
+
+function _setTarget(candle, perfNow) {
+  if (!candle || !candle.open || candle.open <= 0 || !candle.time) return;
+  if (_rTime > 0 && candle.time < _rTime) return;
+  const isNewCandle = (_rTime !== candle.time);
+  if (isNewCandle) {
+    _rTime = candle.time; _rOpen = candle.open;
+    _rClose = candle.open; _rHigh = candle.open; _rLow = candle.open;
+  }
+  _fromClose = _rClose; _fromHigh = _rHigh; _fromLow = _rLow;
+  _toClose = candle.close; _toHigh = candle.high; _toLow = candle.low;
+  _tweenStart = perfNow || performance.now();
+}
+
+function _resetRaf(candle) {
+  if (candle) {
+    _rTime = candle.time; _rOpen = candle.open;
+    _rClose = candle.close; _rHigh = candle.high; _rLow = candle.low;
+    _fromClose = _toClose = candle.close;
+    _fromHigh = _toHigh = candle.high;
+    _fromLow = _toLow = candle.low;
+  } else { _rTime = 0; }
+  _tweenStart = performance.now();
+}
+
 function updateLastCandle(candle){
   if(!candleData.length) return;
   const last = candleData[candleData.length-1];
   if(candle.time < last.time) return;
   if(candle.time !== last.time){
-    // New candle opened — add it directly.
+    // New candle opened — add to data array + set as tween target.
     const bar = { time: candle.time, open: candle.open, high: candle.high, low: candle.low, close: candle.close };
     candleData.push(bar);
     if(candleData.length > 500) candleData.shift();
-    candleSeries.update(bar);
+    _setTarget(bar);
+    _startRaf();
     return;
   }
-  // Same candle: update directly with real tick values — NO smoothing.
-  // This matches Quotex exactly: the candle moves on every real tick,
-  // no animation lag. Previous smoothing caused ~35% permanent lag.
+  // Same candle: update data array + set new tween target.
+  // The rAF loop smoothly eases the rendered candle toward this target.
   last.high = Math.max(last.high, candle.high);
   last.low = Math.min(last.low, candle.low);
   last.close = candle.close;
-  candleSeries.update({ time: last.time, open: last.open, high: last.high, low: last.low, close: last.close });
+  _setTarget(last);
+  _startRaf();
 }
 
 /* ─── SIGNAL DISPLAY ─── */
