@@ -36,7 +36,7 @@ import db as _db
 # already shown in the signal bar (see stream.payout / signal-payout in
 # chart.js). Overridable per-deployment since Quotex's payout schedule can
 # vary by broker account/region.
-PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "81"))
+PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "85"))
 
 # Method A (LIVE running-candle theory) / Method B (strength gating) rollout
 # flags — both untested, added 2026-07-10. Zero-redeploy killswitch: set
@@ -355,7 +355,7 @@ class QuotexFeed:
         # Default covers ~38 always-on forex pairs (see _reconcile_always_on)
         # plus headroom for on-demand non-1m streams and the brief overlap
         # window when a pair's real/otc asset code swaps.
-        self._max_streams     = int(os.environ.get("QX_MAX_STREAMS", "45"))
+        self._max_streams     = int(os.environ.get("QX_MAX_STREAMS", "60"))
         # Held across a stream's whole start sequence (start_candles_stream +
         # history fetch) — staggers concurrent starts AND serializes history
         # fetches, closing a real race in pyquotex's Strategy-2 history
@@ -1714,7 +1714,8 @@ class QuotexFeed:
             raise RuntimeError("Quotex client not connected yet")
 
         asset, period = stream.asset, stream.period
-        print(f"[feed] starting stream {asset}@{period}s")
+        print(f"[feed] starting stream {asset}@{period}s"
+              + (f" (ALWAYS-ON — 85%+ payout)" if stream.always_on else ""))
 
         await self._client.start_candles_stream(asset, period)
         stream.sub_started = True
@@ -2425,20 +2426,20 @@ class QuotexFeed:
 
     def _reconcile_always_on(self) -> None:
         """
-        Keep the always-on set in sync with the latest payout/market data
-        (called right after _load_pairs). Pre-warms every eligible forex
-        pair's 1m stream and never idle-evicts it, so switching between
-        tradeable pairs is instant instead of a cold start.
+        Keep ALL 85%+ payout pairs running as ALWAYS-ON 1m streams.
 
-        A stream stops being always_on the moment its (asset, 60) key is no
-        longer in the eligible set — that covers BOTH a payout dropping
-        below PAYOUT_FLOOR AND a pair's asset code swapping real<->otc (the
-        unified pairs list always represents a logical pair with a single
-        CURRENT asset code, so a real/otc flip makes the OLD code vanish
-        from `eligible` on its own). Demoted streams simply become normal
-        on-demand streams, subject to the usual idle sweep — never killed
-        outright, matching ensure_stream's "never tear down a running
-        stream" philosophy.
+        This is the KEY fix for the user's complaint:
+        'প্রত্যেকটি পেয়ার নতুন করে ডেটা সংগ্রহ করে ক্যান্ডেল ওপেন হয়'
+
+        With always-on, ALL 85%+ pairs have:
+          - History pre-loaded
+          - Live tick stream running
+          - EOC predictions being generated every candle
+          - Market state being tracked
+
+        When the user switches pairs, data is ALREADY there — no cold start,
+        no re-fetching, no delay. Each pair runs independently in its own
+        asyncio task, so switching one doesn't affect another.
         """
         eligible = {(p["asset"], 60) for p in self._pairs_list
                     if p["status"] in ("live", "otc") and not p.get("locked")}
