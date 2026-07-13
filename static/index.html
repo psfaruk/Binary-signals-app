@@ -178,6 +178,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .history-row.correct{background:rgba(0,200,83,.10);border-color:rgba(0,200,83,.25)}
 .history-row.wrong{background:rgba(255,23,68,.10);border-color:rgba(255,23,68,.25)}
 .history-row.draw{background:rgba(255,193,7,.08);border-color:rgba(255,193,7,.20)}
+.history-row.pending{background:rgba(33,150,243,.06);border-color:rgba(33,150,243,.15)}
 .history-row.correct:hover{background:rgba(0,200,83,.16)}
 .history-row.wrong:hover{background:rgba(255,23,68,.16)}
 .history-row.draw:hover{background:rgba(255,193,7,.14)}
@@ -1079,15 +1080,15 @@ function renderTape(){
    modal with everything. */
 
 function addHistory(signal, accuracy, detail){
-  // signalHistory stays OLDEST→NEWEST internally (matches server order and
-  // keeps the index-based click handler stable). renderHistory() draws the
-  // array in REVERSE so the newest signal lands at the TOP of the list.
-  signalHistory.push({ signal, accuracy, detail: detail || null });
+  // signalHistory stays OLDEST→NEWEST internally. renderHistory() draws
+  // in REVERSE so the newest signal is at the TOP of the vertical list.
+  // accuracy = 'draw' here is a PLACEHOLDER — the real accuracy arrives
+  // at the NEXT candle's EOC (the prediction is FOR the next candle).
+  // loadServerHistory() will replace it with the correct value.
+  signalHistory.push({ signal, accuracy: 'pending', detail: detail || null });
   if(signalHistory.length > HISTORY_MAX) signalHistory.shift();
-  totalSignals++;
-  if(accuracy === 'correct') totalCorrect++;
+  // Don't count 'pending' accuracy toward totals
   renderHistory();
-  renderAccuracy();
   // Newest is rendered at the TOP — make sure it's visible.
   setTimeout(() => { historyList.scrollTop = 0; }, 50);
 }
@@ -1133,7 +1134,7 @@ function renderHistory(){
   for(let i = lastIdx; i >= 0; i--){
     const h = signalHistory[i];
     const isRecent = (i === lastIdx);
-    const icon = h.accuracy === 'correct' ? '✅' : h.accuracy === 'wrong' ? '❌' : '➖';
+    const icon = h.accuracy === 'correct' ? '✅' : h.accuracy === 'wrong' ? '❌' : h.accuracy === 'draw' ? '➖' : '⏳';
     const sigCls = h.signal === 'CALL' ? 'call' : h.signal === 'PUT' ? 'put' : 'neutral';
     const strength = h.detail?.strength || '';
     const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
@@ -1141,10 +1142,11 @@ function renderHistory(){
     const scoreVal = h.detail?.score;
     const score = scoreVal != null ? ((scoreVal >= 0 ? '+' : '') + scoreVal) : '';
     const scoreCls = scoreVal != null ? (scoreVal >= 0 ? 'pos' : 'neg') : '';
-    // Full-width result tint (green/red/yellow) for at-a-glance scanning
+    // Full-width result tint (green/red/yellow/blue) for at-a-glance scanning
     const accCls = h.accuracy === 'correct' ? ' correct'
                  : h.accuracy === 'wrong'   ? ' wrong'
                  : h.accuracy === 'draw'    ? ' draw'
+                 : h.accuracy === 'pending' ? ' pending'
                  : '';
     // Most recent row gets a directional glow on top of the result tint
     let recentCls = '';
