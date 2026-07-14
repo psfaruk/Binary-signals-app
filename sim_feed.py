@@ -372,8 +372,13 @@ class QuotexFeed:
                 acc, n_acc = _db.recent_accuracy(asset, period, n=20)
             except Exception:
                 acc, n_acc = None, 0
+        # Per-pair theory selection (2026-07-13)
+        from pair_theory_config import get_muted_theories
+        pair_muted = get_muted_theories(asset)
+        pair_muted.update(self._muted_theories)  # add dynamic mutes
+
         result = analyze_eoc(candles, ticks, micro_history=micro_hist, period=period,
-                             muted=self._muted_theories, asset=asset,
+                             muted=pair_muted, asset=asset,
                              running_ticks=running_ticks if ENABLE_LIVE_THEORY else None,
                              recent_accuracy=acc, recent_n=n_acc,
                              currently_flipped=stream.inverted if stream is not None else False)

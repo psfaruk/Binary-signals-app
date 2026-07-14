@@ -1074,10 +1074,12 @@ class QuotexFeed:
         except Exception:
             pass
 
-        # Build per-pair muted set: global mutes + this pair's specific mutes
-        pair_muted = set()
+        # Build per-pair muted set from STATIC config + dynamic DB mutes
+        from pair_theory_config import get_muted_theories
+        pair_muted = get_muted_theories(asset)  # static config from DB data
+
+        # Also add dynamic mutes from _refresh_theory_mutes (per-pair)
         for key, _note in self._muted_theories.items():
-            # key format: "asset:code" (per-pair) or just "code" (global)
             if ":" in key:
                 _a, _c = key.split(":", 1)
                 if _a == asset:
