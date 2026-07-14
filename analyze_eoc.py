@@ -3735,6 +3735,14 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
     """
     Main entry point: run all theories and blend into a signal.
 
+    PER-PAIR THEORY WEIGHTING (2026-07-13):
+      Different pairs behave differently. OTC exotic pairs (USDPKR, USDBDT)
+      are more mean-reverting — continuation theories (CON, MST) underperform.
+      Stable OTC pairs (USDMXN, USDCOP) follow trends better.
+      The system reads per-pair theory win rates from theory_votes table
+      and adjusts theory weights accordingly (via feed.py's _refresh_theory_mutes).
+      Here, the `muted` set already contains underperforming theories per pair.
+
     Returns dict with: signal, score, confidence, strength, agree, reasons,
                         regime, market_state, theories_detail
 

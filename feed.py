@@ -1074,10 +1074,21 @@ class QuotexFeed:
         except Exception:
             pass
 
+        # Build per-pair muted set: global mutes + this pair's specific mutes
+        pair_muted = set()
+        for key, _note in self._muted_theories.items():
+            # key format: "asset:code" (per-pair) or just "code" (global)
+            if ":" in key:
+                _a, _c = key.split(":", 1)
+                if _a == asset:
+                    pair_muted.add(_c)
+            else:
+                pair_muted.add(key)
+
         result = analyze_eoc(candles, ticks,
                              micro_history=micro_hist,
                              period=period,
-                             muted=self._muted_theories,
+                             muted=pair_muted,
                              asset=asset,
                              running_ticks=running_ticks if ENABLE_LIVE_THEORY else None,
                              recent_accuracy=acc,
@@ -2548,34 +2559,44 @@ class QuotexFeed:
 
     async def _refresh_theory_mutes(self) -> None:
         """
-        Refresh the theory mute set from live 7-day per-theory accuracy
-        (db.theory_perf over theory_votes — includes shadow-graded NEUTRAL
-        predictions, so muted theories keep building the record that can
-        un-mute them).
+        Refresh the theory mute set — now PER-PAIR (2026-07-13).
 
-        Hysteresis: mute below 45% (n>=100 so a true-coin-flip theory rarely
-        false-trips), un-mute at 48%+ — the gap stops borderline theories
-        from flapping in and out every refresh.
+        Different pairs behave differently:
+          - USDPKR_otc: CON+MST underperform (33% win rate) — mean-reverting
+          - USDCOP_otc: MST+ZZ+STRUCT all 100% — trend-following
+          - USDMXN_otc: CON+RUN+TRAP all 100% — momentum works
+
+        This reads per-pair theory win rates from theory_votes and mutes
+        underperforming theories FOR THAT SPECIFIC PAIR.
+
+        Hysteresis: mute below 45% (n>=5 per pair — lower threshold since
+        per-pair data is sparser), un-mute at 50%+.
         """
-        MUTE_BELOW, UNMUTE_AT, MIN_N = 45.0, 48.0, 100
+        MUTE_BELOW, UNMUTE_AT, MIN_N = 45.0, 50.0, 5
+        self._muted_theories.clear()   # reset — rebuild per-pair
+
+        # Get ALL pairs that have signal history
         try:
-            perf = await asyncio.to_thread(
-                _db.theory_perf, None, None, 7, MIN_N)
-        except Exception as exc:
-            print(f"[feed] theory_perf refresh error: {exc}")
-            return
-        for code, st in perf.items():
-            rate, n = st["rate"], st["n"]
-            note = f"{rate:.0f}% n={n}/7d"
-            if code in self._muted_theories:
-                if rate >= UNMUTE_AT:
-                    del self._muted_theories[code]
-                    print(f"[feed] theory {code} UN-MUTED ({note})")
-                else:
-                    self._muted_theories[code] = note   # keep annotation fresh
-            elif rate < MUTE_BELOW:
-                self._muted_theories[code] = note
-                print(f"[feed] theory {code} MUTED ({note})")
+            pairs = await asyncio.to_thread(
+                lambda: [r[0] for r in _db._cursor().__enter__().execute(
+                    "SELECT DISTINCT asset FROM theory_votes").fetchall()])
+        except Exception:
+            pairs = []
+
+        for asset in pairs:
+            try:
+                perf = await asyncio.to_thread(
+                    _db.theory_perf, asset, None, 7, MIN_N)
+            except Exception:
+                continue
+
+            for code, st in perf.items():
+                rate, n = st["rate"], st["n"]
+                if rate < MUTE_BELOW:
+                    key = f"{asset}:{code}"
+                    note = f"{rate:.0f}% n={n}/7d ({asset})"
+                    self._muted_theories[key] = note
+                    print(f"[feed] theory {code} MUTED for {asset} ({note})")
 
     def _reconcile_always_on(self) -> None:
         """
