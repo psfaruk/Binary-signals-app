@@ -2451,10 +2451,13 @@ class QuotexFeed:
                             "running_conf":  self._running_confirmation(stream),
                             "micro":         micro_snap,
                         }
-                        # Carry the re-anchored/re-evaluated/gated prediction
-                        # so the client redraws its signal panel from it.
-                        if reanchored or pred_changed:
-                            msg["prediction"] = stream.prediction
+                        # FIX (2026-07-13): always send prediction if gate has opened
+                        # (not just on pred_changed — that was blocking real-time updates)
+                        if not (stream.signal_delay_until > 0 and time.time() < stream.signal_delay_until):
+                            if stream.signal_delay_until > 0:
+                                stream.signal_delay_until = 0.0
+                            if stream.prediction:
+                                msg["prediction"] = stream.prediction
 
                         # Update the last-broadcast snapshot for the next
                         # skip-redundant-broadcast check.

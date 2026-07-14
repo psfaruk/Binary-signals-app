@@ -376,10 +376,10 @@ class QuotexFeed:
         # All theories deleted. Pure price-action reaction from last candle.
         from candle_reaction import predict_from_candle
         _micro_for_pred = None
-        if len(base_ticks) >= 10:
+        if ticks and len(ticks) >= 10:
             from analyze_eoc import _build_micro
-            _micro_for_pred = _build_micro(base_ticks, candles[-1]["open"] if candles else base_ticks[0])
-        result = predict_from_candle(candles, ticks=base_ticks, micro=_micro_for_pred)
+            _micro_for_pred = _build_micro(ticks, candles[-1]["open"] if candles else ticks[0])
+        result = predict_from_candle(candles, ticks=ticks, micro=_micro_for_pred)
         return result, micro_hist
 
     async def _run_eoc(self, stream, actual_open=None):
@@ -773,27 +773,22 @@ class QuotexFeed:
                         stream.prediction = gated
                         pred_changed = True
 
-                # Broadcast tick
+                # Broadcast tick — ALWAYS send prediction if gate has opened
                 msg = {
                     "type": "tick", "asset": stream.asset, "period": stream.period,
                     "candle": running, "running_conf": self._running_confirmation(stream),
                     "micro": micro,
                 }
-                # ── Signal delay gate (2026-07-10) ──────────────────────────
-                # While the opening-tick confirmation window is still active,
-                # do NOT broadcast the prediction. Candle data, micro, and
-                # running_conf still flow. Once the gate passes, the FIRST
-                # eligible tick broadcasts the prediction.
+                # Signal delay gate: withhold prediction until gate opens.
+                # Once open, send prediction on EVERY tick so frontend stays updated.
                 now_ts = time.time()
                 if stream.signal_delay_until > 0 and now_ts < stream.signal_delay_until:
-                    # Still in delay window — withhold prediction
-                    pass
+                    pass   # still in delay — no prediction
                 else:
                     if stream.signal_delay_until > 0:
-                        # Gate just opened — clear it and force broadcast
                         stream.signal_delay_until = 0.0
-                        pred_changed = True
-                    if pred_changed:
+                    # Always include prediction (not just on pred_changed)
+                    if stream.prediction:
                         msg["prediction"] = stream.prediction
                 await self._broadcast(msg)
 
