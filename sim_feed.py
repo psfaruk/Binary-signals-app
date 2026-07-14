@@ -11,10 +11,10 @@ from collections import deque
 from dataclasses import dataclass, field
 
 import db as _db
-from analyze_eoc import _round_level, _key_levels, _parse_votes, _atr
+from analyze_eoc import _round_level, _key_levels, _atr
 
 PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "81"))
-ENABLE_LIVE_THEORY = os.environ.get("ENABLE_LIVE_THEORY", "1") == "1"
+ENABLE_LIVE_THEORY = os.environ.get("ENABLE_LIVE_REEVAL", "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
 # Signal delay (2026-07-10): withhold prediction for N seconds after candle
 # open so opening ticks can confirm gap direction. Mirrors feed.py.
@@ -470,24 +470,7 @@ class QuotexFeed:
             reasons = prediction.get("reasons", [])
             is_draw = closed["close"] == closed["open"]
             actual_up = closed["close"] > closed["open"]
-            _net = {}
-            for code, vdir, mag in _parse_votes(reasons):
-                _net[code] = _net.get(code, 0) + vdir * mag
-            votes = []
-            fired, right, wrong = set(), set(), set()
-            for code, net in _net.items():
-                fired.add(code)
-                if net == 0:
-                    continue
-                voted_up = net > 0
-                if is_draw:
-                    outcome = "draw"
-                else:
-                    outcome = "right" if voted_up == actual_up else "wrong"
-                    (right if outcome == "right" else wrong).add(code)
-                votes.append((code, "CALL" if voted_up else "PUT", abs(net), outcome))
             if not accuracy:
-                _db.log_theory_votes(asset, period, closed["time"], votes)
                 return accuracy
             _reg = (prediction.get("regime") or {})
             regime, zone = _reg.get("trend"), _reg.get("zone")
@@ -496,25 +479,18 @@ class QuotexFeed:
             if is_draw:
                 tags.append("DRAW")
             move = closed["close"] - closed["open"]
-            pm = f"{sig} s={prediction['score']:+d} {prediction.get('strength')} agree={prediction.get('agree')}"
-            # FIX (refactor 2026-07-14): `if fired` gate was wrong —
-            # candle_reaction's reasons (e.g. '5+ UP streak → PUT reversal')
-            # don't have the 'CODE:+N DIRECTION' format _parse_votes expects,
-            # so `fired` was always empty and log_signal never fired. Now we
-            # log ANY CALL/PUT signal regardless of whether theory-codes
-            # were extractable, so the history DB actually populates.
+            pm = f"{sig} s={prediction['score']:+d} {prediction.get('strength')} agree={prediction.get('agree')} regime={regime}/{zone}"
+            # Log ANY CALL/PUT signal so the history DB actually populates.
             if sig in ("CALL", "PUT"):
                 _db.log_signal(asset, period, closed["time"], sig, prediction["score"],
-                               prediction["confidence"], ",".join(sorted(fired)),
+                               prediction["confidence"], "",
                                "UP" if actual_up else ("FLAT" if is_draw else "DOWN"),
                                accuracy, strength=prediction.get("strength"),
                                agree=prediction.get("agree"),
-                               right_codes=",".join(sorted(right)),
-                               wrong_codes=",".join(sorted(wrong)),
                                reasons=_json.dumps(reasons),
                                a_open=closed["open"], a_close=closed["close"],
                                regime=regime, zone=zone,
-                               tags=",".join(tags), postmortem=pm, votes=votes)
+                               tags=",".join(tags), postmortem=pm)
         except Exception as _e:
             print(f"[db] log_signal error: {_e}")
         return accuracy
@@ -636,7 +612,7 @@ class QuotexFeed:
 
     async def _run_stream(self, stream):
         """Simulated stream main loop: generate history, then tick ~10x/sec,
-        closing+opening candles at period boundaries, running LIVE theory
+        closing+opening candles at period boundaries, running LIVE re-eval
         re-eval + strength gates, and broadcasting snapshot/tick/eoc msgs."""
         key = (stream.asset, stream.period)
         try:
@@ -703,7 +679,7 @@ class QuotexFeed:
                 # Micro analysis
                 micro = self._analyze_microstructure(stream.ticks, stream.candle_open_price)
 
-                # LIVE theory re-eval
+                # LIVE re-eval
                 # Priority 1 (2026-07-10): ADAPTIVE refresh rate.
                 #   - Last 5s: every 2 ticks (Priority 3 critical zone)
                 #   - Last 10s: every 3 ticks
@@ -837,7 +813,7 @@ class QuotexFeed:
 
         while True:
             try:
-                # NOTE (refactor 2026-07-14): theory mute refresh removed.
+                # NOTE (refactor 2026-07-14): mute refresh removed.
                 # Sweep idle
                 now = time.time()
                 for key, s in list(self._streams.items()):

@@ -202,7 +202,7 @@ async def get_signals(asset: str, period: int, limit: int = 50):
 
 @app.get("/api/signals/{asset}/{period}/{ctime}")
 async def get_signal_detail(asset: str, period: int, ctime: int):
-    """Return full detail for a single signal (win/loss reason, theories, etc.)."""
+    """Return full detail for a single signal (win/loss reason, regime, etc.)."""
     detail = _db.get_signal_detail(asset, period, ctime)
     if detail:
         return detail

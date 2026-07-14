@@ -27,7 +27,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from analyze_eoc import _round_level, _key_levels, _parse_votes
+from analyze_eoc import _round_level, _key_levels
 import db as _db
 
 # Minimum live 1-minute payout % for a forex pair to be tradeable in this
@@ -38,10 +38,10 @@ import db as _db
 # vary by broker account/region.
 PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "85"))
 
-# Method A (LIVE running-candle theory) / Method B (strength gating) rollout
+# Method A (LIVE running-candle re-eval) / Method B (strength gating) rollout
 # flags — both untested, added 2026-07-10. Zero-redeploy killswitch: set
 # either to "0" via the platform's env var UI to fall back to prior behavior.
-ENABLE_LIVE_THEORY   = os.environ.get("ENABLE_LIVE_THEORY",   "1") == "1"
+ENABLE_LIVE_THEORY   = os.environ.get("ENABLE_LIVE_REEVAL",  "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
 # ── Signal delay (2026-07-10) ──────────────────────────────────────────────
 # How long after a new candle opens before the prediction is broadcast to
@@ -339,7 +339,7 @@ class _AssetStream:
     idle_since: float | None = None
     created_at: float = field(default_factory=time.time)
     # Snapshot of the (closed candles, just-closed-candle ticks) that fed the
-    # LAST _run_eoc call — reused by the LIVE-theory periodic re-eval so it
+    # LAST _run_eoc call — reused by the LIVE periodic re-eval so it
     # can re-score with fresh running_ticks without re-deriving stale state
     # from stream.ticks, which has since been cleared for the new candle.
     base_candles: list = field(default_factory=list)
@@ -352,7 +352,7 @@ class _AssetStream:
     # FIX (2026-07-13): removed `cached_accuracy_at` — was set but never read
     # (no TTL invalidation was ever implemented).
     # Adaptive-inversion hysteresis (2026-07-10) — whether the last-delivered
-    # signal was flip-corrected; feeds back into analyze_eoc's flip_threshold
+    # signal was flip-corrected; feeds back into the prediction engine
     # so a recovering flip doesn't immediately un-flip itself.
     inverted: bool = False
     # FIX (2026-07-13): removed `live_signal_history` — was reset to [] but
@@ -448,10 +448,10 @@ class QuotexFeed:
         self._pairs_list: list[dict] = list(_DEFAULT_PAIRS)
         self._last_pairs_refresh: float = 0.0
 
-        # NOTE (refactor 2026-07-14): the theory mute gate that used to live
+        # NOTE (refactor 2026-07-14): the per-pair mute gate that used to live
         # here (`_muted_theories` + `_last_perf_refresh` + `_refresh_theory_mutes`)
-        # was removed — the prediction path no longer runs the theory engine,
-        # so per-pair theory muting has nothing to mute. The candle_reaction
+        # was removed — the prediction path no longer runs the old theory engine,
+        # so per-pair muting has nothing to mute. The candle_reaction
         # engine doesn't take a `muted` argument.
         #
         # DB row-count housekeeping. Was startup-only for a long time (see
@@ -1091,7 +1091,7 @@ class QuotexFeed:
         closed = stream.candles
         base_ticks = list(stream.ticks)
         # running_ticks=None here: the NEW candle's ticks are empty at this
-        # exact moment (they accumulate after this call). LIVE theory picks
+        # exact moment (they accumulate after this call). LIVE re-eval picks
         # up once ticks come in, via the periodic re-eval in the stream loop.
 
         # Refresh the per-candle accuracy cache ONCE here (at candle open).
@@ -1113,9 +1113,9 @@ class QuotexFeed:
         if result is None:
             return None
         # Persist flip state for next candle's hysteresis check (see
-        # analyze_eoc's currently_flipped param).
+        # prediction engine's currently_flipped param).
         stream.inverted = result.get("_flipped", False)
-        # Snapshot for the periodic LIVE-theory re-eval (see stream loop).
+        # Snapshot for the periodic LIVE re-eval (see stream loop).
         # IMPORTANT: list(closed) makes a SHALLOW COPY — otherwise
         # stream.base_candles aliases stream.candles and the LIVE re-eval
         # would score against the *current* (mutated) candle list, not the
@@ -1174,57 +1174,18 @@ class QuotexFeed:
         Returns the accuracy string (correct/wrong/draw) or None.
 
         NEUTRAL predictions get no signal_log row (NEUTRAL is not a
-        direction and must never be graded), but their per-theory votes ARE
-        shadow-graded into theory_votes — with the dead band + parrot guard
-        producing NEUTRAL on a large share of candles, dropping those votes
-        would starve theory_perf's 7-day window exactly when the mute gate
-        depends on it, and a muted theory could never earn its way back.
+        direction and must never be graded).
         """
         accuracy = self._accuracy(closed, prediction)
         if not prediction:
             return accuracy
 
-        # Log the resolved prediction with a full WHY report. For each theory
-        # vote we record whether it called THIS candle right or wrong, so later
-        # analysis can see exactly why a signal won or lost.
+        # Log the resolved prediction with a full WHY report.
         try:
             import json as _json
             reasons   = prediction.get("reasons", [])
             is_draw   = closed["close"] == closed["open"]
             actual_up = closed["close"] > closed["open"]
-
-            # Per-theory votes, AGGREGATED per theory. Muted lines are
-            # INCLUDED deliberately (include_muted default) — shadow-grading
-            # them is what lets a muted theory keep its track record alive.
-            # A theory like RUN can emit several sub-votes in one candle —
-            # summing them into one NET vote per theory prevents (a) the
-            # theory_votes PK overwriting earlier sub-votes and (b) the same
-            # theory landing in right_codes AND wrong_codes at once. A theory
-            # whose sub-votes cancel out (net 0) casts no vote. Draw candles
-            # are refunds: theories are neither right nor wrong on them.
-            _net: dict[str, int] = {}
-            for code, vdir, mag in _parse_votes(reasons):
-                _net[code] = _net.get(code, 0) + vdir * mag
-
-            votes = []          # (theory, CALL/PUT, mag, right/wrong/draw)
-            fired, right, wrong = set(), set(), set()
-            for code, net in _net.items():
-                fired.add(code)
-                if net == 0:
-                    continue    # internally conflicted — no net vote
-                voted_up = net > 0
-                if is_draw:
-                    outcome = "draw"
-                else:
-                    outcome = "right" if voted_up == actual_up else "wrong"
-                    (right if outcome == "right" else wrong).add(code)
-                votes.append((code, "CALL" if voted_up else "PUT",
-                              abs(net), outcome))
-
-            # Log theory votes for ALL predictions (CALL/PUT/NEUTRAL).
-            # Previously only NEUTRAL votes were logged, which meant the
-            # theory muting system was based on a biased sample.
-            _db.log_theory_votes(asset, period, closed["time"], votes)
 
             # NEUTRAL final — skip the postmortem (no direction to grade).
             if not accuracy:
@@ -1247,44 +1208,15 @@ class QuotexFeed:
                 tags.append("NOISE_CANDLE")      # sub-noise range: coin flip
             if atr > 0 and abs(move) >= atr * 0.80:
                 tags.append("BIG_MOVE")
-            if ((regime == "UPTREND" and sig == "PUT") or
-                    (regime == "DOWNTREND" and sig == "CALL")):
-                tags.append("COUNTER_REGIME")
-            elif ((regime == "UPTREND" and sig == "CALL") or
-                    (regime == "DOWNTREND" and sig == "PUT")):
-                tags.append("WITH_REGIME")
+            if regime in ("TREND_UP", "TREND_DOWN"):
+                if ((regime == "TREND_UP" and sig == "PUT") or
+                        (regime == "TREND_DOWN" and sig == "CALL")):
+                    tags.append("COUNTER_REGIME")
+                elif ((regime == "TREND_UP" and sig == "CALL") or
+                        (regime == "TREND_DOWN" and sig == "PUT")):
+                    tags.append("WITH_REGIME")
             if micro_snap and micro_snap.get("last_react") == "EXHAUST":
                 tags.append("LATE_FLIP")         # candle flipped at the close
-            if not is_draw and len(wrong) > len(right):
-                tags.append("MAJORITY_WRONG")
-            # Market-state deep-analysis layer: log which state was named and
-            # whether its own directional bias called this candle — the ONLY
-            # honest way to learn if any state reads better than coin-flip
-            # before it is ever allowed to influence the signal.
-            _ms = prediction.get("market_state") or {}
-            if _ms.get("state"):
-                tags.append(f"ST_{_ms['state']}")
-                if _ms.get("bias") in ("CALL", "PUT") and not is_draw:
-                    tags.append("STBIAS_" + (
-                        "RIGHT" if (_ms["bias"] == "CALL") == actual_up
-                        else "WRONG"))
-
-            # Method B (2026-07-10, untested): log whether the running-candle
-            # strength gate fired on this prediction, and whether the gate's
-            # implied call (confirming = same direction, opposing = flip)
-            # matched the actual outcome — the only honest way to learn if
-            # RUNCONF gating tracks real accuracy before trusting it further.
-            _runconf_tag = (prediction or {}).get("_runconf_tag")
-            if _runconf_tag:
-                tags.append(_runconf_tag)   # RUNCONF_UP or RUNCONF_DOWN
-                if not is_draw:
-                    _gate_correct = (
-                        (_runconf_tag == "RUNCONF_UP"   and actual_up ==
-                         (sig == "CALL")) or
-                        (_runconf_tag == "RUNCONF_DOWN" and actual_up !=
-                         (sig == "CALL"))
-                    )
-                    tags.append("RUNCONF_" + ("RIGHT" if _gate_correct else "WRONG"))
 
             _atr_note = (f" ({abs(move) / atr * 100:.0f}% of ATR)"
                          if atr > 0 else "")
@@ -1297,32 +1229,23 @@ class QuotexFeed:
                 f" | actual {_actual_lbl}"
                 f" move={move:+.5f}{_atr_note}"
                 f" | {accuracy.upper()}"
-                f" | right: {','.join(sorted(right)) or '-'}"
-                f" | wrong: {','.join(sorted(wrong)) or '-'}"
                 f" | regime {regime}/{zone}"
                 f"{' | ' + ','.join(tags) if tags else ''}"
             )
 
-            # FIX (refactor 2026-07-14): `if fired` gate was wrong —
-            # candle_reaction's reasons don't have the 'CODE:+N DIRECTION'
-            # format _parse_votes expects, so `fired` was always empty and
-            # log_signal never fired. Now we log ANY CALL/PUT signal so the
-            # history DB actually populates.
+            # Log ANY CALL/PUT signal so the history DB actually populates.
             if sig in ("CALL", "PUT"):
                 _db.log_signal(
                     asset, period, closed["time"],
                     sig, prediction["score"],
-                    prediction["confidence"], ",".join(sorted(fired)),
+                    prediction["confidence"], "",
                     _actual_lbl, accuracy,
                     strength=prediction.get("strength"),
                     agree=prediction.get("agree"),
-                    right_codes=",".join(sorted(right)),
-                    wrong_codes=",".join(sorted(wrong)),
                     reasons=_json.dumps(reasons),
                     a_open=closed["open"], a_close=closed["close"],
                     regime=regime, zone=zone,
                     tags=",".join(tags), postmortem=pm,
-                    votes=votes,
                 )
         except Exception as _e:
             print(f"[db] log_signal error: {_e}")
@@ -1485,10 +1408,10 @@ class QuotexFeed:
                 reaction = "BUYER"
 
         # ── 7. Final-tick recovery / exhaustion ──────────────────────────────────
-        # Real-time version of the LAST theory: last 15% of running candle ticks.
+        # Real-time version of last-N-tick exhaustion: last 15% of running candle ticks.
         last_react = None
         if n >= 15:
-            last_n2 = max(n // 6, 6)   # min 6 so fi_tot can reach 5 (matches LAST theory)
+            last_n2 = max(n // 6, 6)   # min 6 so fi_tot can reach 5
             fin2    = ticks[-last_n2:]
             fi2_up  = sum(1 for i in range(1, len(fin2)) if fin2[i] > fin2[i - 1])
             fi2_dn  = sum(1 for i in range(1, len(fin2)) if fin2[i] < fin2[i - 1])
@@ -1533,7 +1456,7 @@ class QuotexFeed:
         # ── 9. 5-SECOND ANALYSIS: ending direction (last 10 ticks) ───────
         # FIX (2026-07-13): this was MISSING from feed.py's _analyze_microstructure.
         # The frontend showed end=?/?(?%) because the field wasn't here.
-        # Now compute it inline (same logic as analyze_eoc._ending_direction).
+        # Now compute it inline (last-10-tick ending direction).
         _ed_n = len(ticks)
         if _ed_n >= 3:
             _ed_end = ticks[-min(10, _ed_n):]
@@ -2256,15 +2179,15 @@ class QuotexFeed:
                     # rendered from tick updates and does not need to overwrite
                     # the last completed bar in history.
 
-                    # ── LIVE theory periodic re-eval (Method A, 2026-07-10) ──
-                    # Re-run analyze_eoc with the running candle's own ticks
+                    # ── LIVE periodic re-eval (Method A, 2026-07-10) ──
+                    # Re-run prediction with the running candle's own ticks
                     # so the LIVE vote can update mid-candle. Reuses the
                     # (closed candles, just-closed ticks) snapshot taken by
                     # _run_eoc at candle-open — stream.ticks now holds the NEW
                     # (still-open) candle's ticks instead.
                     #
-                    # LIVE theory re-eval — OPTIMIZED (2026-07-12):
-                    # OTC ticks come at 5-10/sec. Re-evaluating theories on
+                    # LIVE re-eval — OPTIMIZED (2026-07-12):
+                    # OTC ticks come at 5-10/sec. Re-evaluating on
                     # every tick was burning CPU and delaying broadcasts.
                     # New intervals are 5x higher to match tick density:
                     #   - Last 5s (critical): every 10 ticks (~1-2s)
@@ -2290,10 +2213,10 @@ class QuotexFeed:
                             reeval_interval = 100
                         # Live-only fast path (2026-07-10 review Next Action #1):
                         # In the last 30s (where LIVE re-eval actually matters),
-                        # only run the 4 theories that use running_ticks.
+                        # only run the signals that use running_ticks.
                         # Earlier in the candle there's nothing to gain from
                         # re-eval (closed candle hasn't changed), so we still
-                        # use the full theory set just for consistency — but the
+                        # use the full signal set just for consistency — but the
                         # 30-tick interval means it fires rarely.
                         live_only = 0 < time_to_close < 30
 
@@ -2598,9 +2521,9 @@ class QuotexFeed:
         self._record_stream_error()
 
     # NOTE (refactor 2026-07-14): `_refresh_theory_mutes` removed.
-    # It used to read per-pair theory win rates from the `theory_votes`
-    # table and mute underperforming theories. With the prediction path
-    # switched to candle_reaction (no theories), the `theory_votes` table
+    # It used to read per-pair win rates from a theory_votes table
+    # and mute underperforming signals. With the prediction path
+    # switched to candle_reaction (no per-theory votes), the theory_votes table
     # is no longer populated, so the mute set was always empty anyway.
 
     def _reconcile_always_on(self) -> None:
@@ -2861,7 +2784,7 @@ class QuotexFeed:
                     await self._load_pairs(broadcast)
                     self._reconcile_always_on()
 
-                # NOTE (refactor 2026-07-14): theory mute refresh block
+                # NOTE (refactor 2026-07-14): mute refresh block
                 # removed — prediction engine no longer uses theories.
 
                 # ── DB row-count cleanup every 6 hours ─────────────────────

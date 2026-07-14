@@ -422,10 +422,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
             <span class="micro-value" id="ms-round">—</span>
           </div>
         </div>
-        <!-- THEORIES -->
+        <!-- SIGNALS -->
         <div style="margin-top:8px">
           <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
-            <span class="section-title" style="margin:0">Theories</span>
+            <span class="section-title" style="margin:0">Signals</span>
             <span class="arrow">▶</span>
           </button>
           <div id="theories-list"></div>
@@ -937,7 +937,7 @@ function renderSignal(pred){
   sigConfVal.textContent = Math.round(conf) + '%';
   sigConfBar.style.width = conf + '%';
   sigConfBar.style.background = s === 'CALL' ? 'var(--green)' : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
-  sigAgree.textContent = (pred.agree || 0) + '/' + (pred.total || 0) + ' theories';
+  sigAgree.textContent = (pred.agree || 0) + '/' + (pred.total || 0) + ' signals';
   // Regime is a dict {trend, zone, ...} — show trend/zone, not [object Object]
   const reg = pred.regime || {};
   const regStr = (typeof reg === 'object' && reg !== null)
@@ -974,7 +974,7 @@ function renderSignal(pred){
   msZigzag.textContent = zzBias === '—' ? '—' : zzBias + ' (' + Math.round(zzStr * 100) + '%)';
   msZigzag.style.color = zzBias === 'CALL' ? 'var(--green)' :
                          zzBias === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
-  // Theories
+  // Signal reasons (was "theories" — now shows the candle_reaction reasons)
   theoriesList.innerHTML = '';
   const td = pred.theories_detail || [];
   if(td.length){
@@ -985,7 +985,6 @@ function renderSignal(pred){
       const vote = (t.vote || 'CALL').toUpperCase();
       const div = document.createElement('div');
       div.className = 'theory-item ' + (vote === 'CALL' ? 'call-vote' : 'put-vote');
-      // Backend sends {code, vote, score} — use code as the theory name
       const name = t.code || t.name || '—';
       div.innerHTML = '<span class="theory-name">' + esc(name) + '</span><span class="theory-vote ' + vote.toLowerCase() + '">' + vote + (t.score != null ? ' (' + (t.score>=0?'+':'') + t.score + ')' : '') + '</span>';
       theoriesList.appendChild(div);
@@ -997,9 +996,13 @@ function renderSignal(pred){
       theoriesToggle.classList.add('open');
       theoriesToggle.setAttribute('aria-expanded','true');
       reasons.forEach(r => {
+        // Reasons from candle_reaction are strings like "5+ UP streak → PUT reversal"
+        // Color them by direction keyword if present
+        const ru = String(r).toUpperCase();
+        const isPut = ru.includes('PUT') || ru.includes('BEAR') || ru.includes('SELLER') || ru.includes('RESISTANCE');
         const div = document.createElement('div');
-        div.className = 'theory-item call-vote';
-        div.innerHTML = '<span class="theory-name">' + esc(r) + '</span><span class="theory-vote call">✓</span>';
+        div.className = 'theory-item ' + (isPut ? 'put-vote' : 'call-vote');
+        div.innerHTML = '<span class="theory-name">' + esc(r) + '</span>';
         theoriesList.appendChild(div);
       });
     }
@@ -1094,7 +1097,7 @@ function renderTape(){
 /* History now loads from the server's signal_log table (via WebSocket
    "signals" request or fetched on demand). Each entry carries the full
    postmortem: signal, accuracy, score, strength, regime, tags, right/wrong
-   theories, and the win/loss reason text. Clicking a row opens a detail
+   reasons, and the win/loss reason text. Clicking a row opens a detail
    modal with everything. */
 
 function addHistory(signal, accuracy, detail){
@@ -1211,7 +1214,7 @@ window._showSignalDetail = function(idx){
   rows += detailRow('Score', d.score != null ? (d.score >= 0 ? '+' : '') + d.score : '—');
   rows += detailRow('Confidence', d.confidence != null ? Math.round(d.confidence) + '%' : '—');
   rows += detailRow('Strength', d.strength || '—');
-  rows += detailRow('Agree', d.agree != null ? d.agree + ' theories' : '—');
+  rows += detailRow('Agree', d.agree != null ? d.agree + ' signals' : '—');
   rows += detailRow('Actual', d.actual || '—');
   rows += detailRow('Regime', (d.regime || '—') + '/' + (d.zone || '—'));
   if(d.a_open != null && d.a_close != null){
@@ -1229,7 +1232,8 @@ window._showSignalDetail = function(idx){
     }
   }
 
-  // Right/wrong theories
+  // Right/wrong signal codes (legacy field — candle_reaction doesn't
+  // populate this, so it'll usually be empty and the block won't render)
   let theoriesHtml = '';
   const rightCodes = (d.right_codes || '').split(',').filter(t => t.trim());
   const wrongCodes = (d.wrong_codes || '').split(',').filter(t => t.trim());
@@ -1428,7 +1432,7 @@ function onEoc(msg){
   if(lastPrediction){
     addHistory(lastPrediction.signal || 'NEUTRAL', msg.accuracy || 'draw');
     // Refresh full history from server so the new entry gets its detail
-    // (postmortem, tags, right/wrong theories) loaded asynchronously.
+    // (postmortem, tags, right/wrong codes) loaded asynchronously.
     // Small delay lets the DB write complete.
     setTimeout(loadServerHistory, 500);
   }

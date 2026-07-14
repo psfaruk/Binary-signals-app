@@ -1,6 +1,6 @@
 """
 Lightweight SQLite persistence layer.
-Tables: candle_micro, signal_log, theory_votes
+Tables: candle_micro, signal_log
 """
 import json
 import sqlite3
@@ -62,17 +62,22 @@ def init():
             regime TEXT, zone TEXT,
             tags TEXT, postmortem TEXT,
             ts REAL DEFAULT (strftime('%s','now')))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS theory_votes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset TEXT, period INT, ctime INT,
-            theory TEXT, vote TEXT, mag REAL,
-            outcome TEXT, ts REAL DEFAULT (strftime('%s','now')))""")
         # Indexes — added ctime composite for faster recent_accuracy queries
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_asset_period ON signal_log(asset, period)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ctime ON signal_log(asset, period, ctime DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ts ON signal_log(ts)")
-        c.execute("CREATE INDEX IF NOT EXISTS ix_tv_theory ON theory_votes(theory)")
-        c.execute("CREATE INDEX IF NOT EXISTS ix_tv_ts ON theory_votes(ts)")
+
+        # Refactor (2026-07-14): the `theory_votes` table is no longer
+        # populated. The old theory engine was replaced by the
+        # candle_reaction / advanced_analysis prediction path which doesn't
+        # emit per-theory votes. Drop the table + its indexes if they still
+        # exist from an older schema, and clean up orphaned rows.
+        try:
+            c.execute("DROP INDEX IF EXISTS ix_tv_theory")
+            c.execute("DROP INDEX IF EXISTS ix_tv_ts")
+            c.execute("DROP TABLE IF EXISTS theory_votes")
+        except Exception:
+            pass
 
 
 def _as_text(v):
@@ -131,22 +136,6 @@ def log_signal(asset, period, ctime, signal, score, confidence,
             print(f"[db] log_signal error: {e}")
 
 
-def log_theory_votes(asset, period, ctime, votes):
-    """votes: list of (theory, CALL/PUT, mag, right/wrong/draw)"""
-    if not votes:
-        return
-    with _lock:
-        try:
-            with _cursor() as c:
-                for theory, vote, mag, outcome in votes:
-                    c.execute("""INSERT INTO theory_votes
-                        (asset,period,ctime,theory,vote,mag,outcome)
-                        VALUES (?,?,?,?,?,?,?)""",
-                        (asset, period, ctime, theory, vote, mag, outcome))
-        except Exception as e:
-            print(f"[db] log_theory_votes error: {e}")
-
-
 def get_micro_history(asset, period, n=5, before_ctime=None):
     with _cursor() as c:
         q = """SELECT * FROM candle_micro
@@ -161,30 +150,9 @@ def get_micro_history(asset, period, n=5, before_ctime=None):
         return [dict(r) for r in reversed(rows)]
 
 
-def theory_perf(asset=None, period=None, days=7, min_n=30):
-    """Return per-theory accuracy over last N days."""
-    cutoff = time.time() - days * 86400
-    with _cursor() as c:
-        rows = c.execute("""SELECT theory,
-                   SUM(CASE WHEN outcome='right' THEN 1 ELSE 0 END) as right_n,
-                   COUNT(*) as total_n
-                   FROM theory_votes
-                   WHERE ts > ?
-                   GROUP BY theory""", (cutoff,)).fetchall()
-        out = {}
-        for r in rows:
-            theory = r["theory"]
-            right_n, total_n = r["right_n"], r["total_n"]
-            if total_n < min_n:
-                continue
-            out[theory] = {"rate": (right_n / total_n * 100) if total_n else 0,
-                           "n": total_n}
-        return out
-
-
 def get_recent_signals(asset, period, limit=20):
     """Return recent signals with full details for frontend history display.
-    Includes postmortem (win/loss reason), tags, right/wrong theories."""
+    Includes postmortem (win/loss reason), tags."""
     with _cursor() as c:
         rows = c.execute("""SELECT ctime, signal, accuracy, score, confidence,
                    strength, agree, theories, actual, regime, zone,
@@ -212,7 +180,7 @@ def recent_accuracy(asset, period, n=20):
     accuracy_float = correct / (correct + wrong)   — draws excluded.
     Returns (None, 0) when no graded rows exist.
     A single graded row returns (1.0 or 0.0, 1) — caller is responsible for
-    gating on sample size (analyze_eoc requires recent_n >= 8 before flipping).
+    gating on sample size (prediction engine requires recent_n >= 8 before flipping).
     """
     with _cursor() as c:
         rows = c.execute("""SELECT accuracy
@@ -237,4 +205,3 @@ def cleanup(days=7):
     with _cursor() as c:
         c.execute("DELETE FROM candle_micro WHERE ctime < ?", (int(cutoff),))
         c.execute("DELETE FROM signal_log WHERE ts < ?", (cutoff,))
-        c.execute("DELETE FROM theory_votes WHERE ts < ?", (cutoff,))
