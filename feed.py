@@ -1526,6 +1526,38 @@ class QuotexFeed:
             "lo_strength":   lo_str  if lo_str  in ("BIG", "MID") else None,
         }
 
+        # ── 9. 5-SECOND ANALYSIS: ending direction (last 10 ticks) ───────
+        # FIX (2026-07-13): this was MISSING from feed.py's _analyze_microstructure.
+        # The frontend showed end=?/?(?%) because the field wasn't here.
+        # Now compute it inline (same logic as analyze_eoc._ending_direction).
+        _ed_n = len(ticks)
+        if _ed_n >= 3:
+            _ed_end = ticks[-min(10, _ed_n):]
+            _ed_en = len(_ed_end)
+            _ed_buy = 0.0
+            _ed_sell = 0.0
+            for _i in range(1, _ed_en):
+                _d = _ed_end[_i] - _ed_end[_i-1]
+                if _d > 0:
+                    _ed_buy += _d
+                elif _d < 0:
+                    _ed_sell += abs(_d)
+            _ed_total = _ed_buy + _ed_sell
+            _ed_bp = round(_ed_buy / _ed_total * 100) if _ed_total > 0 else 50
+            _ed_move = _ed_end[-1] - _ed_end[0]
+            _ed_dir = "UP" if _ed_move > 0 else "DOWN" if _ed_move < 0 else "FLAT"
+            _ed_dom = "BUYER" if _ed_bp >= 65 else "SELLER" if _ed_bp <= 35 else "FIGHT"
+            ending_direction = {
+                "direction": _ed_dir,
+                "buy_pct": _ed_bp,
+                "dominance": _ed_dom,
+                "move": round(_ed_move, 6),
+                "tick_count": _ed_en,
+            }
+        else:
+            ending_direction = {"direction": "FLAT", "buy_pct": 50,
+                                "dominance": "FIGHT", "move": 0, "tick_count": _ed_n}
+
         return {
             "buy_pct":    buy_pct,
             "sell_pct":   sell_pct,
@@ -1540,6 +1572,7 @@ class QuotexFeed:
             "tick_count": len(ticks),
             "last_react": last_react,
             "round":      round_info,
+            "ending_direction": ending_direction,
         }
 
     def _running_confirmation(self, stream: _AssetStream) -> str | None:

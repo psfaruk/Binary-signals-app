@@ -1360,12 +1360,16 @@ def _theory_con(candles, muted):
         sizes = [c["high"] - c["low"] for c in candles[-3:]]
         shrinking = sizes[0] > sizes[1] > sizes[2] and sizes[2] < sizes[0] * SHRINK_THRESHOLD
 
-        # FIX (2026-07-13): mirror image of the bull case above. 4+ consec
-        # bear votes exhaustion ONLY in ranging/sideways. In MARKDOWN,
-        # 4+ consec bear votes continuation.
-        if consec >= EXHAUST_CONSEC and phase not in ("MARKDOWN",) and trend != "DOWNTREND":
+        # FIX (2026-07-13): 4+ bear exhaustion votes CALL — but live data
+        # showed 5-bear-exhaustion voting CALL when price continued DOWN.
+        # Only vote exhaustion if RSI is oversold (genuine reversal signal).
+        # If RSI is NOT oversold, the downtrend is likely to continue.
+        rsi_val_con = _cached_rsi([c["close"] for c in candles])
+        rsi_dyn_con = _cached_dynamic_thresholds(candles)
+        if consec >= EXHAUST_CONSEC and rsi_val_con <= rsi_dyn_con["rsi_oversold"]:
+            # 4+ bear + RSI oversold = genuine exhaustion → reversal CALL
             score += 2
-            reasons.append(f"CON:+2 CALL {consec}-bear-exhaustion-in-{phase.lower()}")
+            reasons.append(f"CON:+2 CALL {consec}-bear-exhaustion-rsi-oversold={rsi_val_con:.0f}")
         elif consec >= EXHAUST_CONSEC and phase in ("MARKDOWN",):
             score -= 2
             reasons.append(f"CON:-2 PUT {consec}-bear-momentum-in-markdown")
@@ -1676,6 +1680,12 @@ def _theory_run(candles, ticks, micro, muted):
     # ── Fight zone = uncertainty ──────────────────────────────────────────
     if is_fight:
         score = int(score * FIGHT_PENALTY)
+
+    # FIX (2026-07-13): cap RUN's total internal score at ±5.
+    # RUN accumulates many sub-votes (pressure + rejection + accel + vap +
+    # ending) that can total -10 or +10, dominating the blend even after
+    # the global MAX_THEORY_VOTE cap. Cap internally before returning.
+    score = max(-5, min(5, score))
 
     if score == 0:
         return None
@@ -3937,13 +3947,61 @@ def analyze_eoc(candles, ticks, micro_history=None, period=60,
             sig, sc, rs = result
             total_fired += 1
             all_reasons.extend(rs)
+            # Cap single-theory vote at ±5
+            sc_capped = max(-5, min(5, sc))
+            if sc_capped != sc:
+                rs.append(f"_{code}: vote capped {sc}->{sc_capped}")
             if sig == "CALL":
-                call_score += abs(sc)
+                call_score += abs(sc_capped)
             else:
-                put_score += abs(sc)
-            theories_detail.append({"code": code, "vote": sig, "score": sc})
+                put_score += abs(sc_capped)
+            theories_detail.append({"code": code, "vote": sig, "score": sc_capped})
         except Exception as e:
             print(f"[analyze] theory {code} error: {e}")
+
+    # ── MICROSTRUCTURE OVERRIDE (2026-07-13) ──────────────────────────────
+    # LIVE ANALYSIS: when microstructure is CLEAR (buy>=55% + reaction match),
+    # SMC theories (FVG/OB/SWEEP/STRUCT) voting against it get reduced 60%.
+    # If ending_direction ALSO confirms, reduce 80% (ultra-clear).
+    if closed_micro:
+        micro_buy = closed_micro.get("buy_pct", 50)
+        micro_react = closed_micro.get("reaction")
+        micro_phases = closed_micro.get("phases", [])
+        ending = closed_micro.get("ending_direction", {})
+
+        strong_bull = (micro_buy >= 55 and micro_react == "BUYER"
+                       and sum(1 for p in micro_phases if p == "UP") >= 1)
+        strong_bear = (micro_buy <= 45 and micro_react == "SELLER"
+                       and sum(1 for p in micro_phases if p == "DOWN") >= 1)
+
+        end_dir = ending.get("direction", "FLAT")
+        end_dom = ending.get("dominance", "FIGHT")
+        if strong_bull and end_dir == "UP" and end_dom == "BUYER":
+            suppress_pct = 0.2   # 80% suppression
+            all_reasons.append(
+                f"_MICRO_BOOST: ultra-clear CALL (buy={micro_buy}% react={micro_react} "
+                f"end={end_dir}/{end_dom} end_buy={ending.get('buy_pct')}%)")
+        elif strong_bear and end_dir == "DOWN" and end_dom == "SELLER":
+            suppress_pct = 0.2
+            all_reasons.append(
+                f"_MICRO_BOOST: ultra-clear PUT (buy={micro_buy}% react={micro_react} "
+                f"end={end_dir}/{end_dom} end_buy={ending.get('buy_pct')}%)")
+        else:
+            suppress_pct = 0.4   # 60% suppression
+
+        SMC_THEORIES = {"OB", "SWEEP", "STRUCT"}
+        if strong_bull or strong_bear:
+            micro_dir = "CALL" if strong_bull else "PUT"
+            for td in theories_detail:
+                if td["code"] in SMC_THEORIES and td["vote"] != micro_dir:
+                    old = td["score"]
+                    td["score"] = int(td["score"] * suppress_pct)
+                    if old != td["score"]:
+                        all_reasons.append(
+                            f"_MICRO_OVERRIDE: {td['code']} vote {old}->{td['score']} "
+                            f"(strong {micro_dir} micro)")
+            call_score = sum(abs(td["score"]) for td in theories_detail if td["vote"] == "CALL")
+            put_score = sum(abs(td["score"]) for td in theories_detail if td["vote"] == "PUT")
 
     # ── Blend ─────────────────────────────────────────────────────────────
     net = call_score - put_score
