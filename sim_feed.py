@@ -372,16 +372,14 @@ class QuotexFeed:
                 acc, n_acc = _db.recent_accuracy(asset, period, n=20)
             except Exception:
                 acc, n_acc = None, 0
-        # Per-pair theory selection (2026-07-13)
-        from pair_theory_config import get_muted_theories
-        pair_muted = get_muted_theories(asset)
-        pair_muted.update(self._muted_theories)  # add dynamic mutes
-
-        result = analyze_eoc(candles, ticks, micro_history=micro_hist, period=period,
-                             muted=pair_muted, asset=asset,
-                             running_ticks=running_ticks if ENABLE_LIVE_THEORY else None,
-                             recent_accuracy=acc, recent_n=n_acc,
-                             currently_flipped=stream.inverted if stream is not None else False)
+        # CANDLE REACTION ENGINE (2026-07-13)
+        # All theories deleted. Pure price-action reaction from last candle.
+        from candle_reaction import predict_from_candle
+        _micro_for_pred = None
+        if len(base_ticks) >= 10:
+            from analyze_eoc import _build_micro
+            _micro_for_pred = _build_micro(base_ticks, candles[-1]["open"] if candles else base_ticks[0])
+        result = predict_from_candle(candles, ticks=base_ticks, micro=_micro_for_pred)
         return result, micro_hist
 
     async def _run_eoc(self, stream, actual_open=None):

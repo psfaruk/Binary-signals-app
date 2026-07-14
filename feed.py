@@ -1087,17 +1087,15 @@ class QuotexFeed:
             else:
                 pair_muted.add(key)
 
-        result = analyze_eoc(candles, ticks,
-                             micro_history=micro_hist,
-                             period=period,
-                             muted=pair_muted,
-                             asset=asset,
-                             running_ticks=running_ticks if ENABLE_LIVE_THEORY else None,
-                             recent_accuracy=acc,
-                             recent_n=n_acc,
-                             currently_flipped=stream.inverted if stream is not None else False,
-                             live_only=live_only,
-                             htf_trend=htf_trend)
+        # CANDLE REACTION ENGINE (2026-07-13)
+        # All theories deleted. Pure price-action reaction from last candle.
+        # Based on Quotex OTC algorithm findings (200-candle analysis).
+        from candle_reaction import predict_from_candle
+        _micro_for_pred = None
+        if base_ticks and len(base_ticks) >= 10:
+            _micro_for_pred = self._analyze_microstructure(
+                base_ticks, candles[-1]["open"] if candles else base_ticks[0])
+        result = predict_from_candle(candles, ticks=base_ticks, micro=_micro_for_pred)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
