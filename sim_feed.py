@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 import db as _db
-from analyze_eoc import analyze_eoc, _round_level, _key_levels, _parse_votes, _atr
+from analyze_eoc import _round_level, _key_levels, _parse_votes, _atr
 
 PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "81"))
 ENABLE_LIVE_THEORY = os.environ.get("ENABLE_LIVE_THEORY", "1") == "1"
@@ -91,8 +91,8 @@ class QuotexFeed:
         self._streams: dict[tuple[str, int], _AssetStream] = {}
         self._max_streams = 45
         self._pairs_list = list(_SIM_PAIRS)
-        self._muted_theories: dict[str, str] = {}
-        self._last_perf_refresh = 0.0
+        # NOTE (refactor 2026-07-14): `_muted_theories` + `_last_perf_refresh`
+        # removed — the prediction engine is candle_reaction (no theories).
         self._last_db_cleanup = 0.0
         self._last_pairs_refresh = 0.0
 
@@ -497,7 +497,13 @@ class QuotexFeed:
                 tags.append("DRAW")
             move = closed["close"] - closed["open"]
             pm = f"{sig} s={prediction['score']:+d} {prediction.get('strength')} agree={prediction.get('agree')}"
-            if fired:
+            # FIX (refactor 2026-07-14): `if fired` gate was wrong —
+            # candle_reaction's reasons (e.g. '5+ UP streak → PUT reversal')
+            # don't have the 'CODE:+N DIRECTION' format _parse_votes expects,
+            # so `fired` was always empty and log_signal never fired. Now we
+            # log ANY CALL/PUT signal regardless of whether theory-codes
+            # were extractable, so the history DB actually populates.
+            if sig in ("CALL", "PUT"):
                 _db.log_signal(asset, period, closed["time"], sig, prediction["score"],
                                prediction["confidence"], ",".join(sorted(fired)),
                                "UP" if actual_up else ("FLAT" if is_draw else "DOWN"),
@@ -831,9 +837,7 @@ class QuotexFeed:
 
         while True:
             try:
-                # Refresh theory mutes
-                if time.time() - self._last_perf_refresh > 300:
-                    self._last_perf_refresh = time.time()
+                # NOTE (refactor 2026-07-14): theory mute refresh removed.
                 # Sweep idle
                 now = time.time()
                 for key, s in list(self._streams.items()):

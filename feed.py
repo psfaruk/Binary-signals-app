@@ -27,7 +27,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from analyze_eoc import analyze_eoc, _round_level, _key_levels, _parse_votes
+from analyze_eoc import _round_level, _key_levels, _parse_votes
 import db as _db
 
 # Minimum live 1-minute payout % for a forex pair to be tradeable in this
@@ -448,16 +448,12 @@ class QuotexFeed:
         self._pairs_list: list[dict] = list(_DEFAULT_PAIRS)
         self._last_pairs_refresh: float = 0.0
 
-        # Theory mute gate — live per-theory accuracy feedback loop.
-        # {theory_code: "43% n=212/7d"} built from db.theory_perf with
-        # hysteresis (see _refresh_theory_mutes); passed into every
-        # analyze_eoc call. Deliberately a cached snapshot refreshed from
-        # the manager loop, NEVER queried inline at EOC time: ~42 always-on
-        # streams close simultaneously each minute and theory_perf holds
-        # db._lock. Empty until the first refresh => no muting at startup.
-        self._muted_theories: dict[str, str] = {}
-        self._last_perf_refresh: float = 0.0
-
+        # NOTE (refactor 2026-07-14): the theory mute gate that used to live
+        # here (`_muted_theories` + `_last_perf_refresh` + `_refresh_theory_mutes`)
+        # was removed — the prediction path no longer runs the theory engine,
+        # so per-pair theory muting has nothing to mute. The candle_reaction
+        # engine doesn't take a `muted` argument.
+        #
         # DB row-count housekeeping. Was startup-only for a long time (see
         # run()'s initial _db.cleanup() call) — this service can stay up for
         # weeks without a redeploy, so unbounded growth between restarts
@@ -1018,18 +1014,20 @@ class QuotexFeed:
                       live_only: bool = False
                       ) -> tuple[dict | None, list]:
         """
-        Shared EOC analysis: pure analyze_eoc theory blend, nothing else.
-        Used by the watched asset (via _run_eoc) AND background trackers, so
-        evidence collected in the background goes through the exact same
-        pipeline as the on-screen signal. Returns (result, micro_hist).
+        Shared EOC analysis — runs candle_reaction.predict_from_candle on
+        the just-closed candle. Used by the watched asset (via _run_eoc)
+        AND background trackers, so evidence collected in the background
+        goes through the exact same pipeline as the on-screen signal.
+        Returns (result, micro_hist).
 
-        candles[-1] is the just-closed candle at this point. micro_history is
-        fetched BEFORE the just-closed candle is saved to DB (we save it right
-        after this call), so the history contains only the candles PRIOR to
-        the current one — no double-counting with ticks/RUN. before_ctime
-        restricts it to the 5 candle-slots immediately before the just-closed
-        candle: a restart / asset switch can no longer feed hours-old rows to
-        MICRO as if they were the previous candle.
+        candles[-1] is the just-closed candle at this point. micro_history
+        is fetched BEFORE the just-closed candle is saved to DB (we save
+        it right after this call), so the history contains only the
+        candles PRIOR to the current one — no double-counting with the
+        current candle's ticks. before_ctime restricts it to the 5
+        candle-slots immediately before the just-closed candle: a restart
+        / asset switch can no longer feed hours-old rows as if they were
+        the previous candle.
 
         Last-10s optimization (2026-07-10): if `stream` is provided, use
         stream.cached_accuracy instead of querying the DB every call.
@@ -1037,10 +1035,10 @@ class QuotexFeed:
         saves ~190 DB queries/minute across 38 always-on streams.
 
         Live-only fast path (2026-07-10 review Next Action #1):
-          live_only=True → only RUN, VELOCITY, LIVE_WICK, ORDERFLOW run.
-          Cuts CPU ~70% per re-eval AND removes the noise from closed-candle
-          theories re-evaluating identical inputs every 2-3 ticks. Used for
-          LIVE re-eval in the last 30s of a candle.
+          live_only=True → only the running-tick theories re-evaluate
+          (kept for API compatibility — candle_reaction is a single-shot
+          pure price-action engine, so live_only mostly affects the
+          micro_history fetch + accuracy cache).
         """
         if len(candles) < 5:
             return None, []
@@ -1074,21 +1072,11 @@ class QuotexFeed:
         except Exception:
             pass
 
-        # Build per-pair muted set from STATIC config + dynamic DB mutes
-        from pair_theory_config import get_muted_theories
-        pair_muted = get_muted_theories(asset)  # static config from DB data
-
-        # Also add dynamic mutes from _refresh_theory_mutes (per-pair)
-        for key, _note in self._muted_theories.items():
-            if ":" in key:
-                _a, _c = key.split(":", 1)
-                if _a == asset:
-                    pair_muted.add(_c)
-            else:
-                pair_muted.add(key)
-
-        # CANDLE REACTION ENGINE (2026-07-13)
-        # All theories deleted. Pure price-action reaction from last candle.
+        # NOTE (refactor 2026-07-14): the per-pair `pair_muted` set + the
+        # `pair_theory_config` import that used to live here were removed.
+        # The candle_reaction engine doesn't take a muted-set argument.
+        # CANDLE REACTION ENGINE (active since 2026-07-13)
+        # Pure price-action reaction from last closed candle.
         # Based on Quotex OTC algorithm findings (200-candle analysis).
         from candle_reaction import predict_from_candle
         _micro_for_pred = None
@@ -1315,9 +1303,12 @@ class QuotexFeed:
                 f"{' | ' + ','.join(tags) if tags else ''}"
             )
 
-            # Log whenever a theory fired — this is the only evidence
-            # source now that analyze_eoc is the sole signal generator.
-            if fired:
+            # FIX (refactor 2026-07-14): `if fired` gate was wrong —
+            # candle_reaction's reasons don't have the 'CODE:+N DIRECTION'
+            # format _parse_votes expects, so `fired` was always empty and
+            # log_signal never fired. Now we log ANY CALL/PUT signal so the
+            # history DB actually populates.
+            if sig in ("CALL", "PUT"):
                 _db.log_signal(
                     asset, period, closed["time"],
                     sig, prediction["score"],
@@ -2606,46 +2597,11 @@ class QuotexFeed:
         self._client, self._connected = None, False
         self._record_stream_error()
 
-    async def _refresh_theory_mutes(self) -> None:
-        """
-        Refresh the theory mute set — now PER-PAIR (2026-07-13).
-
-        Different pairs behave differently:
-          - USDPKR_otc: CON+MST underperform (33% win rate) — mean-reverting
-          - USDCOP_otc: MST+ZZ+STRUCT all 100% — trend-following
-          - USDMXN_otc: CON+RUN+TRAP all 100% — momentum works
-
-        This reads per-pair theory win rates from theory_votes and mutes
-        underperforming theories FOR THAT SPECIFIC PAIR.
-
-        Hysteresis: mute below 45% (n>=5 per pair — lower threshold since
-        per-pair data is sparser), un-mute at 50%+.
-        """
-        MUTE_BELOW, UNMUTE_AT, MIN_N = 45.0, 50.0, 5
-        self._muted_theories.clear()   # reset — rebuild per-pair
-
-        # Get ALL pairs that have signal history
-        try:
-            pairs = await asyncio.to_thread(
-                lambda: [r[0] for r in _db._cursor().__enter__().execute(
-                    "SELECT DISTINCT asset FROM theory_votes").fetchall()])
-        except Exception:
-            pairs = []
-
-        for asset in pairs:
-            try:
-                perf = await asyncio.to_thread(
-                    _db.theory_perf, asset, None, 7, MIN_N)
-            except Exception:
-                continue
-
-            for code, st in perf.items():
-                rate, n = st["rate"], st["n"]
-                if rate < MUTE_BELOW:
-                    key = f"{asset}:{code}"
-                    note = f"{rate:.0f}% n={n}/7d ({asset})"
-                    self._muted_theories[key] = note
-                    print(f"[feed] theory {code} MUTED for {asset} ({note})")
+    # NOTE (refactor 2026-07-14): `_refresh_theory_mutes` removed.
+    # It used to read per-pair theory win rates from the `theory_votes`
+    # table and mute underperforming theories. With the prediction path
+    # switched to candle_reaction (no theories), the `theory_votes` table
+    # is no longer populated, so the mute set was always empty anyway.
 
     def _reconcile_always_on(self) -> None:
         """
@@ -2905,10 +2861,8 @@ class QuotexFeed:
                     await self._load_pairs(broadcast)
                     self._reconcile_always_on()
 
-                # ── Refresh theory mute set every 5 minutes ────────────────
-                if time.time() - self._last_perf_refresh > 300:
-                    self._last_perf_refresh = time.time()
-                    await self._refresh_theory_mutes()
+                # NOTE (refactor 2026-07-14): theory mute refresh block
+                # removed — prediction engine no longer uses theories.
 
                 # ── DB row-count cleanup every 6 hours ─────────────────────
                 # asyncio.to_thread: _db.cleanup() is blocking sqlite3 I/O
