@@ -386,14 +386,14 @@ class QuotexFeed:
                 acc, n_acc = _db.recent_accuracy(asset, period, n=20)
             except Exception:
                 acc, n_acc = None, 0
-        # CANDLE REACTION ENGINE (2026-07-13)
-        # All theories deleted. Pure price-action reaction from last candle.
+        # 6-MODULE ENGINE (2026-07-14)
+        # Runs 6 independent modules + Smart Blender with per-pair adaptation.
         from candle_reaction import predict_from_candle
         _micro_for_pred = None
         if ticks and len(ticks) >= 10:
             from analyze_eoc import _build_micro
             _micro_for_pred = _build_micro(ticks, candles[-1]["open"] if candles else ticks[0])
-        result = predict_from_candle(candles, ticks=ticks, micro=_micro_for_pred)
+        result = predict_from_candle(candles, ticks=ticks, micro=_micro_for_pred, asset=asset)
         return result, micro_hist
 
     async def _run_eoc(self, stream, actual_open=None):

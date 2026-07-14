@@ -1075,15 +1075,14 @@ class QuotexFeed:
         # NOTE (refactor 2026-07-14): the per-pair `pair_muted` set + the
         # `pair_theory_config` import that used to live here were removed.
         # The candle_reaction engine doesn't take a muted-set argument.
-        # CANDLE REACTION ENGINE (active since 2026-07-13)
-        # Pure price-action reaction from last closed candle.
-        # Based on Quotex OTC algorithm findings (200-candle analysis).
+        # 6-MODULE ENGINE (active since 2026-07-14)
+        # Runs 6 independent modules + Smart Blender with per-pair adaptation.
         from candle_reaction import predict_from_candle
         _micro_for_pred = None
         if ticks and len(ticks) >= 10:
             _micro_for_pred = self._analyze_microstructure(
                 list(ticks), candles[-1]["open"] if candles else ticks[0])
-        result = predict_from_candle(candles, ticks=list(ticks) if ticks else [], micro=_micro_for_pred)
+        result = predict_from_candle(candles, ticks=list(ticks) if ticks else [], micro=_micro_for_pred, asset=asset)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
