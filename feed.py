@@ -1092,10 +1092,10 @@ class QuotexFeed:
         # Based on Quotex OTC algorithm findings (200-candle analysis).
         from candle_reaction import predict_from_candle
         _micro_for_pred = None
-        if base_ticks and len(base_ticks) >= 10:
+        if ticks and len(ticks) >= 10:
             _micro_for_pred = self._analyze_microstructure(
-                base_ticks, candles[-1]["open"] if candles else base_ticks[0])
-        result = predict_from_candle(candles, ticks=base_ticks, micro=_micro_for_pred)
+                list(ticks), candles[-1]["open"] if candles else ticks[0])
+        result = predict_from_candle(candles, ticks=list(ticks) if ticks else [], micro=_micro_for_pred)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
