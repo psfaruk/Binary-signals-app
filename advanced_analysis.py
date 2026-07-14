@@ -360,11 +360,15 @@ def classify_market_regime(candles, lookback=30):
     vol_pct = (atr_now / atr_hist) if atr_hist > 0 else 1.0
 
     # Determine regime — VOLATILE takes priority (noise dominates everything)
+    # FIX (Bug 3): tie-break used `>=` for both TREND_UP and TREND_DOWN, so
+    # when hh_hl == lh_ll (a tie) the first branch (TREND_UP) always won.
+    # Now both use strict `>`, so ties fall through to RANGE (neutral) —
+    # which is the correct classification when swing structure is ambiguous.
     if vol_pct > 1.5:
         regime = "VOLATILE"
-    elif ema9 > ema21 and trend_strength > 0.25 and hh_hl >= lh_ll:
+    elif ema9 > ema21 and trend_strength > 0.25 and hh_hl > lh_ll:
         regime = "TREND_UP"
-    elif ema9 < ema21 and trend_strength > 0.25 and lh_ll >= hh_hl:
+    elif ema9 < ema21 and trend_strength > 0.25 and lh_ll > hh_hl:
         regime = "TREND_DOWN"
     else:
         regime = "RANGE"
