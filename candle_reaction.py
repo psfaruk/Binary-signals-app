@@ -193,16 +193,21 @@ def predict_from_candle(candles, ticks=None, micro=None):
     signal = "CALL" if net > 0 else "PUT"
     confidence = round(abs(net) / total * 100) if total > 0 else 0
 
-    # Strength: based on how many signals agree
+    # Strength: based on net score (how strongly one side dominates)
     agree = max(call_score, put_score)
-    if confidence >= 70 and agree >= 6:
+    abs_net = abs(net)
+
+    if abs_net >= 5:
         strength = "STRONG"
-    elif confidence >= 60 and agree >= 4:
+    elif abs_net >= 3:
+        strength = "MEDIUM"
+    elif abs_net >= 1:
+        # Weak signal — still send it so user gets a signal
+        # (previous version returned NEUTRAL which meant NO signal at all)
         strength = "MEDIUM"
     else:
-        # No WEAK signals — return NEUTRAL instead
         return {"signal": "NEUTRAL", "confidence": confidence, "strength": "NEUTRAL",
-                "score": net, "reasons": reasons + [f"Confidence too low ({confidence}%) → NEUTRAL"]}
+                "score": net, "reasons": reasons + [f"Net too low ({net}) → NEUTRAL"]}
 
     return {
         "signal": signal,
