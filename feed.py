@@ -1404,8 +1404,21 @@ class QuotexFeed:
         Identifies buyer/seller pressure, fight zones, hold levels, and reactions.
         """
         ticks = list(ticks)
-        if len(ticks) < 10:
+        if len(ticks) < 3:
             return None
+        if len(ticks) < 10:
+            cur = ticks[-1]
+            op = open_price
+            return {
+                "buy_pct": 50, "sell_pct": 50, "pressure": "FIGHT",
+                "is_fight": False, "crosses": 0,
+                "hold_price": cur, "hold_visits": len(ticks),
+                "phases": ["FLAT"], "reaction": None,
+                "net": round(cur - op, 6), "tick_count": len(ticks),
+                "last_react": None, "round": {},
+                "ending_direction": {"direction": "FLAT", "buy_pct": 50,
+                                    "dominance": "FIGHT", "move": 0, "tick_count": len(ticks)},
+            }
 
         op  = open_price
         hi  = max(ticks)
