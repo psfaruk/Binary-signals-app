@@ -82,8 +82,8 @@ IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "300"))
 # ERROR_COOLDOWN seconds. Existing streams are never torn down by this —
 # only ensure_stream()'s capacity/cooldown gate for brand-new pairs fires.
 ERROR_WINDOW    = int(os.environ.get("ERROR_WINDOW",    "60"))
-ERROR_THRESHOLD = int(os.environ.get("ERROR_THRESHOLD", "4"))
-ERROR_COOLDOWN  = int(os.environ.get("ERROR_COOLDOWN",  "120"))
+ERROR_THRESHOLD = int(os.environ.get("ERROR_THRESHOLD", "10"))
+ERROR_COOLDOWN  = int(os.environ.get("ERROR_COOLDOWN",  "30"))
 # Candle history bounding. When a stream's candle list exceeds MAX_CANDLES,
 # truncate to the most recent TRUNCATE_TO. Keeps memory bounded on long-lived
 # always-on pairs without throwing away recent chart context.

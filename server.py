@@ -61,6 +61,11 @@ if os.environ.get("USE_SIM") == "1":
     _HAS_PYQUOTEX = False
     print("[server] USE_SIM=1 — forcing simulated feed")
 
+# Auto-fallback to sim if no Quotex credentials and not forcing sim
+if _HAS_PYQUOTEX and not os.environ.get("QX_TOKEN", "").strip() and not os.environ.get("QX_EMAIL", "").strip():
+    _HAS_PYQUOTEX = False
+    print("[server] no Quotex credentials — falling back to SIMULATED feed")
+
 if _HAS_PYQUOTEX:
     from feed import QuotexFeed as _Feed
     print("[server] real feed available — using REAL Quotex feed")
