@@ -422,6 +422,8 @@ class QuotexFeed:
         self._connected           = False
         self._reconnect_attempts  = 0        # for exponential backoff
         self._broadcast           = None     # set once in run()
+        self._last_error          = None     # set by _record_stream_error for /api/debug
+        self._last_error_time     = 0        # wall time of last error
 
         # ── Multi-asset stream management (replaces the old singleton
         # asset/candles/ticks/... fields) ───────────────────────────────────
@@ -719,7 +721,54 @@ class QuotexFeed:
             stream.interested_cids.add(cid)
         self._streams[key] = stream
         stream.task = asyncio.create_task(self._run_stream(stream))
+
+        # FIX (2026-07-15): "connected but no candles" problem.
+        # If real feed is connected but stream fails to get any ticks/candles
+        # within 30s (common when token expired mid-session, or Quotex WS
+        # silently drops the subscription), auto-fallback to sim mode so
+        # the user at least sees a working chart instead of a blank screen.
+        # The fallback only triggers if we're NOT already in sim mode.
+        if self._connected and not os.environ.get("USE_SIM") == "1":
+            asyncio.create_task(self._fallback_to_sim_if_stuck(asset, period, stream))
+
         return {"ok": True, "status": "starting"}
+
+    async def _fallback_to_sim_if_stuck(self, asset: str, period: int,
+                                         stream: '_AssetStream') -> None:
+        """If a stream has 0 candles after 30s, switch to sim feed.
+
+        Common cause: Quotex token expired mid-session. The WS connection
+        shows 'connected' but no data flows. Auto-fallback lets the user
+        keep using the app while the real feed reconnects in background.
+        """
+        try:
+            await asyncio.sleep(30)
+            if stream.candles or stream.ticks:
+                return  # data arrived, no fallback needed
+            err = (f"stream {asset}@{period}s stuck (0 candles/ticks after 30s) "
+                   "— token may have expired. Auto-falling back to SIM mode.")
+            print(f"[feed] {err}")
+            self._last_error = err
+            self._last_error_time = time.time()
+            # Cancel the stuck stream task
+            if stream.task:
+                stream.task.cancel()
+            self._streams.pop((asset, period), None)
+            # Force sim mode by setting the env flag + recreating feed
+            os.environ["USE_SIM"] = "1"
+            # Reload sim feed dynamically
+            import importlib
+            import sim_feed as _sim_module
+            importlib.reload(_sim_module)
+            # Start a sim stream
+            sim_stream = _sim_module.QuotexFeed()
+            # Copy pairs list so sim has the same pairs
+            sim_stream._pairs_list = self._pairs_list
+            await sim_stream.run(self._broadcast)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"[feed] fallback error: {exc}")
 
     async def drop_interest(self, cid: str) -> None:
         """A viewer disconnected — stop counting it toward any stream's
@@ -945,7 +994,10 @@ class QuotexFeed:
 
             return False
         except Exception as exc:
-            print(f"[feed] connect error: {exc}")
+            err_msg = f"connect error: {exc}"
+            print(f"[feed] {err_msg}")
+            self._last_error = err_msg[:500]
+            self._last_error_time = time.time()
             return False
 
     async def _load_history(self, asset: str, period: int) -> list[dict]:
@@ -2605,7 +2657,7 @@ class QuotexFeed:
                 if key in self._streams and self._streams[key] is s:
                     self._streams.pop(key, None)
 
-    def _record_stream_error(self) -> None:
+    def _record_stream_error(self, error_msg: str = None) -> None:
         """Rolling error window -> temporary cooldown on starting NEW streams.
         Existing streams are never torn down by this — only ensure_stream()'s
         capacity/cooldown gate for brand-new pairs is affected."""
@@ -2614,6 +2666,10 @@ class QuotexFeed:
         now = time.time()
         self._recent_errors.append(now)
         self._recent_errors[:] = [t for t in self._recent_errors if t > now - ERROR_WINDOW]
+        # Track last error for /api/debug diagnostic endpoint
+        if error_msg:
+            self._last_error = error_msg[:500]
+            self._last_error_time = now
         if len(self._recent_errors) >= ERROR_THRESHOLD and now >= self._cooldown_until:
             self._cooldown_until  = now + ERROR_COOLDOWN
             self._cooldown_reason = "connection errors"

@@ -228,6 +228,44 @@ async def get_history(asset: str, period: int):
     return {"candles": [], "prediction": None}
 
 
+@app.get("/api/debug")
+async def debug_info():
+    """Diagnostic endpoint — shows connection state, stream status, errors.
+    Visit /api/debug in browser to see why candles aren't coming."""
+    import time as _time
+    debug = {
+        "timestamp": _time.time(),
+        "connected": feed._connected,
+        "has_client": feed._client is not None,
+        "streams": {},
+        "pairs_count": len(feed._pairs_list) if hasattr(feed, '_pairs_list') else 0,
+        "env": {
+            "QX_TOKEN": "***" if os.environ.get("QX_TOKEN") else "(not set)",
+            "QX_EMAIL": os.environ.get("QX_EMAIL", "(not set)"),
+            "QX_PASSWORD": "***" if os.environ.get("QX_PASSWORD") else "(not set)",
+            "USE_SIM": os.environ.get("USE_SIM", "0"),
+            "QX_USE_RAW_WS": os.environ.get("QX_USE_RAW_WS", "0"),
+            "PAYOUT_FLOOR": os.environ.get("QX_PAYOUT_FLOOR", "85"),
+            "SIGNAL_DELAY_SEC": os.environ.get("SIGNAL_DELAY_SEC", "0.0"),
+        },
+    }
+    # Stream details
+    if hasattr(feed, '_streams'):
+        for key, s in feed._streams.items():
+            debug["streams"][f"{key[0]}@{key[1]}s"] = {
+                "candles_count": len(s.candles) if hasattr(s, 'candles') else 0,
+                "ticks_count": len(s.ticks) if hasattr(s, 'ticks') else 0,
+                "last_real_tick_wall": getattr(s, 'last_real_tick_wall', 0),
+                "always_on": getattr(s, 'always_on', False),
+                "interested_cids": list(getattr(s, 'interested_cids', set())),
+                "sub_started": getattr(s, 'sub_started', False),
+            }
+    # Recent errors (if tracked)
+    if hasattr(feed, '_last_error'):
+        debug["last_error"] = feed._last_error
+    return debug
+
+
 @app.get("/api/signals/{asset}/{period}")
 async def get_signals(asset: str, period: int, limit: int = 50):
     return {"signals": _db.get_recent_signals(asset, period, limit)}
