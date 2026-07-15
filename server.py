@@ -79,17 +79,50 @@ cid_counter = 0
 
 
 async def broadcast(msg: dict):
-    """Push a message to every connected client — PARALLEL sends.
-    Uses asyncio.gather so one slow client doesn't block others."""
+    """Push a message to connected clients — PARALLEL sends.
+
+    FIX (2026-07-15 audit): previously sent ALL messages to ALL clients,
+    wasteful when N viewers watch M different pairs (each got N×M msgs).
+    Now filters by asset/period: only clients interested in the message's
+    asset/period receive it. Messages without asset/period (pairs, status,
+    signals list) go to everyone.
+    """
     if not clients:
         return
     data = json.dumps(msg)
-    # Send to ALL clients in parallel — no head-of-line blocking
+    msg_asset = msg.get("asset")
+    msg_period = msg.get("period")
+
+    # If no asset/period in message, broadcast to all (pairs, status, etc.)
+    if not msg_asset:
+        target_cids = list(clients.keys())
+    else:
+        # Filter: only send to clients interested in this asset/period.
+        # feed tracks interested_cids per stream — look it up.
+        target_cids = list(clients.keys())  # default: all
+        try:
+            stream_key = (msg_asset, msg_period) if msg_period else None
+            if stream_key and hasattr(feed, '_streams'):
+                stream = feed._streams.get(stream_key)
+                if stream and stream.interested_cids:
+                    target_cids = list(stream.interested_cids)
+                elif stream:
+                    # Stream exists but no interested viewers — skip
+                    target_cids = []
+                # else: stream not found, send to all (safety)
+        except Exception:
+            pass  # on any error, fall back to broadcast-all
+
     tasks = []
     cids = []
-    for cid, ws in list(clients.items()):
+    for cid in target_cids:
+        ws = clients.get(cid)
+        if ws is None:
+            continue
         cids.append(cid)
         tasks.append(ws.send_text(data))
+    if not tasks:
+        return
     results = await asyncio.gather(*tasks, return_exceptions=True)
     # Remove dead clients
     for cid, result in zip(cids, results):

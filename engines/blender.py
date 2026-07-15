@@ -217,10 +217,19 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
         confidence = min(confidence, 55)
 
     # ── Step 9: Pattern confluence check for STRONG ──────────────────────
-    has_pattern_confluence = any(
+    # FIX (2026-07-15 audit): true confluence requires the pattern to be
+    # CONFIRMED by at least one other non-pattern group agreeing in the
+    # same direction. A lone pattern module voting by itself is not real
+    # confluence — it's just one module's opinion.
+    pattern_agrees = any(
         r.reliability == "PATTERN" and r.direction == signal
         for r, e in adjusted
     )
+    non_pattern_agrees = any(
+        r.reliability != "PATTERN" and r.direction == signal
+        for r, e in adjusted
+    )
+    has_pattern_confluence = pattern_agrees and non_pattern_agrees
 
     # FIX: 'agree' = number of unique groups voting for majority direction
     # (NOT score). The HTML label says 'N/M modules' so this must be a count.

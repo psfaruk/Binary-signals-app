@@ -860,10 +860,17 @@ function updateLastCandle(candle){
     _startRaf();
     return;
   }
-  // Same candle: update data array + set new tween target.
-  // The rAF loop smoothly eases the rendered candle toward this target.
-  last.high = Math.max(last.high, candle.high);
-  last.low = Math.min(last.low, candle.low);
+  // Same candle: FULLY sync to backend's authoritative values.
+  // FIX (2026-07-15 audit): previously used Math.max/Math.min for high/low
+  // and never updated open. This broke when backend reanchors a candle
+  // (timer-close fallback → first real tick resets open/high/low to real
+  // values). The old max/min kept stale placeholder-based wide high/low,
+  // and the wrong open persisted for the entire candle lifetime.
+  // Backend is the source of truth — it tracks cumulative high/low via
+  // _track_tick(), so we just take its values directly.
+  last.open  = candle.open;
+  last.high  = candle.high;
+  last.low   = candle.low;
   last.close = candle.close;
   _setTarget(last);
   _startRaf();
