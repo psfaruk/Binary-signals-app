@@ -16,9 +16,10 @@ from analyze_eoc import _round_level, _key_levels, _atr
 PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "81"))
 ENABLE_LIVE_THEORY = os.environ.get("ENABLE_LIVE_REEVAL", "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
-# Signal delay (2026-07-10): withhold prediction for N seconds after candle
-# open so opening ticks can confirm gap direction. Mirrors feed.py.
-SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
+# Signal delay: withhold prediction for N seconds after candle open so
+# opening ticks can confirm gap direction. CHANGED to 0.0 (2026-07-15 per
+# user request) — signal now delivered immediately at EOC. Mirrors feed.py.
+SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "0.0"))
 ZONE_LOSS_GUARD = 3
 
 _SIM_PAIRS = [

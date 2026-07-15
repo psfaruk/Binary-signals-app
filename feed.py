@@ -43,12 +43,12 @@ PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "85"))
 # either to "0" via the platform's env var UI to fall back to prior behavior.
 ENABLE_LIVE_THEORY   = os.environ.get("ENABLE_LIVE_REEVAL",  "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
-# ── Signal delay (2026-07-10) ──────────────────────────────────────────────
-# How long after a new candle opens before the prediction is broadcast to
-# clients. Lets the opening 2-3 seconds of ticks confirm the gap direction
-# and initial momentum before the user acts on the signal. Set to 0 to
-# disable (broadcast immediately at EOC, old behavior).
-SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
+# ── Signal delay ───────────────────────────────────────────────────────────
+# How long after a new candle opens before the prediction is broadcast.
+# Originally 3s to let opening ticks confirm gap direction. CHANGED to 0.0
+# (2026-07-15 per user request) — signal now delivered immediately at EOC.
+# Set SIGNAL_DELAY_SEC=3.0 in env vars to restore the old delayed behavior.
+SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "0.0"))
 
 # ── Event-driven pipeline tuning (2026-07-11) ──────────────────────────────
 # MICRO_RECALC_EVERY: recompute _analyze_microstructure() every N ticks. The
