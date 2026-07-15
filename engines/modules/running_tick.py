@@ -37,12 +37,21 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
         sub_votes.append(("PUT", 2, f"5-sec ending DOWN/SELLER ({ed_buy}%)"))
 
     # ── Sub-signal 2: Buyer/seller pressure ──────────────────────────────
+    # FIX: old threshold was buy_pct >= 65 / <= 35, but _build_micro sets
+    # pressure="SELLER" when sell_pct >= 62 (buy_pct <= 38). So there was
+    # a 3% gap (buy_pct 36-38) where pressure=SELLER but no vote fired.
+    # Now fires whenever pressure is set (BUYER/SELLER), with score scaled
+    # by how dominant the pressure is.
     buy_pct = micro.get("buy_pct", 50)
     pressure = micro.get("pressure", "FIGHT")
-    if pressure == "BUYER" and buy_pct >= 65:
-        sub_votes.append(("CALL", 2, f"Strong buyer pressure ({buy_pct}%)"))
-    elif pressure == "SELLER" and buy_pct <= 35:
-        sub_votes.append(("PUT", 2, f"Strong seller pressure ({buy_pct}%)"))
+    if pressure == "BUYER":
+        # Stronger buyer pressure = higher score (2-3)
+        score = 3 if buy_pct >= 70 else 2
+        sub_votes.append(("CALL", score, f"Buyer pressure ({buy_pct}%)"))
+    elif pressure == "SELLER":
+        sell_pct = 100 - buy_pct
+        score = 3 if sell_pct >= 70 else 2
+        sub_votes.append(("PUT", score, f"Seller pressure ({sell_pct}%)"))
 
     # ── Sub-signal 3: Reaction ───────────────────────────────────────────
     reaction = micro.get("reaction")

@@ -189,10 +189,14 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
     total = call_score + put_score
 
     if total == 0 or net == 0:
+        # Count majority groups for display even on NEUTRAL
+        call_g = set(r.group for r, e in adjusted if r.direction == "CALL")
+        put_g = set(r.group for r, e in adjusted if r.direction == "PUT")
+        maj_n = max(len(call_g), len(put_g)) if (call_g or put_g) else 0
         return {
             "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
             "score": 0, "reasons": all_reasons or ["CONFLICTING_SIGNALS"],
-            "regime": regime, "agree": max(call_score, put_score),
+            "regime": regime, "agree": maj_n,
             "total": total_groups, "signals_fired": total_groups,
             "modules": _module_breakdown(adjusted, all_results),
             "asset": asset, "profile": pair_profile,
@@ -218,7 +222,9 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
         for r, e in adjusted
     )
 
-    agree = max(call_score, put_score)
+    # FIX: 'agree' = number of unique groups voting for majority direction
+    # (NOT score). The HTML label says 'N/M modules' so this must be a count.
+    agree = majority_group_n
     abs_net = abs(net)
 
     if (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2

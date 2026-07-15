@@ -939,30 +939,30 @@ function renderSignal(pred){
   sigConfBar.style.width = conf + '%';
   sigConfBar.style.background = s === 'CALL' ? 'var(--green)' : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
   sigAgree.textContent = (pred.agree || 0) + '/' + (pred.total || 0) + ' modules';
-  // Regime is a dict {trend, zone, ...} — show trend/zone, not [object Object]
+  // Regime display — the new regime dict has keys: regime, trend_strength,
+  // volatility_pct, ema9, ema21, is_trending, is_ranging, is_volatile
   const reg = pred.regime || {};
   const regStr = (typeof reg === 'object' && reg !== null)
-    ? (reg.trend || '—') + '/' + (reg.zone || '—')
+    ? (reg.regime || '—') + ' (str=' + (reg.trend_strength || 0) + ')'
     : String(reg || '—');
   sigRegime.textContent = regStr;
-  // ── Market State panel (2026-07-11) ─────────────────────────────────
-  // Display the new market_state fields: trend, zone, phase, structure,
-  // volatility, zigzag_bias. These come from _classify_market_state() in
-  // analyze_eoc.py and help the user see WHY the signal fired.
-  const ms = pred.market_state || {};
-  const trendVal = ms.trend || '—';
-  const zoneVal = ms.zone || '—';
-  const phaseVal = ms.phase || '—';
-  const structVal = ms.structure || '—';
-  const volVal = ms.volatility || '—';
-  const zzBias = ms.zigzag_bias || '—';
-  const zzStr = ms.bias_strength || 0;
+  // ── Market State panel — uses regime dict keys now (no more market_state)
+  const ms = reg;  // regime IS the market state now
+  const trendVal = ms.regime || '—';
+  const zoneVal = ms.is_volatile ? 'VOLATILE' : ms.is_trending ? 'TREND' : ms.is_ranging ? 'RANGE' : '—';
+  const phaseVal = '—';  // not computed in new engine
+  const structVal = '—';  // not computed in new engine
+  const volVal = ms.volatility_pct ? (ms.volatility_pct > 1.3 ? 'HIGH' : ms.volatility_pct < 0.7 ? 'LOW' : 'NORMAL') : '—';
+  const zzBias = '—';  // not computed in new engine
+  const zzStr = ms.trend_strength || 0;
   msTrend.textContent = trendVal;
-  msTrend.style.color = trendVal === 'UPTREND' ? 'var(--green)' :
-                        trendVal === 'DOWNTREND' ? 'var(--red)' : 'var(--text-dim)';
+  msTrend.style.color = trendVal === 'TREND_UP' ? 'var(--green)' :
+                        trendVal === 'TREND_DOWN' ? 'var(--red)' :
+                        trendVal === 'VOLATILE' ? 'var(--yellow)' : 'var(--text-dim)';
   msZone.textContent = zoneVal;
-  msZone.style.color = zoneVal === 'HIGH' ? 'var(--green)' :
-                       zoneVal === 'LOW' ? 'var(--red)' : 'var(--text-dim)';
+  msZone.style.color = zoneVal === 'TREND' ? 'var(--green)' :
+                       zoneVal === 'VOLATILE' ? 'var(--yellow)' :
+                       zoneVal === 'RANGE' ? 'var(--text-dim)' : 'var(--text-dim)';
   msPhase.textContent = phaseVal;
   msPhase.style.color = phaseVal === 'MARKUP' ? 'var(--green)' :
                         phaseVal === 'MARKDOWN' ? 'var(--red)' :
