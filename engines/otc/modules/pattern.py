@@ -20,7 +20,7 @@ Each pattern gets its own group (PATTERN_*) so they're counted as
 independent votes in the blender.
 """
 from advanced_analysis import detect_candle_patterns
-from engines.types import ModuleResult, MarketContext
+from engines.otc.types import ModuleResult, MarketContext
 
 REVERSAL_PATTERNS = {
     "BULL_ENGULF", "BEAR_ENGULF", "MORNING_STAR", "EVENING_STAR",

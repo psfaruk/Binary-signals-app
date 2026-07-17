@@ -15,7 +15,7 @@ Reliability: INDICATOR ×1.0 (baseline — indicators are mathematically
 derived, not price-action patterns, but in OTC they can be noisy)
 """
 import math
-from engines.types import ModuleResult, MarketContext
+from engines.otc.types import ModuleResult, MarketContext
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

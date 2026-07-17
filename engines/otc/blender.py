@@ -16,10 +16,10 @@ Pipeline:
 
 This is the ONLY public entry point: predict()
 """
-from engines.types import ModuleResult, MarketContext, RELIABILITY
-from engines.context import compute_context
-from engines.per_pair import get_weights, get_profile
-from engines.modules import (
+from engines.otc.types import ModuleResult, MarketContext, RELIABILITY
+from engines.otc.context import compute_context
+from engines.otc.per_pair import get_weights, get_profile
+from engines.otc.modules import (
     candle_reaction as mod_candle,
     running_tick as mod_tick,
     pattern as mod_pattern,

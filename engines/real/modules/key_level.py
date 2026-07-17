@@ -11,7 +11,7 @@ Signals:
 Reliability: LEVEL ×1.3 (key levels are structurally important)
 """
 import math
-from engines.types import ModuleResult, MarketContext
+from engines.real.types import ModuleResult, MarketContext
 from analyze_eoc import _round_level
 
 
