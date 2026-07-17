@@ -10,6 +10,8 @@ Two completely separate engines live side-by-side:
 
     engines.real — for real-market pairs (live exchange prices)
         Same 6 modules + Smart Blender, but retuned for trend-following.
+        Module 6 is replaced with `trend_follow` (instead of `otc_pattern`)
+        which detects momentum continuation rather than mean-reversion.
         Heavier weight on indicator (RSI/MACD/EMA), pattern (engulfing etc.).
         Payout floor: 70%.
 
@@ -25,11 +27,23 @@ Public API:
 
 If `category` is omitted, it is auto-detected from the asset name:
 asset ending in "_otc" → otc, otherwise → real.
+
+Category-asset mismatch (e.g. category="real" but asset="EURUSD_otc")
+raises a ValueError — the caller MUST pass a consistent pair.
 """
 from engines import otc as _otc_engine
 from engines import real as _real_engine
 
-__all__ = ["predict", "otc", "real"]
+__all__ = ["predict", "otc", "real", "category_of"]
+
+
+def category_of(asset: str) -> str:
+    """Return the category for an asset name.
+
+    "EURUSD_otc" → "otc"
+    "EURUSD"     → "real"
+    """
+    return "otc" if (asset or "").endswith("_otc") else "real"
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
@@ -48,9 +62,26 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     Returns:
         The engine's prediction dict (signal, confidence, strength, etc.)
         with an extra "category" field for UI/logging.
+
+    Raises:
+        ValueError: if category is explicitly set AND conflicts with the
+            asset name (e.g. category="real" but asset="EURUSD_otc").
+            This is a hard error — the caller MUST fix the inconsistency
+            rather than silently letting an OTC pair get analyzed by the
+            Real engine (or vice versa).
     """
+    # Auto-detect category from asset name when not specified.
+    detected = category_of(asset)
     if category is None:
-        category = "otc" if asset.endswith("_otc") else "real"
+        category = detected
+    elif category != detected:
+        # Hard mismatch — refuse to route. This was previously silent,
+        # allowing an OTC pair to be analyzed by the Real engine (or
+        # vice versa), defeating the whole point of having two engines.
+        raise ValueError(
+            f"category/asset mismatch: category={category!r} but asset "
+            f"{asset!r} implies category={detected!r}. Pass a consistent "
+            f"pair, or omit category to auto-detect.")
 
     if category == "otc":
         result = _otc_engine.predict(
@@ -61,7 +92,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             candles, ticks, micro, asset=asset,
             htf_trend=htf_trend, period=period)
     else:
-        raise ValueError(f"unknown category {category!r}; expected 'otc' or 'real'")
+        raise ValueError(
+            f"unknown category {category!r}; expected 'otc' or 'real'")
 
     # Echo the resolved category so the UI / signal_log can record which
     # engine produced this prediction (useful for per-engine accuracy

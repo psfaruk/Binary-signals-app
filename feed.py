@@ -620,14 +620,23 @@ class QuotexFeed:
         The combined `pairs` list is kept for any older client code that
         still expects a single list — new frontend code should read
         real_pairs / otc_pairs instead.
+
+        FIX (2026-07-17): closed real pairs (status="closed" — weekend /
+        outside bank hours) are filtered OUT of the active lists. Quotex
+        publishes real-market instruments only during bank hours; showing
+        closed real pairs in the Real Market dropdown is misleading
+        because the user can't trade them. OTC pairs are always open
+        (24/7 broker-generated), so they're never filtered.
         """
+        active_real = [p for p in self._real_pairs_list if p["status"] == "live"]
+        active_otc  = [p for p in self._otc_pairs_list  if p["status"] == "otc"]
         return {
-            "real_pairs": self._real_pairs_list,
-            "otc_pairs":  self._otc_pairs_list,
+            "real_pairs": active_real,
+            "otc_pairs":  active_otc,
             "payout_floor_real": PAYOUT_FLOOR_REAL,
             "payout_floor_otc":  PAYOUT_FLOOR_OTC,
-            # Backward compat: combined list (real first, then OTC)
-            "pairs":        self._real_pairs_list + self._otc_pairs_list,
+            # Backward compat: combined list (real first, then otc)
+            "pairs":        active_real + active_otc,
             "payout_floor": PAYOUT_FLOOR_OTC,
         }
 
@@ -2737,6 +2746,14 @@ class QuotexFeed:
         no re-fetching, no delay. Each pair runs independently in its own
         asyncio task, so switching one doesn't affect another.
         """
+        # FIX (2026-07-17): previously used a single eligibility check
+        # against `p.get("locked")` which was set with category-specific
+        # floors in _load_pairs. That part is correct (locked flag already
+        # uses the right floor per pair). However, the eligibility filter
+        # also checked `p["status"] in ("live", "otc")` — we now keep
+        # that AND make sure both real (live) AND otc always-on pairs are
+        # warmed up. The locked flag is the source of truth — if a pair
+        # is locked, it's below its category's payout floor.
         eligible = {(p["asset"], 60) for p in self._pairs_list
                     if p["status"] in ("live", "otc") and not p.get("locked")}
 

@@ -143,14 +143,23 @@ class QuotexFeed:
 
         Matches feed.py's available_pairs() structure so the frontend
         doesn't care which feed (real or sim) it's talking to.
+
+        FIX (2026-07-17): only pairs with status="live" (real) or "otc"
+        are included in the active lists. Closed pairs are filtered out
+        so the UI dropdown only shows currently-tradeable pairs. The
+        full lists (including closed) are kept as `_real_pairs_list` /
+        `_otc_pairs_list` instance attrs for debugging — call those
+        directly if you need to see closed pairs.
         """
+        active_real = [p for p in self._real_pairs_list if p["status"] == "live"]
+        active_otc  = [p for p in self._otc_pairs_list  if p["status"] == "otc"]
         return {
-            "real_pairs": self._real_pairs_list,
-            "otc_pairs":  self._otc_pairs_list,
+            "real_pairs": active_real,
+            "otc_pairs":  active_otc,
             "payout_floor_real": PAYOUT_FLOOR_REAL,
             "payout_floor_otc":  PAYOUT_FLOOR_OTC,
             # Backward compat
-            "pairs":        self._pairs_list,
+            "pairs":        active_real + active_otc,
             "payout_floor": PAYOUT_FLOOR_OTC,
         }
 
@@ -280,7 +289,15 @@ class QuotexFeed:
         return candles
 
     def _gen_tick(self, stream: _AssetStream) -> float:
-        """Generate next realistic tick price."""
+        """Generate next realistic tick price.
+
+        FIX (2026-07-17): Real-market pairs trend harder (less mean
+        reversion), OTC pairs mean-revert more (broker's algorithm
+        suppresses trends). The mean-reversion factor is now category-
+        dependent:
+          - Real pairs: 0.001 (weak reversion — trends persist)
+          - OTC pairs:  0.003 (strong reversion — broker pulls back)
+        """
         pip = _PIP.get(stream.asset, 0.0001)
         price = stream._sim_price
 
@@ -295,14 +312,19 @@ class QuotexFeed:
             stream._sim_volatility = pip * random.uniform(0.5, 1.5)
         vol = max(pip * 0.2, stream._sim_volatility)
 
-        # Mean reversion
+        # Mean reversion — category-dependent.
+        # Real markets: weaker reversion (trends driven by real order flow)
+        # OTC markets: stronger reversion (broker algorithm suppresses trends)
         base = _BASE_PRICES.get(stream.asset, 1.0)
-        reversion = (base - price) * 0.002
+        is_otc = stream.asset.endswith("_otc")
+        reversion_factor = 0.003 if is_otc else 0.001
+        reversion = (base - price) * reversion_factor
 
         change = stream._sim_momentum + random.gauss(0, vol) + reversion
 
-        # Occasional spikes
-        if random.random() < 0.005:
+        # Occasional spikes — OTC pairs spike more (broker fakeouts)
+        spike_prob = 0.005 if not is_otc else 0.008
+        if random.random() < spike_prob:
             change += random.gauss(0, pip * 3)
 
         new_price = price + change
