@@ -2772,6 +2772,106 @@ class QuotexFeed:
                 s.always_on = True
                 s.idle_since = None
 
+    async def _watchdog_always_on(self) -> None:
+        """Restart dead always_on streams. CRITICAL for Railway deployment.
+
+        User requirement (2026-07-17): 'Once the app is deployed, candles
+        should always be running on the server, whether anyone is watching
+        or not. No kind of crash or obstacle allowed.'
+
+        The existing _reconcile_always_on only runs every 5 minutes (when
+        _load_pairs runs) and only SETS the always_on flag — it does NOT
+        check if the stream's asyncio.Task is actually alive. If a stream
+        task dies (Quotex WS drop, exception in _stream_loop, OOM kill,
+        etc.), the always_on flag stays True but no ticks flow. The user
+        sees a blank chart when they open the app, and candles only start
+        when they manually subscribe.
+
+        This watchdog runs every 30 seconds (10x faster than
+        _reconcile_always_on) and for each always_on-eligible pair:
+          1. If no stream exists → create one (always_on=True)
+          2. If stream exists but task is done/crashed → restart it
+          3. If stream exists and task is alive → leave alone
+
+        This guarantees that within 30s of any stream death, it's back up
+        and ticking — meeting the 'always running' requirement.
+        """
+        # Build the eligible set fresh each run — pair open/closed status
+        # changes over time (real market opens/closes), so we can't cache.
+        eligible_assets = {
+            p["asset"] for p in self._pairs_list
+            if p["status"] in ("live", "otc") and not p.get("locked")
+        }
+
+        for asset in eligible_assets:
+            key = (asset, 60)  # always_on is always 1m
+            stream = self._streams.get(key)
+
+            if stream is None:
+                # Stream doesn't exist — create it with always_on=True.
+                # Same logic as _reconcile_always_on's "create" branch.
+                try:
+                    s = _AssetStream(asset=asset, period=60, always_on=True)
+                    self._streams[key] = s
+                    s.task = asyncio.create_task(self._run_stream(s))
+                    print(f"[feed] watchdog: created always_on stream for {asset}")
+                except Exception as exc:
+                    print(f"[feed] watchdog: FAILED to create {asset}: {exc}")
+                continue
+
+            # Stream exists — check if its task is alive.
+            task = stream.task
+            if task is None or task.done():
+                # Task is dead (crashed, returned, or was cancelled).
+                # Log the exception if there was one, then restart.
+                if task is not None and not task.cancelled():
+                    try:
+                        exc = task.exception()
+                        if exc:
+                            print(f"[feed] watchdog: stream {asset} died with "
+                                  f"{type(exc).__name__}: {exc}. Restarting.")
+                        else:
+                            print(f"[feed] watchdog: stream {asset} task completed "
+                                  f"unexpectedly. Restarting.")
+                    except asyncio.InvalidStateError:
+                        pass
+                else:
+                    print(f"[feed] watchdog: stream {asset} task was cancelled. Restarting.")
+
+                # Preserve the candle history so the new task continues
+                # where the old one left off (don't lose chart context).
+                old_candles = stream.candles
+                old_ticks = list(stream.ticks) if stream.ticks else []
+                old_pred = stream.prediction
+                old_open_time = stream.candle_open_time
+                old_open_price = stream.candle_open_price
+                old_open_is_real = stream.candle_open_is_real
+
+                # Create a fresh stream with preserved state.
+                new_stream = _AssetStream(
+                    asset=asset, period=60, always_on=True,
+                    candles=old_candles,
+                    candle_open_time=old_open_time,
+                    candle_open_price=old_open_price,
+                    candle_open_is_real=old_open_is_real,
+                )
+                new_stream.ticks.extend(old_ticks)
+                new_stream.prediction = old_pred
+                new_stream.idle_since = None
+                # Mark old stream as evicting so its cleanup doesn't
+                # call stop_candles_stream on the new subscription.
+                stream._evicting = True
+                # Replace in registry
+                self._streams[key] = new_stream
+                new_stream.task = asyncio.create_task(self._run_stream(new_stream))
+
+        # Also: demote always_on streams for pairs that are no longer
+        # eligible (pair closed, payout dropped below floor).
+        for key, s in list(self._streams.items()):
+            if s.always_on and s.asset not in eligible_assets:
+                s.always_on = False
+                print(f"[feed] watchdog: demoted {s.asset} (no longer eligible)")
+
     async def _sweep_idle_streams(self) -> None:
         """Evict streams with no interested viewers for > IDLE_TIMEOUT.
 
@@ -2925,6 +3025,11 @@ class QuotexFeed:
         HOUSEKEEP_SECS    = 5
         # Global staleness reuses the module-level STALE_SECS (overridable via
         # env) — see top of file. Was previously a separate GLOBAL_STALE_SECS.
+        # FIX (2026-07-17): always_on watchdog runs every 30s (6 housekeep
+        # ticks). Separate counter so it doesn't interfere with the existing
+        # 5s housekeeping cadence.
+        _last_watchdog_run = 0.0
+        WATCHDOG_INTERVAL  = 30.0   # seconds between watchdog checks
 
         while True:
             try:
@@ -2993,6 +3098,19 @@ class QuotexFeed:
                         await self._rebuild_client()
 
                 await self._sweep_idle_streams()
+
+                # ── Always-on watchdog (every 30s) ───────────────────────────
+                # CRITICAL for Railway: ensures all eligible pairs are always
+                # ticking on the server, regardless of viewer count. Restarts
+                # any stream whose asyncio.Task has died (crash, exception,
+                # Quotex WS drop). Without this, candles only tick when a
+                # viewer is watching — defeats the purpose of always_on.
+                if time.time() - _last_watchdog_run > WATCHDOG_INTERVAL:
+                    _last_watchdog_run = time.time()
+                    try:
+                        await self._watchdog_always_on()
+                    except Exception as exc:
+                        print(f"[feed] watchdog error: {exc}")
 
                 # ── Refresh pair list every 5 minutes (market open/close) ──
                 if time.time() - self._last_pairs_refresh > 300:
