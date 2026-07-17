@@ -14,26 +14,52 @@ import db as _db
 from analyze_eoc import _round_level, _key_levels, _atr
 
 PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "81"))
+# FIX (2026-07-17): split payout floors for REAL vs OTC. Real pairs have
+# lower broker margins → lower payouts → lower floor (default 70).
+# OTC pairs have higher headline payouts → higher floor (default 85).
+PAYOUT_FLOOR_REAL = int(os.environ.get("QX_PAYOUT_FLOOR_REAL", "70"))
+PAYOUT_FLOOR_OTC  = int(os.environ.get("QX_PAYOUT_FLOOR_OTC",
+                                       os.environ.get("QX_PAYOUT_FLOOR", "85")))
 ENABLE_LIVE_THEORY = os.environ.get("ENABLE_LIVE_REEVAL", "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
 # Signal delay: withhold prediction for N seconds after candle open so
-# opening ticks can confirm gap direction. CHANGED to 0.0 (2026-07-15 per
-# user request) — signal now delivered immediately at EOC. Mirrors feed.py.
-SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "0.0"))
+# opening ticks can confirm gap direction. Restored to 3.0s (2026-07-17
+# bug-fix audit) — was 0.0, causing predictions to fire on open price
+# without any opening-tick confirmation.
+SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
 ZONE_LOSS_GUARD = 3
 
-_SIM_PAIRS = [
-    {"asset": "EURUSD_otc", "display": "EUR/USD", "status": "otc", "payout": 87, "locked": False},
-    {"asset": "GBPUSD_otc", "display": "GBP/USD", "status": "otc", "payout": 85, "locked": False},
-    {"asset": "USDJPY_otc", "display": "USD/JPY", "status": "otc", "payout": 83, "locked": False},
-    {"asset": "AUDUSD_otc", "display": "AUD/USD", "status": "otc", "payout": 82, "locked": False},
-    {"asset": "EURGBP_otc", "display": "EUR/GBP", "status": "otc", "payout": 84, "locked": False},
-    {"asset": "GBPJPY_otc", "display": "GBP/JPY", "status": "otc", "payout": 86, "locked": False},
-    {"asset": "EURJPY_otc", "display": "EUR/JPY", "status": "otc", "payout": 82, "locked": False},
-    {"asset": "NZDUSD_otc", "display": "NZD/USD", "status": "otc", "payout": 80, "locked": True},
-    {"asset": "USDCAD_otc", "display": "USD/CAD", "status": "otc", "payout": 83, "locked": False},
-    {"asset": "EURCHF_otc", "display": "EUR/CHF", "status": "otc", "payout": 81, "locked": False},
+# FIX (2026-07-17): two separate pair lists for the 3-dot category menu.
+# Real pairs (no _otc suffix) — simulated live market hours behavior.
+# OTC pairs (_otc suffix) — simulated broker-generated feed.
+_SIM_REAL_PAIRS = [
+    {"asset": "EURUSD", "display": "EUR/USD", "status": "live", "payout": 82, "locked": False, "category": "real"},
+    {"asset": "GBPUSD", "display": "GBP/USD", "status": "live", "payout": 80, "locked": False, "category": "real"},
+    {"asset": "USDJPY", "display": "USD/JPY", "status": "live", "payout": 78, "locked": False, "category": "real"},
+    {"asset": "AUDUSD", "display": "AUD/USD", "status": "live", "payout": 75, "locked": False, "category": "real"},
+    {"asset": "USDCAD", "display": "USD/CAD", "status": "live", "payout": 76, "locked": False, "category": "real"},
+    {"asset": "NZDUSD", "display": "NZD/USD", "status": "live", "payout": 72, "locked": False, "category": "real"},
+    {"asset": "USDCHF", "display": "USD/CHF", "status": "live", "payout": 74, "locked": False, "category": "real"},
+    {"asset": "EURJPY", "display": "EUR/JPY", "status": "live", "payout": 79, "locked": False, "category": "real"},
+    {"asset": "GBPJPY", "display": "GBP/JPY", "status": "live", "payout": 81, "locked": False, "category": "real"},
+    {"asset": "EURGBP", "display": "EUR/GBP", "status": "live", "payout": 73, "locked": False, "category": "real"},
 ]
+
+_SIM_OTC_PAIRS = [
+    {"asset": "EURUSD_otc", "display": "EUR/USD", "status": "otc", "payout": 87, "locked": False, "category": "otc"},
+    {"asset": "GBPUSD_otc", "display": "GBP/USD", "status": "otc", "payout": 85, "locked": False, "category": "otc"},
+    {"asset": "USDJPY_otc", "display": "USD/JPY", "status": "otc", "payout": 83, "locked": False, "category": "otc"},
+    {"asset": "AUDUSD_otc", "display": "AUD/USD", "status": "otc", "payout": 82, "locked": False, "category": "otc"},
+    {"asset": "EURGBP_otc", "display": "EUR/GBP", "status": "otc", "payout": 84, "locked": False, "category": "otc"},
+    {"asset": "GBPJPY_otc", "display": "GBP/JPY", "status": "otc", "payout": 86, "locked": False, "category": "otc"},
+    {"asset": "EURJPY_otc", "display": "EUR/JPY", "status": "otc", "payout": 82, "locked": False, "category": "otc"},
+    {"asset": "NZDUSD_otc", "display": "NZD/USD", "status": "otc", "payout": 80, "locked": True,  "category": "otc"},
+    {"asset": "USDCAD_otc", "display": "USD/CAD", "status": "otc", "payout": 83, "locked": False, "category": "otc"},
+    {"asset": "EURCHF_otc", "display": "EUR/CHF", "status": "otc", "payout": 81, "locked": False, "category": "otc"},
+]
+
+# Combined backward-compat list (real first, then otc) — matches feed.py
+_SIM_PAIRS = _SIM_REAL_PAIRS + _SIM_OTC_PAIRS
 
 # Base prices for simulation
 _BASE_PRICES = {
@@ -41,6 +67,12 @@ _BASE_PRICES = {
     "AUDUSD_otc": 0.67350, "EURGBP_otc": 0.85280, "GBPJPY_otc": 204.850,
     "EURJPY_otc": 174.850, "NZDUSD_otc": 0.61050, "USDCAD_otc": 1.36450,
     "EURCHF_otc": 0.94280,
+    # Real-market base prices (slightly different from OTC to reflect
+    # the live spread at the time the sim was started).
+    "EURUSD": 1.08420, "GBPUSD": 1.27180, "USDJPY": 161.180,
+    "AUDUSD": 0.67320, "USDCAD": 1.36480, "NZDUSD": 0.61020,
+    "USDCHF": 0.90420, "EURJPY": 174.820, "GBPJPY": 204.780,
+    "EURGBP": 0.85250,
 }
 
 _PIP = {
@@ -48,6 +80,11 @@ _PIP = {
     "AUDUSD_otc": 0.0001, "EURGBP_otc": 0.0001, "GBPJPY_otc": 0.01,
     "EURJPY_otc": 0.01, "NZDUSD_otc": 0.0001, "USDCAD_otc": 0.0001,
     "EURCHF_otc": 0.0001,
+    # Real pairs use the same pip sizes as their OTC twins.
+    "EURUSD": 0.0001, "GBPUSD": 0.0001, "USDJPY": 0.01,
+    "AUDUSD": 0.0001, "USDCAD": 0.0001, "NZDUSD": 0.0001,
+    "USDCHF": 0.0001, "EURJPY": 0.01, "GBPJPY": 0.01,
+    "EURGBP": 0.0001,
 }
 
 
@@ -86,20 +123,36 @@ class _AssetStream:
 
 class QuotexFeed:
     def __init__(self):
-        """Initialize simulated feed with default OTC pair list."""
+        """Initialize simulated feed with default Real + OTC pair lists."""
         self._connected = False
         self._broadcast = None
         self._streams: dict[tuple[str, int], _AssetStream] = {}
         self._max_streams = 45
+        # FIX (2026-07-17): split pair lists by category. _pairs_list kept
+        # as combined backward-compat (real first, then otc).
         self._pairs_list = list(_SIM_PAIRS)
+        self._real_pairs_list = list(_SIM_REAL_PAIRS)
+        self._otc_pairs_list  = list(_SIM_OTC_PAIRS)
         # NOTE (refactor 2026-07-14): `_muted_theories` + `_last_perf_refresh`
         # removed — the prediction engine is candle_reaction (no theories).
         self._last_db_cleanup = 0.0
         self._last_pairs_refresh = 0.0
 
     def available_pairs(self) -> dict:
-        """Return the sim pair list + payout floor."""
-        return {"pairs": self._pairs_list, "payout_floor": PAYOUT_FLOOR}
+        """Return Real + OTC pair lists with their respective payout floors.
+
+        Matches feed.py's available_pairs() structure so the frontend
+        doesn't care which feed (real or sim) it's talking to.
+        """
+        return {
+            "real_pairs": self._real_pairs_list,
+            "otc_pairs":  self._otc_pairs_list,
+            "payout_floor_real": PAYOUT_FLOOR_REAL,
+            "payout_floor_otc":  PAYOUT_FLOOR_OTC,
+            # Backward compat
+            "pairs":        self._pairs_list,
+            "payout_floor": PAYOUT_FLOOR_OTC,
+        }
 
     def snapshot(self, asset: str, period: int) -> dict | None:
         """Return current candle history + prediction for an asset."""
@@ -139,8 +192,13 @@ class QuotexFeed:
 
         pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
         if pair and pair.get("locked"):
+            # FIX (2026-07-17): category-specific payout floor in the error
+            # message — real pairs need >= PAYOUT_FLOOR_REAL (70), OTC pairs
+            # need >= PAYOUT_FLOOR_OTC (85).
+            floor = PAYOUT_FLOOR_OTC if asset.endswith("_otc") else PAYOUT_FLOOR_REAL
             return {"ok": False, "status": "locked", "payout": pair.get("payout"),
-                    "reason": f"Needs {PAYOUT_FLOOR}%"}
+                    "reason": f"Needs {floor}% payout "
+                              f"(currently {pair.get('payout', '?')}%)"}
 
         stream = _AssetStream(asset=asset, period=period)
         if cid:
@@ -389,12 +447,18 @@ class QuotexFeed:
                 acc, n_acc = None, 0
         # 6-MODULE ENGINE (2026-07-14)
         # Runs 6 independent modules + Smart Blender with per-pair adaptation.
+        # FIX (2026-07-17): predict_from_candle now auto-routes to
+        # engines.otc or engines.real based on asset name — sim pairs
+        # follow the same path as real feed pairs. Real sim pairs (no _otc
+        # suffix) get the trend-following REAL engine, OTC sim pairs get
+        # the mean-reversion OTC engine.
         from candle_reaction import predict_from_candle
         _micro_for_pred = None
         if ticks and len(ticks) >= 10:
             from analyze_eoc import _build_micro
             _micro_for_pred = _build_micro(ticks, candles[-1]["open"] if candles else ticks[0])
-        result = predict_from_candle(candles, ticks=ticks, micro=_micro_for_pred, asset=asset)
+        result = predict_from_candle(candles, ticks=ticks, micro=_micro_for_pred,
+                                     asset=asset, period=period)
         return result, micro_hist
 
     async def _run_eoc(self, stream, actual_open=None):
@@ -810,7 +874,19 @@ class QuotexFeed:
         _db.cleanup()
         self._connected = True
         print("[sim] connected (simulation mode)")
-        await self._broadcast({"type": "pairs", "pairs": self._pairs_list, "payout_floor": PAYOUT_FLOOR})
+        # FIX (2026-07-17): broadcast structured payload (real_pairs + otc_pairs
+        # + payout_floor_real + payout_floor_otc) so the frontend 3-dot menu
+        # can populate both category counts. Backward-compat `pairs` and
+        # `payout_floor` keys are kept for any older client.
+        await self._broadcast({
+            "type": "pairs",
+            "pairs":  self._pairs_list,                  # backward compat
+            "real_pairs": self._real_pairs_list,
+            "otc_pairs":  self._otc_pairs_list,
+            "payout_floor_real": PAYOUT_FLOOR_REAL,
+            "payout_floor_otc":  PAYOUT_FLOOR_OTC,
+            "payout_floor": PAYOUT_FLOOR_OTC,            # backward compat
+        })
 
         while True:
             try:

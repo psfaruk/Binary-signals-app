@@ -12,7 +12,7 @@ from advanced_analysis import (
     compute_statistical_edge,
     _atr,
 )
-from engines.types import MarketContext
+from engines.otc.types import MarketContext
 
 
 def compute_context(candles) -> MarketContext:

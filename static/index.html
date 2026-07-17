@@ -37,6 +37,54 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .spacer{flex:1}
 #sound-btn{background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius);padding:3px 8px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:4px}
 #sound-btn:hover{color:var(--text);border-color:var(--text-dim)}
+/* ─── 3-DOT MARKET CATEGORY MENU (Real / OTC switch) ─── */
+/* Top-right corner hamburger-style menu. Click → dropdown with two
+   options: "Real Market" and "OTC Market". Selecting one filters the
+   pair-select dropdown to only show pairs of that category. */
+#market-menu-wrap{position:relative;display:inline-block}
+#market-menu-btn{
+  background:none;border:1px solid var(--border);color:var(--text-dim);
+  border-radius:var(--radius);padding:6px 8px;cursor:pointer;font-size:16px;
+  line-height:0;letter-spacing:1px;display:flex;align-items:center;gap:2px;
+  font-family:var(--sans)
+}
+#market-menu-btn:hover{color:var(--text);border-color:var(--text-dim)}
+#market-menu-btn.active-real{color:var(--green);border-color:var(--green)}
+#market-menu-btn.active-otc{color:var(--yellow);border-color:var(--yellow)}
+/* Dropdown panel — hidden by default, shown when .open is added */
+#market-menu-dropdown{
+  display:none;position:absolute;right:0;top:calc(100% + 4px);
+  min-width:200px;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius);box-shadow:0 8px 24px rgba(0,0,0,.5);
+  z-index:100;overflow:hidden
+}
+#market-menu-dropdown.open{display:block;animation:menu-fade .15s ease-out}
+@keyframes menu-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.market-menu-header{
+  padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.8px;
+  color:var(--text-dim);background:rgba(255,255,255,.03);border-bottom:1px solid var(--border)
+}
+.market-menu-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:8px 12px;cursor:pointer;font-size:13px;color:var(--text);
+  border-bottom:1px solid rgba(255,255,255,.04);transition:background .1s
+}
+.market-menu-item:last-child{border-bottom:none}
+.market-menu-item:hover{background:rgba(255,255,255,.06)}
+.market-menu-item.selected{background:rgba(88,166,255,.10);color:var(--blue)}
+.market-menu-item .cat-name{display:flex;align-items:center;gap:8px;font-weight:600}
+.market-menu-item .cat-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.market-menu-item .cat-dot.real{background:var(--green);box-shadow:0 0 6px var(--green)}
+.market-menu-item .cat-dot.otc{background:var(--yellow);box-shadow:0 0 6px var(--yellow)}
+.market-menu-item .cat-count{font-size:11px;color:var(--text-dim);font-family:var(--mono)}
+/* Active category badge in the topbar (next to payout) */
+#market-badge{
+  display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;
+  font-size:11px;font-weight:700;letter-spacing:.5px;cursor:pointer;
+  background:rgba(0,200,83,.15);color:var(--green);border:1px solid rgba(0,200,83,.3)
+}
+#market-badge.otc{background:rgba(255,193,7,.15);color:var(--yellow);border-color:rgba(255,193,7,.3)}
+#market-badge .badge-dot{width:6px;height:6px;border-radius:50%;background:currentColor}
 /* MAIN AREA */
 #main{display:grid;grid-template-columns:1fr 320px;gap:0;overflow:hidden;min-height:0}
 #main>*{min-width:0}
@@ -301,12 +349,33 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <span class="pair-arrow">▼</span>
     </div>
     <span class="payout" id="payout-label">—</span>
+    <!-- Active market category badge — click also opens the 3-dot menu -->
+    <span id="market-badge" title="Switch market category">
+      <span class="badge-dot"></span>
+      <span id="market-badge-label">REAL</span>
+    </span>
     <span id="conn-dot" class="disconnected" role="status" aria-live="polite"></span>
     <span id="conn-label" role="status" aria-live="polite">Disconnected</span>
     <span class="badge badge-gray" id="pairs-count">Pairs: —</span>
-    <span class="badge badge-gray" id="otc-badge">—</span>
     <span class="spacer"></span>
     <button id="sound-btn" title="Toggle sound" aria-pressed="false" aria-label="Toggle sound alerts">🔇</button>
+    <!-- 3-DOT MARKET CATEGORY MENU — top-right corner.
+         Click → dropdown with "Real Market" and "OTC Market" options.
+         Selecting one re-filters the pair-select dropdown. -->
+    <div id="market-menu-wrap">
+      <button id="market-menu-btn" title="Switch market category" aria-label="Market category menu">⋮</button>
+      <div id="market-menu-dropdown" role="menu" aria-label="Market category">
+        <div class="market-menu-header">Market Category</div>
+        <div class="market-menu-item" data-cat="real" role="menuitem">
+          <span class="cat-name"><span class="cat-dot real"></span> Real Market</span>
+          <span class="cat-count" id="real-count">—</span>
+        </div>
+        <div class="market-menu-item" data-cat="otc" role="menuitem">
+          <span class="cat-name"><span class="cat-dot otc"></span> OTC Market</span>
+          <span class="cat-count" id="otc-count">—</span>
+        </div>
+      </div>
+    </div>
   </header>
   <!-- MAIN -->
   <div id="main">
@@ -466,12 +535,20 @@ const HISTORY_MAX = 30;
 
 /* ─── STATE ─── */
 let ws = null, reconnectTimer = null, reconnectAttempts = 0;
-let currentAsset = 'EURUSD_otc', currentPeriod = 60;
+// FIX (2026-07-17): default asset depends on stored category. If user
+// last selected "real", default to EURUSD (real); otherwise EURUSD_otc.
+let currentCategory = localStorage.getItem('marketCategory') || 'otc';
+if(currentCategory !== 'real' && currentCategory !== 'otc') currentCategory = 'otc';
+let currentAsset = (currentCategory === 'real') ? 'EURUSD' : 'EURUSD_otc';
+let currentPeriod = 60;
 let chart, candleSeries, ghostSeries;
 let candleData = [], lastPrediction = null;
 let signalHistory = [], totalCorrect = 0, totalSignals = 0;
 let soundEnabled = false, audioCtx = null;
 let pairsList = [];
+// FIX (2026-07-17): category split. Two separate pair lists + active category
+// state. The 3-dot menu in the topbar switches between "real" and "otc".
+let realPairsList = [], otcPairsList = [];
 let currentMicro = null, runningConf = null;
 let tapePrices = [], tapeDir = [];
 let staleTimeout = null;
@@ -506,7 +583,15 @@ const payoutLabel = $('payout-label');
 const connDot = $('conn-dot');
 const connLabel = $('conn-label');
 const pairsCount = $('pairs-count');
-const otcBadge = $('otc-badge');
+// FIX (2026-07-17): otcBadge replaced by marketBadge (clickable category
+// badge in the topbar — shows REAL or OTC, click opens the 3-dot menu).
+const marketBadge = $('market-badge');
+const marketBadgeLabel = $('market-badge-label');
+const marketMenuBtn = $('market-menu-btn');
+const marketMenuDropdown = $('market-menu-dropdown');
+const marketMenuItems = document.querySelectorAll('.market-menu-item');
+const realCountEl = $('real-count');
+const otcCountEl  = $('otc-count');
 const soundBtn = $('sound-btn');
 const signalBox = $('signal-box');
 const signalLabel = $('signal-label');
@@ -1302,26 +1387,141 @@ function renderAccuracy(){
 }
 
 /* ─── PAIRS ─── */
-function renderPairs(pairs){
-  pairsList = pairs;
+// FIX (2026-07-17): renderPairs now accepts the FULL payload (with real_pairs
+// + otc_pairs + payout_floor_real + payout_floor_otc) instead of a single
+// flat pair list. The currently-active category's list is rendered in the
+// pair-select dropdown; the other category's list is just counted.
+function renderPairs(payload){
+  // Accept either the new structured payload {real_pairs, otc_pairs, ...}
+  // or a legacy flat array (for backward compat with old server versions).
+  if(Array.isArray(payload)){
+    // Legacy: single array — assume all OTC (old behavior).
+    realPairsList = [];
+    otcPairsList = payload;
+  } else {
+    realPairsList = payload.real_pairs || [];
+    otcPairsList  = payload.otc_pairs  || [];
+  }
+  // Combined backward-compat list (some old code reads `pairsList`).
+  pairsList = realPairsList.concat(otcPairsList);
+
+  // Update the category counts in the 3-dot dropdown.
+  if(realCountEl) realCountEl.textContent = realPairsList.length;
+  if(otcCountEl)  otcCountEl.textContent  = otcPairsList.length;
+
+  // Render only the active category's pairs in the dropdown.
+  const activeList = currentCategory === 'real' ? realPairsList : otcPairsList;
   pairSelect.innerHTML = '';
-  pairs.forEach(p => {
+  if(activeList.length === 0){
     const opt = document.createElement('option');
-    opt.value = p.asset;
-    opt.textContent = p.display + (p.payout ? ' (' + p.payout + '%)' : '') + (p.locked ? ' 🔒' : '');
-    if(p.locked) opt.classList.add('locked');
-    if(p.asset === currentAsset) opt.selected = true;
-    opt.disabled = !!p.locked;
+    opt.value = '';
+    opt.textContent = currentCategory === 'real'
+      ? 'No real-market pairs open'
+      : 'No OTC pairs open';
+    opt.disabled = true;
     pairSelect.appendChild(opt);
-  });
-  pairsCount.textContent = 'Pairs: ' + pairs.length;
-  const cur = pairs.find(p => p.asset === currentAsset);
+  } else {
+    activeList.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.asset;
+      opt.textContent = p.display
+        + (p.payout ? ' (' + p.payout + '%)' : '')
+        + (p.locked ? ' 🔒' : '');
+      if(p.locked) opt.classList.add('locked');
+      if(p.asset === currentAsset) opt.selected = true;
+      opt.disabled = !!p.locked;
+      pairSelect.appendChild(opt);
+    });
+  }
+  pairsCount.textContent = (currentCategory === 'real' ? 'Real: ' : 'OTC: ')
+    + activeList.length;
+
+  // If the currently-selected asset is NOT in the active category's list
+  // (e.g. user just switched from OTC to Real while EURUSD_otc was
+  // selected), auto-switch to the first available pair of the new category.
+  const stillThere = activeList.find(p => p.asset === currentAsset && !p.locked);
+  if(!stillThere && activeList.length > 0){
+    const firstOk = activeList.find(p => !p.locked) || activeList[0];
+    if(firstOk){
+      currentAsset = firstOk.asset;
+      pairSelect.value = currentAsset;
+      // Trigger a re-subscribe to the new asset.
+      if(ws && ws.readyState === WebSocket.OPEN){
+        send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+               category: currentCategory });
+        loadServerHistory();
+      }
+    }
+  }
+
+  // Update payout + market badge to reflect the currently-selected pair.
+  const cur = pairsList.find(p => p.asset === currentAsset);
   if(cur){
     payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
-    otcBadge.textContent = cur.asset.includes('_otc') ? 'OTC' : 'LIVE';
-    otcBadge.className = 'badge ' + (cur.asset.includes('_otc') ? 'badge-yellow' : 'badge-green');
   }
+  updateMarketBadge();
 }
+
+function updateMarketBadge(){
+  // Update the badge in the topbar to show the active category.
+  if(!marketBadge || !marketBadgeLabel) return;
+  if(currentCategory === 'real'){
+    marketBadgeLabel.textContent = 'REAL';
+    marketBadge.classList.remove('otc');
+    marketMenuBtn.classList.remove('active-otc');
+    marketMenuBtn.classList.add('active-real');
+  } else {
+    marketBadgeLabel.textContent = 'OTC';
+    marketBadge.classList.add('otc');
+    marketMenuBtn.classList.remove('active-real');
+    marketMenuBtn.classList.add('active-otc');
+  }
+  // Mark the selected item in the dropdown.
+  marketMenuItems.forEach(item => {
+    if(item.dataset.cat === currentCategory) item.classList.add('selected');
+    else item.classList.remove('selected');
+  });
+}
+
+/* ─── 3-DOT MARKET CATEGORY MENU ─── */
+// Toggle dropdown open/close on button click.
+if(marketMenuBtn){
+  marketMenuBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    marketMenuDropdown.classList.toggle('open');
+  });
+  // Clicking the badge also opens the menu (it's a visual hint).
+  if(marketBadge){
+    marketBadge.addEventListener('click', (e) => {
+      e.stopPropagation();
+      marketMenuDropdown.classList.toggle('open');
+    });
+  }
+  // Click outside the menu closes it.
+  document.addEventListener('click', (e) => {
+    if(!marketMenuDropdown.contains(e.target) && e.target !== marketMenuBtn){
+      marketMenuDropdown.classList.remove('open');
+    }
+  });
+  // Click an item → switch category.
+  marketMenuItems.forEach(item => {
+    item.addEventListener('click', () => {
+      const newCat = item.dataset.cat;
+      if(newCat === currentCategory){
+        marketMenuDropdown.classList.remove('open');
+        return;
+      }
+      currentCategory = newCat;
+      localStorage.setItem('marketCategory', newCat);
+      updateMarketBadge();
+      marketMenuDropdown.classList.remove('open');
+      // Re-render the pair dropdown with the new category's list.
+      renderPairs({ real_pairs: realPairsList, otc_pairs: otcPairsList });
+    });
+  });
+}
+// Initialize the badge on first load.
+updateMarketBadge();
 
 /* ─── WEBSOCKET ─── */
 function connect(){
@@ -1332,7 +1532,8 @@ function connect(){
     setStatus('connected');
     reconnectAttempts = 0;
     send({ type: 'pairs' });
-    send({ type: 'subscribe', asset: currentAsset, period: currentPeriod });
+    send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+           category: currentCategory });
     // Load signal history from server (so it persists across page refreshes
     // and reconnects, and carries full win/loss detail).
     setTimeout(loadServerHistory, 800);
@@ -1524,8 +1725,16 @@ pairSelect.addEventListener('change', () => {
   const cur = pairsList.find(p => p.asset === currentAsset);
   if(cur){
     payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
-    otcBadge.textContent = cur.asset.includes('_otc') ? 'OTC' : 'LIVE';
-    otcBadge.className = 'badge ' + (cur.asset.includes('_otc') ? 'badge-yellow' : 'badge-green');
+    // FIX (2026-07-17): category auto-sync — if the user manually selected
+    // a pair from a different category (e.g. they were on REAL and chose
+    // an _otc pair from a stale list), switch currentCategory to match
+    // the new asset's category and update the badge.
+    const newCat = currentAsset.endsWith('_otc') ? 'otc' : 'real';
+    if(newCat !== currentCategory){
+      currentCategory = newCat;
+      localStorage.setItem('marketCategory', newCat);
+      updateMarketBadge();
+    }
   }
   signalHistory = []; totalCorrect = 0; totalSignals = 0;
   renderHistory(); renderAccuracy();
@@ -1547,7 +1756,8 @@ pairSelect.addEventListener('change', () => {
   alertedSignalDirection = null;
   renderPending();   // show PENDING until new pair's prediction arrives
   tickTapeInner.innerHTML = '<span class="tape-price flat">Waiting for data...</span>';
-  send({ type: 'subscribe', asset: currentAsset, period: currentPeriod });
+  send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+         category: currentCategory });
   // Load new pair's signal history from server.
   setTimeout(loadServerHistory, 500);
 });

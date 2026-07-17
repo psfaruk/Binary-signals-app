@@ -36,7 +36,28 @@ import db as _db
 # already shown in the signal bar (see stream.payout / signal-payout in
 # chart.js). Overridable per-deployment since Quotex's payout schedule can
 # vary by broker account/region.
-PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "85"))
+#
+# FIX (2026-07-17): split into two separate floors for REAL vs OTC.
+#   - REAL pairs reflect actual market liquidity and have lower broker
+#     margin, so payouts are typically 70-85%. Floor = 70%.
+#   - OTC pairs are broker-generated with higher spreads but Quotex
+#     publishes higher headline payouts (typically 85-92%). Floor = 85%.
+# `PAYOUT_FLOOR` is kept as an alias for OTC for backward compatibility
+# with any code that still reads the old single constant — new code
+# should use PAYOUT_FLOOR_REAL or PAYOUT_FLOOR_OTC explicitly.
+PAYOUT_FLOOR_REAL = int(os.environ.get("QX_PAYOUT_FLOOR_REAL", "70"))
+PAYOUT_FLOOR_OTC  = int(os.environ.get("QX_PAYOUT_FLOOR_OTC",
+                                       os.environ.get("QX_PAYOUT_FLOOR", "85")))
+PAYOUT_FLOOR      = PAYOUT_FLOOR_OTC   # legacy alias
+
+
+def _payout_floor_for(asset: str) -> int:
+    """Return the appropriate payout floor for an asset based on category.
+
+    OTC assets (ending in '_otc') → PAYOUT_FLOOR_OTC (default 85)
+    Real assets                   → PAYOUT_FLOOR_REAL (default 70)
+    """
+    return PAYOUT_FLOOR_OTC if asset.endswith("_otc") else PAYOUT_FLOOR_REAL
 
 # Method A (LIVE running-candle re-eval) / Method B (strength gating) rollout
 # flags — both untested, added 2026-07-10. Zero-redeploy killswitch: set
@@ -476,7 +497,12 @@ class QuotexFeed:
 
         # Unified pair list — one entry per logical pair, status=live/otc/closed
         # (connection-wide, not per-asset — kept as-is)
+        # FIX (2026-07-17): split into real_pairs_list and otc_pairs_list so
+        # the frontend 3-dot menu can switch between Real Market and OTC
+        # Market views. _pairs_list is kept as a combined backward-compat list.
         self._pairs_list: list[dict] = list(_DEFAULT_PAIRS)
+        self._real_pairs_list: list[dict] = []   # populated by _load_pairs
+        self._otc_pairs_list:  list[dict] = list(_DEFAULT_PAIRS)  # default to OTC list (matches old behavior)
         self._last_pairs_refresh: float = 0.0
 
         # NOTE (refactor 2026-07-14): the per-pair mute gate that used to live
@@ -577,24 +603,52 @@ class QuotexFeed:
             return "SIDEWAYS"
 
     def available_pairs(self) -> dict:
-        """Return the current forex pair list and payout floor for the /api/pairs endpoint."""
-        return {"pairs": self._pairs_list, "payout_floor": PAYOUT_FLOOR}
+        """Return the current forex pair lists and payout floors for /api/pairs.
+
+        Returns a dict with TWO separate pair lists so the frontend can
+        render Real Market and OTC Market as two distinct categories:
+
+            {
+              "real_pairs": [...],         # real-market pairs (no _otc suffix)
+              "otc_pairs":  [...],         # OTC pairs (asset ends with _otc)
+              "payout_floor_real": 70,     # minimum payout % for real pairs
+              "payout_floor_otc":  85,     # minimum payout % for OTC pairs
+              "pairs":        [...],       # BACKWARD COMPAT: combined list (real first, then otc)
+              "payout_floor": 85,          # BACKWARD COMPAT: alias for payout_floor_otc
+            }
+
+        The combined `pairs` list is kept for any older client code that
+        still expects a single list — new frontend code should read
+        real_pairs / otc_pairs instead.
+        """
+        return {
+            "real_pairs": self._real_pairs_list,
+            "otc_pairs":  self._otc_pairs_list,
+            "payout_floor_real": PAYOUT_FLOOR_REAL,
+            "payout_floor_otc":  PAYOUT_FLOOR_OTC,
+            # Backward compat: combined list (real first, then OTC)
+            "pairs":        self._real_pairs_list + self._otc_pairs_list,
+            "payout_floor": PAYOUT_FLOOR_OTC,
+        }
 
     async def _load_pairs(self, broadcast=None) -> None:
         """
-        Fetch all Quotex instruments and build a UNIFIED, FOREX-ONLY pair list.
+        Fetch all Quotex instruments and build TWO separate forex pair lists:
+        one for REAL market pairs (live exchange, no _otc suffix) and one
+        for OTC pairs (broker-generated, _otc suffix).
 
-        Each logical forex pair (e.g. EUR/USD) appears exactly ONCE:
-          - status="live"   → real market open  → asset = "EURUSD"
-          - status="otc"    → real closed, OTC open → asset = "EURUSD_otc"
-          - status="closed" → both closed → asset = real (or OTC) name, disabled
+        Each pair carries its 1-minute payout % and a "locked" flag — locked
+        means payout is below the category-specific floor:
+          - REAL pairs use PAYOUT_FLOOR_REAL (default 70%)
+          - OTC pairs use PAYOUT_FLOOR_OTC  (default 85%)
 
         Non-forex instruments (crypto/commodities/stocks) are dropped
         entirely — this app only ever streams forex (see _FOREX_BASES).
 
-        Each live/otc pair also carries its 1-minute payout % and a
-        "locked" flag (payout < PAYOUT_FLOOR) — locked pairs are shown
-        disabled and ensure_stream() refuses to start a stream for them.
+        Both real and OTC variants of the same logical pair (e.g. EURUSD
+        and EURUSD_otc) appear in their respective lists. This is intentional
+        — the user can switch between Real Market view and OTC Market view
+        from the 3-dot menu in the topbar.
         """
         try:
             instruments = await self._client.get_instruments()
@@ -628,51 +682,82 @@ class QuotexFeed:
                     "payout":  payout,
                 }
 
-            # Build unified list: one entry per logical pair
-            pairs: list[dict] = []
+            # Build TWO separate lists — real_pairs and otc_pairs.
+            # Both variants of the same logical pair appear (when both are
+            # open). This is the explicit user requirement: the 3-dot menu
+            # switches between Real Market view and OTC Market view.
+            real_pairs: list[dict] = []
+            otc_pairs:  list[dict] = []
+
             for base, v in by_base.items():
                 real = v.get("real")
                 otc  = v.get("otc")
 
-                if real and real["open"]:
-                    chosen, status = real, "live"
-                elif otc and otc["open"]:
-                    chosen, status = otc, "otc"
-                else:
-                    chosen, status = (real or otc), "closed"
+                # REAL list entry — only if a real instrument exists
+                if real:
+                    status = "live" if real["open"] else "closed"
+                    floor = PAYOUT_FLOOR_REAL
+                    payout = real["payout"]
+                    locked = status == "live" and (
+                        payout is None or payout < floor)
+                    real_pairs.append({
+                        "asset":   real["asset"],
+                        "display": real["display"],
+                        "status":  status,
+                        "payout":  payout,
+                        "locked":  locked,
+                        "category": "real",
+                    })
 
-                # Missing payout data defaults to locked (safe default, not
-                # an accidental bypass of the payout gate).
-                payout = chosen["payout"]
-                locked = status in ("live", "otc") and (
-                    payout is None or payout < PAYOUT_FLOOR)
+                # OTC list entry — only if an OTC instrument exists
+                if otc:
+                    status = "otc" if otc["open"] else "closed"
+                    floor = PAYOUT_FLOOR_OTC
+                    payout = otc["payout"]
+                    locked = status == "otc" and (
+                        payout is None or payout < floor)
+                    otc_pairs.append({
+                        "asset":   otc["asset"],
+                        "display": otc["display"],
+                        "status":  status,
+                        "payout":  payout,
+                        "locked":  locked,
+                        "category": "otc",
+                    })
 
-                pairs.append({
-                    "asset":   chosen["asset"],
-                    "display": chosen["display"],
-                    "status":  status,
-                    "payout":  payout,
-                    "locked":  locked,
-                })
+            # Sort each list: active (live/otc) before closed, unlocked before
+            # locked, then highest payout first — the pairs actually worth
+            # picking float to the top instead of being buried alphabetically.
+            def _sort_key(x):
+                return (x["status"] == "closed", x["locked"],
+                        -(x["payout"] or 0), x["display"].upper())
 
-            # Sort: active (live/otc) before closed, unlocked before locked,
-            # then highest payout first — the pairs actually worth picking
-            # float to the top instead of being buried alphabetically.
-            pairs.sort(key=lambda x: (
-                x["status"] == "closed", x["locked"],
-                -(x["payout"] or 0), x["display"].upper()))
+            real_pairs.sort(key=_sort_key)
+            otc_pairs.sort(key=_sort_key)
 
-            self._pairs_list        = pairs
+            self._real_pairs_list = real_pairs
+            self._otc_pairs_list  = otc_pairs
+            # Backward-compat: combined list (real first, then otc). Old code
+            # that reads self._pairs_list still works.
+            self._pairs_list = real_pairs + otc_pairs
             self._last_pairs_refresh = time.time()
-            print(f"[feed] pairs loaded: {len(pairs)} forex pairs "
-                  f"({sum(1 for p in pairs if p['status']=='live')} live, "
-                  f"{sum(1 for p in pairs if p['status']=='otc')} OTC, "
-                  f"{sum(1 for p in pairs if p['status']=='closed')} closed, "
-                  f"{sum(1 for p in pairs if p['locked'])} locked <{PAYOUT_FLOOR}%)")
+
+            print(f"[feed] pairs loaded: "
+                  f"{len(real_pairs)} real ({sum(1 for p in real_pairs if p['status']=='live')} live, "
+                  f"{sum(1 for p in real_pairs if p['locked'])} locked <{PAYOUT_FLOOR_REAL}%) | "
+                  f"{len(otc_pairs)} OTC ({sum(1 for p in otc_pairs if p['status']=='otc')} open, "
+                  f"{sum(1 for p in otc_pairs if p['locked'])} locked <{PAYOUT_FLOOR_OTC}%)")
 
             if broadcast:
-                await broadcast({"type": "pairs", "pairs": pairs,
-                                  "payout_floor": PAYOUT_FLOOR})
+                await broadcast({
+                    "type": "pairs",
+                    "pairs":  self._pairs_list,            # backward compat
+                    "real_pairs": real_pairs,
+                    "otc_pairs":  otc_pairs,
+                    "payout_floor_real": PAYOUT_FLOOR_REAL,
+                    "payout_floor_otc":  PAYOUT_FLOOR_OTC,
+                    "payout_floor": PAYOUT_FLOOR_OTC,      # backward compat
+                })
 
         except Exception as exc:
             print(f"[feed] pairs load error: {exc}")
@@ -732,10 +817,17 @@ class QuotexFeed:
         # below the floor, anyone already watching keeps their stream (see
         # _reconcile_always_on, which only ever demotes always_on, never
         # tears the stream down).
+        #
+        # FIX (2026-07-17): use category-specific payout floor. Real pairs
+        # use PAYOUT_FLOOR_REAL (default 70%), OTC pairs use PAYOUT_FLOOR_OTC
+        # (default 85%). The pair's "locked" flag is already set per-category
+        # in _load_pairs, but the error message here also needs the right
+        # floor value to display correctly.
         pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
         if pair and pair.get("locked"):
+            floor = _payout_floor_for(asset)
             return {"ok": False, "status": "locked", "payout": pair.get("payout"),
-                    "reason": f"Needs {PAYOUT_FLOOR}% payout "
+                    "reason": f"Needs {floor}% payout "
                               f"(currently {pair.get('payout', '?')}%)"}
 
         if time.time() < self._cooldown_until:
@@ -1170,6 +1262,10 @@ class QuotexFeed:
         # FIX (Bug #5, 2026-07-17): also pass `period` so per_pair
         # DB-adaptation can look up the right (asset, period) accuracy
         # bucket instead of always defaulting to period=60.
+        # FIX (2026-07-17, category split): predict_from_candle now routes
+        # to engines.otc or engines.real based on asset name (auto-detect:
+        # ends with "_otc" → otc, otherwise → real). No explicit category
+        # arg needed here — the router in engines/__init__.py handles it.
         result = predict_from_candle(candles, ticks=list(ticks) if ticks else [],
                                      micro=_micro_for_pred, asset=asset,
                                      htf_trend=htf_trend, period=stream.period)

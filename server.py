@@ -216,7 +216,49 @@ async def index():
 
 @app.get("/api/pairs")
 async def get_pairs():
+    """Return both Real Market and OTC Market pair lists.
+
+    Returns:
+        {
+          "real_pairs": [...],          # real-market pairs (no _otc suffix), payout >= 70%
+          "otc_pairs":  [...],          # OTC pairs (_otc suffix), payout >= 85%
+          "payout_floor_real": 70,
+          "payout_floor_otc":  85,
+          "pairs":        [...],        # BACKWARD COMPAT: combined list
+          "payout_floor": 85,
+        }
+    """
     return feed.available_pairs()
+
+
+@app.get("/api/pairs/{category}")
+async def get_pairs_by_category(category: str):
+    """Return only the pair list for the requested category.
+
+    Args:
+        category: "real" or "otc" (case-insensitive)
+
+    Returns:
+        {"category": "real", "pairs": [...], "payout_floor": 70}
+        or 404 if category is unknown.
+    """
+    cat = category.lower().strip()
+    all_pairs = feed.available_pairs()
+    if cat == "real":
+        return {
+            "category": "real",
+            "pairs": all_pairs["real_pairs"],
+            "payout_floor": all_pairs["payout_floor_real"],
+        }
+    if cat == "otc":
+        return {
+            "category": "otc",
+            "pairs": all_pairs["otc_pairs"],
+            "payout_floor": all_pairs["payout_floor_otc"],
+        }
+    raise HTTPException(
+        status_code=404,
+        detail=f"unknown category {category!r}; expected 'real' or 'otc'")
 
 
 @app.get("/api/status")
@@ -243,17 +285,21 @@ async def debug_info():
     debug = {
         "timestamp": _time.time(),
         "connected": feed._connected,
-        "has_client": feed._client is not None,
+        "has_client": getattr(feed, '_client', None) is not None,
         "streams": {},
         "pairs_count": len(feed._pairs_list) if hasattr(feed, '_pairs_list') else 0,
+        "real_pairs_count": len(feed._real_pairs_list) if hasattr(feed, '_real_pairs_list') else 0,
+        "otc_pairs_count":  len(feed._otc_pairs_list)  if hasattr(feed, '_otc_pairs_list')  else 0,
         "env": {
             "QX_TOKEN": "***" if os.environ.get("QX_TOKEN") else "(not set)",
             "QX_EMAIL": os.environ.get("QX_EMAIL", "(not set)"),
             "QX_PASSWORD": "***" if os.environ.get("QX_PASSWORD") else "(not set)",
             "USE_SIM": os.environ.get("USE_SIM", "0"),
             "QX_USE_RAW_WS": os.environ.get("QX_USE_RAW_WS", "0"),
-            "PAYOUT_FLOOR": os.environ.get("QX_PAYOUT_FLOOR", "85"),
-            "SIGNAL_DELAY_SEC": os.environ.get("SIGNAL_DELAY_SEC", "0.0"),
+            "PAYOUT_FLOOR_REAL": os.environ.get("QX_PAYOUT_FLOOR_REAL", "70"),
+            "PAYOUT_FLOOR_OTC":  os.environ.get("QX_PAYOUT_FLOOR_OTC",
+                                                os.environ.get("QX_PAYOUT_FLOOR", "85")),
+            "SIGNAL_DELAY_SEC": os.environ.get("SIGNAL_DELAY_SEC", "3.0"),
         },
     }
     # Stream details
@@ -505,6 +551,19 @@ async def ws_endpoint(ws: WebSocket):
                         "type": "error",
                         "error": f"invalid period {period!r}; allowed: "
                                  f"{sorted(_ALLOWED_PERIODS)}",
+                    }))
+                    continue
+                # Optional `category` field: "real" or "otc". Used only
+                # for validation logging — the engine itself auto-detects
+                # from asset name. If a client sends a mismatched category
+                # (e.g. category="real" but asset="EURUSD_otc"), we honor
+                # the asset name (the source of truth).
+                category = (msg.get("category") or "").lower().strip()
+                if category and category not in ("real", "otc"):
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "error": f"invalid category {category!r}; "
+                                 f"expected 'real' or 'otc'",
                     }))
                     continue
                 result = await feed.ensure_stream(asset, period, cid=cid)

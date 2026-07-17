@@ -12,7 +12,7 @@ Sub-signals:
 
 All three come from the same tick data source → collapsed into 1 vote.
 """
-from engines.types import ModuleResult, MarketContext
+from engines.otc.types import ModuleResult, MarketContext
 
 
 def analyze(candles, ticks, micro, ctx: MarketContext) -> list:

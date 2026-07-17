@@ -13,7 +13,7 @@ Signals:
 
 Volatility-scaled thresholds adapt to market noise level.
 """
-from engines.types import ModuleResult, MarketContext
+from engines.real.types import ModuleResult, MarketContext
 
 
 def analyze(candles, ctx: MarketContext) -> list:
