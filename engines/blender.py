@@ -29,7 +29,8 @@ from engines.modules import (
 )
 
 
-def predict(candles, ticks=None, micro=None, asset="") -> dict:
+def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
+            period: int = 60) -> dict:
     """Main entry point — runs 6 modules + smart blend.
 
     Args:
@@ -37,6 +38,11 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
         ticks: tick list for the closed candle (optional)
         micro: microstructure dict (optional)
         asset: pair name for per-pair weighting (e.g. "EURUSD_otc")
+        htf_trend: "UPTREND" | "DOWNTREND" | "SIDEWAYS" from 5m EMA confluence.
+            Counter-HTF signals get a 0.7 penalty; aligned signals get 1.1 boost.
+            "SIDEWAYS" (uncertain HTF) leaves signals unaffected.
+        period: candle period in seconds (default 60). Used by per_pair
+            DB-adaptation to look up the right historical accuracy bucket.
 
     Returns dict with:
         signal: "CALL" | "PUT" | "NEUTRAL"
@@ -51,9 +57,10 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
         modules: dict of per-module breakdown for UI
         asset: str
         profile: str (pair behavior profile)
+        htf_trend: str (echo for UI/logging)
     """
     if not candles or len(candles) < 3:
-        return _neutral("INSUFFICIENT_DATA", {}, "")
+        return _neutral("INSUFFICIENT_DATA", {}, asset)
 
     # ── Step 1: Compute shared context ONCE ──────────────────────────────
     ctx = compute_context(candles)
@@ -77,11 +84,16 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
     grouped_results = non_body + ([collapsed_body] if collapsed_body else [])
 
     # ── Step 4: Exhaustion gate detection ────────────────────────────────
+    # FIX (Bug #9, 2026-07-17): exhaustion detection now runs on the
+    # COLLAPSED grouped_results (post-collapse), not on raw all_results.
+    # Previously a signal could be detected as "exhaustion" from a body
+    # sub-signal that was later dropped during BODY-group collapse, so the
+    # exhaustion flag was inconsistent with the actual voting set.
     exhaustion_indicators = 0
     if any(r.group == "BODY" and "exhaustion" in " ".join(r.reasons).lower()
-           for r in all_results):
+           for r in grouped_results):
         exhaustion_indicators += 1
-    if any(r.group == "WICK" for r in all_results):
+    if any(r.group == "WICK" for r in grouped_results):
         exhaustion_indicators += 1
     if ctx.stats["current_streak"] >= 4:
         exhaustion_indicators += 1
@@ -90,8 +102,8 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
     is_exhausting = exhaustion_indicators >= 2
     is_strongly_exhausting = exhaustion_indicators >= 3
 
-    # ── Step 5: Get per-pair weights ─────────────────────────────────────
-    pair_weights = get_weights(asset)
+    # ── Step 5: Get per-pair weights (DB-adapted) ──────────────────────
+    pair_weights = get_weights(asset, period=period)
     pair_profile = get_profile(asset)
 
     # ── Step 6: Apply regime + per-pair + reliability weights ────────────
@@ -126,6 +138,10 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
         regime_reasons.append(
             f"_PAIR_PROFILE: {asset} = {pair_profile} → per-pair weights applied")
 
+    if htf_trend != "SIDEWAYS":
+        regime_reasons.append(
+            f"_HTF: 5m {htf_trend} → aligned ×1.1, counter-trend ×0.7")
+
     # Apply all multipliers
     adjusted = []
     suppressed_count = 0
@@ -154,7 +170,17 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
         # Per-pair module weight
         p_mult = pair_weights.get(r.module_name, 1.0)
 
-        effective = round(r.score * r_mult * t_mult * p_mult)
+        # HTF confluence multiplier (NEW — was previously computed but discarded).
+        # Counter-HTF CALL signals (HTF=DOWN) and counter-HTF PUT signals (HTF=UP)
+        # get a 0.7 penalty. Aligned signals get 1.1 boost. SIDEWAYS = neutral.
+        if htf_trend == "UPTREND":
+            h_mult = 1.1 if r.direction == "CALL" else 0.7
+        elif htf_trend == "DOWNTREND":
+            h_mult = 1.1 if r.direction == "PUT" else 0.7
+        else:
+            h_mult = 1.0
+
+        effective = round(r.score * r_mult * t_mult * p_mult * h_mult)
 
         if effective == 0:
             suppressed_count += 1
@@ -199,37 +225,75 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
             "regime": regime, "agree": maj_n,
             "total": total_groups, "signals_fired": total_groups,
             "modules": _module_breakdown(adjusted, all_results),
-            "asset": asset, "profile": pair_profile,
+            "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
         }
 
     signal = "CALL" if net > 0 else "PUT"
 
-    # ── Step 8: Confidence calibration (group-aware) ─────────────────────
+    # ── Step 8: Confidence calibration (refactored) ─────────────────────
+    # FIX (Bug #13-14, 2026-07-17): the old blend mixed two non-comparable
+    # metrics (group-count % and weighted-score %) by simple averaging,
+    # which inflated confidence when correlated modules agreed and capped
+    # strong-but-isolated signals at 55%. Now:
+    #   1. Use the GEOMETRIC mean of vote-count and weight ratios (sensitive
+    #      to BOTH breadth and depth, but doesn't compound them linearly).
+    #   2. Replace the flat 55% single-group cap with an adaptive cap that
+    #      scales up with effective score — a lone PATTERN signal with
+    #      effective score >= 6 has earned more trust than a lone score=1.
+    #   3. Apply a small HTF-alignment bonus when the signal agrees with
+    #      the 5m trend (already captured in effective score, but a direct
+    #      confidence bump makes UI grade reflect it).
     majority_groups = call_groups if signal == "CALL" else put_groups
     majority_group_n = len(majority_groups)
 
-    vote_count_confidence = round(majority_group_n / total_groups * 100) if total_groups else 0
-    weight_confidence = round(max(call_score, put_score) / total * 100) if total > 0 else 0
+    vote_ratio = (majority_group_n / total_groups) if total_groups else 0
+    majority_score = max(call_score, put_score)
+    weight_ratio = (majority_score / total) if total > 0 else 0
 
-    confidence = int(0.5 * vote_count_confidence + 0.5 * weight_confidence)
+    # Geometric mean: sensitive to BOTH breadth and depth, but a low value
+    # in either pulls the result down (avoids the 50%+50% compounding bug).
+    import math as _math
+    confidence = int(_math.sqrt(vote_ratio * weight_ratio) * 100)
 
+    # HTF alignment bonus (only when HTF is directional AND signal agrees).
+    if htf_trend == "UPTREND" and signal == "CALL":
+        confidence = min(100, confidence + 5)
+    elif htf_trend == "DOWNTREND" and signal == "PUT":
+        confidence = min(100, confidence + 5)
+    elif htf_trend in ("UPTREND", "DOWNTREND") and (
+        (htf_trend == "UPTREND" and signal == "PUT")
+        or (htf_trend == "DOWNTREND" and signal == "CALL")
+    ):
+        confidence = max(0, confidence - 5)
+
+    # Adaptive single-group cap: a lone strong signal deserves more trust
+    # than a lone weak one. Was: flat min(55). Now: cap scales with the
+    # signal's effective score.
     if total_groups == 1:
-        confidence = min(confidence, 55)
+        max_eff = majority_score  # effective score of the single voting group
+        if max_eff >= 6:
+            cap = 70
+        elif max_eff >= 4:
+            cap = 62
+        else:
+            cap = 55
+        confidence = min(confidence, cap)
 
     # ── Step 9: Pattern confluence check for STRONG ──────────────────────
-    # FIX (2026-07-15 audit): true confluence requires the pattern to be
-    # CONFIRMED by at least one other non-pattern group agreeing in the
-    # same direction. A lone pattern module voting by itself is not real
-    # confluence — it's just one module's opinion.
+    # FIX (Bug #12, 2026-07-17): tighten pattern confluence.
+    # Previously ANY non-pattern group (even a score-1 stochastic
+    # continuation) counted as confluence. Now requires a non-pattern
+    # group with effective score >= 3 — i.e. a substantive confirmation,
+    # not noise.
     pattern_agrees = any(
         r.reliability == "PATTERN" and r.direction == signal
         for r, e in adjusted
     )
-    non_pattern_agrees = any(
-        r.reliability != "PATTERN" and r.direction == signal
+    strong_non_pattern_agrees = any(
+        r.reliability != "PATTERN" and r.direction == signal and e >= 3
         for r, e in adjusted
     )
-    has_pattern_confluence = pattern_agrees and non_pattern_agrees
+    has_pattern_confluence = pattern_agrees and strong_non_pattern_agrees
 
     # FIX: 'agree' = number of unique groups voting for majority direction
     # (NOT score). The HTML label says 'N/M modules' so this must be a count.
@@ -242,7 +306,7 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
     elif (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
           and not has_pattern_confluence):
         strength = "MEDIUM"
-        all_reasons.append("_DOWNGRADE: STRONG→MEDIUM (no pattern confluence)")
+        all_reasons.append("_DOWNGRADE: STRONG→MEDIUM (no strong pattern confluence)")
     elif confidence >= 50 and abs_net >= 2:
         strength = "MEDIUM"
     elif abs_net >= 1:
@@ -254,7 +318,7 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
             "regime": regime, "agree": agree, "total": total_groups,
             "signals_fired": total_groups,
             "modules": _module_breakdown(adjusted, all_results),
-            "asset": asset, "profile": pair_profile,
+            "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
         }
 
     return {
@@ -270,6 +334,7 @@ def predict(candles, ticks=None, micro=None, asset="") -> dict:
         "modules": _module_breakdown(adjusted, all_results),
         "asset": asset,
         "profile": pair_profile,
+        "htf_trend": htf_trend,
     }
 
 
@@ -363,7 +428,7 @@ def _module_breakdown(adjusted: list, all_results: list) -> dict:
     return breakdown
 
 
-def _neutral(reasons, regime, asset="", ctx=None) -> dict:
+def _neutral(reasons, regime, asset="", ctx=None, htf_trend="SIDEWAYS") -> dict:
     """Return a NEUTRAL prediction."""
     modules = {}
     if ctx:
@@ -373,4 +438,5 @@ def _neutral(reasons, regime, asset="", ctx=None) -> dict:
         "score": 0, "reasons": reasons if isinstance(reasons, list) else [reasons],
         "regime": regime, "agree": 0, "total": 0, "signals_fired": 0,
         "modules": modules, "asset": asset, "profile": get_profile(asset),
+        "htf_trend": htf_trend,
     }

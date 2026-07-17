@@ -45,10 +45,13 @@ ENABLE_LIVE_THEORY   = os.environ.get("ENABLE_LIVE_REEVAL",  "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
 # ── Signal delay ───────────────────────────────────────────────────────────
 # How long after a new candle opens before the prediction is broadcast.
-# Originally 3s to let opening ticks confirm gap direction. CHANGED to 0.0
-# (2026-07-15 per user request) — signal now delivered immediately at EOC.
-# Set SIGNAL_DELAY_SEC=3.0 in env vars to restore the old delayed behavior.
-SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "0.0"))
+# Was set to 0.0 on 2026-07-15 per user request, but this caused
+# predictions to fire on the open price with zero opening-tick confirmation
+# — a documented cause of wrong predictions (Bug #2, restored 2026-07-17).
+# Default 3.0s: lets the first 2-3 opening ticks confirm gap direction
+# before broadcasting. Override to 0.0 via env var only if you specifically
+# want instant EOC broadcast.
+SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
 
 # ── Event-driven pipeline tuning (2026-07-11) ──────────────────────────────
 # MICRO_RECALC_EVERY: recompute _analyze_microstructure() every N ticks. The
@@ -163,16 +166,45 @@ _DEFAULT_PAIRS: list[dict] = [
 
 # ── Small helpers ─────────────────────────────────────────────────────────────
 
-def _atr(candles: list[dict]) -> float:
+def _atr(candles: list[dict], n: int = 20) -> float:
+    """True Range ATR — properly accounts for overnight gaps.
+
+    FIX (Bug #21, 2026-07-17): previously used the simple high-low average
+    (no gap handling) which understated ATR on pairs with frequent gaps
+    and diverged from advanced_analysis._atr used by the prediction
+    engine. Now uses the same True Range formula as
+    advanced_analysis._atr — max(high-low, |high-prev_close|, |low-prev_close|)
+    — so feed-side ATR (used for stream housekeeping, contamination
+    detection, pred-candle sizing) is consistent with engine-side ATR
+    (used for regime classification and key-level confluence).
+
+    Falls back to price-relative 0.01% on flat/empty inputs.
+    """
     if not candles:
         return 0.0001
-    # FIX: fallback was 0.0001 (forex-only). Now uses price-relative fallback.
-    avg_range = sum(c["high"] - c["low"] for c in candles) / len(candles)
-    if avg_range <= 0 and candles:
-        # Price-relative fallback for non-forex pairs
+    if len(candles) < 2:
+        # Single candle: just high-low, no prev close to gap from.
+        rng = candles[0]["high"] - candles[0]["low"]
+        if rng > 0:
+            return rng
+        ref = candles[0].get("close", 0) or 1.0
+        return ref * 0.0001
+    recent = candles[-n:] if len(candles) >= n else candles
+    trs = []
+    for i in range(1, len(recent)):
+        c, prev = recent[i], recent[i - 1]
+        tr = max(
+            c["high"] - c["low"],
+            abs(c["high"] - prev["close"]),
+            abs(c["low"] - prev["close"]),
+        )
+        trs.append(tr)
+    avg = (sum(trs) / len(trs)) if trs else 0.0
+    if avg <= 0:
+        # Price-relative fallback for non-forex / flat pairs
         ref = candles[-1]["close"] or 1.0
-        return ref * 0.0001  # 0.01% of price
-    return avg_range or 0.0001
+        return ref * 0.0001
+    return avg
 
 
 def _pred_candle(candles: list[dict], signal: str, period: int, actual_open: float | None = None) -> dict:
@@ -351,13 +383,10 @@ class _AssetStream:
     cached_accuracy: tuple = field(default_factory=lambda: (None, 0))
     # FIX (2026-07-13): removed `cached_accuracy_at` — was set but never read
     # (no TTL invalidation was ever implemented).
-    # Adaptive-inversion hysteresis (2026-07-10) — whether the last-delivered
-    # signal was flip-corrected; feeds back into the prediction engine
-    # so a recovering flip doesn't immediately un-flip itself.
-    inverted: bool = False
-    # FIX (2026-07-13): removed `live_signal_history` — was reset to [] but
-    # never read or appended to. The "flip 2+ times in 10s → demote" logic
-    # was never implemented.
+    # FIX (Bug #3, 2026-07-17): removed the `inverted` field — was set
+    # from result.get("_flipped") which the prediction engine never emits,
+    # and persisted for a "hysteresis check" that was never read. Dead
+    # code; removing both the field and the assignment in _run_eoc.
     # ── Signal delay (2026-07-10) ─────────────────────────────────────────
     # User requirement: prediction candle open হওয়ার ২-৩ সেকেন্ড পরে signal
     # broadcast হবে, যাতে opening tick behavior confirm হয়। EOC-তে
@@ -1134,7 +1163,16 @@ class QuotexFeed:
         if ticks and len(ticks) >= 10:
             _micro_for_pred = self._analyze_microstructure(
                 list(ticks), candles[-1]["open"] if candles else ticks[0])
-        result = predict_from_candle(candles, ticks=list(ticks) if ticks else [], micro=_micro_for_pred, asset=asset)
+        # FIX (Bug #1, 2026-07-17): htf_trend was computed above but never
+        # passed to the prediction engine. Now threaded through so the
+        # blender can apply HTF confluence weighting (aligned ×1.1,
+        # counter-trend ×0.7).
+        # FIX (Bug #5, 2026-07-17): also pass `period` so per_pair
+        # DB-adaptation can look up the right (asset, period) accuracy
+        # bucket instead of always defaulting to period=60.
+        result = predict_from_candle(candles, ticks=list(ticks) if ticks else [],
+                                     micro=_micro_for_pred, asset=asset,
+                                     htf_trend=htf_trend, period=stream.period)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
@@ -1163,9 +1201,9 @@ class QuotexFeed:
             running_ticks=None, stream=stream)
         if result is None:
             return None
-        # Persist flip state for next candle's hysteresis check (see
-        # prediction engine's currently_flipped param).
-        stream.inverted = result.get("_flipped", False)
+        # FIX (Bug #3, 2026-07-17): removed `stream.inverted = result.get("_flipped")`
+        # — the prediction engine never emits an `_flipped` key, so this was
+        # always False, and no caller ever read `stream.inverted` afterward.
         # Snapshot for the periodic LIVE re-eval (see stream loop).
         # IMPORTANT: list(closed) makes a SHALLOW COPY — otherwise
         # stream.base_candles aliases stream.candles and the LIVE re-eval
@@ -1198,12 +1236,21 @@ class QuotexFeed:
         return {**result, "candle": _pred_candle(closed, result["signal"], stream.period, actual_open),
                 "payout": stream.payout}
 
-    def _accuracy(self, just_closed: dict, pred: dict | None) -> str | None:
+    def _accuracy(self, just_closed: dict, pred: dict | None,
+                  period: int = 60) -> str | None:
         # Compare the candle that just closed against the prediction that was
         # made FOR it (pred), NOT the one before it. `pred` is captured
         # immediately before it is reassigned in the close handler.
         # NEUTRAL is not a direction — it must never be graded (the old code
         # fell through to pred_up=False, silently grading NEUTRAL as PUT).
+        #
+        # FIX (Bug #4, 2026-07-17): the period parameter is accepted so the
+        # caller can document which candle period this grade corresponds to.
+        # For binary CALL/PUT grading on Quotex, the trade is settled on the
+        # close of the next candle of the SAME period — i.e. just_closed IS
+        # the settlement candle. So the grade logic itself (close>open ⇒ UP)
+        # is correct; the period arg is used only for sanity-logging if the
+        # caller wants to mix periods.
         if not pred or pred["signal"] not in ("CALL", "PUT"):
             return None
         # Zero-move candle = broker refund (draw), not a win or a loss.
@@ -1227,7 +1274,7 @@ class QuotexFeed:
         NEUTRAL predictions get no signal_log row (NEUTRAL is not a
         direction and must never be graded).
         """
-        accuracy = self._accuracy(closed, prediction)
+        accuracy = self._accuracy(closed, prediction, period=period)
         if not prediction:
             return accuracy
 
