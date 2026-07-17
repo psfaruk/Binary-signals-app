@@ -37,54 +37,78 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .spacer{flex:1}
 #sound-btn{background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius);padding:3px 8px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:4px}
 #sound-btn:hover{color:var(--text);border-color:var(--text-dim)}
-/* ─── 3-DOT MARKET CATEGORY MENU (Real / OTC switch) ─── */
+/* ─── 3-DOT MARKET CATEGORY MENU (Real / OTC switch) — TAB-STYLE ─── */
 /* Top-right corner hamburger-style menu. Click → dropdown with two
    options: "Real Market" and "OTC Market". Selecting one filters the
-   pair-select dropdown to only show pairs of that category. */
+   pair-select dropdown to only show pairs of that category.
+   FIX (2026-07-17): upgraded to a more tab-like visual style — bigger
+   items, clearer selected state, status indicators (live count + market
+   open/closed hint). */
 #market-menu-wrap{position:relative;display:inline-block}
 #market-menu-btn{
   background:none;border:1px solid var(--border);color:var(--text-dim);
-  border-radius:var(--radius);padding:6px 8px;cursor:pointer;font-size:16px;
-  line-height:0;letter-spacing:1px;display:flex;align-items:center;gap:2px;
-  font-family:var(--sans)
+  border-radius:var(--radius);padding:6px 10px;cursor:pointer;font-size:18px;
+  line-height:0;letter-spacing:2px;display:flex;align-items:center;gap:2px;
+  font-family:var(--sans);transition:all .15s
 }
 #market-menu-btn:hover{color:var(--text);border-color:var(--text-dim)}
-#market-menu-btn.active-real{color:var(--green);border-color:var(--green)}
-#market-menu-btn.active-otc{color:var(--yellow);border-color:var(--yellow)}
+#market-menu-btn.active-real{color:var(--green);border-color:var(--green);background:rgba(0,200,83,.08)}
+#market-menu-btn.active-otc{color:var(--yellow);border-color:var(--yellow);background:rgba(255,193,7,.08)}
 /* Dropdown panel — hidden by default, shown when .open is added */
 #market-menu-dropdown{
-  display:none;position:absolute;right:0;top:calc(100% + 4px);
-  min-width:200px;background:var(--card);border:1px solid var(--border);
-  border-radius:var(--radius);box-shadow:0 8px 24px rgba(0,0,0,.5);
+  display:none;position:absolute;right:0;top:calc(100% + 6px);
+  min-width:260px;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius);box-shadow:0 10px 30px rgba(0,0,0,.6);
   z-index:100;overflow:hidden
 }
 #market-menu-dropdown.open{display:block;animation:menu-fade .15s ease-out}
 @keyframes menu-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .market-menu-header{
-  padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.8px;
-  color:var(--text-dim);background:rgba(255,255,255,.03);border-bottom:1px solid var(--border)
+  padding:8px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.8px;
+  color:var(--text-dim);background:rgba(255,255,255,.04);border-bottom:1px solid var(--border);
+  display:flex;justify-content:space-between;align-items:center
 }
+.market-menu-header .hint{font-size:9px;text-transform:none;letter-spacing:0;color:var(--text-dim)}
 .market-menu-item{
   display:flex;align-items:center;justify-content:space-between;
-  padding:8px 12px;cursor:pointer;font-size:13px;color:var(--text);
-  border-bottom:1px solid rgba(255,255,255,.04);transition:background .1s
+  padding:12px 14px;cursor:pointer;font-size:14px;color:var(--text);
+  border-bottom:1px solid rgba(255,255,255,.04);transition:background .12s
 }
 .market-menu-item:last-child{border-bottom:none}
 .market-menu-item:hover{background:rgba(255,255,255,.06)}
-.market-menu-item.selected{background:rgba(88,166,255,.10);color:var(--blue)}
-.market-menu-item .cat-name{display:flex;align-items:center;gap:8px;font-weight:600}
-.market-menu-item .cat-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.market-menu-item .cat-dot.real{background:var(--green);box-shadow:0 0 6px var(--green)}
-.market-menu-item .cat-dot.otc{background:var(--yellow);box-shadow:0 0 6px var(--yellow)}
-.market-menu-item .cat-count{font-size:11px;color:var(--text-dim);font-family:var(--mono)}
-/* Active category badge in the topbar (next to payout) */
+.market-menu-item.selected{background:rgba(88,166,255,.12)}
+.market-menu-item.selected.real{background:rgba(0,200,83,.12);box-shadow:inset 3px 0 0 var(--green)}
+.market-menu-item.selected.otc{background:rgba(255,193,7,.12);box-shadow:inset 3px 0 0 var(--yellow)}
+.market-menu-item .cat-name{display:flex;align-items:center;gap:10px;font-weight:600}
+.market-menu-item .cat-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.market-menu-item .cat-dot.real{background:var(--green);box-shadow:0 0 8px var(--green)}
+.market-menu-item .cat-dot.otc{background:var(--yellow);box-shadow:0 0 8px var(--yellow)}
+.market-menu-item .cat-info{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.market-menu-item .cat-count{font-size:12px;color:var(--text-dim);font-family:var(--mono);font-weight:700}
+.market-menu-item .cat-status{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.3px}
+.market-menu-item .cat-status.open{color:var(--green)}
+.market-menu-item .cat-status.closed{color:var(--red)}
+/* Active category badge in the topbar (next to payout) — clickable, also
+   opens the 3-dot menu. Looks like a tab. */
 #market-badge{
-  display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;
-  font-size:11px;font-weight:700;letter-spacing:.5px;cursor:pointer;
-  background:rgba(0,200,83,.15);color:var(--green);border:1px solid rgba(0,200,83,.3)
+  display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:10px;
+  font-size:12px;font-weight:700;letter-spacing:.5px;cursor:pointer;user-select:none;
+  background:rgba(0,200,83,.15);color:var(--green);border:1px solid rgba(0,200,83,.4);
+  transition:all .12s
 }
-#market-badge.otc{background:rgba(255,193,7,.15);color:var(--yellow);border-color:rgba(255,193,7,.3)}
-#market-badge .badge-dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+#market-badge:hover{transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.3)}
+#market-badge.otc{background:rgba(255,193,7,.15);color:var(--yellow);border-color:rgba(255,193,7,.4)}
+#market-badge .badge-dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse-dot 2s infinite}
+/* Closed-market warning banner — shows when Real Market is closed
+   (weekend, outside bank hours). Doesn't block OTC. */
+#market-closed-banner{
+  display:none;position:fixed;top:42px;left:0;right:0;z-index:99;
+  background:rgba(255,23,68,.95);color:#fff;text-align:center;
+  padding:6px 12px;font-size:12px;font-weight:600;letter-spacing:.3px;
+  box-shadow:0 2px 8px rgba(0,0,0,.4)
+}
+#market-closed-banner.show{display:block;animation:banner-fade .3s ease-out}
+@keyframes banner-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 /* MAIN AREA */
 #main{display:grid;grid-template-columns:1fr 320px;gap:0;overflow:hidden;min-height:0}
 #main>*{min-width:0}
@@ -360,23 +384,37 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
     <span class="spacer"></span>
     <button id="sound-btn" title="Toggle sound" aria-pressed="false" aria-label="Toggle sound alerts">🔇</button>
     <!-- 3-DOT MARKET CATEGORY MENU — top-right corner.
-         Click → dropdown with "Real Market" and "OTC Market" options.
-         Selecting one re-filters the pair-select dropdown. -->
+         Click → dropdown with "Real Market" and "OTC Market" tab options.
+         Selecting one re-filters the pair-select dropdown AND the panel
+         shows only that category's pairs. Each item shows live count +
+         market open/closed status (Real Market closed on weekends). -->
     <div id="market-menu-wrap">
       <button id="market-menu-btn" title="Switch market category" aria-label="Market category menu">⋮</button>
       <div id="market-menu-dropdown" role="menu" aria-label="Market category">
-        <div class="market-menu-header">Market Category</div>
+        <div class="market-menu-header">
+          <span>Market Category</span>
+          <span class="hint">Tap to switch</span>
+        </div>
         <div class="market-menu-item" data-cat="real" role="menuitem">
           <span class="cat-name"><span class="cat-dot real"></span> Real Market</span>
-          <span class="cat-count" id="real-count">—</span>
+          <span class="cat-info">
+            <span class="cat-count" id="real-count">—</span>
+            <span class="cat-status" id="real-status">checking…</span>
+          </span>
         </div>
         <div class="market-menu-item" data-cat="otc" role="menuitem">
           <span class="cat-name"><span class="cat-dot otc"></span> OTC Market</span>
-          <span class="cat-count" id="otc-count">—</span>
+          <span class="cat-info">
+            <span class="cat-count" id="otc-count">—</span>
+            <span class="cat-status" id="otc-status">checking…</span>
+          </span>
         </div>
       </div>
     </div>
   </header>
+  <!-- Closed-market warning banner — shown when the currently-active
+       category's market is closed (e.g. Real Market on weekend). -->
+  <div id="market-closed-banner"></div>
   <!-- MAIN -->
   <div id="main">
     <!-- CHART -->
@@ -592,6 +630,9 @@ const marketMenuDropdown = $('market-menu-dropdown');
 const marketMenuItems = document.querySelectorAll('.market-menu-item');
 const realCountEl = $('real-count');
 const otcCountEl  = $('otc-count');
+const realStatusEl = $('real-status');
+const otcStatusEl  = $('otc-status');
+const marketClosedBanner = $('market-closed-banner');
 const soundBtn = $('sound-btn');
 const signalBox = $('signal-box');
 const signalLabel = $('signal-label');
@@ -1391,6 +1432,8 @@ function renderAccuracy(){
 // + otc_pairs + payout_floor_real + payout_floor_otc) instead of a single
 // flat pair list. The currently-active category's list is rendered in the
 // pair-select dropdown; the other category's list is just counted.
+// Also updates the status indicators in the 3-dot menu (Real Market open
+// vs closed — closed on weekends).
 function renderPairs(payload){
   // Accept either the new structured payload {real_pairs, otc_pairs, ...}
   // or a legacy flat array (for backward compat with old server versions).
@@ -1405,9 +1448,21 @@ function renderPairs(payload){
   // Combined backward-compat list (some old code reads `pairsList`).
   pairsList = realPairsList.concat(otcPairsList);
 
-  // Update the category counts in the 3-dot dropdown.
+  // Update the category counts AND status indicators in the 3-dot dropdown.
+  // Real Market is OPEN when at least 1 real pair has status="live".
+  // OTC Market is OPEN when at least 1 OTC pair has status="otc" (24/7).
+  const realOpen = realPairsList.length > 0;
+  const otcOpen  = otcPairsList.length > 0;
   if(realCountEl) realCountEl.textContent = realPairsList.length;
   if(otcCountEl)  otcCountEl.textContent  = otcPairsList.length;
+  if(realStatusEl){
+    realStatusEl.textContent = realOpen ? 'OPEN' : 'CLOSED';
+    realStatusEl.className = 'cat-status ' + (realOpen ? 'open' : 'closed');
+  }
+  if(otcStatusEl){
+    otcStatusEl.textContent = otcOpen ? 'OPEN 24/7' : 'CLOSED';
+    otcStatusEl.className = 'cat-status ' + (otcOpen ? 'open' : 'closed');
+  }
 
   // Render only the active category's pairs in the dropdown.
   const activeList = currentCategory === 'real' ? realPairsList : otcPairsList;
@@ -1415,12 +1470,21 @@ function renderPairs(payload){
   if(activeList.length === 0){
     const opt = document.createElement('option');
     opt.value = '';
-    opt.textContent = currentCategory === 'real'
-      ? 'No real-market pairs open'
-      : 'No OTC pairs open';
+    if(currentCategory === 'real'){
+      opt.textContent = '⚠ Real Market closed (weekend/bank holiday)';
+    } else {
+      opt.textContent = 'No OTC pairs open';
+    }
     opt.disabled = true;
     pairSelect.appendChild(opt);
+    // Show closed-market banner for Real category on weekends.
+    if(currentCategory === 'real' && !realOpen){
+      showMarketClosedBanner('Real Market is currently closed (weekend). OTC Market is open 24/7 — switch to OTC tab.');
+    } else {
+      hideMarketClosedBanner();
+    }
   } else {
+    hideMarketClosedBanner();
     activeList.forEach(p => {
       const opt = document.createElement('option');
       opt.value = p.asset;
@@ -1462,6 +1526,17 @@ function renderPairs(payload){
   updateMarketBadge();
 }
 
+function showMarketClosedBanner(msg){
+  if(!marketClosedBanner) return;
+  marketClosedBanner.textContent = '⚠ ' + msg;
+  marketClosedBanner.classList.add('show');
+}
+
+function hideMarketClosedBanner(){
+  if(!marketClosedBanner) return;
+  marketClosedBanner.classList.remove('show');
+}
+
 function updateMarketBadge(){
   // Update the badge in the topbar to show the active category.
   if(!marketBadge || !marketBadgeLabel) return;
@@ -1476,10 +1551,13 @@ function updateMarketBadge(){
     marketMenuBtn.classList.remove('active-real');
     marketMenuBtn.classList.add('active-otc');
   }
-  // Mark the selected item in the dropdown.
+  // Mark the selected item in the dropdown — also clear the other's
+  // selected class so only one tab shows as active at a time.
   marketMenuItems.forEach(item => {
-    if(item.dataset.cat === currentCategory) item.classList.add('selected');
-    else item.classList.remove('selected');
+    item.classList.remove('selected', 'real', 'otc');
+    if(item.dataset.cat === currentCategory){
+      item.classList.add('selected', currentCategory);
+    }
   });
 }
 

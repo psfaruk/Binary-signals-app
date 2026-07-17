@@ -910,6 +910,21 @@ class QuotexFeed:
             "payout_floor": PAYOUT_FLOOR_OTC,            # backward compat
         })
 
+        # FIX (2026-07-17): pre-warm all eligible pairs as always_on streams
+        # so the chart shows ticks immediately when a user opens the app —
+        # matches feed.py's _reconcile_always_on behavior. Without this,
+        # sim mode only ticks when a viewer is subscribed.
+        for p in self._pairs_list:
+            if p["status"] in ("live", "otc") and not p.get("locked"):
+                key = (p["asset"], 60)
+                if key not in self._streams:
+                    s = _AssetStream(asset=p["asset"], period=60, always_on=True)
+                    self._streams[key] = s
+                    s.task = asyncio.create_task(self._run_stream(s))
+
+        _last_watchdog_run = 0.0
+        WATCHDOG_INTERVAL = 30.0
+
         while True:
             try:
                 # NOTE (refactor 2026-07-14): mute refresh removed.
@@ -927,6 +942,38 @@ class QuotexFeed:
                         if s.task:
                             s.task.cancel()
                         self._streams.pop(key, None)
+
+                # ── Always-on watchdog (every 30s) ──────────────────────────
+                # Restart dead always_on streams so the sim stays ticking
+                # even with no viewers — mirrors feed.py's _watchdog_always_on.
+                if now - _last_watchdog_run > WATCHDOG_INTERVAL:
+                    _last_watchdog_run = now
+                    eligible_assets = {
+                        p["asset"] for p in self._pairs_list
+                        if p["status"] in ("live", "otc") and not p.get("locked")
+                    }
+                    for asset in eligible_assets:
+                        key = (asset, 60)
+                        stream = self._streams.get(key)
+                        if stream is None:
+                            s = _AssetStream(asset=asset, period=60, always_on=True)
+                            self._streams[key] = s
+                            s.task = asyncio.create_task(self._run_stream(s))
+                            print(f"[sim] watchdog: created always_on stream for {asset}")
+                            continue
+                        task = stream.task
+                        if task is None or task.done():
+                            print(f"[sim] watchdog: restarting dead stream {asset}")
+                            new_stream = _AssetStream(
+                                asset=asset, period=60, always_on=True,
+                                candles=stream.candles)
+                            new_stream.ticks.extend(list(stream.ticks))
+                            new_stream.prediction = stream.prediction
+                            new_stream.candle_open_time = stream.candle_open_time
+                            new_stream.candle_open_price = stream.candle_open_price
+                            stream._evicting = True
+                            self._streams[key] = new_stream
+                            new_stream.task = asyncio.create_task(self._run_stream(new_stream))
             except Exception as exc:
                 print(f"[sim] manager error: {exc}")
             await asyncio.sleep(5)
