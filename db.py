@@ -61,11 +61,28 @@ def init():
             a_open REAL, a_close REAL,
             regime TEXT, zone TEXT,
             tags TEXT, postmortem TEXT,
+            category TEXT,        -- FIX (2026-07-17): track which engine produced this signal
             ts REAL DEFAULT (strftime('%s','now')))""")
         # Indexes — added ctime composite for faster recent_accuracy queries
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_asset_period ON signal_log(asset, period)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ctime ON signal_log(asset, period, ctime DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ts ON signal_log(ts)")
+        # FIX (2026-07-17): index for per-category accuracy queries.
+        c.execute("CREATE INDEX IF NOT EXISTS ix_sl_category ON signal_log(category, asset, period)")
+
+        # FIX (2026-07-17): schema migration. Older deployments created
+        # signal_log WITHOUT the `category` column. Detect & add it here
+        # so existing DBs upgrade transparently on next startup.
+        try:
+            cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
+            if "category" not in cols:
+                c.execute("ALTER TABLE signal_log ADD COLUMN category TEXT")
+                print("[db] migrated signal_log: added `category` column")
+                # Backfill existing rows from asset name (OTC if ends with _otc)
+                c.execute("UPDATE signal_log SET category = 'otc' WHERE asset LIKE '%_otc'")
+                c.execute("UPDATE signal_log SET category = 'real' WHERE category IS NULL")
+        except Exception as _e:
+            print(f"[db] signal_log migration skipped: {_e}")
 
         # Refactor (2026-07-14): the `theory_votes` table is no longer
         # populated. The old theory engine was replaced by the
@@ -119,11 +136,17 @@ def log_signal(asset, period, ctime, signal, score, confidence,
     with _lock:
         try:
             with _cursor() as c:
+                # FIX (2026-07-17): persist `category` so per-engine accuracy
+                # can be tracked separately. Defaults to auto-detected from
+                # asset name if caller doesn't pass it.
+                category = kw.get("category")
+                if category is None:
+                    category = "otc" if asset.endswith("_otc") else "real"
                 c.execute("""INSERT INTO signal_log
                     (asset,period,ctime,signal,score,confidence,theories,
                      actual,accuracy,strength,agree,right_codes,wrong_codes,
-                     reasons,a_open,a_close,regime,zone,tags,postmortem)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     reasons,a_open,a_close,regime,zone,tags,postmortem,category)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (asset, period, ctime, signal, score, confidence, _as_text(theories),
                      actual, accuracy,
                      kw.get("strength"), kw.get("agree"),
@@ -131,7 +154,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                      _as_text(kw.get("reasons")),
                      kw.get("a_open"), kw.get("a_close"),
                      kw.get("regime"), kw.get("zone"),
-                     _as_text(kw.get("tags")), kw.get("postmortem")))
+                     _as_text(kw.get("tags")), kw.get("postmortem"),
+                     category))
         except Exception as e:
             print(f"[db] log_signal error: {e}")
 
@@ -204,7 +228,7 @@ def recent_accuracy(asset, period, n=20):
 
 _MODULE_NAMES = (
     "candle_reaction", "running_tick", "pattern",
-    "indicator", "key_level", "otc_pattern",
+    "indicator", "key_level", "otc_pattern", "trend_follow",
 )
 
 

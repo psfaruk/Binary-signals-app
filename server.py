@@ -553,11 +553,14 @@ async def ws_endpoint(ws: WebSocket):
                                  f"{sorted(_ALLOWED_PERIODS)}",
                     }))
                     continue
-                # Optional `category` field: "real" or "otc". Used only
-                # for validation logging — the engine itself auto-detects
-                # from asset name. If a client sends a mismatched category
-                # (e.g. category="real" but asset="EURUSD_otc"), we honor
-                # the asset name (the source of truth).
+                # Optional `category` field: "real" or "otc". The server
+                # now ENFORCES consistency between category and asset — if
+                # a client sends category="real" but asset="EURUSD_otc"
+                # (or vice versa), the subscribe is REJECTED with an error.
+                # FIX (2026-07-17): previously the server silently honored
+                # the asset name even on mismatch, which let an OTC pair
+                # be analyzed by the Real engine (defeating the whole point
+                # of having two engines).
                 category = (msg.get("category") or "").lower().strip()
                 if category and category not in ("real", "otc"):
                     await ws.send_text(json.dumps({
@@ -566,6 +569,18 @@ async def ws_endpoint(ws: WebSocket):
                                  f"expected 'real' or 'otc'",
                     }))
                     continue
+                # If category is specified, validate it matches the asset.
+                if category:
+                    expected_cat = "otc" if asset.endswith("_otc") else "real"
+                    if category != expected_cat:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "error": f"category/asset mismatch: category={category!r} "
+                                     f"but asset {asset!r} belongs to {expected_cat!r}. "
+                                     f"Switch to the {expected_cat!r} category in the 3-dot "
+                                     f"menu to subscribe to this pair.",
+                        }))
+                        continue
                 result = await feed.ensure_stream(asset, period, cid=cid)
                 await ws.send_text(json.dumps(result))
 

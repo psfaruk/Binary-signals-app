@@ -10,7 +10,7 @@ from typing import Literal, Optional
 
 Direction = Literal["CALL", "PUT", "NEUTRAL"]
 SignalType = Literal["REVERSAL", "CONTINUATION"]
-ReliabilityTier = Literal["PATTERN", "STAT", "LEVEL", "CANDLE", "MICRO", "INDICATOR", "OTC"]
+ReliabilityTier = Literal["PATTERN", "STAT", "LEVEL", "CANDLE", "MICRO", "INDICATOR", "OTC", "TREND"]
 
 
 @dataclass
@@ -68,8 +68,9 @@ RELIABILITY = {
     "PATTERN":   1.5,   # multi-candle patterns (highest conviction)
     "STAT":      1.3,   # statistical edge (Z-score, rarity)
     "LEVEL":     1.3,   # key S/R level confluence
+    "TREND":     1.3,   # REAL engine trend-following signals (real-market trends are reliable)
     "INDICATOR": 1.3,   # REAL-MARKET: indicators reflect real order flow (was 1.0 in OTC)
     "CANDLE":    1.0,   # single-candle signals (baseline)
-    "OTC":       1.2,   # OTC-style patterns (still applicable — mean reversion occurs on real pairs too)
+    "OTC":       1.2,   # OTC-style patterns (kept for compat, but Real engine uses TREND module instead)
     "MICRO":     0.7,   # REAL-MARKET: tick microstructure is more meaningful (real volume) — was 0.6
 }

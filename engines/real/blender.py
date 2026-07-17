@@ -4,7 +4,7 @@ Smart Blender — combines 6 independent modules into final prediction.
 Pipeline:
   1. Compute shared MarketContext ONCE
   2. Run all 6 modules (candle_reaction, running_tick, pattern,
-     indicator, key_level, otc_pattern)
+     indicator, key_level, trend_follow)
   3. Collapse correlated groups (BODY signals → 1 vote)
   4. Apply regime-aware weighting (TREND/RANGE/VOLATILE + exhaustion gate)
   5. Apply per-pair module weighting (USDPKR → boost reversal, EURUSD → boost indicator)
@@ -25,7 +25,7 @@ from engines.real.modules import (
     pattern as mod_pattern,
     indicator as mod_indicator,
     key_level as mod_keylevel,
-    otc_pattern as mod_otc,
+    trend_follow as mod_trend,
 )
 
 
@@ -72,7 +72,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     all_results += mod_pattern.analyze(candles, ctx)
     all_results += mod_indicator.analyze(candles, ctx)
     all_results += mod_keylevel.analyze(candles, ctx)
-    all_results += mod_otc.analyze(candles, ctx)
+    all_results += mod_trend.analyze(candles, ctx)
 
     if not all_results:
         return _neutral("NO_SIGNAL", ctx.regime, asset)
@@ -389,7 +389,7 @@ def _module_breakdown(adjusted: list, all_results: list) -> dict:
     """
     breakdown = {}
     module_names = ["candle_reaction", "running_tick", "pattern",
-                    "indicator", "key_level", "otc_pattern"]
+                    "indicator", "key_level", "trend_follow"]
 
     for mname in module_names:
         module_adjusted = [(r, e) for r, e in adjusted if r.module_name == mname]
