@@ -86,6 +86,14 @@ async def broadcast(msg: dict):
     Now filters by asset/period: only clients interested in the message's
     asset/period receive it. Messages without asset/period (pairs, status,
     signals list) go to everyone.
+
+    FIX (Bug #15, 2026-07-17): the previous filter had a "stream not found
+    → send to all (safety)" fallback that fired when the asset's stream
+    had already been torn down (e.g., post idle-eviction). That caused
+    stale-asset messages to be broadcast to every viewer. Now if a stream
+    exists but has no interested_cids, we skip the broadcast for that
+    (asset, period); if no stream exists at all, we also skip — the
+    viewers are clearly not watching this asset anymore.
     """
     if not clients:
         return
@@ -99,19 +107,18 @@ async def broadcast(msg: dict):
     else:
         # Filter: only send to clients interested in this asset/period.
         # feed tracks interested_cids per stream — look it up.
-        target_cids = list(clients.keys())  # default: all
+        target_cids = []  # default: skip (was: list(clients.keys()))
         try:
             stream_key = (msg_asset, msg_period) if msg_period else None
             if stream_key and hasattr(feed, '_streams'):
                 stream = feed._streams.get(stream_key)
                 if stream and stream.interested_cids:
                     target_cids = list(stream.interested_cids)
-                elif stream:
-                    # Stream exists but no interested viewers — skip
-                    target_cids = []
-                # else: stream not found, send to all (safety)
+                # else: stream gone or no viewers → skip (was: send to all)
         except Exception:
-            pass  # on any error, fall back to broadcast-all
+            # On unexpected error, fall back to broadcast-all to avoid
+            # silently dropping important messages (status/pairs).
+            target_cids = list(clients.keys())
 
     tasks = []
     cids = []
@@ -456,6 +463,15 @@ async def get_signal_detail(asset: str, period: int, ctime: int):
 
 # ── WebSocket endpoint ───────────────────────────────────────────────────────
 
+# Allowed candle periods (seconds). Anything outside this whitelist is
+# rejected up-front — feed.ensure_stream would silently misbehave on
+# invalid periods (negative, fractional, or unreasonably large).
+# FIX (Bug #16, 2026-07-17): previously any integer was accepted, which
+# could create bogus streams (e.g., period=-1 or period=999999) that
+# wasted resources and corrupted the stream registry.
+_ALLOWED_PERIODS = {15, 30, 60, 120, 180, 300, 600, 900, 1800, 3600}
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     global cid_counter
@@ -477,7 +493,20 @@ async def ws_endpoint(ws: WebSocket):
 
             if t == "subscribe":
                 asset = msg.get("asset", "")
-                period = int(msg.get("period", 60))
+                # Validate period up-front. Reject anything not in the
+                # whitelist with a clear error instead of letting the feed
+                # create a bogus stream.
+                try:
+                    period = int(msg.get("period", 60))
+                except (TypeError, ValueError):
+                    period = 0  # forces the validation failure below
+                if period not in _ALLOWED_PERIODS:
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "error": f"invalid period {period!r}; allowed: "
+                                 f"{sorted(_ALLOWED_PERIODS)}",
+                    }))
+                    continue
                 result = await feed.ensure_stream(asset, period, cid=cid)
                 await ws.send_text(json.dumps(result))
 
@@ -494,7 +523,16 @@ async def ws_endpoint(ws: WebSocket):
 
             elif t == "signals":
                 asset = msg.get("asset", "")
-                period = int(msg.get("period", 60))
+                try:
+                    period = int(msg.get("period", 60))
+                except (TypeError, ValueError):
+                    period = 60
+                if period not in _ALLOWED_PERIODS:
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "error": f"invalid period {period!r}",
+                    }))
+                    continue
                 sigs = _db.get_recent_signals(asset, period, 50)
                 await ws.send_text(json.dumps({
                     "type": "signals",

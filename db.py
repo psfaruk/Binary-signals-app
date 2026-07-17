@@ -196,6 +196,100 @@ def recent_accuracy(asset, period, n=20):
     return correct / total, total
 
 
+# ── Per-module per-pair accuracy (added Bug #5 fix, 2026-07-17) ─────────────
+# The `reasons` column in signal_log stores reason strings prefixed with
+# [module_name]. We parse those to extract per-module win rates per asset,
+# which lets per_pair.get_weights() adapt from historical accuracy instead
+# of relying on the hardcoded PAIR_CONFIGS alone.
+
+_MODULE_NAMES = (
+    "candle_reaction", "running_tick", "pattern",
+    "indicator", "key_level", "otc_pattern",
+)
+
+
+def per_module_accuracy(asset, period=60, n=200):
+    """Return per-module accuracy for a given (asset, period).
+
+    Parses the `reasons` JSON array from signal_log and, for each module,
+    counts how often its votes aligned with the final graded outcome.
+
+    Returns:
+        dict[module_name] = {
+            "correct": int, "wrong": int, "total": int,
+            "win_rate": float (0..1) or None if no graded rows
+        }
+
+    A module is credited `correct` when its own vote direction matched the
+    final signal direction AND that final signal was graded `correct`. If
+    the module's vote opposed the final signal and the final was `wrong`,
+    the module is also credited `correct` (it was right, against the
+    majority). Symmetric logic for `wrong`.
+
+    This matches the attribution already used by /api/stats in server.py.
+    """
+    out = {m: {"correct": 0, "wrong": 0, "total": 0, "win_rate": None}
+           for m in _MODULE_NAMES}
+
+    with _cursor() as c:
+        rows = c.execute("""SELECT signal, accuracy, reasons
+                   FROM signal_log
+                   WHERE asset=? AND period=? AND signal IN ('CALL','PUT')
+                     AND accuracy IN ('correct','wrong')
+                   ORDER BY ctime DESC LIMIT ?""",
+                   (asset, period, n)).fetchall()
+
+    if not rows:
+        return out
+
+    for row in rows:
+        final_signal = row["signal"]
+        accuracy = row["accuracy"]
+        reasons_raw = row["reasons"] or "[]"
+        try:
+            reasons = json.loads(reasons_raw) if isinstance(reasons_raw, str) else reasons_raw
+        except (ValueError, TypeError):
+            reasons = []
+        if not isinstance(reasons, list):
+            reasons = []
+
+        for reason in reasons:
+            reason_str = str(reason)
+            if not reason_str.startswith("["):
+                continue
+            end_bracket = reason_str.find("]")
+            if end_bracket == -1:
+                continue
+            module = reason_str[1:end_bracket].strip()
+            if module not in _MODULE_NAMES:
+                continue
+            upper = reason_str.upper()
+            # Determine the module's vote direction from the reason text.
+            if "PUT" in upper or "BEAR" in upper or "SELLER" in upper:
+                module_dir = "PUT"
+            elif "CALL" in upper or "BULL" in upper or "BUYER" in upper:
+                module_dir = "CALL"
+            else:
+                continue
+
+            out[module]["total"] += 1
+            # Aligned with final AND final was correct → module was right.
+            # Opposed final AND final was wrong → module was also right.
+            if module_dir == final_signal and accuracy == "correct":
+                out[module]["correct"] += 1
+            elif module_dir != final_signal and accuracy == "wrong":
+                out[module]["correct"] += 1
+            else:
+                out[module]["wrong"] += 1
+
+    for m in _MODULE_NAMES:
+        s = out[m]
+        if s["total"] > 0:
+            s["win_rate"] = s["correct"] / s["total"]
+
+    return out
+
+
 def cleanup(days=7):
     # NOTE (2026-07-13): this is a synchronous blocking sqlite3 call.
     # feed.py's run() calls it once at startup (acceptable — one-time prune

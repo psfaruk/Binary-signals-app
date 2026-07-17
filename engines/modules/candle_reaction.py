@@ -90,7 +90,16 @@ def analyze(candles, ctx: MarketContext) -> list:
                          for i in range(-min(20, len(candles)), 0)]
         median_body = sorted(recent_bodies)[len(recent_bodies) // 2]
         if median_body > 0 and abs(body) > median_body * body_mult:
-            z_boost = 1 if stats["z_body"] > 2.0 else 0
+            # FIX (Bug #19, 2026-07-17): Z-score boost threshold is now
+            # volatility-scaled (was static Z > 2.0). Matches the same
+            # scaling used in otc_pattern.SIGNAL 3 for consistency.
+            if vol_pct >= 1.3:
+                z_boost_threshold = 2.0
+            elif vol_pct <= 0.7:
+                z_boost_threshold = 2.8
+            else:
+                z_boost_threshold = 2.3
+            z_boost = 1 if stats["z_body"] > z_boost_threshold else 0
             score = 3 + z_boost
             if body > 0:
                 results.append(ModuleResult(

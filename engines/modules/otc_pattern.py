@@ -59,20 +59,36 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}) → CALL reversal boost"]))
 
     # ── SIGNAL 3: Z-score extreme reversal ───────────────────────────────
-    # Statistically unusual body (Z > 2) → strong reversal signal
-    if stats["z_body"] > 2.0:
+    # Statistically unusual body (Z > threshold) → strong reversal signal.
+    # FIX (Bug #19, 2026-07-17): the threshold was static (Z > 2.0). In a
+    # high-volatility regime, Z>2 fires on ~5% of candles (correct), but in
+    # a low-volatility regime it can fire on 15-20% because body sizes are
+    # more tightly clustered — leading to too many reversal calls. Now the
+    # threshold scales with the volatility ratio in ctx.vol_pct:
+    #   vol_pct >= 1.3  → Z > 2.0 (high noise floor, only extremes count)
+    #   vol_pct <= 0.7  → Z > 2.8 (low noise → require stronger signal)
+    #   default         → Z > 2.3 (slightly stricter than original 2.0)
+    vol_pct = ctx.vol_pct
+    if vol_pct >= 1.3:
+        z_threshold = 2.0
+    elif vol_pct <= 0.7:
+        z_threshold = 2.8
+    else:
+        z_threshold = 2.3
+
+    if stats["z_body"] > z_threshold:
         last = candles[-1]
         body = last["close"] - last["open"]
         if body > 0:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=2, confidence=63,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
-                reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f}) → PUT reversal (statistical edge)"]))
+                reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f} > {z_threshold}, vol={vol_pct:.1f}x) → PUT reversal (statistical edge)"]))
         elif body < 0:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=2, confidence=63,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
-                reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f}) → CALL reversal (statistical edge)"]))
+                reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f} > {z_threshold}, vol={vol_pct:.1f}x) → CALL reversal (statistical edge)"]))
 
     # ── SIGNAL 4: Close percentile extreme ───────────────────────────────
     # Close at 95th+ or 5th- percentile of recent closes → extreme → reversal
@@ -88,22 +104,30 @@ def analyze(candles, ctx: MarketContext) -> list:
             signal_type="REVERSAL", reliability="OTC", group="OTC_PCTILE",
             reasons=[f"Close at {pctile:.0f}th percentile (extreme low) → CALL reversal"]))
 
-    # ── SIGNAL 5: Alternation bias (weak) ────────────────────────────────
-    # In OTC, 53% of the time the next candle is opposite direction.
-    # This is a very weak signal — only fires when there's no strong
-    # directional bias from other signals.
-    if consec == 1:
+    # ── SIGNAL 5: Alternation bias (very weak, gated) ───────────────────
+    # FIX (Bug #6, 2026-07-17): previously fired on EVERY consec==1 candle
+    # (i.e. ~half of all candles), injecting noise into the blender. Now
+    # gated on three additional conditions:
+    #   1. Last body must be small (Z<0.5) — a big body has directional
+    #      momentum that overrides the weak 53% alternation prior.
+    #   2. Current streak rarity must be > 0.30 (not already rare) — if
+    #      the streak itself is already unusual, the rarity signal handles
+    #      reversal; alternation would just double-count.
+    #   3. No other OTC signal has already fired this candle (mean_rev,
+    #      rarity, zscore, pctile). Prevents the same module from piling
+    #      on multiple reversal votes for the same single-candle event.
+    if consec == 1 and stats["streak_rarity"] > 0.30 and stats["z_body"] < 0.5:
         last = candles[-1]
         body = last["close"] - last["open"]
-        if body > 0:
+        if body > 0 and not results:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=1, confidence=53,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_ALTERNATE",
-                reasons=["OTC alternation bias (53% opposite) → PUT"]))
-        elif body < 0:
+                reasons=["OTC alternation bias (small body, 53% opposite) → PUT"]))
+        elif body < 0 and not results:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=1, confidence=53,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_ALTERNATE",
-                reasons=["OTC alternation bias (53% opposite) → CALL"]))
+                reasons=["OTC alternation bias (small body, 53% opposite) → CALL"]))
 
     return results

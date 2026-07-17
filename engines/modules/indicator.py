@@ -129,6 +129,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     last_close = closes[-1]
 
     # ── INDICATOR 1: RSI (14) ────────────────────────────────────────────
+    # FIX (Bug #7, 2026-07-17): removed the "mild momentum" branches that
+    # fired on 60<RSI<70 and 30<RSI<40 — these were essentially noise
+    # (confidence 52%, score 1) that fired on most candles in a trending
+    # market. Now RSI only votes on the classic overbought/oversold zones
+    # (>70 / <30) where there is a real statistical edge.
     rsi = _rsi(closes, 14)
     if rsi > 70:
         results.append(ModuleResult(
@@ -140,33 +145,33 @@ def analyze(candles, ctx: MarketContext) -> list:
             module_name="indicator", direction="CALL", score=3, confidence=60,
             signal_type="REVERSAL", reliability="INDICATOR", group="IND_RSI",
             reasons=[f"RSI oversold ({rsi:.0f}) → CALL reversal (60% win rate)"]))
-    elif rsi > 60 and rsi < 70:
-        # Mild bullish momentum
-        results.append(ModuleResult(
-            module_name="indicator", direction="CALL", score=1, confidence=52,
-            signal_type="CONTINUATION", reliability="INDICATOR", group="IND_RSI",
-            reasons=[f"RSI bullish momentum ({rsi:.0f}) → CALL continuation"]))
-    elif rsi < 40 and rsi > 30:
-        results.append(ModuleResult(
-            module_name="indicator", direction="PUT", score=1, confidence=52,
-            signal_type="CONTINUATION", reliability="INDICATOR", group="IND_RSI",
-            reasons=[f"RSI bearish momentum ({rsi:.0f}) → PUT continuation"]))
 
-    # ── INDICATOR 2: MACD ────────────────────────────────────────────────
-    macd_line, signal_line, histogram = _macd(closes)
-    if macd_line > signal_line and histogram > 0:
-        # Bullish MACD
-        score = 3 if histogram > abs(macd_line) * 0.3 else 2
+    # ── INDICATOR 2: MACD (crossover detection) ─────────────────────────
+    # FIX (Bug #8, 2026-07-17): the old version checked STATE (macd_line vs
+    # signal_line position) which fires on every candle of a multi-candle
+    # trend, piling on continuation votes for stale momentum. Now only
+    # fires on a FRESH crossover within the last 2 candles: histogram
+    # flips sign between candle N-2 and N-1 (or N-1 and N).
+    MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+    macd_line, signal_line, histogram = _macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    # Detect sign change in histogram by recomputing on truncated closes.
+    if len(closes) >= MACD_SLOW + MACD_SIGNAL + 1:
+        _ml_prev, _sl_prev, hist_prev = _macd(closes[:-1], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+        fresh_bull_cross = hist_prev <= 0 and histogram > 0
+        fresh_bear_cross = hist_prev >= 0 and histogram < 0
+    else:
+        fresh_bull_cross = fresh_bear_cross = False
+
+    if fresh_bull_cross:
         results.append(ModuleResult(
-            module_name="indicator", direction="CALL", score=score, confidence=58,
+            module_name="indicator", direction="CALL", score=3, confidence=60,
             signal_type="CONTINUATION", reliability="INDICATOR", group="IND_MACD",
-            reasons=[f"MACD bullish crossover (hist={histogram:.6f}) → CALL continuation"]))
-    elif macd_line < signal_line and histogram < 0:
-        score = 3 if abs(histogram) > abs(macd_line) * 0.3 else 2
+            reasons=[f"MACD fresh bullish crossover (hist={histogram:.6f}) → CALL"]))
+    elif fresh_bear_cross:
         results.append(ModuleResult(
-            module_name="indicator", direction="PUT", score=score, confidence=58,
+            module_name="indicator", direction="PUT", score=3, confidence=60,
             signal_type="CONTINUATION", reliability="INDICATOR", group="IND_MACD",
-            reasons=[f"MACD bearish crossover (hist={histogram:.6f}) → PUT continuation"]))
+            reasons=[f"MACD fresh bearish crossover (hist={histogram:.6f}) → PUT"]))
 
     # ── INDICATOR 3: EMA Crossover (9 vs 21) ─────────────────────────────
     ema9 = ctx.ema9
@@ -202,6 +207,10 @@ def analyze(candles, ctx: MarketContext) -> list:
         # Skip vote — just informational
 
     # ── INDICATOR 5: Stochastic ──────────────────────────────────────────
+    # FIX (Bug #10, 2026-07-17): removed the mid-zone momentum branches
+    # (k>50, k<50 with confidence 51%) — pure noise that fired on nearly
+    # every candle. Stochastic now only fires on classic overbought/oversold
+    # reversals: %K crosses %D from above (>80) or from below (<20).
     k, d = _stochastic(candles, 14, 3)
     if k > 80 and k < d:
         # %K above 80 and crossing below %D → bearish signal
@@ -215,15 +224,5 @@ def analyze(candles, ctx: MarketContext) -> list:
             module_name="indicator", direction="CALL", score=2, confidence=57,
             signal_type="REVERSAL", reliability="INDICATOR", group="IND_STOCH",
             reasons=[f"Stochastic bullish cross (%K={k:.0f} < 20, crossing %D) → CALL"]))
-    elif k > 50 and k > d and k < 80:
-        results.append(ModuleResult(
-            module_name="indicator", direction="CALL", score=1, confidence=51,
-            signal_type="CONTINUATION", reliability="INDICATOR", group="IND_STOCH",
-            reasons=[f"Stochastic bullish momentum (%K={k:.0f}) → CALL"]))
-    elif k < 50 and k < d and k > 20:
-        results.append(ModuleResult(
-            module_name="indicator", direction="PUT", score=1, confidence=51,
-            signal_type="CONTINUATION", reliability="INDICATOR", group="IND_STOCH",
-            reasons=[f"Stochastic bearish momentum (%K={k:.0f}) → PUT"]))
 
     return results
