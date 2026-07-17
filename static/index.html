@@ -17,23 +17,88 @@
 }
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px}
 #app{display:grid;grid-template-rows:auto 1fr auto;height:100vh;gap:0}
-/* TOP BAR */
-#topbar{display:flex;align-items:center;gap:12px;padding:6px 12px;background:var(--card);border-bottom:1px solid var(--border);flex-wrap:wrap;min-height:38px}
-.pair-wrap{position:relative}
-#pair-select{appearance:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);padding:4px 28px 4px 10px;font-size:13px;font-family:var(--sans);cursor:pointer;min-width:160px}
+/* ─── TOP BAR (redesigned 2026-07-17) ─── */
+/* Two-row layout: Row 1 = pair select + live price + connection status
+                   Row 2 = market category tabs (Real / OTC) with status */
+#topbar{
+  display:flex;flex-direction:column;
+  background:var(--card);border-bottom:1px solid var(--border);
+  padding:0;flex-shrink:0
+}
+#topbar-row1{
+  display:flex;align-items:center;gap:10px;padding:6px 12px;
+  border-bottom:1px solid var(--border);min-height:38px
+}
+#topbar-row2{
+  display:flex;align-items:center;gap:0;padding:0 12px;
+  background:rgba(0,0,0,.2);min-height:34px
+}
+/* Pair selector — wider, clearer */
+.pair-wrap{position:relative;flex-shrink:0}
+#pair-select{appearance:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);padding:6px 30px 6px 12px;font-size:14px;font-weight:600;font-family:var(--sans);cursor:pointer;min-width:200px;transition:border-color .15s}
 #pair-select:focus{outline:none;border-color:var(--green)}
-.pair-arrow{position:absolute;right:8px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--text-dim);font-size:10px}
+#pair-select:hover{border-color:var(--text-dim)}
+.pair-arrow{position:absolute;right:10px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--text-dim);font-size:10px}
+/* Live price ticker — animated */
+.live-price-wrap{display:flex;align-items:center;gap:8px;padding:4px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);min-width:140px}
+.live-price-label{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px}
+.live-price-val{font-family:var(--mono);font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;transition:color .15s}
+.live-price-val.up{color:var(--green)}
+.live-price-val.down{color:var(--red)}
+.live-price-val.flat{color:var(--text-dim)}
+.live-price-arrow{font-size:14px;font-weight:700;transition:transform .2s}
+.live-price-arrow.up{color:var(--green);transform:rotate(0deg)}
+.live-price-arrow.down{color:var(--red);transform:rotate(180deg)}
+.live-price-arrow.flat{color:var(--text-dim)}
+/* Payout */
+.payout{font-family:var(--mono);color:var(--yellow);font-weight:600;font-size:13px;padding:4px 10px;background:var(--yellow-bg);border-radius:var(--radius);border:1px solid rgba(255,193,7,.25)}
+/* Connection status group */
+.conn-group{display:flex;align-items:center;gap:6px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius)}
+#conn-dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex-shrink:0}
+#conn-dot.connected{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse-dot 2s infinite}
+#conn-dot.disconnected{background:var(--red);box-shadow:0 0 8px var(--red)}
+#conn-dot.connecting{background:var(--yellow);animation:pulse-dot 1s infinite}
+#conn-label{font-size:11px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.3px}
+/* Pairs count badge */
+.pairs-count-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:var(--radius);font-size:11px;font-weight:600;background:rgba(88,166,255,.12);color:var(--blue);border:1px solid rgba(88,166,255,.25);white-space:nowrap}
+/* Tick rate indicator (NEW — shows ticks/sec for the active stream) */
+.tick-rate-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:var(--radius);font-size:11px;font-weight:600;background:rgba(139,148,158,.12);color:var(--text-dim);border:1px solid var(--border);white-space:nowrap;font-family:var(--mono)}
+.tick-rate-badge .tick-dot{width:5px;height:5px;border-radius:50%;background:var(--green);animation:pulse-dot 1s infinite}
+/* Sound button */
+#sound-btn{background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius);padding:6px 10px;cursor:pointer;font-size:14px;display:flex;align-items:center;gap:4px;transition:all .15s}
+#sound-btn:hover{color:var(--text);border-color:var(--text-dim)}
+#sound-btn.on{color:var(--green);border-color:var(--green);background:var(--green-bg)}
+/* Category tab buttons — big, clear, in row 2 */
+.cat-tabs{display:flex;align-items:center;gap:2px;flex:1}
+.cat-tab{
+  display:flex;align-items:center;gap:8px;padding:6px 16px;cursor:pointer;
+  font-size:13px;font-weight:700;color:var(--text-dim);background:transparent;
+  border:none;border-bottom:2px solid transparent;transition:all .15s;
+  text-transform:uppercase;letter-spacing:.5px;font-family:var(--sans)
+}
+.cat-tab:hover{color:var(--text);background:rgba(255,255,255,.04)}
+.cat-tab.active.real{color:var(--green);border-bottom-color:var(--green);background:rgba(0,200,83,.06)}
+.cat-tab.active.otc{color:var(--yellow);border-bottom-color:var(--yellow);background:rgba(255,193,7,.06)}
+.cat-tab .cat-tab-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.cat-tab .cat-tab-dot.real{background:var(--green);box-shadow:0 0 6px var(--green)}
+.cat-tab .cat-tab-dot.otc{background:var(--yellow);box-shadow:0 0 6px var(--yellow)}
+.cat-tab .cat-tab-count{font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;background:rgba(255,255,255,.08);color:var(--text);font-family:var(--mono)}
+.cat-tab.active.real .cat-tab-count{background:rgba(0,200,83,.2);color:var(--green)}
+.cat-tab.active.otc .cat-tab-count{background:rgba(255,193,7,.2);color:var(--yellow)}
+.cat-tab-status{font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.3px;font-weight:600}
+.cat-tab-status.open{color:var(--green)}
+.cat-tab-status.closed{color:var(--red)}
+/* Right side of row 2 — extra stats */
+.topbar-stats{display:flex;align-items:center;gap:8px;padding:0 4px}
+.stat-mini{display:flex;flex-direction:column;align-items:flex-end;gap:0;padding:2px 8px}
+.stat-mini-label{font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.3px}
+.stat-mini-val{font-size:11px;color:var(--text);font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums}
+/* Backward-compat: keep some legacy classes for old JS refs */
 .badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}
 .badge-green{background:var(--green-bg);color:var(--green)}
 .badge-red{background:var(--red-bg);color:var(--red)}
 .badge-yellow{background:var(--yellow-bg);color:var(--yellow)}
 .badge-gray{background:rgba(139,148,158,.15);color:var(--text-dim)}
-.payout{font-family:var(--mono);color:var(--yellow);font-weight:600;font-size:12px}
-#conn-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
-#conn-dot.connected{background:var(--green);box-shadow:0 0 6px var(--green)}
-#conn-dot.disconnected{background:var(--red);box-shadow:0 0 6px var(--red)}
-#conn-dot.connecting{background:var(--yellow);animation:pulse-dot 1s infinite}
-#conn-label{font-size:11px;color:var(--text-dim)}
 .spacer{flex:1}
 #sound-btn{background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius);padding:3px 8px;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:4px}
 #sound-btn:hover{color:var(--text);border-color:var(--text-dim)}
@@ -366,48 +431,95 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 </head>
 <body>
 <div id="app">
-  <!-- TOP BAR -->
+  <!-- TOP BAR — redesigned 2026-07-17: two rows -->
   <header id="topbar">
-    <div class="pair-wrap">
-      <select id="pair-select"><option value="">Loading...</option></select>
-      <span class="pair-arrow">▼</span>
+    <!-- Row 1: pair selector + live price + connection + sound -->
+    <div id="topbar-row1">
+      <div class="pair-wrap">
+        <select id="pair-select"><option value="">Loading...</option></select>
+        <span class="pair-arrow">▼</span>
+      </div>
+      <!-- Live price ticker — animated with every tick -->
+      <div class="live-price-wrap">
+        <span class="live-price-label">PRICE</span>
+        <span class="live-price-val flat" id="live-price">—</span>
+        <span class="live-price-arrow flat" id="live-price-arrow">▲</span>
+      </div>
+      <span class="payout" id="payout-label">—</span>
+      <!-- Connection status -->
+      <div class="conn-group">
+        <span id="conn-dot" class="disconnected" role="status" aria-live="polite"></span>
+        <span id="conn-label" role="status" aria-live="polite">Disconnected</span>
+      </div>
+      <span class="pairs-count-badge" id="pairs-count">Pairs: —</span>
+      <!-- Tick rate indicator — shows ticks/sec for the active stream -->
+      <span class="tick-rate-badge" id="tick-rate-badge" title="Ticks per second for the active stream">
+        <span class="tick-dot"></span>
+        <span id="tick-rate-val">0</span>/s
+      </span>
+      <span class="spacer"></span>
+      <button id="sound-btn" title="Toggle sound" aria-pressed="false" aria-label="Toggle sound alerts">🔇</button>
+      <!-- 3-DOT MARKET CATEGORY MENU — kept as fallback / quick switch
+           button (also clickable). The main category tabs are in row 2. -->
+      <div id="market-menu-wrap">
+        <button id="market-menu-btn" title="Quick category switch" aria-label="Market category menu">⋮</button>
+        <div id="market-menu-dropdown" role="menu" aria-label="Market category">
+          <div class="market-menu-header">
+            <span>Market Category</span>
+            <span class="hint">Tap to switch</span>
+          </div>
+          <div class="market-menu-item" data-cat="real" role="menuitem">
+            <span class="cat-name"><span class="cat-dot real"></span> Real Market</span>
+            <span class="cat-info">
+              <span class="cat-count" id="real-count">—</span>
+              <span class="cat-status" id="real-status">checking…</span>
+            </span>
+          </div>
+          <div class="market-menu-item" data-cat="otc" role="menuitem">
+            <span class="cat-name"><span class="cat-dot otc"></span> OTC Market</span>
+            <span class="cat-info">
+              <span class="cat-count" id="otc-count">—</span>
+              <span class="cat-status" id="otc-status">checking…</span>
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
-    <span class="payout" id="payout-label">—</span>
-    <!-- Active market category badge — click also opens the 3-dot menu -->
-    <span id="market-badge" title="Switch market category">
-      <span class="badge-dot"></span>
-      <span id="market-badge-label">REAL</span>
-    </span>
-    <span id="conn-dot" class="disconnected" role="status" aria-live="polite"></span>
-    <span id="conn-label" role="status" aria-live="polite">Disconnected</span>
-    <span class="badge badge-gray" id="pairs-count">Pairs: —</span>
-    <span class="spacer"></span>
-    <button id="sound-btn" title="Toggle sound" aria-pressed="false" aria-label="Toggle sound alerts">🔇</button>
-    <!-- 3-DOT MARKET CATEGORY MENU — top-right corner.
-         Click → dropdown with "Real Market" and "OTC Market" tab options.
-         Selecting one re-filters the pair-select dropdown AND the panel
-         shows only that category's pairs. Each item shows live count +
-         market open/closed status (Real Market closed on weekends). -->
-    <div id="market-menu-wrap">
-      <button id="market-menu-btn" title="Switch market category" aria-label="Market category menu">⋮</button>
-      <div id="market-menu-dropdown" role="menu" aria-label="Market category">
-        <div class="market-menu-header">
-          <span>Market Category</span>
-          <span class="hint">Tap to switch</span>
+    <!-- Row 2: category tabs (Real Market / OTC Market) — big, prominent.
+         This is the primary way to switch between categories. Each tab
+         shows live pair count + open/closed status. -->
+    <div id="topbar-row2">
+      <div class="cat-tabs">
+        <button class="cat-tab" data-cat="real" id="cat-tab-real">
+          <span class="cat-tab-dot real"></span>
+          <span>Real Market</span>
+          <span class="cat-tab-count" id="cat-tab-real-count">—</span>
+          <span class="cat-tab-status" id="cat-tab-real-status">—</span>
+        </button>
+        <button class="cat-tab" data-cat="otc" id="cat-tab-otc">
+          <span class="cat-tab-dot otc"></span>
+          <span>OTC Market</span>
+          <span class="cat-tab-count" id="cat-tab-otc-count">—</span>
+          <span class="cat-tab-status" id="cat-tab-otc-status">—</span>
+        </button>
+      </div>
+      <!-- Right-side mini stats: active category + accuracy + candle countdown -->
+      <div class="topbar-stats">
+        <div class="stat-mini">
+          <span class="stat-mini-label">Active</span>
+          <span class="stat-mini-val" id="stat-active-cat">—</span>
         </div>
-        <div class="market-menu-item" data-cat="real" role="menuitem">
-          <span class="cat-name"><span class="cat-dot real"></span> Real Market</span>
-          <span class="cat-info">
-            <span class="cat-count" id="real-count">—</span>
-            <span class="cat-status" id="real-status">checking…</span>
-          </span>
+        <div class="stat-mini">
+          <span class="stat-mini-label">Win Rate</span>
+          <span class="stat-mini-val" id="stat-winrate">—</span>
         </div>
-        <div class="market-menu-item" data-cat="otc" role="menuitem">
-          <span class="cat-name"><span class="cat-dot otc"></span> OTC Market</span>
-          <span class="cat-info">
-            <span class="cat-count" id="otc-count">—</span>
-            <span class="cat-status" id="otc-status">checking…</span>
-          </span>
+        <div class="stat-mini">
+          <span class="stat-mini-label">Signals</span>
+          <span class="stat-mini-val" id="stat-signals">0</span>
+        </div>
+        <div class="stat-mini">
+          <span class="stat-mini-label">Next Candle</span>
+          <span class="stat-mini-val" id="stat-countdown">--:--</span>
         </div>
       </div>
     </div>
@@ -530,12 +642,18 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
             <span class="micro-value" id="ms-round">—</span>
           </div>
         </div>
-        <!-- 6-MODULE ENGINE -->
+        <!-- 6-MODULE ENGINE — shows per-module votes + active engine label -->
         <div style="margin-top:8px">
           <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
             <span class="section-title" style="margin:0">6-Module Engine</span>
             <span class="arrow">▶</span>
           </button>
+          <!-- Active engine badge — shows which engine (OTC/REAL) produced
+               the current prediction. Updates with each new prediction. -->
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;font-size:10px;color:var(--text-dim)">
+            <span>Active Engine:</span>
+            <span id="engine-label" style="font-weight:700;padding:2px 8px;border-radius:3px;background:rgba(255,193,7,.15);color:var(--yellow);font-family:var(--mono)">—</span>
+          </div>
           <div id="theories-list"></div>
         </div>
       </div>
@@ -589,6 +707,11 @@ let pairsList = [];
 let realPairsList = [], otcPairsList = [];
 let currentMicro = null, runningConf = null;
 let tapePrices = [], tapeDir = [];
+// FIX (2026-07-17): tick rate tracking — counts ticks received in the
+// last second to display ticks/sec in the topbar. Updates every 500ms.
+let tickTimestamps = [];   // array of Date.now() for each tick received
+let lastLivePrice = 0;     // last seen price, for direction arrow
+let lastTickAt = 0;        // wall time of last tick (for stale detection)
 let staleTimeout = null;
 /* ── CANDLE COUNTDOWN STATE ── */
 let runningCandleOpenTime = 0;
@@ -633,6 +756,22 @@ const otcCountEl  = $('otc-count');
 const realStatusEl = $('real-status');
 const otcStatusEl  = $('otc-status');
 const marketClosedBanner = $('market-closed-banner');
+// FIX (2026-07-17, UI redesign): new topbar elements
+const livePriceEl = $('live-price');
+const livePriceArrow = $('live-price-arrow');
+const tickRateVal = $('tick-rate-val');
+const catTabReal = $('cat-tab-real');
+const catTabOtc = $('cat-tab-otc');
+const catTabRealCount = $('cat-tab-real-count');
+const catTabOtcCount = $('cat-tab-otc-count');
+const catTabRealStatus = $('cat-tab-real-status');
+const catTabOtcStatus = $('cat-tab-otc-status');
+const statActiveCat = $('stat-active-cat');
+const statWinrate = $('stat-winrate');
+const statSignals = $('stat-signals');
+const statCountdown = $('stat-countdown');
+const catTabs = document.querySelectorAll('.cat-tab');
+const engineLabel = $('engine-label');
 const soundBtn = $('sound-btn');
 const signalBox = $('signal-box');
 const signalLabel = $('signal-label');
@@ -1111,14 +1250,18 @@ function renderSignal(pred){
   // 6-Module Engine breakdown
   theoriesList.innerHTML = '';
   const modules = pred.modules || {};
-  const moduleOrder = ['candle_reaction', 'running_tick', 'pattern', 'indicator', 'key_level', 'otc_pattern'];
+  // FIX (2026-07-17): include BOTH 'otc_pattern' (OTC engine) and
+  // 'trend_follow' (Real engine) — only one will be present based on
+  // which engine produced this prediction. Category field tells us which.
+  const moduleOrder = ['candle_reaction', 'running_tick', 'pattern', 'indicator', 'key_level', 'otc_pattern', 'trend_follow'];
   const moduleLabels = {
     'candle_reaction': 'Candle Reaction',
     'running_tick': 'Running Tick',
     'pattern': 'Pattern',
     'indicator': 'Indicator',
     'key_level': 'Key Level',
-    'otc_pattern': 'OTC Pattern'
+    'otc_pattern': 'OTC Pattern',
+    'trend_follow': 'Trend Follow'
   };
   let hasModuleVote = false;
   moduleOrder.forEach(mname => {
@@ -1166,6 +1309,21 @@ function renderSignal(pred){
   }
   // Beep only on fresh alerts — silent update otherwise.
   if(shouldAlert) signalBeep();
+  // FIX (2026-07-17): update the active-engine badge to show which engine
+  // (OTC / REAL) produced this prediction. The category field is set by
+  // the engines/__init__.py router.
+  if(engineLabel){
+    const cat = pred.category || currentCategory;
+    if(cat === 'real'){
+      engineLabel.textContent = 'REAL ENGINE';
+      engineLabel.style.background = 'rgba(0,200,83,.15)';
+      engineLabel.style.color = 'var(--green)';
+    } else {
+      engineLabel.textContent = 'OTC ENGINE';
+      engineLabel.style.background = 'rgba(255,193,7,.15)';
+      engineLabel.style.color = 'var(--yellow)';
+    }
+  }
 }
 
 /* ─── MICROSTRUCTURE ─── */
@@ -1463,6 +1621,18 @@ function renderPairs(payload){
     otcStatusEl.textContent = otcOpen ? 'OPEN 24/7' : 'CLOSED';
     otcStatusEl.className = 'cat-status ' + (otcOpen ? 'open' : 'closed');
   }
+  // FIX (2026-07-17, UI redesign): update the big cat-tab count + status
+  // indicators in topbar row 2.
+  if(catTabRealCount) catTabRealCount.textContent = realPairsList.length;
+  if(catTabOtcCount)  catTabOtcCount.textContent  = otcPairsList.length;
+  if(catTabRealStatus){
+    catTabRealStatus.textContent = realOpen ? 'OPEN' : 'CLOSED';
+    catTabRealStatus.className = 'cat-tab-status ' + (realOpen ? 'open' : 'closed');
+  }
+  if(catTabOtcStatus){
+    catTabOtcStatus.textContent = otcOpen ? 'OPEN 24/7' : 'CLOSED';
+    catTabOtcStatus.className = 'cat-tab-status ' + (otcOpen ? 'open' : 'closed');
+  }
 
   // Render only the active category's pairs in the dropdown.
   const activeList = currentCategory === 'real' ? realPairsList : otcPairsList;
@@ -1539,17 +1709,18 @@ function hideMarketClosedBanner(){
 
 function updateMarketBadge(){
   // Update the badge in the topbar to show the active category.
-  if(!marketBadge || !marketBadgeLabel) return;
-  if(currentCategory === 'real'){
-    marketBadgeLabel.textContent = 'REAL';
-    marketBadge.classList.remove('otc');
-    marketMenuBtn.classList.remove('active-otc');
-    marketMenuBtn.classList.add('active-real');
-  } else {
-    marketBadgeLabel.textContent = 'OTC';
-    marketBadge.classList.add('otc');
-    marketMenuBtn.classList.remove('active-real');
-    marketMenuBtn.classList.add('active-otc');
+  if(marketBadge && marketBadgeLabel){
+    if(currentCategory === 'real'){
+      marketBadgeLabel.textContent = 'REAL';
+      marketBadge.classList.remove('otc');
+      marketMenuBtn.classList.remove('active-otc');
+      marketMenuBtn.classList.add('active-real');
+    } else {
+      marketBadgeLabel.textContent = 'OTC';
+      marketBadge.classList.add('otc');
+      marketMenuBtn.classList.remove('active-real');
+      marketMenuBtn.classList.add('active-otc');
+    }
   }
   // Mark the selected item in the dropdown — also clear the other's
   // selected class so only one tab shows as active at a time.
@@ -1557,6 +1728,14 @@ function updateMarketBadge(){
     item.classList.remove('selected', 'real', 'otc');
     if(item.dataset.cat === currentCategory){
       item.classList.add('selected', currentCategory);
+    }
+  });
+  // FIX (2026-07-17, UI redesign): update the big cat-tab buttons in row 2.
+  // Clear all active classes, then add the active class to the current tab.
+  catTabs.forEach(tab => {
+    tab.classList.remove('active', 'real', 'otc');
+    if(tab.dataset.cat === currentCategory){
+      tab.classList.add('active', currentCategory);
     }
   });
 }
@@ -1598,6 +1777,21 @@ if(marketMenuBtn){
     });
   });
 }
+// FIX (2026-07-17, UI redesign): big cat-tab click handlers (the primary
+// way to switch categories — these are the prominent tab buttons in
+// topbar row 2). Same logic as the dropdown menu items above.
+catTabs.forEach(tab => {
+  if(!tab) return;
+  tab.addEventListener('click', () => {
+    const newCat = tab.dataset.cat;
+    if(newCat === currentCategory) return;
+    currentCategory = newCat;
+    localStorage.setItem('marketCategory', newCat);
+    updateMarketBadge();
+    // Re-render the pair dropdown with the new category's list.
+    renderPairs({ real_pairs: realPairsList, otc_pairs: otcPairsList });
+  });
+});
 // Initialize the badge on first load.
 updateMarketBadge();
 
@@ -1701,6 +1895,46 @@ function onTick(msg){
     updateLastCandle(c);
     // The running candle's `time` is its open time — refresh the countdown.
     runningCandleOpenTime = c.time;
+    // FIX (2026-07-17): update live price ticker on every tick (millisecond
+    // updates). Compares to the previous price to set the direction arrow.
+    if(c.close !== undefined && c.close !== null){
+      const newPrice = c.close;
+      if(livePriceEl){
+        livePriceEl.textContent = (typeof newPrice === 'number')
+          ? newPrice.toFixed(newPrice > 100 ? 3 : 5)
+          : '—';
+        if(lastLivePrice > 0){
+          if(newPrice > lastLivePrice){
+            livePriceEl.className = 'live-price-val up';
+            if(livePriceArrow){
+              livePriceArrow.className = 'live-price-arrow up';
+              livePriceArrow.textContent = '▲';
+            }
+          } else if(newPrice < lastLivePrice){
+            livePriceEl.className = 'live-price-val down';
+            if(livePriceArrow){
+              livePriceArrow.className = 'live-price-arrow down';
+              livePriceArrow.textContent = '▼';
+            }
+          } else {
+            livePriceEl.className = 'live-price-val flat';
+            if(livePriceArrow){
+              livePriceArrow.className = 'live-price-arrow flat';
+              livePriceArrow.textContent = '◆';
+            }
+          }
+        }
+        lastLivePrice = newPrice;
+      }
+    }
+    // Track tick rate — push timestamp, prune entries older than 1 second
+    const nowMs = Date.now();
+    tickTimestamps.push(nowMs);
+    lastTickAt = nowMs;
+    // Prune entries older than 1000ms
+    while(tickTimestamps.length > 0 && nowMs - tickTimestamps[0] > 1000){
+      tickTimestamps.shift();
+    }
   }
   if(c) addTapeTick(c.close);
   if(msg.micro) renderMicro(msg.micro);
@@ -1938,6 +2172,49 @@ function updateCandleCountdown(){
 // die anyway, but storing the IDs is best practice and future-proof.
 const _countdownInterval = setInterval(updateCandleCountdown, 200);
 
+// FIX (2026-07-17): tick rate display + stat panel updates. Runs every
+// 250ms — prunes tick timestamps older than 1s, displays the count as
+// "N/s" in the topbar tick-rate badge. Also updates the mini stat panel
+// (active category, win rate, signals count, next candle countdown).
+const _tickRateInterval = setInterval(() => {
+  const nowMs = Date.now();
+  // Prune tick timestamps older than 1000ms
+  while(tickTimestamps.length > 0 && nowMs - tickTimestamps[0] > 1000){
+    tickTimestamps.shift();
+  }
+  if(tickRateVal){
+    tickRateVal.textContent = tickTimestamps.length;
+  }
+  // Update active category display
+  if(statActiveCat){
+    statActiveCat.textContent = currentCategory.toUpperCase();
+    statActiveCat.style.color = currentCategory === 'real' ? 'var(--green)' : 'var(--yellow)';
+  }
+  // Update signals count + win rate from current state
+  if(statSignals){
+    statSignals.textContent = totalSignals;
+  }
+  if(statWinrate && totalSignals > 0){
+    const pct = Math.round((totalCorrect / totalSignals) * 100);
+    statWinrate.textContent = pct + '%';
+    statWinrate.style.color = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
+  } else if(statWinrate){
+    statWinrate.textContent = '—';
+  }
+  // Update next-candle countdown in the mini stat panel
+  if(statCountdown && runningCandleOpenTime && currentPeriod){
+    const closeAt = (runningCandleOpenTime + currentPeriod) * 1000;
+    const remaining = Math.max(0, Math.floor((closeAt - Date.now()) / 1000));
+    const m = Math.floor(remaining / 60);
+    const s = remaining % 60;
+    statCountdown.textContent = (m > 0 ? m + ':' : '') + (s < 10 ? '0' : '') + s;
+    // Color: red in last 5s, orange in last 10s
+    if(remaining <= 5) statCountdown.style.color = 'var(--red)';
+    else if(remaining <= 10) statCountdown.style.color = 'var(--yellow)';
+    else statCountdown.style.color = 'var(--text)';
+  }
+}, 250);
+
 // Ping to keep alive + dead-connection detection.
 // FIX (2026-07-13): the old keepalive just sent {type:'status'} every 15s
 // but never checked if a response came back. A dead-but-open TCP connection
@@ -1967,6 +2244,7 @@ const _keepaliveInterval = setInterval(()=>{
 window.addEventListener('pagehide', () => {
   try {
     clearInterval(_countdownInterval);
+    clearInterval(_tickRateInterval);
     clearInterval(_keepaliveInterval);
     if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
     if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
