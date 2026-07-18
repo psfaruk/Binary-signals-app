@@ -546,24 +546,44 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 
 .history-row{
   display:grid;
-  grid-template-columns:46px 1fr auto auto 18px;
+  grid-template-columns:46px 1fr auto auto 56px;
   align-items:center;gap:8px;
-  font-size:12px;padding:8px 10px;border-radius:5px;cursor:pointer;
+  font-size:12px;padding:8px 10px 8px 14px;border-radius:5px;cursor:pointer;
   transition:background .15s, border-color .15s, transform .1s;
   background:rgba(255,255,255,.02);
   border:1px solid rgba(255,255,255,.05);
+  border-left:3px solid rgba(139,148,158,.4);
   flex:0 0 auto;
   min-height:36px;
+  position:relative;
 }
 .history-row:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12)}
 .history-row:active{transform:scale(.995)}
-.history-row.correct{background:rgba(0,200,83,.10);border-color:rgba(0,200,83,.25)}
-.history-row.wrong{background:rgba(255,23,68,.10);border-color:rgba(255,23,68,.25)}
-.history-row.draw{background:rgba(255,193,7,.08);border-color:rgba(255,193,7,.20)}
-.history-row.pending{background:rgba(33,150,243,.06);border-color:rgba(33,150,243,.15)}
-.history-row.correct:hover{background:rgba(0,200,83,.16)}
-.history-row.wrong:hover{background:rgba(255,23,68,.16)}
-.history-row.draw:hover{background:rgba(255,193,7,.14)}
+.history-row.correct{
+  background:rgba(0,200,83,.14);
+  border-color:rgba(0,200,83,.35);
+  border-left:3px solid var(--green);
+  box-shadow:inset 0 0 12px rgba(0,200,83,.06);
+}
+.history-row.wrong{
+  background:rgba(255,23,68,.14);
+  border-color:rgba(255,23,68,.35);
+  border-left:3px solid var(--red);
+  box-shadow:inset 0 0 12px rgba(255,23,68,.06);
+}
+.history-row.draw{
+  background:rgba(255,193,7,.10);
+  border-color:rgba(255,193,7,.30);
+  border-left:3px solid var(--yellow);
+}
+.history-row.pending{
+  background:rgba(33,150,243,.08);
+  border-color:rgba(33,150,243,.20);
+  border-left:3px solid #2196f3;
+}
+.history-row.correct:hover{background:rgba(0,200,83,.20)}
+.history-row.wrong:hover{background:rgba(255,23,68,.20)}
+.history-row.draw:hover{background:rgba(255,193,7,.16)}
 
 .history-row-recent{
   box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 0 10px rgba(255,255,255,.06);
@@ -590,7 +610,20 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 .history-score{font-family:var(--mono);font-weight:600;font-size:12px;min-width:34px;text-align:right}
 .history-score.pos{color:var(--green)}
 .history-score.neg{color:var(--red)}
-.history-icon{font-size:14px;width:16px;text-align:center;line-height:1}
+.history-icon{
+  display:flex;align-items:center;justify-content:center;gap:4px;
+  font-size:16px;width:56px;text-align:center;line-height:1;
+  font-weight:700;letter-spacing:.5px;
+}
+.history-icon .icon-emoji{font-size:16px;line-height:1}
+.history-icon .icon-label{
+  font-size:9px;font-family:var(--sans);font-weight:800;
+  letter-spacing:.6px;text-transform:uppercase;
+}
+.history-row.correct .icon-label{color:var(--green)}
+.history-row.wrong .icon-label{color:var(--red)}
+.history-row.draw .icon-label{color:var(--yellow)}
+.history-row.pending .icon-label{color:#2196f3}
 
 /* ============================================================================
    SIGNAL DETAIL MODAL
@@ -809,9 +842,12 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   /* Signal label: smaller */
   #signal-label{font-size:20px}
 
-  /* History: tighter rows */
-  .history-row{padding:6px 8px;font-size:11px;gap:6px;grid-template-columns:40px 1fr auto auto 16px}
+  /* History: tighter rows — keep icon visible for quick win/loss scan */
+  .history-row{padding:6px 8px;font-size:11px;gap:6px;grid-template-columns:36px 1fr auto auto 44px}
   .history-strength{font-size:9px;padding:1px 4px}
+  .history-icon{width:44px;font-size:14px;gap:2px}
+  .history-icon .icon-emoji{font-size:14px}
+  .history-icon .icon-label{font-size:8px}
 
   /* Modal: full-width on phones */
   #signal-detail-modal{padding:12px;border-radius:6px}
@@ -839,9 +875,11 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   /* Hide accuracy-bar details on tiny phones */
   #accuracy-bar{padding:3px 8px;font-size:10px}
 
-  /* History rows: drop the icon column, save space */
-  .history-row{grid-template-columns:36px 1fr auto auto;gap:5px;padding:5px 6px}
-  .history-icon{display:none}
+  /* History rows: keep icon (just emoji) but drop the label to save space */
+  .history-row{grid-template-columns:30px 1fr auto auto 20px;gap:4px;padding:5px 6px}
+  .history-icon{width:20px;font-size:14px;gap:0}
+  .history-icon .icon-label{display:none}
+  .history-icon .icon-emoji{font-size:14px}
 
   /* Countdown: top-right corner */
   #candle-countdown{top:4px;right:50px;font-size:10px;padding:2px 6px}

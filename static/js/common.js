@@ -784,7 +784,22 @@ function renderHistory(){
   for(let i = lastIdx; i >= 0; i--){
     const h = signalHistory[i];
     const isRecent = (i === lastIdx);
-    const icon = h.accuracy === 'correct' ? '✅' : h.accuracy === 'wrong' ? '❌' : h.accuracy === 'draw' ? '➖' : '⏳';
+    // FIX (2026-07-18): clearer win/loss icons with text labels.
+    //   correct  → ✅ WIN   (green)
+    //   wrong    → ❌ LOSS  (red)
+    //   draw     → ➖ DRAW  (yellow)
+    //   pending  → ⏳ WAIT  (blue)
+    // On phones (<400px) the text label is hidden via CSS — only the emoji shows.
+    let iconEmoji, iconLabel;
+    if(h.accuracy === 'correct'){
+      iconEmoji = '✅'; iconLabel = 'WIN';
+    } else if(h.accuracy === 'wrong'){
+      iconEmoji = '❌'; iconLabel = 'LOSS';
+    } else if(h.accuracy === 'draw'){
+      iconEmoji = '➖'; iconLabel = 'DRAW';
+    } else {
+      iconEmoji = '⏳'; iconLabel = 'WAIT';
+    }
     const sigCls = h.signal === 'CALL' ? 'call' : h.signal === 'PUT' ? 'put' : 'neutral';
     const strength = h.detail ? h.detail.strength : '';
     const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
@@ -812,7 +827,10 @@ function renderHistory(){
          +  `<span class="history-signal ${sigCls}">${h.signal}</span>`
          +  `<span class="history-strength ${strengthCls}">${strengthLetter}</span>`
          +  `<span class="history-score ${scoreCls}">${score || '—'}</span>`
-         +  `<span class="history-icon">${icon}</span>`
+         +  `<span class="history-icon">`
+         +    `<span class="icon-emoji">${iconEmoji}</span>`
+         +    `<span class="icon-label">${iconLabel}</span>`
+         +  `</span>`
          +  `</div>`;
   }
   historyList.innerHTML = html;
