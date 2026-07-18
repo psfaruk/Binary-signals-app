@@ -1,18 +1,19 @@
 """
-Shared market context — computed ONCE per candle close, passed to all modules.
+engines/base/context.py — Shared market context computer.
 
-This avoids redundant computation of regime, ATR, statistical edge, and
-key levels across 6 modules. O(N) per call where N = lookback (typically
-50 candles).
+Computes the MarketContext ONCE per candle close and passes it to every
+module so they don't recompute regime/ATR/stats/key_levels.
+
+Uses `core.analysis` as the single source of truth for analysis functions.
 """
-from advanced_analysis import (
+from core.analysis import (
     classify_market_regime,
     find_key_levels,
     check_level_confluence,
     compute_statistical_edge,
     _atr,
 )
-from engines.otc.types import MarketContext
+from engines.base.types import MarketContext
 
 
 def compute_context(candles) -> MarketContext:

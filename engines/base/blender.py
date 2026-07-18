@@ -1,10 +1,14 @@
 """
-Smart Blender — combines 6 independent modules into final prediction.
+engines/base/blender.py — Smart blender (shared by both engines).
+
+Combines 6 modules into a final CALL/PUT/NEUTRAL prediction. This is
+the SINGLE source of truth for the blending algorithm — previously
+duplicated 442 lines × 2 between engines/otc/blender.py and
+engines/real/blender.py, identical except for ONE module name.
 
 Pipeline:
   1. Compute shared MarketContext ONCE
-  2. Run all 6 modules (candle_reaction, running_tick, pattern,
-     indicator, key_level, otc_pattern)
+  2. Run all 6 modules (5 shared + 1 engine-specific 6th module)
   3. Collapse correlated groups (BODY signals → 1 vote)
   4. Apply regime-aware weighting (TREND/RANGE/VOLATILE + exhaustion gate)
   5. Apply per-pair module weighting (USDPKR → boost reversal, EURUSD → boost indicator)
@@ -14,24 +18,53 @@ Pipeline:
   9. Group-aware confidence calibration
   10. Strength tier determination
 
-This is the ONLY public entry point: predict()
+Engine-specific configuration is passed in via a `BlenderConfig` dataclass:
+  - module_6_name: "otc_pattern" or "trend_follow"
+  - module_6_fn: the analyze() function for the 6th module
+  - reliability: dict of reliability tier → multiplier
+  - weight_adapter: PairWeightAdapter instance
+  - module_names: tuple of 6 module names (for the breakdown display)
 """
-from engines.otc.types import ModuleResult, MarketContext, RELIABILITY
-from engines.otc.context import compute_context
-from engines.otc.per_pair import get_weights, get_profile
-from engines.otc.modules import (
+import math
+from dataclasses import dataclass, field
+from typing import Callable
+
+from engines.base.types import ModuleResult, MarketContext
+from engines.base.context import compute_context
+from engines.base.modules import (
     candle_reaction as mod_candle,
     running_tick as mod_tick,
     pattern as mod_pattern,
     indicator as mod_indicator,
     key_level as mod_keylevel,
-    otc_pattern as mod_otc,
 )
+from engines.base.per_pair import PairWeightAdapter
+
+
+@dataclass
+class BlenderConfig:
+    """Engine-specific configuration for the shared blender.
+
+    Encapsulates everything that differs between the OTC and Real engines:
+      - module_6_name: name of the 6th module ("otc_pattern" or "trend_follow")
+      - module_6_fn: the 6th module's analyze() function
+      - reliability: dict of reliability tier → multiplier
+      - weight_adapter: PairWeightAdapter instance (with engine-specific
+                        PAIR_CONFIGS and DEFAULT_WEIGHTS baked in)
+      - module_names: tuple of 6 module names (for breakdown display)
+      - engine_name: short label for debug logs ("otc" or "real")
+    """
+    module_6_name: str
+    module_6_fn: Callable
+    reliability: dict
+    weight_adapter: PairWeightAdapter
+    module_names: tuple
+    engine_name: str = "base"
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
-            period: int = 60) -> dict:
-    """Main entry point — runs 6 modules + smart blend.
+            period: int = 60, config=None) -> dict:
+    """Run 6 modules + smart blend using the given engine config.
 
     Args:
         candles: list of closed candle dicts (time, open, high, low, close)
@@ -39,10 +72,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         micro: microstructure dict (optional)
         asset: pair name for per-pair weighting (e.g. "EURUSD_otc")
         htf_trend: "UPTREND" | "DOWNTREND" | "SIDEWAYS" from 5m EMA confluence.
-            Counter-HTF signals get a 0.7 penalty; aligned signals get 1.1 boost.
-            "SIDEWAYS" (uncertain HTF) leaves signals unaffected.
-        period: candle period in seconds (default 60). Used by per_pair
-            DB-adaptation to look up the right historical accuracy bucket.
+        period: candle period in seconds (default 60).
+        config: BlenderConfig dataclass (REQUIRED) — encapsulates the
+            engine-specific reliability multipliers, weight adapter, and
+            the 6th module.
 
     Returns dict with:
         signal: "CALL" | "PUT" | "NEUTRAL"
@@ -59,8 +92,16 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         profile: str (pair behavior profile)
         htf_trend: str (echo for UI/logging)
     """
+    if config is None:
+        raise ValueError("BlenderConfig is required — pass engines.{otc,real}.config.BLENDER_CONFIG")
+
+    reliability = config.reliability
+    weight_adapter = config.weight_adapter
+    module_6_fn = config.module_6_fn
+    module_names = config.module_names
+
     if not candles or len(candles) < 3:
-        return _neutral("INSUFFICIENT_DATA", {}, asset)
+        return _neutral("INSUFFICIENT_DATA", {}, asset, weight_adapter)
 
     # ── Step 1: Compute shared context ONCE ──────────────────────────────
     ctx = compute_context(candles)
@@ -72,10 +113,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     all_results += mod_pattern.analyze(candles, ctx)
     all_results += mod_indicator.analyze(candles, ctx)
     all_results += mod_keylevel.analyze(candles, ctx)
-    all_results += mod_otc.analyze(candles, ctx)
+    all_results += module_6_fn(candles, ctx)
 
     if not all_results:
-        return _neutral("NO_SIGNAL", ctx.regime, asset)
+        return _neutral("NO_SIGNAL", ctx.regime, asset, weight_adapter)
 
     # ── Step 3: Collapse correlated groups (BODY → 1 vote) ───────────────
     body_signals = [r for r in all_results if r.group == "BODY"]
@@ -84,11 +125,6 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     grouped_results = non_body + ([collapsed_body] if collapsed_body else [])
 
     # ── Step 4: Exhaustion gate detection ────────────────────────────────
-    # FIX (Bug #9, 2026-07-17): exhaustion detection now runs on the
-    # COLLAPSED grouped_results (post-collapse), not on raw all_results.
-    # Previously a signal could be detected as "exhaustion" from a body
-    # sub-signal that was later dropped during BODY-group collapse, so the
-    # exhaustion flag was inconsistent with the actual voting set.
     exhaustion_indicators = 0
     if any(r.group == "BODY" and "exhaustion" in " ".join(r.reasons).lower()
            for r in grouped_results):
@@ -103,8 +139,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     is_strongly_exhausting = exhaustion_indicators >= 3
 
     # ── Step 5: Get per-pair weights (DB-adapted) ──────────────────────
-    pair_weights = get_weights(asset, period=period)
-    pair_profile = get_profile(asset)
+    pair_weights = weight_adapter.get_weights(asset, period=period)
+    pair_profile = weight_adapter.get_profile(asset)
 
     # ── Step 6: Apply regime + per-pair + reliability weights ────────────
     regime = ctx.regime
@@ -165,14 +201,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             r_mult = 1.0
 
         # Reliability tier multiplier
-        t_mult = RELIABILITY.get(r.reliability, 1.0)
+        t_mult = reliability.get(r.reliability, 1.0)
 
         # Per-pair module weight
         p_mult = pair_weights.get(r.module_name, 1.0)
 
-        # HTF confluence multiplier (NEW — was previously computed but discarded).
-        # Counter-HTF CALL signals (HTF=DOWN) and counter-HTF PUT signals (HTF=UP)
-        # get a 0.7 penalty. Aligned signals get 1.1 boost. SIDEWAYS = neutral.
+        # HTF confluence multiplier.
         if htf_trend == "UPTREND":
             h_mult = 1.1 if r.direction == "CALL" else 0.7
         elif htf_trend == "DOWNTREND":
@@ -209,7 +243,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         all_reasons.append(f"_SUPPRESSED: {suppressed_count} signal(s) dampened to 0")
 
     if total_groups == 0:
-        return _neutral(all_reasons or ["NO_SIGNAL"], regime, asset, ctx)
+        return _neutral(all_reasons or ["NO_SIGNAL"], regime, asset, weight_adapter, ctx)
 
     net = call_score - put_score
     total = call_score + put_score
@@ -224,25 +258,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             "score": 0, "reasons": all_reasons or ["CONFLICTING_SIGNALS"],
             "regime": regime, "agree": maj_n,
             "total": total_groups, "signals_fired": total_groups,
-            "modules": _module_breakdown(adjusted, all_results),
+            "modules": _module_breakdown(adjusted, all_results, module_names),
             "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
         }
 
     signal = "CALL" if net > 0 else "PUT"
 
-    # ── Step 8: Confidence calibration (refactored) ─────────────────────
-    # FIX (Bug #13-14, 2026-07-17): the old blend mixed two non-comparable
-    # metrics (group-count % and weighted-score %) by simple averaging,
-    # which inflated confidence when correlated modules agreed and capped
-    # strong-but-isolated signals at 55%. Now:
-    #   1. Use the GEOMETRIC mean of vote-count and weight ratios (sensitive
-    #      to BOTH breadth and depth, but doesn't compound them linearly).
-    #   2. Replace the flat 55% single-group cap with an adaptive cap that
-    #      scales up with effective score — a lone PATTERN signal with
-    #      effective score >= 6 has earned more trust than a lone score=1.
-    #   3. Apply a small HTF-alignment bonus when the signal agrees with
-    #      the 5m trend (already captured in effective score, but a direct
-    #      confidence bump makes UI grade reflect it).
+    # ── Step 8: Confidence calibration ───────────────────────────────────
     majority_groups = call_groups if signal == "CALL" else put_groups
     majority_group_n = len(majority_groups)
 
@@ -250,12 +272,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     majority_score = max(call_score, put_score)
     weight_ratio = (majority_score / total) if total > 0 else 0
 
-    # Geometric mean: sensitive to BOTH breadth and depth, but a low value
-    # in either pulls the result down (avoids the 50%+50% compounding bug).
-    import math as _math
-    confidence = int(_math.sqrt(vote_ratio * weight_ratio) * 100)
+    # Geometric mean: sensitive to BOTH breadth and depth.
+    confidence = int(math.sqrt(vote_ratio * weight_ratio) * 100)
 
-    # HTF alignment bonus (only when HTF is directional AND signal agrees).
+    # HTF alignment bonus.
     if htf_trend == "UPTREND" and signal == "CALL":
         confidence = min(100, confidence + 5)
     elif htf_trend == "DOWNTREND" and signal == "PUT":
@@ -266,11 +286,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     ):
         confidence = max(0, confidence - 5)
 
-    # Adaptive single-group cap: a lone strong signal deserves more trust
-    # than a lone weak one. Was: flat min(55). Now: cap scales with the
-    # signal's effective score.
+    # Adaptive single-group cap.
     if total_groups == 1:
-        max_eff = majority_score  # effective score of the single voting group
+        max_eff = majority_score
         if max_eff >= 6:
             cap = 70
         elif max_eff >= 4:
@@ -280,11 +298,6 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         confidence = min(confidence, cap)
 
     # ── Step 9: Pattern confluence check for STRONG ──────────────────────
-    # FIX (Bug #12, 2026-07-17): tighten pattern confluence.
-    # Previously ANY non-pattern group (even a score-1 stochastic
-    # continuation) counted as confluence. Now requires a non-pattern
-    # group with effective score >= 3 — i.e. a substantive confirmation,
-    # not noise.
     pattern_agrees = any(
         r.reliability == "PATTERN" and r.direction == signal
         for r, e in adjusted
@@ -295,8 +308,6 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     )
     has_pattern_confluence = pattern_agrees and strong_non_pattern_agrees
 
-    # FIX: 'agree' = number of unique groups voting for majority direction
-    # (NOT score). The HTML label says 'N/M modules' so this must be a count.
     agree = majority_group_n
     abs_net = abs(net)
 
@@ -317,7 +328,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             "score": net, "reasons": all_reasons + [f"Net too low ({net}) → NEUTRAL"],
             "regime": regime, "agree": agree, "total": total_groups,
             "signals_fired": total_groups,
-            "modules": _module_breakdown(adjusted, all_results),
+            "modules": _module_breakdown(adjusted, all_results, module_names),
             "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
         }
 
@@ -331,7 +342,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         "agree": agree,
         "total": total_groups,
         "signals_fired": total_groups,
-        "modules": _module_breakdown(adjusted, all_results),
+        "modules": _module_breakdown(adjusted, all_results, module_names),
         "asset": asset,
         "profile": pair_profile,
         "htf_trend": htf_trend,
@@ -382,14 +393,12 @@ def _collapse_body_group(body_signals: list) -> ModuleResult:
         reasons=[f"[BODY collapsed] {reasons_str}"])
 
 
-def _module_breakdown(adjusted: list, all_results: list) -> dict:
+def _module_breakdown(adjusted: list, all_results: list, module_names: tuple) -> dict:
     """Build per-module breakdown for UI display.
 
     Returns dict mapping module_name → {direction, score, reasons, fired}
     """
     breakdown = {}
-    module_names = ["candle_reaction", "running_tick", "pattern",
-                    "indicator", "key_level", "otc_pattern"]
 
     for mname in module_names:
         module_adjusted = [(r, e) for r, e in adjusted if r.module_name == mname]
@@ -428,15 +437,20 @@ def _module_breakdown(adjusted: list, all_results: list) -> dict:
     return breakdown
 
 
-def _neutral(reasons, regime, asset="", ctx=None, htf_trend="SIDEWAYS") -> dict:
+def _neutral(reasons, regime, asset="", weight_adapter=None, ctx=None,
+             htf_trend="SIDEWAYS") -> dict:
     """Return a NEUTRAL prediction."""
     modules = {}
-    if ctx:
-        modules = _module_breakdown([], [])
+    pair_profile = "default"
+    if weight_adapter is not None:
+        pair_profile = weight_adapter.get_profile(asset)
+        if ctx is not None:
+            # Use the engine's module names for the breakdown display
+            modules = _module_breakdown([], [], weight_adapter.module_names)
     return {
         "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
         "score": 0, "reasons": reasons if isinstance(reasons, list) else [reasons],
         "regime": regime, "agree": 0, "total": 0, "signals_fired": 0,
-        "modules": modules, "asset": asset, "profile": get_profile(asset),
+        "modules": modules, "asset": asset, "profile": pair_profile,
         "htf_trend": htf_trend,
     }

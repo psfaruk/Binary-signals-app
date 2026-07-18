@@ -30,15 +30,23 @@ if [ ! -f .env ]; then
 fi
 
 # ── Credentials চেক ─────────────────────────────────────────────────────────
-if grep -q "your_email@example.com" .env; then
+# FIX (BUG-5, 2026-07-18): .env.example now exists with empty fields, so
+# we check if QX_TOKEN / QX_EMAIL / QX_PASSWORD are still empty rather
+# than looking for a placeholder email string. Also accept USE_SIM=1 as
+# a valid config (no creds needed in sim mode).
+if ! grep -qE "^(QX_TOKEN|QX_EMAIL|QX_PASSWORD)=.+" .env && \
+   ! grep -qE "^USE_SIM=1" .env; then
     echo ""
-    echo "❌ .env ফাইলে এখনও ডিফল্ট email আছে!"
+    echo "❌ .env ফাইলে কোনো Quotex credentials নেই!"
     echo ""
     echo "   .env ফাইল edit করুন এবং আপনার Quotex email + password দিন:"
     echo "   nano .env"
     echo ""
     echo "   অথবা যদি আপনার কাছে session token থাকে (browser থেকে কপি করা):"
     echo "   QX_TOKEN=abc123... লাইনটি uncomment করে token দিন"
+    echo ""
+    echo "   অথবা simulation mode এ চালাতে (credentials ছাড়া):"
+    echo "   USE_SIM=1 লাইনটি uncomment করুন"
     exit 1
 fi
 

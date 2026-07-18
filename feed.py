@@ -1325,7 +1325,22 @@ class QuotexFeed:
         # itself the moment the regime/zone classification changes (see the
         # streak update in _close_running_and_start_new), not on a timer.
         _reg = result.get("regime") or {}
-        _key = (_reg.get("trend"), _reg.get("zone"))
+        # FIX (BUG-2, 2026-07-18): use correct keys. Previously
+        # `_reg.get("trend")` returned None always (no such key), making
+        # the chop-guard degenerate to "wrong ≥3x in a row → WEAK"
+        # regardless of regime/zone. Now we use the actual `regime` key
+        # and derive a zone label, so the guard only fires for the
+        # SPECIFIC (regime, zone) that's been losing.
+        _regime = _reg.get("regime")
+        if _reg.get("is_volatile"):
+            _zone = "VOLATILE"
+        elif _reg.get("is_trending"):
+            _zone = "TREND"
+        elif _reg.get("is_ranging"):
+            _zone = "RANGE"
+        else:
+            _zone = "UNKNOWN"
+        _key = (_regime, _zone)
         if (result["signal"] != "NEUTRAL"
                 and _key == (stream.zone_streak["regime"], stream.zone_streak["zone"])
                 and stream.zone_streak["losses"] >= ZONE_LOSS_GUARD):
@@ -1401,7 +1416,23 @@ class QuotexFeed:
             atr   = (sum(x["high"] - x["low"] for x in _hist) / len(_hist)
                      if _hist else c_rng)
             _reg  = (prediction.get("regime") or {})
-            regime, zone = _reg.get("trend"), _reg.get("zone")
+            # FIX (BUG-2, 2026-07-18): previously read `_reg.get("trend")`
+            # and `_reg.get("zone")` — but classify_market_regime() returns
+            # keys `regime` (e.g. "TREND_UP") and boolean flags
+            # `is_trending`/`is_ranging`/`is_volatile`. There is NO "trend"
+            # or "zone" key. This silently logged regime=None/zone=None for
+            # EVERY signal, breaking the chop-guard and any per-regime
+            # analytics. Now we use the correct keys and derive a `zone`
+            # label from the regime flags.
+            regime = _reg.get("regime")
+            if _reg.get("is_volatile"):
+                zone = "VOLATILE"
+            elif _reg.get("is_trending"):
+                zone = "TREND"
+            elif _reg.get("is_ranging"):
+                zone = "RANGE"
+            else:
+                zone = "UNKNOWN"
             sig   = prediction["signal"]
 
             tags = []
@@ -1910,7 +1941,17 @@ class QuotexFeed:
         # clears the streak; a loss in the SAME zone extends it.
         if accuracy in ("correct", "wrong"):
             _reg = (stream.prediction or {}).get("regime") or {}
-            _key = (_reg.get("trend"), _reg.get("zone"))
+            # FIX (BUG-2, 2026-07-18): use correct regime/zone keys.
+            _regime = _reg.get("regime")
+            if _reg.get("is_volatile"):
+                _zone = "VOLATILE"
+            elif _reg.get("is_trending"):
+                _zone = "TREND"
+            elif _reg.get("is_ranging"):
+                _zone = "RANGE"
+            else:
+                _zone = "UNKNOWN"
+            _key = (_regime, _zone)
             if _key == (stream.zone_streak["regime"], stream.zone_streak["zone"]):
                 stream.zone_streak["losses"] = (
                     stream.zone_streak["losses"] + 1 if accuracy == "wrong" else 0)

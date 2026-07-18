@@ -14,7 +14,7 @@ focuses on what actually works in broker-generated price feeds:
 Reliability: OTC ×1.2 (OTC-specific patterns get a slight bonus
 since they're tuned for the actual market behavior)
 """
-from engines.otc.types import ModuleResult, MarketContext
+from engines.base.types import ModuleResult, MarketContext
 
 
 def analyze(candles, ctx: MarketContext) -> list:

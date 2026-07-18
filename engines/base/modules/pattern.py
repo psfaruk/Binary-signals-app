@@ -19,8 +19,8 @@ Patterns (reliability: PATTERN ×1.5):
 Each pattern gets its own group (PATTERN_*) so they're counted as
 independent votes in the blender.
 """
-from advanced_analysis import detect_candle_patterns
-from engines.otc.types import ModuleResult, MarketContext
+from core.analysis import detect_candle_patterns
+from engines.base.types import ModuleResult, MarketContext
 
 REVERSAL_PATTERNS = {
     "BULL_ENGULF", "BEAR_ENGULF", "MORNING_STAR", "EVENING_STAR",

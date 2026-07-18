@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="description" content="OTC Market Binary Options Signals — 24/7 live candle chart, 6-module prediction engine, signal history.">
+  <title>OTC Market — Binary Signal Terminal</title>
+  <link rel="stylesheet" href="/static/css/common.css">
+  <link rel="stylesheet" href="/static/css/otc.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       HEADER / TOPBAR
+       Row 1: brand + pair selector + live price + payout + connection + switch
+       Row 2: market status banner + mini stats
+       ════════════════════════════════════════════════════════════════════ -->
+  <header id="topbar">
+
+    <!-- Row 1 -->
+    <div id="topbar-row1">
+
+      <!-- Brand block: yellow dot + "OTC MARKET" title -->
+      <div class="brand" aria-label="OTC Market">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <div class="brand-title">
+          <span class="brand-name">OTC MARKET</span>
+          <span class="brand-sub">OTC 24/7 engine</span>
+        </div>
+      </div>
+
+      <!-- Pair selector -->
+      <div class="pair-wrap">
+        <select id="pair-select" aria-label="Select trading pair">
+          <option value="">Loading...</option>
+        </select>
+        <span class="pair-arrow" aria-hidden="true">▼</span>
+      </div>
+
+      <!-- Live price ticker -->
+      <div class="live-price-wrap" aria-live="polite">
+        <span class="live-price-label">PRICE</span>
+        <span class="live-price-val flat" id="live-price">—</span>
+        <span class="live-price-arrow flat" id="live-price-arrow" aria-hidden="true">▲</span>
+      </div>
+
+      <!-- Payout -->
+      <span class="payout" id="payout-label" aria-label="Payout percent">—</span>
+
+      <!-- Connection status -->
+      <div class="conn-group">
+        <span id="conn-dot" class="disconnected" role="status" aria-live="polite"></span>
+        <span id="conn-label" role="status" aria-live="polite">Disconnected</span>
+      </div>
+
+      <span class="pairs-count-badge" id="pairs-count" aria-label="Available pair count">Pairs: —</span>
+
+      <!-- Tick rate (hidden on small screens via CSS) -->
+      <span class="tick-rate-badge" id="tick-rate-badge" title="Ticks per second for the active stream">
+        <span class="tick-dot" aria-hidden="true"></span>
+        <span id="tick-rate-val">0</span>/s
+      </span>
+
+      <span class="spacer"></span>
+
+      <!-- Sound toggle -->
+      <button id="sound-btn" type="button" title="Toggle sound alerts"
+              aria-pressed="false" aria-label="Toggle sound alerts">🔇</button>
+
+      <!-- ══ MARKET SWITCH BUTTON — clicking it navigates to real.html ══ -->
+      <button id="market-switch-btn" type="button" aria-label="Switch to Real Market"
+              title="Switch to Real Market (live forex, weekdays only)">
+        <span class="switch-icon" aria-hidden="true">⇄</span>
+        <span class="switch-text">Switch to Real</span>
+      </button>
+
+    </div>
+
+    <!-- Row 2: status banner + mini stats -->
+    <div id="topbar-row2">
+
+      <!-- Market status indicator (24/7 — always live) -->
+      <span id="market-status-indicator" class="market-status always"
+            role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>OTC MARKET — 24/7
+      </span>
+
+      <div class="topbar-stats">
+        <div class="stat-mini">
+          <span class="stat-mini-label">Active</span>
+          <span class="stat-mini-val" id="stat-active-cat">OTC</span>
+        </div>
+        <div class="stat-mini">
+          <span class="stat-mini-label">Win Rate</span>
+          <span class="stat-mini-val" id="stat-winrate">—</span>
+        </div>
+        <div class="stat-mini">
+          <span class="stat-mini-label">Signals</span>
+          <span class="stat-mini-val" id="stat-signals">0</span>
+        </div>
+        <div class="stat-mini">
+          <span class="stat-mini-label">Next Candle</span>
+          <span class="stat-mini-val" id="stat-countdown">--:--</span>
+        </div>
+      </div>
+
+    </div>
+
+  </header>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       MAIN AREA — chart (left) + side panel (right)
+       ════════════════════════════════════════════════════════════════════ -->
+  <main id="main">
+
+    <!-- Chart -->
+    <section id="chart-wrap" aria-label="Live candle chart">
+      <div id="chart-container"></div>
+      <div id="candle-countdown" class="idle">--:--</div>
+      <div id="stale-overlay"><span id="stale-msg">⚠ FEED STALE</span></div>
+      <div id="chart-loading-overlay" class="show">
+        <div id="chart-loading-spinner"></div>
+        <span id="chart-loading-text">Loading chart data…</span>
+      </div>
+    </section>
+
+    <!-- Side panel -->
+    <aside id="panel" aria-label="Signal and analysis panel">
+
+      <!-- Signal box -->
+      <div class="panel-section">
+        <div class="section-title">Signal</div>
+        <div id="signal-box" class="neutral">
+          <div id="signal-label">—</div>
+        </div>
+        <div style="margin-top:8px">
+          <div class="signal-row"><span class="label">Score</span><span class="value" id="sig-score">—</span></div>
+          <div class="signal-row"><span class="label">Strength</span><span class="value" id="sig-strength">—</span></div>
+          <div class="signal-row"><span class="label">Confidence</span><span class="value" id="sig-conf-val">—</span></div>
+          <div class="conf-bar-wrap"><div class="conf-bar" id="sig-conf-bar" style="width:0%"></div></div>
+          <div class="signal-row"><span class="label">Agree</span><span class="value" id="sig-agree">—</span></div>
+          <div class="signal-row"><span class="label">Regime</span><span class="value" id="sig-regime">—</span></div>
+        </div>
+      </div>
+
+      <!-- Market State (3 fields only — phase/structure/zigzag removed) -->
+      <div class="panel-section" id="market-state-section">
+        <div class="section-title">Market State</div>
+        <div class="micro-grid">
+          <div class="micro-item">
+            <span class="micro-label">Trend</span>
+            <span class="micro-value" id="ms-trend">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Zone</span>
+            <span class="micro-value" id="ms-zone">—</span>
+          </div>
+          <div class="micro-item" style="grid-column:1/-1">
+            <span class="micro-label">Volatility</span>
+            <span class="micro-value" id="ms-volatility">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Microstructure -->
+      <div class="panel-section" style="flex:1;overflow-y:auto">
+        <div class="section-title">Running Candle Microstructure</div>
+
+        <div class="micro-grid">
+          <!-- Buyer/Seller bar -->
+          <div class="bs-bar-wrap">
+            <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text-dim);margin-bottom:2px">
+              <span>BUYER</span><span>SELLER</span>
+            </div>
+            <div class="bs-bars">
+              <div class="bs-buy" id="bs-buy" style="width:50%">50%</div>
+              <div class="bs-sell" id="bs-sell" style="width:50%">50%</div>
+            </div>
+          </div>
+
+          <div class="micro-item">
+            <span class="micro-label">Pressure</span>
+            <span class="pressure-badge buyer" id="ms-pressure">BUYER</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Reaction</span>
+            <span class="react-badge none" id="ms-reaction">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Fight</span>
+            <span class="micro-value" id="ms-fight">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Hold Level</span>
+            <span class="micro-value" id="ms-hold">—</span>
+          </div>
+
+          <div class="phase-box">
+            <div class="phase-card"><div class="phase-name">Early</div><div class="phase-dir flat" id="ph-early">—</div></div>
+            <div class="phase-card"><div class="phase-name">Mid</div><div class="phase-dir flat" id="ph-mid">—</div></div>
+            <div class="phase-card"><div class="phase-name">Late</div><div class="phase-dir flat" id="ph-late">—</div></div>
+          </div>
+
+          <div class="micro-item">
+            <span class="micro-label">Last React</span>
+            <span class="react-badge none" id="ms-last-react">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Running Conf</span>
+            <span class="running-conf none" id="ms-running-conf">—</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Ticks</span>
+            <span class="micro-value" id="ms-ticks">0</span>
+          </div>
+          <div class="micro-item">
+            <span class="micro-label">Net</span>
+            <span class="micro-value" id="ms-net">—</span>
+          </div>
+          <div class="micro-item" style="grid-column:1/-1">
+            <span class="micro-label">Round Level</span>
+            <span class="micro-value" id="ms-round">—</span>
+          </div>
+        </div>
+
+        <!-- 6-Module Engine breakdown -->
+        <div style="margin-top:10px">
+          <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
+            <span class="section-title" style="margin:0">6-Module Engine</span>
+            <span class="arrow" aria-hidden="true">▶</span>
+          </button>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:10px;color:var(--text-dim)">
+            <span>Active Engine:</span>
+            <span id="engine-label" class="engine-label">—</span>
+          </div>
+          <div id="theories-list"></div>
+        </div>
+      </div>
+
+    </aside>
+  </main>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       BOTTOM BAR — tick tape + accuracy + signal history
+       ════════════════════════════════════════════════════════════════════ -->
+  <footer id="bottom">
+    <div>
+      <div id="tick-tape"><div id="tick-tape-inner"><span class="tape-price flat">Waiting for data...</span></div></div>
+      <div id="accuracy-bar">Accuracy: <span class="pct" id="acc-pct">—</span> <span id="acc-detail"></span></div>
+    </div>
+    <div id="history-panel">
+      <div class="section-title">
+        <span>Signal History</span>
+        <span class="hint">newest on top · click row for detail</span>
+      </div>
+      <div id="history-list"></div>
+    </div>
+  </footer>
+
+</div>
+
+<!-- Signal detail modal -->
+<div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+  <div id="signal-detail-modal">
+    <h3><span id="detail-title">Signal Detail</span><span class="detail-close" id="detail-close" role="button" aria-label="Close">×</span></h3>
+    <div id="detail-body"></div>
+  </div>
+</div>
+
+<!-- Scripts: vendored chart library first, then shared logic, then page bootstrap -->
+<script defer src="/static/lightweight-charts.js"></script>
+<script defer src="/static/js/common.js"></script>
+<script defer src="/static/js/otc.js"></script>
+</body>
+</html>

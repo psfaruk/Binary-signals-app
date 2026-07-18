@@ -1,16 +1,19 @@
 """
-Type definitions for the prediction engine package.
+engines/base/types.py — Shared type definitions for BOTH engines.
 
-All modules return ModuleResult objects. The blender combines them
-into a final prediction. MarketContext is computed ONCE and shared
-across all modules to avoid redundant computation.
+The OTC and Real engines share the SAME ModuleResult and MarketContext
+dataclasses. Only the RELIABILITY multipliers differ between them —
+those live in `engines/otc/config.py` and `engines/real/config.py`.
 """
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 Direction = Literal["CALL", "PUT", "NEUTRAL"]
 SignalType = Literal["REVERSAL", "CONTINUATION"]
-ReliabilityTier = Literal["PATTERN", "STAT", "LEVEL", "CANDLE", "MICRO", "INDICATOR", "OTC"]
+ReliabilityTier = Literal[
+    "PATTERN", "STAT", "LEVEL", "CANDLE", "MICRO",
+    "INDICATOR", "OTC", "TREND",
+]
 
 
 @dataclass
@@ -24,7 +27,7 @@ class ModuleResult:
         confidence: 0-100 (module's own confidence in its vote)
         signal_type: REVERSAL or CONTINUATION (used for regime weighting)
         reliability: tier key for weight multiplier
-        group: correlation group (BODY, WICK, PATTERN_*, LEVEL, STAT, MICRO, OTC, INDICATOR)
+        group: correlation group (BODY, WICK, PATTERN_*, LEVEL, STAT, MICRO, OTC, INDICATOR, TREND)
         reasons: list of human-readable reason strings
     """
     module_name: str
@@ -52,16 +55,3 @@ class MarketContext:
     ema21: float
     vol_pct: float        # volatility ratio (current ATR / historical ATR)
     closes: list          # list of close prices (for indicators)
-
-
-# Reliability tier multipliers — applied AFTER regime weighting.
-# Higher tier = more trustworthy signal.
-RELIABILITY = {
-    "PATTERN":   1.5,   # multi-candle patterns (highest conviction)
-    "STAT":      1.3,   # statistical edge (Z-score, rarity)
-    "LEVEL":     1.3,   # key S/R level confluence
-    "INDICATOR": 1.0,   # technical indicators (RSI, MACD, etc.)
-    "CANDLE":    1.0,   # single-candle signals (baseline)
-    "OTC":       1.2,   # OTC-specific patterns (slight bonus)
-    "MICRO":     0.6,   # tick microstructure (single data source, noisy)
-}

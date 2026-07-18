@@ -11,8 +11,8 @@ Signals:
 Reliability: LEVEL ×1.3 (key levels are structurally important)
 """
 import math
-from engines.real.types import ModuleResult, MarketContext
-from analyze_eoc import _round_level
+from engines.base.types import ModuleResult, MarketContext
+from core.analysis import _round_level
 
 
 def analyze(candles, ctx: MarketContext) -> list:

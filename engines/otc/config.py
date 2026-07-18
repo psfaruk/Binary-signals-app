@@ -1,44 +1,43 @@
 """
-Per-pair module weight adaptation.
+engines/otc/config.py — OTC engine configuration.
 
-Different OTC pairs have different behaviors:
-  - Exotic OTC (USDPKR, USDBDT, USDCOP) → mean-reverting → boost reversal engines
-  - Major OTC (EURUSD, GBPUSD, USDJPY) → more trending → boost continuation engines
-  - JPY pairs → session-dependent volatility → boost key_level
-  - High-volatility pairs → dampen indicator (noise)
+Holds the OTC-specific bits that differ from the Real engine:
+  - PAIR_CONFIGS (per-pair static weight priors)
+  - DEFAULT_WEIGHTS (fallback when asset not in PAIR_CONFIGS)
+  - RELIABILITY (reliability-tier multipliers)
+  - module_6 selection: otc_pattern (mean-reversion detector)
+  - module_names: tuple of 6 module names
 
-This module provides:
-  1. Static per-pair configs (based on known OTC behavior)
-  2. DB-based adaptation (NEW, Bug #5 fix, 2026-07-17): when ≥20 graded
-     signals exist for a (asset, period), the per-module win rate is used
-     to scale the static weights. Modules performing poorly (win_rate <
-     0.45) get dampened; modules performing well (win_rate > 0.60) get
-     boosted. Static config still provides the prior — adaptation is
-     capped to ±30% to avoid overfitting on small samples.
+Everything else (blender algorithm, context, 5 shared modules, types) is
+imported from engines.base — eliminating the previous 95% duplication
+between engines/otc/ and engines/real/.
 
-Usage:
-    weights = get_weights("EURUSD_otc")
-    # weights = {"candle_reaction": 1.0, "running_tick": 0.8, ...}
+The BlenderConfig instance is built once at import time and reused for
+every prediction.
 """
-import os
-import threading
-import time
+from engines.base.blender import BlenderConfig
+from engines.base.per_pair import PairWeightAdapter
+from engines.base.modules.otc_pattern import analyze as _otc_pattern_analyze
+from core.constants import OTC_MODULES
 
-# Minimum graded samples per module before adaptation kicks in. Below
-# this, the static config is used unchanged (small-sample noise dominates).
-_ADAPT_MIN_SAMPLES = int(os.environ.get("ADAPT_MIN_SAMPLES", "20"))
-# Static-config prior weight (0.7) vs DB-learned weight (0.3). Keeps
-# adaptation from overreacting on small or noisy samples.
-_ADAPT_PRIOR = float(os.environ.get("ADAPT_PRIOR", "0.7"))
-# Cap on per-module adaptation magnitude (±30%).
-_ADAPT_CAP = float(os.environ.get("ADAPT_CAP", "0.30"))
-# In-memory cache TTL for per-pair DB lookups (seconds). Avoids re-querying
-# signal_log on every prediction when 38 streams all close at once.
-_ADAPT_CACHE_TTL = float(os.environ.get("ADAPT_CACHE_TTL", "60"))
+# ── Reliability tier multipliers (OTC tuning) ────────────────────────────
+# OTC markets are broker-generated — indicators and patterns are less
+# reliable than in real markets. OTC-specific patterns (mean-reversion)
+# get a slight bonus because they exploit the broker's tendency to
+# revert price to a mean.
+RELIABILITY = {
+    "PATTERN":   1.5,   # multi-candle patterns (highest conviction)
+    "STAT":      1.3,   # statistical edge (Z-score, rarity)
+    "LEVEL":     1.3,   # key S/R level confluence
+    "INDICATOR": 1.0,   # technical indicators (RSI, MACD, etc.) — baseline in OTC
+    "CANDLE":    1.0,   # single-candle signals (baseline)
+    "OTC":       1.2,   # OTC-specific patterns (slight bonus)
+    "MICRO":     0.6,   # tick microstructure (single data source, noisy)
+    "TREND":     1.0,   # not used by OTC engine (kept for dict compat)
+}
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  DEFAULT WEIGHTS (all modules equal, OTC gets slight bonus)
-# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── DEFAULT WEIGHTS (all modules equal, OTC gets slight bonus) ───────────
 DEFAULT_WEIGHTS = {
     "candle_reaction": 1.0,
     "running_tick":    1.0,
@@ -48,14 +47,12 @@ DEFAULT_WEIGHTS = {
     "otc_pattern":     1.2,   # OTC-specific gets bonus (most relevant for OTC markets)
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  PER-PAIR MODEL CONFIGS
-# ═══════════════════════════════════════════════════════════════════════════════
-# Each pair gets a config with:
+
+# ── PER-PAIR MODEL CONFIGS ───────────────────────────────────────────────
+# Each OTC pair gets a config with:
 #   - module weights (which engines to trust more/less)
 #   - behavior profile ("mean_reverting", "trending", "volatile", "stable")
 #   - description
-
 PAIR_CONFIGS = {
     # ── EXOTIC OTC PAIRS (mean-reverting) ──────────────────────────────
     # These pairs tend to reverse after 3+ same-direction candles.
@@ -138,7 +135,7 @@ PAIR_CONFIGS = {
             "candle_reaction": 1.1,
             "running_tick":    1.0,
             "pattern":         1.0,
-            "indicator":       0.7,   # noisy, dampen indicators
+            "indicator":       0.7,
             "key_level":       1.2,
             "otc_pattern":     1.2,
         },
@@ -146,15 +143,13 @@ PAIR_CONFIGS = {
     },
 
     # ── MAJOR OTC PAIRS (more trending) ────────────────────────────────
-    # These pairs follow trends better. Continuation signals work.
-    # Indicators (EMA, MACD) are more reliable here.
     "EURUSD_otc": {
         "profile": "trending",
         "weights": {
             "candle_reaction": 1.0,
             "running_tick":    1.0,
             "pattern":         1.1,
-            "indicator":       1.2,   # indicators work on major pairs
+            "indicator":       1.2,
             "key_level":       1.1,
             "otc_pattern":     1.0,
         },
@@ -179,7 +174,7 @@ PAIR_CONFIGS = {
             "running_tick":    1.0,
             "pattern":         1.2,
             "indicator":       1.1,
-            "key_level":       1.2,   # JPY pairs respect round numbers
+            "key_level":       1.2,
             "otc_pattern":     1.0,
         },
         "description": "JPY cross — trending, round levels important",
@@ -308,9 +303,6 @@ PAIR_CONFIGS = {
     },
 
     # ── CHF PAIRS (safe-haven, rangey) ──────────────────────────────────
-    # CHF pairs tend to be more rangey with sharp news-driven moves.
-    # FIX (Bug #11, 2026-07-17): these were missing from PAIR_CONFIGS,
-    # silently falling through to DEFAULT_WEIGHTS.
     "USDCHF_otc": {
         "profile": "stable",
         "weights": {
@@ -372,7 +364,7 @@ PAIR_CONFIGS = {
         "description": "CHF/JPY — safe-haven cross, volatile",
     },
 
-    # ── EUR CROSS PAIRS (missing) ───────────────────────────────────────
+    # ── EUR CROSS PAIRS ───────────────────────────────────────────────
     "EURGBP_otc": {
         "profile": "stable",
         "weights": {
@@ -434,7 +426,7 @@ PAIR_CONFIGS = {
         "description": "EUR/JPY — trending, round levels important",
     },
 
-    # ── GBP CROSS PAIRS (missing) ───────────────────────────────────────
+    # ── GBP CROSS PAIRS ───────────────────────────────────────────────
     "GBPJPY_otc": {
         "profile": "volatile",
         "weights": {
@@ -472,7 +464,7 @@ PAIR_CONFIGS = {
         "description": "GBP/CAD — volatile, oil-correlated",
     },
 
-    # ── AUD / CAD / JPY CROSS PAIRS (missing) ───────────────────────────
+    # ── AUD / CAD / JPY CROSS PAIRS ─────────────────────────────────────
     "AUDJPY_otc": {
         "profile": "trending",
         "weights": {
@@ -498,7 +490,7 @@ PAIR_CONFIGS = {
         "description": "CAD/JPY — oil-correlated, trending",
     },
 
-    # ── EXOTIC OTC PAIRS (missing) ──────────────────────────────────────
+    # ── EXOTIC OTC PAIRS ──────────────────────────────────────────────
     "USDTRY_otc": {
         "profile": "mean_reverting",
         "weights": {
@@ -526,123 +518,28 @@ PAIR_CONFIGS = {
 }
 
 
-def get_weights(asset: str, period: int = 60, use_db: bool = True) -> dict:
-    """Get module weights for a specific asset.
+# ── Build the OTC engine's PairWeightAdapter (instance, scoped to OTC) ───
+weight_adapter = PairWeightAdapter(
+    pair_configs=PAIR_CONFIGS,
+    default_weights=DEFAULT_WEIGHTS,
+    engine_name="otc",
+)
 
-    Combines the static PAIR_CONFIGS prior with DB-learned per-module
-    win-rate adaptation. When `use_db` is True (default) AND enough graded
-    samples exist for this (asset, period), modules with win_rate > 0.60
-    get boosted up to +30%, and modules with win_rate < 0.45 get dampened
-    up to -30%. Adaptation is capped and prior-weighted (70% static /
-    30% learned) to avoid overfitting on small or noisy samples.
-
-    Args:
-        asset: pair name (e.g. "EURUSD_otc", "USDPKR_otc")
-        period: candle period in seconds (default 60 — only the 1m feed
-            has graded history in practice, but the API supports any)
-        use_db: set False to skip DB lookup (used by /api/stats and tests)
-
-    Returns:
-        dict mapping module name → weight multiplier
-    """
-    config = PAIR_CONFIGS.get(asset)
-    base = config["weights"].copy() if config else DEFAULT_WEIGHTS.copy()
-
-    if not use_db:
-        return base
-
-    # Cache lookup — the prediction path is hot (every candle close across
-    # 38 streams), and per_module_accuracy does a SQL scan each call.
-    now = time.time()
-    cache_key = (asset, period)
-    cached = _ADAPT_CACHE.get(cache_key)
-    if cached and (now - cached["ts"]) < _ADAPT_CACHE_TTL:
-        return cached["weights"]
-
-    adapted = _adapt_from_db(base, asset, period)
-    _ADAPT_CACHE[cache_key] = {"ts": now, "weights": adapted.copy()}
-    return adapted
+# Module 6 for OTC: otc_pattern (mean-reversion detector)
+# Wraps the analyze function so it matches the (candles, ctx) signature.
+def _module_6(candles, ctx):
+    return _otc_pattern_analyze(candles, ctx)
 
 
-# In-process cache for DB-adapted weights. Keyed by (asset, period).
-_ADAPT_CACHE: dict = {}
-_ADAPT_CACHE_LOCK = threading.Lock()
-
-
-def _adapt_from_db(static_weights: dict, asset: str, period: int) -> dict:
-    """Blend static weights with DB-learned per-module win rates.
-
-    Returns a new dict; the input is not mutated.
-    """
-    try:
-        import db as _db
-    except ImportError:
-        # db module not importable (e.g. unit-test context) → static only.
-        return static_weights.copy()
-
-    try:
-        stats = _db.per_module_accuracy(asset, period=period, n=200)
-    except Exception:
-        # DB read failed (locked, missing table, etc.) → static fallback.
-        return static_weights.copy()
-
-    adapted = {}
-    for module, static_w in static_weights.items():
-        s = stats.get(module, {})
-        total = s.get("total", 0)
-        win_rate = s.get("win_rate")
-        if total < _ADAPT_MIN_SAMPLES or win_rate is None:
-            adapted[module] = static_w
-            continue
-
-        # Map win_rate ∈ [0, 1] to a scaling factor centered at 1.0.
-        # win_rate=0.50 → 1.0 (no change)
-        # win_rate=0.70 → +0.30 (boosted to 1.30, capped)
-        # win_rate=0.30 → -0.30 (dampened to 0.70, capped)
-        deviation = win_rate - 0.50
-        scale = max(-_ADAPT_CAP, min(_ADAPT_CAP, deviation * 1.5))
-        learned_w = static_w * (1.0 + scale)
-        # Prior-weighted blend: keep mostly the static config, layer in
-        # a fraction of the learned value.
-        blended = _ADAPT_PRIOR * static_w + (1.0 - _ADAPT_PRIOR) * learned_w
-        # Round to 2 decimals for readable debug output.
-        adapted[module] = round(blended, 2)
-
-    return adapted
-
-
-def invalidate_adaptation_cache(asset: str = None, period: int = None):
-    """Clear the DB-adaptation cache. Called after a batch of new signal
-    log writes so the next prediction reflects fresh accuracy data."""
-    with _ADAPT_CACHE_LOCK:
-        if asset is None:
-            _ADAPT_CACHE.clear()
-        else:
-            keys_to_drop = [k for k in _ADAPT_CACHE
-                            if k[0] == asset and (period is None or k[1] == period)]
-            for k in keys_to_drop:
-                _ADAPT_CACHE.pop(k, None)
-
-
-def get_profile(asset: str) -> str:
-    """Get the behavior profile for an asset.
-
-    Returns one of: "mean_reverting", "trending", "volatile", "stable", "default"
-    """
-    config = PAIR_CONFIGS.get(asset)
-    if config:
-        return config["profile"]
-    return "default"
-
-
-def get_description(asset: str) -> str:
-    """Get human-readable description for an asset's behavior profile."""
-    config = PAIR_CONFIGS.get(asset)
-    if config:
-        return config.get("description", "")
-    return "Unknown pair — using default balanced weights"
-
-
-def list_configured_pairs() -> list:
-    """Return list of all pairs with custom configs."""
-    return sorted(PAIR_CONFIGS.keys())
+# ── Build the OTC engine's BlenderConfig ─────────────────────────────────
+# This is the SINGLE object that captures all OTC-specific behavior. The
+# shared engines.base.blender.predict() takes this config and runs the
+# generic 6-module pipeline.
+CONFIG = BlenderConfig(
+    module_6_name="otc_pattern",
+    module_6_fn=_module_6,
+    reliability=RELIABILITY,
+    weight_adapter=weight_adapter,
+    module_names=OTC_MODULES,
+    engine_name="otc",
+)

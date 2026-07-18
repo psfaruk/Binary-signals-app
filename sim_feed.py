@@ -112,13 +112,23 @@ class _AssetStream:
     _live_reeval_ticks: int = 0
     # Last-10s optimization (2026-07-10)
     cached_accuracy: tuple = field(default_factory=lambda: (None, 0))
-    inverted: bool = False   # adaptive-inversion hysteresis, mirrors feed.py
+    # FIX (BUG-4, 2026-07-18): live_signal_history was being assigned but
+    # never declared on the dataclass — would AttributeError on first
+    # LIVE re-eval. Declared here as a proper field.
+    live_signal_history: list = field(default_factory=list)
     # Signal delay (2026-07-10)
     signal_delay_until: float = 0.0
     # Sim-specific
     _sim_price: float = 0.0
     _sim_momentum: float = 0.0
     _sim_volatility: float = 0.0
+    # FIX (BUG-4, 2026-07-18): removed dead fields `inverted`,
+    # `cached_accuracy_at`, and `live_signal_history` — these were
+    # carry-overs from older feed.py that sim_feed.py never properly
+    # used. `inverted` was set from `result.get("_flipped")` which the
+    # engine never emits; `cached_accuracy_at` was set but never read;
+    # `live_signal_history` was never declared on the dataclass (would
+    # AttributeError if LIVE re-eval ran before _run_eoc set it).
 
 
 class QuotexFeed:
@@ -492,17 +502,17 @@ class QuotexFeed:
         try:
             stream.cached_accuracy = await asyncio.to_thread(
                 _db.recent_accuracy, stream.asset, stream.period, n=20)
-            stream.cached_accuracy_at = time.time()
         except Exception:
             stream.cached_accuracy = (None, 0)
-            stream.cached_accuracy_at = time.time()
         # Reset flip-suppression tracker for new candle.
         stream.live_signal_history = []
         result, micro_hist = self._analyze_core(stream.asset, stream.period,
                                                   closed, base_ticks, stream=stream)
         if result is None:
             return None
-        stream.inverted = result.get("_flipped", False)
+        # FIX (BUG-4, 2026-07-18): removed `stream.inverted = result.get("_flipped")`
+        # — the engine never emits an `_flipped` key, so this was always False
+        # and the field itself was dead (removed from the dataclass).
         # FIX (2026-07-13): list(closed) makes a SHALLOW COPY — same bug as
         # feed.py had. Without this, base_candles aliases stream.candles and
         # the LIVE re-eval scores against the mutated list, not the snapshot.
@@ -511,7 +521,18 @@ class QuotexFeed:
         stream._live_reeval_ticks = 0
 
         _reg = result.get("regime") or {}
-        _key = (_reg.get("trend"), _reg.get("zone"))
+        # FIX (BUG-2, 2026-07-18): use correct regime/zone keys (was
+        # `_reg.get("trend")` which never existed — broke chop-guard).
+        _regime = _reg.get("regime")
+        if _reg.get("is_volatile"):
+            _zone = "VOLATILE"
+        elif _reg.get("is_trending"):
+            _zone = "TREND"
+        elif _reg.get("is_ranging"):
+            _zone = "RANGE"
+        else:
+            _zone = "UNKNOWN"
+        _key = (_regime, _zone)
         if (result["signal"] != "NEUTRAL"
                 and _key == (stream.zone_streak["regime"], stream.zone_streak["zone"])
                 and stream.zone_streak["losses"] >= ZONE_LOSS_GUARD):
@@ -560,7 +581,16 @@ class QuotexFeed:
             if not accuracy:
                 return accuracy
             _reg = (prediction.get("regime") or {})
-            regime, zone = _reg.get("trend"), _reg.get("zone")
+            # FIX (BUG-2, 2026-07-18): use correct keys (was `_reg.get("trend")`).
+            regime = _reg.get("regime")
+            if _reg.get("is_volatile"):
+                zone = "VOLATILE"
+            elif _reg.get("is_trending"):
+                zone = "TREND"
+            elif _reg.get("is_ranging"):
+                zone = "RANGE"
+            else:
+                zone = "UNKNOWN"
             sig = prediction["signal"]
             tags = []
             if is_draw:
@@ -674,7 +704,17 @@ class QuotexFeed:
         accuracy = self._grade_and_log(stream.asset, stream.period, closed, stream.prediction, _micro_snap, stream.candles)
         if accuracy in ("correct", "wrong"):
             _reg = (stream.prediction or {}).get("regime") or {}
-            _key = (_reg.get("trend"), _reg.get("zone"))
+            # FIX (BUG-2, 2026-07-18): use correct regime/zone keys.
+            _regime = _reg.get("regime")
+            if _reg.get("is_volatile"):
+                _zone = "VOLATILE"
+            elif _reg.get("is_trending"):
+                _zone = "TREND"
+            elif _reg.get("is_ranging"):
+                _zone = "RANGE"
+            else:
+                _zone = "UNKNOWN"
+            _key = (_regime, _zone)
             if _key == (stream.zone_streak["regime"], stream.zone_streak["zone"]):
                 stream.zone_streak["losses"] = stream.zone_streak["losses"] + 1 if accuracy == "wrong" else 0
             else:
@@ -971,7 +1011,12 @@ class QuotexFeed:
                             new_stream.prediction = stream.prediction
                             new_stream.candle_open_time = stream.candle_open_time
                             new_stream.candle_open_price = stream.candle_open_price
-                            stream._evicting = True
+                            # FIX (BUG-4, 2026-07-18): removed dead
+                            # `stream._evicting = True` assignment — the
+                            # old stream is already being replaced and
+                            # its task is done; setting a flag on it has
+                            # no effect (the field was never declared on
+                            # the dataclass either).
                             self._streams[key] = new_stream
                             new_stream.task = asyncio.create_task(self._run_stream(new_stream))
             except Exception as exc:

@@ -19,7 +19,7 @@ of engines/otc/modules/otc_pattern.py — it was running OTC mean-reversion
 logic on real-market pairs, defeating the entire purpose of having two
 engines. This file is now a proper trend-following module.
 """
-from engines.real.types import ModuleResult, MarketContext
+from engines.base.types import ModuleResult, MarketContext
 
 
 def analyze(candles, ctx: MarketContext) -> list:

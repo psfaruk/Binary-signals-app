@@ -1,0 +1,36 @@
+/* ============================================================================
+   real.css — Real Market page overrides.
+   Green accent (#00c853). "REAL MARKET" branding.
+   Real market is closed on weekends — closed status indicator.
+   ============================================================================ */
+
+:root{
+  --accent:#00c853;
+  --accent-bg:rgba(0,200,83,.12);
+  --accent-border:rgba(0,200,83,.4);
+}
+
+/* Brand title — Real */
+.brand-title .brand-name{color:var(--green)}
+.brand-dot{background:var(--green);box-shadow:0 0 8px var(--green)}
+
+/* Switch button: green tinted (it points TO OTC, but lives on Real page) */
+#market-switch-btn{
+  background:var(--accent-bg);
+  color:var(--accent);
+  border-color:var(--accent-border);
+}
+
+/* Chart candle colors already default green/red — no override needed */
+
+/* Active engine badge default — green */
+.engine-label{
+  background:rgba(0,200,83,.15);
+  color:var(--green);
+}
+
+/* Closed-market warning color tint (weekend) */
+#market-status-indicator.closed{
+  color:var(--red);background:var(--red-bg);
+  border:1px solid rgba(255,23,68,.3);
+}
