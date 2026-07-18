@@ -125,18 +125,85 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     grouped_results = non_body + ([collapsed_body] if collapsed_body else [])
 
     # ── Step 4: Exhaustion gate detection ────────────────────────────────
+    # FIX (2026-07-18, structural bias): the old exhaustion gate was
+    # self-reinforcing — 2 of its 4 checks depended on reversal-module
+    # outputs (BODY exhaustion reason + WICK signal, both from
+    # candle_reaction). This created confirmation bias: the gate fired
+    # exactly when the reversal modules already voted, doubling their
+    # weight via the "strongly_exhausting" override.
+    #
+    # Now we keep the original 4 checks BUT add 2 INDEPENDENT tick-volume
+    # checks sourced from the microstructure data (not from any module's
+    # output). These provide a true second opinion:
+    #
+    #   5. Tick velocity deceleration: if last_velocity.accel < 0.7 after
+    #      a strong move (|net| > 0.5 ATR), the move is running out of
+    #      steam — exhaustion regardless of what reversal modules say.
+    #   6. Volume-price divergence: if tick_count is high (≥30) but net
+    #      move is small (<0.3 ATR), price is stalling under high
+    #      activity — exhaustion/consolidation.
+    #
+    # A reversal module's BODY/WICK signal no longer automatically counts
+    # toward exhaustion — it's just one input. The independent tick checks
+    # must ALSO fire (or the streak must be extreme) for the gate to
+    # trigger the "strongly_exhausting" reversal boost.
     exhaustion_indicators = 0
+    exhaustion_reasons = []
+
+    # Check 1: BODY exhaustion reason (from candle_reaction — reversal module)
     if any(r.group == "BODY" and "exhaustion" in " ".join(r.reasons).lower()
            for r in grouped_results):
         exhaustion_indicators += 1
+        exhaustion_reasons.append("BODY exhaustion reason")
+
+    # Check 2: WICK signal (from candle_reaction — reversal module)
     if any(r.group == "WICK" for r in grouped_results):
         exhaustion_indicators += 1
+        exhaustion_reasons.append("WICK rejection")
+
+    # Check 3: Long streak (statistical — independent of modules)
     if ctx.stats["current_streak"] >= 4:
         exhaustion_indicators += 1
+        exhaustion_reasons.append(f"streak={ctx.stats['current_streak']}")
+
+    # Check 4: Rare streak (statistical — independent of modules)
     if ctx.stats["streak_rarity"] < 0.10 and ctx.stats["current_streak"] >= 3:
         exhaustion_indicators += 1
+        exhaustion_reasons.append(f"rare streak (rarity={ctx.stats['streak_rarity']:.0%})")
+
+    # Check 5 (NEW): Tick velocity deceleration — INDEPENDENT of modules.
+    # Sourced from microstructure.last_velocity, not from any module vote.
+    if micro and isinstance(micro, dict):
+        lv = micro.get("last_velocity")
+        if lv and isinstance(lv, dict):
+            accel = lv.get("accel", 1.0)
+            net_move = abs(micro.get("net", 0))
+            atr = ctx.atr if ctx.atr > 0 else 0.0001
+            # Deceleration: accel < 0.7 means recent 5-tick speed is < 70%
+            # of recent 10-tick speed. Combined with a meaningful net move
+            # (>0.5 ATR), this indicates the move is losing momentum.
+            if accel < 0.7 and net_move > atr * 0.5:
+                exhaustion_indicators += 1
+                exhaustion_reasons.append(
+                    f"tick deceleration (accel={accel:.2f}, net={net_move/atr:.2f}x ATR)")
+
+    # Check 6 (NEW): Volume-price divergence — INDEPENDENT of modules.
+    # High tick activity but small net move = price stalling = exhaustion.
+    if micro and isinstance(micro, dict):
+        tick_count = micro.get("tick_count", 0)
+        net_move = abs(micro.get("net", 0))
+        atr = ctx.atr if ctx.atr > 0 else 0.0001
+        if tick_count >= 30 and net_move < atr * 0.3:
+            exhaustion_indicators += 1
+            exhaustion_reasons.append(
+                f"volume-price divergence ({tick_count} ticks, net={net_move/atr:.2f}x ATR)")
+
     is_exhausting = exhaustion_indicators >= 2
     is_strongly_exhausting = exhaustion_indicators >= 3
+
+    # Store exhaustion reasons for the prediction output so the UI can
+    # show WHY the gate fired (transparency for the new independent checks).
+    _exhaustion_detail = " | ".join(exhaustion_reasons) if exhaustion_reasons else ""
 
     # ── Step 5: Get per-pair weights (DB-adapted) ──────────────────────
     pair_weights = weight_adapter.get_weights(asset, period=period)
@@ -241,6 +308,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         all_reasons.append(vol_note)
     if suppressed_count > 0:
         all_reasons.append(f"_SUPPRESSED: {suppressed_count} signal(s) dampened to 0")
+    # FIX (2026-07-18): surface exhaustion gate detail so the UI shows
+    # WHICH independent checks fired, not just that the gate triggered.
+    if is_exhausting and _exhaustion_detail:
+        all_reasons.append(
+            f"_EXHAUSTION_GATE: {exhaustion_indicators} indicators "
+            f"({'strongly' if is_strongly_exhausting else 'mildly'} exhausting) "
+            f"[{_exhaustion_detail}]")
 
     if total_groups == 0:
         return _neutral(all_reasons or ["NO_SIGNAL"], regime, asset, weight_adapter, ctx)

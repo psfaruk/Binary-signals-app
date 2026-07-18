@@ -11,6 +11,20 @@ Sub-signals:
   3. Reaction (visited extreme then reversed)
 
 All three come from the same tick data source → collapsed into 1 vote.
+
+FIX (2026-07-18, structural bias): the old composite_type logic was
+broken — it marked a vote as CONTINUATION only when ALL sub-votes
+agreed (call_n > 0 and put_n == 0), and REVERSAL otherwise. This
+conflated "sub-vote agreement" with "trend continuation", which are
+completely different concepts. A mixed-vote CALL in a downtrend is
+still a REVERSAL; a unanimous CALL in an uptrend is a CONTINUATION.
+
+The new logic determines signal_type by comparing the composite vote
+direction against the PRIOR CLOSED candle's body direction:
+  - Vote direction AGREES with prior candle body → CONTINUATION
+  - Vote direction OPPOSES prior candle body → REVERSAL
+  - Prior candle was doji (no clear direction) → fall back to NEUTRAL
+    classification based on streak agreement
 """
 from engines.base.types import ModuleResult, MarketContext
 
@@ -37,15 +51,9 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
         sub_votes.append(("PUT", 2, f"5-sec ending DOWN/SELLER ({ed_buy}%)"))
 
     # ── Sub-signal 2: Buyer/seller pressure ──────────────────────────────
-    # FIX: old threshold was buy_pct >= 65 / <= 35, but _build_micro sets
-    # pressure="SELLER" when sell_pct >= 62 (buy_pct <= 38). So there was
-    # a 3% gap (buy_pct 36-38) where pressure=SELLER but no vote fired.
-    # Now fires whenever pressure is set (BUYER/SELLER), with score scaled
-    # by how dominant the pressure is.
     buy_pct = micro.get("buy_pct", 50)
     pressure = micro.get("pressure", "FIGHT")
     if pressure == "BUYER":
-        # Stronger buyer pressure = higher score (2-3)
         score = 3 if buy_pct >= 70 else 2
         sub_votes.append(("CALL", score, f"Buyer pressure ({buy_pct}%)"))
     elif pressure == "SELLER":
@@ -66,26 +74,60 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
     # ── Collapse into ONE composite vote ─────────────────────────────────
     call_sum = sum(s for d, s, _ in sub_votes if d == "CALL")
     put_sum = sum(s for d, s, _ in sub_votes if d == "PUT")
-    call_n = sum(1 for d, s, _ in sub_votes if d == "CALL")
-    put_n = sum(1 for d, s, _ in sub_votes if d == "PUT")
 
     reasons_str = " | ".join(r for _, _, r in sub_votes)
 
+    if call_sum == put_sum:
+        return []  # exact tie — no vote
+
+    # FIX (2026-07-18): Determine composite_type by comparing the vote
+    # direction against the PRIOR CLOSED candle's body direction, NOT by
+    # whether sub-votes unanimously agreed. This is what CONTINUATION vs
+    # REVERSAL actually means in the regime-weighting context.
+    prior_dir = 0  # 1=up, -1=down, 0=doji/unknown
+    if len(candles) >= 2:
+        prev = candles[-2]
+        prev_body = prev["close"] - prev["open"]
+        if prev_body > 0:
+            prior_dir = 1
+        elif prev_body < 0:
+            prior_dir = -1
+
     if call_sum > put_sum:
         composite_score = min(4, call_sum - put_sum)
-        composite_type = "CONTINUATION" if (call_n > 0 and put_n == 0) else "REVERSAL"
+        vote_dir = 1  # CALL = up
+        if prior_dir == 1:
+            composite_type = "CONTINUATION"  # ticks pushing up after up candle
+            type_reason = "continues prior up"
+        elif prior_dir == -1:
+            composite_type = "REVERSAL"  # ticks pushing up after down candle
+            type_reason = "reverses prior down"
+        else:
+            # Prior was doji — use streak alignment as fallback
+            streak_dir = ctx.stats.get("streak_direction", 0)
+            composite_type = "CONTINUATION" if streak_dir == 1 else "REVERSAL"
+            type_reason = "prior doji, streak-aligned"
         return [ModuleResult(
             module_name="running_tick", direction="CALL", score=composite_score,
             confidence=min(60, composite_score * 20),
             signal_type=composite_type, reliability="MICRO", group="MICRO",
-            reasons=[f"Micro composite: {reasons_str}"])]
-    elif put_sum > call_sum:
-        composite_score = min(4, put_sum - call_sum)
-        composite_type = "CONTINUATION" if (put_n > 0 and call_n == 0) else "REVERSAL"
-        return [ModuleResult(
-            module_name="running_tick", direction="PUT", score=composite_score,
-            confidence=min(60, composite_score * 20),
-            signal_type=composite_type, reliability="MICRO", group="MICRO",
-            reasons=[f"Micro composite: {reasons_str}"])]
+            reasons=[f"Micro composite CALL ({type_reason}): {reasons_str}"])]
 
-    return []  # exact tie — no vote
+    # put_sum > call_sum
+    composite_score = min(4, put_sum - call_sum)
+    vote_dir = -1  # PUT = down
+    if prior_dir == -1:
+        composite_type = "CONTINUATION"  # ticks pushing down after down candle
+        type_reason = "continues prior down"
+    elif prior_dir == 1:
+        composite_type = "REVERSAL"  # ticks pushing down after up candle
+        type_reason = "reverses prior up"
+    else:
+        streak_dir = ctx.stats.get("streak_direction", 0)
+        composite_type = "CONTINUATION" if streak_dir == -1 else "REVERSAL"
+        type_reason = "prior doji, streak-aligned"
+    return [ModuleResult(
+        module_name="running_tick", direction="PUT", score=composite_score,
+        confidence=min(60, composite_score * 20),
+        signal_type=composite_type, reliability="MICRO", group="MICRO",
+        reasons=[f"Micro composite PUT ({type_reason}): {reasons_str}"])]
