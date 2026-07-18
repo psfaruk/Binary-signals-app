@@ -253,10 +253,21 @@ class QuotexFeed:
 
     def _gen_history(self, asset: str, period: int = 60, n: int = 120) -> list[dict]:
         """Generate realistic candle history.
+
         FIX (2026-07-13): period was hardcoded to 60 — for 5-minute streams
         (period=300), history candles were 60s apart but the stream loop
         floors to 300s, causing a spurious candle-close on iteration 1 and
-        misaligned timestamps for the rest of the stream."""
+        misaligned timestamps for the rest of the stream.
+
+        FIX (2026-07-18, chart-crash bug): previously history used
+        ``volatility = pip * 1.5-6.0`` per candle with intra-candle wick
+        ``volatility * 0.3``, giving ranges of 3-9 pip. But the live tick
+        generator (_gen_tick) uses per-tick vol of ~0.3 pip at 10 ticks/sec
+        for 60 sec = 600 ticks, producing expected range of ~29 pip. The
+        10x mismatch made the running candle look like a giant spike next
+        to small history candles. Now history volatility is scaled to
+        match the tick-based volatility so ranges are consistent.
+        """
         base = _BASE_PRICES.get(asset, 1.0)
         pip = _PIP.get(asset, 0.0001)
         now = int(time.time())
@@ -269,18 +280,27 @@ class QuotexFeed:
         # Slight trend bias
         trend = random.uniform(-0.3, 0.3) * pip
 
+        # FIX (2026-07-18): Scale volatility by sqrt(period/60) so longer
+        # periods (5min, 15min) have proportionally larger ranges. Base
+        # volatility is calibrated to produce ~8-20 pip ranges for 1-min
+        # forex candles, matching what the tick generator produces.
+        period_scale = (period / 60.0) ** 0.5
+
         for i in range(n):
             t = start + i * period
-            volatility = pip * random.uniform(1.5, 6.0)
+            # FIX: increased volatility from 1.5-6.0 to 4.0-10.0 to match
+            # tick-based realized volatility.
+            volatility = pip * random.uniform(4.0, 10.0) * period_scale
             # Random walk with mean reversion
             change = random.gauss(trend, volatility)
             # Occasional bigger moves
             if random.random() < 0.08:
                 change *= random.uniform(2, 4)
             o = price
-            # Intra-candle path
-            hi = max(o, o + change) + abs(random.gauss(0, volatility * 0.3))
-            lo = min(o, o + change) - abs(random.gauss(0, volatility * 0.3))
+            # Intra-candle path — wick is 40% of volatility (was 30%)
+            # to better match the tick-based high/low spread.
+            hi = max(o, o + change) + abs(random.gauss(0, volatility * 0.4))
+            lo = min(o, o + change) - abs(random.gauss(0, volatility * 0.4))
             c = o + change
             # Mean reversion toward base
             if abs(c - base) > pip * 20:
@@ -290,6 +310,9 @@ class QuotexFeed:
             o = round(o, 5)
             hi = round(hi, 5)
             lo = round(lo, 5)
+            # Safety: ensure high >= max(open, close) and low <= min(open, close)
+            hi = max(hi, o, c)
+            lo = min(lo, o, c)
             candles.append({"time": t, "open": o, "high": hi, "low": lo, "close": c})
             price = c
             # Slowly drift trend
@@ -307,20 +330,29 @@ class QuotexFeed:
         dependent:
           - Real pairs: 0.001 (weak reversion — trends persist)
           - OTC pairs:  0.003 (strong reversion — broker pulls back)
+
+        FIX (2026-07-18, chart-crash bug): reduced per-tick volatility
+        from 0.3 pip to 0.1 pip. With ~10 ticks/sec for 60 sec = 600
+        ticks, the old setting produced expected range of ~29 pip per
+        1-min candle — way too volatile and inconsistent with the history
+        candle generator. New setting produces ~10 pip range, matching
+        realistic 1-min EURUSD volatility and the updated history gen.
+        Spike probability also reduced from 0.8% to 0.3% (was producing
+        ~5 spikes per minute = unrealistic noise).
         """
         pip = _PIP.get(stream.asset, 0.0001)
         price = stream._sim_price
 
-        # Momentum: tends to continue in same direction
+        # Momentum: tends to continue in same direction (reduced from 0.15)
         stream._sim_momentum *= 0.97  # decay
-        stream._sim_momentum += random.gauss(0, pip * 0.15)
+        stream._sim_momentum += random.gauss(0, pip * 0.05)
 
-        # Volatility clustering
-        stream._sim_volatility = stream._sim_volatility * 0.95 + abs(random.gauss(0, pip * 0.3)) * 0.05
-        # FIX (2026-07-13): re-seed if volatility decayed too low (steady-state ~24%)
-        if stream._sim_volatility < pip * 0.3:
-            stream._sim_volatility = pip * random.uniform(0.5, 1.5)
-        vol = max(pip * 0.2, stream._sim_volatility)
+        # Volatility clustering (reduced from 0.3 to 0.1)
+        stream._sim_volatility = stream._sim_volatility * 0.95 + abs(random.gauss(0, pip * 0.1)) * 0.05
+        # FIX: re-seed if volatility decayed too low (steady-state now ~8%)
+        if stream._sim_volatility < pip * 0.1:
+            stream._sim_volatility = pip * random.uniform(0.15, 0.4)
+        vol = max(pip * 0.08, stream._sim_volatility)
 
         # Mean reversion — category-dependent.
         # Real markets: weaker reversion (trends driven by real order flow)
@@ -332,10 +364,11 @@ class QuotexFeed:
 
         change = stream._sim_momentum + random.gauss(0, vol) + reversion
 
-        # Occasional spikes — OTC pairs spike more (broker fakeouts)
-        spike_prob = 0.005 if not is_otc else 0.008
+        # Occasional spikes — reduced probability (was 0.5%/0.8%, now 0.2%/0.3%)
+        # and reduced magnitude (was pip*3, now pip*1.5)
+        spike_prob = 0.002 if not is_otc else 0.003
         if random.random() < spike_prob:
-            change += random.gauss(0, pip * 3)
+            change += random.gauss(0, pip * 1.5)
 
         new_price = price + change
         new_price = round(new_price, 5)

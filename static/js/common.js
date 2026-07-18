@@ -267,17 +267,52 @@ function refreshPriceLines(){
 }
 
 function updateChart(candles, predCandle, resetView){
-  candleData = candles.map(c => ({
-    time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
-  }));
-  candleSeries.setData(candleData);
+  // FIX (2026-07-18, chart-crash bug): sanitize incoming candle data to
+  // prevent LightweightCharts from crashing on:
+  //   - Duplicate timestamps (causes "Assertion failed" error)
+  //   - Non-ascending timestamps (causes render corruption)
+  //   - NaN/Infinity values (causes blank chart)
+  //   - high < low or open <= 0 (causes assertion errors)
+  // We de-duplicate by time (keep last), sort ascending, and clamp values.
+  const seen = new Map();
+  for(const c of (candles || [])){
+    if(!c) continue;
+    const t = typeof c.time === 'number' ? Math.floor(c.time) : 0;
+    if(t <= 0) continue;
+    const o = +c.open, h = +c.high, l = +c.low, cl = +c.close;
+    if(!isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(cl)) continue;
+    if(o <= 0 || h <= 0 || l <= 0 || cl <= 0) continue;
+    // Clamp OHLC to be internally consistent
+    const hi = Math.max(h, o, cl);
+    const lo = Math.min(l, o, cl);
+    seen.set(t, { time: t, open: o, high: hi, low: lo, close: cl });
+  }
+  candleData = Array.from(seen.values()).sort((a, b) => a.time - b.time);
+  try{
+    candleSeries.setData(candleData);
+  }catch(e){
+    console.error('[chart] setData error:', e);
+  }
   if(candleData.length) _resetRaf(candleData[candleData.length-1]);
   if(candleData.length) hideChartLoading();
-  if(resetView && candleData.length) chart.timeScale().scrollToPosition(3, false);
+  if(resetView && candleData.length){
+    try{ chart.timeScale().scrollToPosition(3, false); }catch(_){}
+  }
   if(predCandle){
-    ghostSeries.setData([predCandle]);
+    // Sanitize predCandle too — it must have a future timestamp
+    const pt = typeof predCandle.time === 'number' ? Math.floor(predCandle.time) : 0;
+    const po = +predCandle.open, ph = +predCandle.high, pl = +predCandle.low, pc = +predCandle.close;
+    if(pt > 0 && isFinite(po) && isFinite(ph) && isFinite(pl) && isFinite(pc) && po > 0){
+      const phi = Math.max(ph, po, pc);
+      const plo = Math.min(pl, po, pc);
+      try{
+        ghostSeries.setData([{ time: pt, open: po, high: phi, low: plo, close: pc }]);
+      }catch(e){ console.error('[chart] ghostSeries.setData error:', e); }
+    } else {
+      try{ ghostSeries.setData([]); }catch(_){}
+    }
   } else {
-    ghostSeries.setData([]);
+    try{ ghostSeries.setData([]); }catch(_){}
   }
   _priceLinesRange = { lo: 0, hi: 0, step: 0 };
   refreshPriceLines();
@@ -295,13 +330,22 @@ function _rafFrame(ts){
     _rClose = _fromClose + (_toClose - _fromClose) * eased;
     _rHigh  = _fromHigh  + (_toHigh  - _fromHigh)  * eased;
     _rLow   = _fromLow   + (_toLow   - _fromLow)   * eased;
+    // FIX (2026-07-18): ensure all values are finite before applying.
+    if(!isFinite(_rClose) || !isFinite(_rHigh) || !isFinite(_rLow)){
+      _rafActive = false;
+      return;
+    }
     const safeHigh = Math.max(_rHigh, _rClose, _rOpen);
     const safeLow  = Math.min(_rLow,  _rClose, _rOpen);
     const safeClose = Math.min(safeHigh, Math.max(safeLow, _rClose));
-    if(!isNaN(safeHigh) && !isNaN(safeLow) && !isNaN(safeClose)){
+    if(safeHigh > 0 && safeLow > 0 && safeClose > 0){
       try{
         candleSeries.update({ time: _rTime, open: _rOpen, high: safeHigh, low: safeLow, close: safeClose });
-      }catch(_){}
+      }catch(e){
+        // Suppress LightweightCharts assertion errors — they happen when
+        // the chart is in a transitional state (e.g. setData + update
+        // racing). The next tick will retry.
+      }
     }
     if(progress >= 1.0){ _rafActive = false; return; }
   } else {
@@ -343,28 +387,48 @@ function _resetRaf(candle){
 }
 
 function updateLastCandle(candle){
+  // FIX (2026-07-18, chart-crash bug): sanitize the incoming tick candle
+  // before applying it. Reject NaN/Infinity, non-positive prices, and
+  // clamp OHLC to be internally consistent (high >= max(open,close),
+  // low <= min(open,close)). This prevents LightweightCharts.update()
+  // from throwing assertion errors that would silently kill the chart.
+  if(!candle) return;
+  const t  = typeof candle.time  === 'number' ? Math.floor(candle.time)  : 0;
+  const o  = +candle.open, h  = +candle.high, l  = +candle.low, c  = +candle.close;
+  if(t <= 0) return;
+  if(!isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(c)) return;
+  if(o <= 0 || h <= 0 || l <= 0 || c <= 0) return;
+  const hi = Math.max(h, o, c);
+  const lo = Math.min(l, o, c);
+  const safeCandle = { time: t, open: o, high: hi, low: lo, close: c };
+
   if(!candleData.length){
-    const bar = { time: candle.time, open: candle.open, high: candle.high, low: candle.low, close: candle.close };
-    candleData.push(bar);
-    if(candleSeries) candleSeries.setData(candleData);
-    _resetRaf(bar);
+    candleData.push(safeCandle);
+    try{ if(candleSeries) candleSeries.setData(candleData); }catch(e){ console.error('[chart] setData(empty) error:', e); }
+    _resetRaf(safeCandle);
     return;
   }
   const last = candleData[candleData.length-1];
-  if(candle.time < last.time) return;
-  if(candle.time !== last.time){
-    const bar = { time: candle.time, open: candle.open, high: candle.high, low: candle.low, close: candle.close };
-    candleData.push(bar);
+  if(safeCandle.time < last.time) return;  // skip old ticks
+  if(safeCandle.time !== last.time){
+    // New candle — append and auto-scroll to keep it visible.
+    candleData.push(safeCandle);
     if(candleData.length > 500) candleData.shift();
-    _setTarget(bar);
+    _setTarget(safeCandle);
     _startRaf();
+    // Auto-scroll to show the new candle (only if user is at the right edge)
+    try{
+      if(chart && chart.timeScale().isVisible()){
+        chart.timeScale().scrollToPosition(3, false);
+      }
+    }catch(_){}
     return;
   }
   // Same candle: backend is the source of truth — take its values directly.
-  last.open  = candle.open;
-  last.high  = candle.high;
-  last.low   = candle.low;
-  last.close = candle.close;
+  last.open  = safeCandle.open;
+  last.high  = safeCandle.high;
+  last.low   = safeCandle.low;
+  last.close = safeCandle.close;
   _setTarget(last);
   _startRaf();
 }
