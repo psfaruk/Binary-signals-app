@@ -125,53 +125,44 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     grouped_results = non_body + ([collapsed_body] if collapsed_body else [])
 
     # ── Step 4: Exhaustion gate detection ────────────────────────────────
-    # FIX (2026-07-18, structural bias): the old exhaustion gate was
-    # self-reinforcing — 2 of its 4 checks depended on reversal-module
-    # outputs (BODY exhaustion reason + WICK signal, both from
-    # candle_reaction). This created confirmation bias: the gate fired
-    # exactly when the reversal modules already voted, doubling their
-    # weight via the "strongly_exhausting" override.
+    # FIX (2026-07-18, structural bias): the original exhaustion gate had
+    # 4 checks, 2 of which depended on reversal-module outputs (BODY
+    # exhaustion reason + WICK signal from candle_reaction). This was
+    # self-reinforcing — the gate fired exactly when reversal modules
+    # already voted, doubling their weight via the "strongly_exhausting"
+    # override.
     #
-    # Now we keep the original 4 checks BUT add 2 INDEPENDENT tick-volume
-    # checks sourced from the microstructure data (not from any module's
-    # output). These provide a true second opinion:
+    # FIX (2026-07-18, partial fix): added 2 INDEPENDENT tick-volume
+    # checks. But user noted the OLD checks (1, 2) were still present,
+    # so self-reinforcement was only diluted, not eliminated.
     #
-    #   5. Tick velocity deceleration: if last_velocity.accel < 0.7 after
-    #      a strong move (|net| > 0.5 ATR), the move is running out of
-    #      steam — exhaustion regardless of what reversal modules say.
-    #   6. Volume-price divergence: if tick_count is high (≥30) but net
-    #      move is small (<0.3 ATR), price is stalling under high
-    #      activity — exhaustion/consolidation.
+    # FIX (2026-07-18, final): REMOVED the 2 reversal-module-dependent
+    # checks entirely. Now ALL exhaustion checks are INDEPENDENT of
+    # module outputs — they source from raw statistics + microstructure:
     #
-    # A reversal module's BODY/WICK signal no longer automatically counts
-    # toward exhaustion — it's just one input. The independent tick checks
-    # must ALSO fire (or the streak must be extreme) for the gate to
-    # trigger the "strongly_exhausting" reversal boost.
+    #   1. Long streak (statistical — current_streak >= 4)
+    #   2. Rare streak (statistical — streak_rarity < 0.10 + streak >= 3)
+    #   3. Tick velocity deceleration (microstructure.last_velocity.accel < 0.7
+    #      after a strong move)
+    #   4. Volume-price divergence (high tick_count, small net move)
+    #
+    # The gate now requires genuine independent confirmation. A reversal
+    # module's BODY/WICK signal no longer counts toward exhaustion — the
+    # gate is a TRUE second opinion, not an echo of the reversal modules.
     exhaustion_indicators = 0
     exhaustion_reasons = []
 
-    # Check 1: BODY exhaustion reason (from candle_reaction — reversal module)
-    if any(r.group == "BODY" and "exhaustion" in " ".join(r.reasons).lower()
-           for r in grouped_results):
-        exhaustion_indicators += 1
-        exhaustion_reasons.append("BODY exhaustion reason")
-
-    # Check 2: WICK signal (from candle_reaction — reversal module)
-    if any(r.group == "WICK" for r in grouped_results):
-        exhaustion_indicators += 1
-        exhaustion_reasons.append("WICK rejection")
-
-    # Check 3: Long streak (statistical — independent of modules)
+    # Check 1: Long streak (statistical — independent of modules)
     if ctx.stats["current_streak"] >= 4:
         exhaustion_indicators += 1
         exhaustion_reasons.append(f"streak={ctx.stats['current_streak']}")
 
-    # Check 4: Rare streak (statistical — independent of modules)
+    # Check 2: Rare streak (statistical — independent of modules)
     if ctx.stats["streak_rarity"] < 0.10 and ctx.stats["current_streak"] >= 3:
         exhaustion_indicators += 1
         exhaustion_reasons.append(f"rare streak (rarity={ctx.stats['streak_rarity']:.0%})")
 
-    # Check 5 (NEW): Tick velocity deceleration — INDEPENDENT of modules.
+    # Check 3: Tick velocity deceleration — INDEPENDENT of modules.
     # Sourced from microstructure.last_velocity, not from any module vote.
     if micro and isinstance(micro, dict):
         lv = micro.get("last_velocity")
@@ -187,7 +178,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 exhaustion_reasons.append(
                     f"tick deceleration (accel={accel:.2f}, net={net_move/atr:.2f}x ATR)")
 
-    # Check 6 (NEW): Volume-price divergence — INDEPENDENT of modules.
+    # Check 4: Volume-price divergence — INDEPENDENT of modules.
     # High tick activity but small net move = price stalling = exhaustion.
     if micro and isinstance(micro, dict):
         tick_count = micro.get("tick_count", 0)
@@ -198,11 +189,14 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             exhaustion_reasons.append(
                 f"volume-price divergence ({tick_count} ticks, net={net_move/atr:.2f}x ATR)")
 
+    # Thresholds: with only 4 independent checks (was 6), require 2 for
+    # "exhausting" and 3 for "strongly exhausting". This keeps the gate
+    # selective — it fires only when multiple independent signals agree.
     is_exhausting = exhaustion_indicators >= 2
     is_strongly_exhausting = exhaustion_indicators >= 3
 
     # Store exhaustion reasons for the prediction output so the UI can
-    # show WHY the gate fired (transparency for the new independent checks).
+    # show WHY the gate fired (transparency for the independent checks).
     _exhaustion_detail = " | ".join(exhaustion_reasons) if exhaustion_reasons else ""
 
     # ── Step 5: Get per-pair weights (DB-adapted) ──────────────────────
@@ -432,6 +426,20 @@ def _collapse_body_group(body_signals: list) -> ModuleResult:
 
     Direction = majority by score sum.
     Score = max + 1 corroboration bonus if ≥3 agree.
+
+    FIX (2026-07-18, structural bias): the old logic set sig_type =
+    "REVERSAL" if ANY signal in the group was REVERSAL, else
+    "CONTINUATION". Since candle_reaction's 5 BODY signals were all
+    REVERSAL, the collapsed vote was always REVERSAL — even when a
+    new CONTINUATION signal (BODY_CONT group, but if it were in BODY)
+    had more score. Now sig_type follows the MAJORITY direction's
+    signal_type, weighted by score. This makes the collapse fair when
+    both REVERSAL and CONTINUATION BODY signals are present.
+
+    NOTE: BODY_CONT and WICK_CONT signals use separate groups so they
+    are NOT collapsed with BODY/WICK — they vote independently. This
+    ensures continuation signals aren't drowned out by the reversal
+    majority in the BODY group.
     """
     if not body_signals:
         return None
@@ -445,18 +453,33 @@ def _collapse_body_group(body_signals: list) -> ModuleResult:
         direction = "CALL"
         max_score = max(r.score for r in body_signals if r.direction == "CALL")
         agree_n = call_n
+        # Majority direction's signal_type wins (score-weighted).
+        majority_signals = [r for r in body_signals if r.direction == "CALL"]
     elif put_sum > call_sum:
         direction = "PUT"
         max_score = max(r.score for r in body_signals if r.direction == "PUT")
         agree_n = put_n
+        majority_signals = [r for r in body_signals if r.direction == "PUT"]
     else:
         return None
 
     bonus = 1 if agree_n >= 3 else 0
     score = max_score + bonus
 
-    types = set(r.signal_type for r in body_signals)
-    sig_type = "REVERSAL" if "REVERSAL" in types else "CONTINUATION"
+    # FIX: sig_type follows the MAJORITY direction's signals, weighted
+    # by score. If the majority of CALL-score comes from CONTINUATION
+    # signals, the collapsed vote is CONTINUATION. This is fair.
+    cont_score = sum(r.score for r in majority_signals if r.signal_type == "CONTINUATION")
+    rev_score  = sum(r.score for r in majority_signals if r.signal_type == "REVERSAL")
+    if cont_score > rev_score:
+        sig_type = "CONTINUATION"
+    elif rev_score > cont_score:
+        sig_type = "REVERSAL"
+    else:
+        # Tie — fall back to majority count
+        cont_n = sum(1 for r in majority_signals if r.signal_type == "CONTINUATION")
+        rev_n  = sum(1 for r in majority_signals if r.signal_type == "REVERSAL")
+        sig_type = "CONTINUATION" if cont_n > rev_n else "REVERSAL"
 
     reasons_str = " | ".join(r.reasons[0] if r.reasons else "" for r in body_signals)
 

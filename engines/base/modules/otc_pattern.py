@@ -54,20 +54,25 @@ def analyze(candles, ctx: MarketContext) -> list:
     # FIX (2026-07-18): GATE this signal in strong trend regimes — if the
     # market is clearly trending, mean-reversion is the WRONG bet. Only
     # fire in RANGE or VOLATILE regimes, or weak trends.
+    # FIX (2026-07-18, conflict bug): was threshold 0.6 while Signal 8
+    # (trend-streak) used 0.5. In the 0.5-0.6 zone BOTH signals fired,
+    # producing contradictory REVERSAL+CONTINUATION votes for the same
+    # event. Now both use 0.5 so they're mutually exclusive: above 0.5
+    # only continuation fires, below 0.5 only reversal fires.
     consec = stats["current_streak"]
     streak_dir = stats["streak_direction"]
-    mean_rev_gated = (is_trending and trend_strength > 0.6)
+    mean_rev_gated = (is_trending and trend_strength > 0.5)
     if consec >= 3 and not mean_rev_gated:
         if streak_dir == 1:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=2, confidence=62,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_MEANREV",
-                reasons=[f"OTC mean-rev: {consec}+ UP → PUT (62% reversal in OTC, regime={trend_regime})"]))
+                reasons=[f"OTC mean-rev: {consec}+ UP → PUT (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
         elif streak_dir == -1:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=2, confidence=62,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_MEANREV",
-                reasons=[f"OTC mean-rev: {consec}+ DOWN → CALL (62% reversal in OTC, regime={trend_regime})"]))
+                reasons=[f"OTC mean-rev: {consec}+ DOWN → CALL (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
 
     # ── REVERSAL SIGNAL 2: Streak rarity boost ───────────────────────────
     # Rare streaks (<10% occurrence) get a reversal boost. Keep this one
@@ -188,8 +193,14 @@ def analyze(candles, ctx: MarketContext) -> list:
     # ── CONTINUATION SIGNAL 8: Strong-trend streak ───────────────────────
     # In a confirmed TREND regime (trend_strength > 0.5), a 2+ same-dir
     # streak gets a continuation vote. This directly counterbalances
-    # Signal 1 (mean-rev) which is now gated OFF in strong trends.
-    # Without this, the engine would have NO opinion during trends.
+    # Signal 1 (mean-rev) which is gated OFF at trend_strength > 0.5.
+    #
+    # FIX (2026-07-18, conflict bug): Signal 1 threshold AND this
+    # threshold must match exactly — otherwise in the gap zone both fire
+    # and produce contradictory votes. Both now use 0.5 (strict >).
+    # Below 0.5: only reversal (Signal 1) fires.
+    # Above 0.5: only continuation (Signal 8) fires.
+    # At exactly 0.5: neither fires (clean neutral — rare edge case).
     if is_trending and trend_strength > 0.5 and consec >= 2:
         if trend_regime == "TREND_UP" and streak_dir == 1:
             results.append(ModuleResult(

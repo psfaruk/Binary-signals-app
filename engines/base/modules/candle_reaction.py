@@ -160,4 +160,95 @@ def analyze(candles, ctx: MarketContext) -> list:
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
                     reasons=["Shrinking bear body → CALL exhaustion (54% win rate)"]))
 
+    # ═══════════════════════════════════════════════════════════════════════
+    #  CONTINUATION SIGNALS (NEW, 2026-07-18)
+    #  Previously this module was 100% REVERSAL (5/5 signals) — making it
+    #  structurally incapable of voting for a trend. Since candle_reaction
+    #  fires on EVERY candle close (it's the most active module), this
+    #  was the single biggest source of structural reversal bias.
+    #
+    #  Two CONTINUATION signals added:
+    #    6. Rising/falling closes momentum — 3+ candles with monotonically
+    #       rising (or falling) closes, each with a non-trivial body.
+    #       This is the definition of trend momentum.
+    #    7. Trend-aligned wick rejection — a wick rejection in the direction
+    #       of a confirmed trend is a continuation signal (e.g. lower wick
+    #       during an uptrend = buyers stepped in = continuation).
+    #  These are gated on trend regime so they don't fire in RANGE markets
+    #  where reversal interpretation is correct.
+    # ═══════════════════════════════════════════════════════════════════════
+
+    regime = ctx.regime
+    is_trending = regime.get("is_trending", False)
+    trend_regime = regime.get("regime", "RANGE")
+    trend_strength = regime.get("trend_strength", 0.0)
+
+    # ── CONTINUATION SIGNAL 6: Rising/falling closes momentum ────────────
+    # 3+ consecutive candles with monotonically rising closes + each body
+    # is non-trivial (>= 30% of range) = clean trend momentum.
+    # This is the structural opposite of Signal 1 (streak reversal):
+    # Signal 1 bets the streak ENDS, Signal 6 bets the streak CONTINUES.
+    # The difference: Signal 6 requires monotonic CLOSES (not just bodies)
+    # AND requires a confirmed trend regime — so it only fires when the
+    # trend is real, not a 3-candle blip in a range.
+    if is_trending and trend_strength > 0.4 and len(candles) >= 3:
+        c1_close = candles[-3]["close"]
+        c2_close = candles[-2]["close"]
+        c3_close = candles[-1]["close"]
+        # Monotonic rising closes
+        if c1_close < c2_close < c3_close:
+            # Each body must be non-trivial (not dojis)
+            b1 = abs(candles[-3]["close"] - candles[-3]["open"])
+            b2 = abs(candles[-2]["close"] - candles[-2]["open"])
+            b3 = abs(body)
+            r1 = candles[-3]["high"] - candles[-3]["low"]
+            r2 = candles[-2]["high"] - candles[-2]["low"]
+            if (r1 > 0 and r2 > 0 and rng > 0
+                    and b1/r1 >= 0.30 and b2/r2 >= 0.30 and body_pct >= 30
+                    and trend_regime == "TREND_UP"):
+                results.append(ModuleResult(
+                    module_name="candle_reaction", direction="CALL", score=3, confidence=62,
+                    signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
+                    reasons=[f"Rising closes momentum (3 UP, str={trend_strength:.2f}) → CALL continuation (62% win rate)"]))
+        # Monotonic falling closes
+        elif c1_close > c2_close > c3_close:
+            b1 = abs(candles[-3]["close"] - candles[-3]["open"])
+            b2 = abs(candles[-2]["close"] - candles[-2]["open"])
+            b3 = abs(body)
+            r1 = candles[-3]["high"] - candles[-3]["low"]
+            r2 = candles[-2]["high"] - candles[-2]["low"]
+            if (r1 > 0 and r2 > 0 and rng > 0
+                    and b1/r1 >= 0.30 and b2/r2 >= 0.30 and body_pct >= 30
+                    and trend_regime == "TREND_DOWN"):
+                results.append(ModuleResult(
+                    module_name="candle_reaction", direction="PUT", score=3, confidence=62,
+                    signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
+                    reasons=[f"Falling closes momentum (3 DOWN, str={trend_strength:.2f}) → PUT continuation (62% win rate)"]))
+
+    # ── CONTINUATION SIGNAL 7: Trend-aligned wick rejection ──────────────
+    # Signal 3 (WICK) always treats wick rejection as REVERSAL. But a
+    # lower-wick rejection during an UPTREND is actually a CONTINUATION
+    # signal — it means buyers stepped in at the low and pushed price
+    # back up, confirming the trend. Similarly for upper-wick in downtrend.
+    # This signal fires INSTEAD OF Signal 3 when the wick aligns with
+    # a confirmed trend. We use group="WICK_CONT" (not "WICK") so the
+    # blender doesn't double-count with Signal 3.
+    if is_trending and trend_strength > 0.4 and rng > 0:
+        upper_wick = h - max(o, c)
+        lower_wick = min(o, c) - l
+        uw_pct = upper_wick / rng * 100
+        lw_pct = lower_wick / rng * 100
+        # Lower wick rejection in uptrend = buyers defended the low → CALL continuation
+        if lw_pct > 40 and body_pct < 35 and trend_regime == "TREND_UP" and body > 0:
+            results.append(ModuleResult(
+                module_name="candle_reaction", direction="CALL", score=2, confidence=58,
+                signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
+                reasons=[f"Trend-aligned lower wick ({lw_pct:.0f}%, uptrend str={trend_strength:.2f}) → CALL continuation (58% win rate)"]))
+        # Upper wick rejection in downtrend = sellers defended the high → PUT continuation
+        elif uw_pct > 40 and body_pct < 35 and trend_regime == "TREND_DOWN" and body < 0:
+            results.append(ModuleResult(
+                module_name="candle_reaction", direction="PUT", score=2, confidence=58,
+                signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
+                reasons=[f"Trend-aligned upper wick ({uw_pct:.0f}%, downtrend str={trend_strength:.2f}) → PUT continuation (58% win rate)"]))
+
     return results
