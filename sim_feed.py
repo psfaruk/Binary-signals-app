@@ -520,13 +520,39 @@ class QuotexFeed:
         # follow the same path as real feed pairs. Real sim pairs (no _otc
         # suffix) get the trend-following REAL engine, OTC sim pairs get
         # the mean-reversion OTC engine.
+        # FIX (HTF sim parity, 2026-07-19): sim_feed was passing the
+        # default htf_trend="SIDEWAYS" — meaning HTF confluence was NEVER
+        # applied in sim mode. Now we derive it from the sim's own 1m
+        # candle buffer using the same graceful-degradation logic as
+        # feed.py (>=9 5m closes with progressive threshold). Sim uses
+        # synthetic candles with proper `time` fields, so the same
+        # _aggregate_5m_closes helper works.
         from candle_reaction import predict_from_candle
+        try:
+            from feed import _aggregate_5m_closes, _ema_simple
+            closes_5m_sim = _aggregate_5m_closes(candles[-105:] if len(candles) > 105 else candles, period)
+            n5_sim = len(closes_5m_sim)
+            if n5_sim >= 9:
+                e9 = _ema_simple(closes_5m_sim, 9)
+                e21 = _ema_simple(closes_5m_sim, 21)
+                sep_sim = abs(e9 - e21) / e21 if e21 > 0 else 0
+                thresh_sim = 0.0003 if n5_sim >= 21 else (0.0005 if n5_sim >= 14 else 0.0008)
+                if e9 > e21 and sep_sim > thresh_sim:
+                    htf_sim = "UPTREND"
+                elif e9 < e21 and sep_sim > thresh_sim:
+                    htf_sim = "DOWNTREND"
+                else:
+                    htf_sim = "SIDEWAYS"
+            else:
+                htf_sim = "SIDEWAYS"
+        except Exception:
+            htf_sim = "SIDEWAYS"
         _micro_for_pred = None
         if ticks and len(ticks) >= 10:
             from analyze_eoc import _build_micro
             _micro_for_pred = _build_micro(ticks, candles[-1]["open"] if candles else ticks[0])
         result = predict_from_candle(candles, ticks=ticks, micro=_micro_for_pred,
-                                     asset=asset, period=period)
+                                     asset=asset, period=period, htf_trend=htf_sim)
         return result, micro_hist
 
     async def _run_eoc(self, stream, actual_open=None):

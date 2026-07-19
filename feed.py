@@ -621,6 +621,39 @@ class QuotexFeed:
         case. Now we use each 1m candle's `time` field, floor to its
         5-minute bucket, and aggregate OHLC properly. The close of each
         5m bucket becomes the input to the EMA.
+
+        FIX (HTF cold-start regression, 2026-07-19): the original Bug A
+        fix introduced a COLD-START REGRESSION. Requiring >= 105 1m
+        candles means HTF is forced to SIDEWAYS for ~1h45m after a fresh
+        start (or after any reconnect that resets the candle buffer — and
+        this codebase has a known reconnect/re-subscribe storm history on
+        Cloudflare-blocked Railway). During that window:
+          - blender.py's HTF confluence multiplier is fully disabled
+            (counter-trend ×0.7 penalty = 1.0, aligned ×1.1 bonus = 1.0)
+          - candle_reaction/otc_pattern's NEW trend-aware dampening (which
+            only consults the 1m regime, NOT 5m HTF) fires against weak
+            1m noise, suppressing real reversals without HTF confirmation.
+
+        New approach: GRACEFUL DEGRADATION across three confidence tiers
+        based on how many 5m closes are available. We NEVER silently
+        degrade to flat SIDEWAYS — instead we scale the EMA separation
+        threshold so a clear trend read fires as soon as we have enough
+        5m closes for EMA9 (>=9), and tighten the threshold as more data
+        arrives. Below 9 5m closes we still return SIDEWAYS because
+        EMA9 itself isn't fully formed — that's a genuine minimum.
+
+        Threshold schedule (sep = |ema9-ema21|/ema21):
+          - >=21 5m closes (full EMA21):  sep > 0.0003  (0.03%)
+          - >=14 5m closes (EMA21 seeded): sep > 0.0005 (0.05%) — tighter
+                                               because EMA21 is still warming up
+          - >=9  5m closes (EMA9 ready):  sep > 0.0008 (0.08%) — even tighter,
+                                               only fires on strong directional
+                                               moves during early warmup
+          - <9   5m closes: SIDEWAYS (no EMA9 yet)
+
+        This way a strong trend is detected within ~9-14 minutes of cold
+        start instead of ~1h45m, while spurious noise-driven reads during
+        warmup are kept out by the progressively tighter thresholds.
         """
         # Determine period from the stream (default to 60s = 1m).
         period = stream.period if stream is not None else 60
@@ -633,32 +666,41 @@ class QuotexFeed:
 
         # Use the stream's existing 1m closed candles (NO network call)
         candles_1m = stream.candles if stream is not None else []
-        # FIX (Bug A): require >= 105 1m candles so ema21 actually uses
-        # period=21. With fewer, we don't have enough 5m closes to compute
-        # a meaningful EMA21 — returning SIDEWAYS is safer than emitting a
-        # noise-driven false trend that downstream trend_follow would
-        # amplify into wrong predictions.
-        if len(candles_1m) < 105:
+        if not candles_1m:
             return "SIDEWAYS"
 
         try:
             # Cap at the last 105 1m candles (=> up to 21 5m closes).
             window = candles_1m[-105:]
             closes_5m = _aggregate_5m_closes(window, period)
-            if len(closes_5m) < 21:
-                # The 105 1m candles didn't align into 21 full 5m buckets
-                # (rare — happens only if the 1m feed has gaps). Bail.
+            n5 = len(closes_5m)
+
+            # Hard floor: EMA9 needs >=9 closes. Below that, any "trend"
+            # would be pure noise. (Note: _ema_simple seeds with SMA over
+            # min(period, len(prices)) so it technically runs with fewer,
+            # but the result is meaningless — a 3-point SMA of 5m closes
+            # tells you nothing about the 5m trend.)
+            if n5 < 9:
                 return "SIDEWAYS"
 
-            # Compute EMA on the 5m closes. With >=21 closes both EMAs use
-            # their full period — no degeneration.
+            # Compute EMAs. _ema_simple seeds with SMA over min(period, n5)
+            # so EMA21 still works (warmup-mode) when n5 < 21.
             ema9  = _ema_simple(closes_5m, 9)
             ema21 = _ema_simple(closes_5m, 21)
             sep = abs(ema9 - ema21) / ema21 if ema21 > 0 else 0
 
-            if ema9 > ema21 and sep > 0.0003:
+            # Progressive threshold: tighter when we have less data, so a
+            # cold-start read only fires on genuinely strong moves.
+            if n5 >= 21:
+                thresh = 0.0003
+            elif n5 >= 14:
+                thresh = 0.0005
+            else:  # 9 <= n5 < 14
+                thresh = 0.0008
+
+            if ema9 > ema21 and sep > thresh:
                 trend = "UPTREND"
-            elif ema9 < ema21 and sep > 0.0003:
+            elif ema9 < ema21 and sep > thresh:
                 trend = "DOWNTREND"
             else:
                 trend = "SIDEWAYS"
@@ -668,6 +710,8 @@ class QuotexFeed:
                 "fetched_at": time.time(),
                 "ema9": ema9,
                 "ema21": ema21,
+                "n_5m_closes": n5,
+                "threshold": thresh,
             }
             return trend
         except Exception as exc:
