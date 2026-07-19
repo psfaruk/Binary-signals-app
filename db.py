@@ -161,6 +161,9 @@ def log_signal(asset, period, ctime, signal, score, confidence,
 
 
 def get_micro_history(asset, period, n=5, before_ctime=None):
+    # candle_micro PK is (asset, period, ctime) — ctime is unique per
+    # (asset, period) so no secondary tiebreaker is needed (unlike
+    # signal_log which uses AUTOINCREMENT id).
     with _cursor() as c:
         q = """SELECT * FROM candle_micro
                WHERE asset=? AND period=?
@@ -184,7 +187,7 @@ def get_recent_signals(asset, period, limit=20):
                    a_open, a_close, reasons
                    FROM signal_log
                    WHERE asset=? AND period=? AND signal IN ('CALL','PUT')
-                   ORDER BY ctime DESC LIMIT ?""",
+                   ORDER BY ctime DESC, id DESC LIMIT ?""",
                    (asset, period, limit)).fetchall()
         return [dict(r) for r in reversed(rows)]
 
@@ -211,7 +214,7 @@ def recent_accuracy(asset, period, n=20):
                    FROM signal_log
                    WHERE asset=? AND period=? AND signal IN ('CALL','PUT')
                      AND accuracy IN ('correct','wrong')
-                   ORDER BY ctime DESC LIMIT ?""",
+                   ORDER BY ctime DESC, id DESC LIMIT ?""",
                    (asset, period, n)).fetchall()
     if not rows:
         return None, 0
@@ -226,10 +229,20 @@ def recent_accuracy(asset, period, n=20):
 # which lets per_pair.get_weights() adapt from historical accuracy instead
 # of relying on the hardcoded PAIR_CONFIGS alone.
 
-_MODULE_NAMES = (
-    "candle_reaction", "running_tick", "pattern",
-    "indicator", "key_level", "otc_pattern", "trend_follow",
-)
+# FIX M6 (2026-07-19): import from core.constants instead of defining a
+# local tuple. Prevents drift if a new module is added — previously
+# /api/stats (which uses core.constants.MODULE_NAMES) would show the new
+# module while per_module_accuracy (which used the local tuple) would
+# silently skip it. Now both use the single source of truth.
+try:
+    from core.constants import MODULE_NAMES as _MODULE_NAMES
+except ImportError:
+    # Fallback for contexts where core.constants isn't importable (e.g.
+    # standalone test scripts). Keeps the local tuple as a safety net.
+    _MODULE_NAMES = (
+        "candle_reaction", "running_tick", "pattern",
+        "indicator", "key_level", "otc_pattern", "trend_follow",
+    )
 
 
 def per_module_accuracy(asset, period=60, n=200):
@@ -260,7 +273,7 @@ def per_module_accuracy(asset, period=60, n=200):
                    FROM signal_log
                    WHERE asset=? AND period=? AND signal IN ('CALL','PUT')
                      AND accuracy IN ('correct','wrong')
-                   ORDER BY ctime DESC LIMIT ?""",
+                   ORDER BY ctime DESC, id DESC LIMIT ?""",
                    (asset, period, n)).fetchall()
 
     if not rows:

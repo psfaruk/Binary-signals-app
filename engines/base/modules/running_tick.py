@@ -95,7 +95,7 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
 
     if call_sum > put_sum:
         composite_score = min(4, call_sum - put_sum)
-        vote_dir = 1  # CALL = up
+        # FIX M1 (2026-07-19): removed dead `vote_dir = 1` — assigned but never read.
         if prior_dir == 1:
             composite_type = "CONTINUATION"  # ticks pushing up after up candle
             type_reason = "continues prior up"
@@ -115,7 +115,7 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
 
     # put_sum > call_sum
     composite_score = min(4, put_sum - call_sum)
-    vote_dir = -1  # PUT = down
+    # FIX M1 (2026-07-19): removed dead `vote_dir = -1` — assigned but never read.
     if prior_dir == -1:
         composite_type = "CONTINUATION"  # ticks pushing down after down candle
         type_reason = "continues prior down"

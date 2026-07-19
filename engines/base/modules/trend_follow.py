@@ -88,23 +88,85 @@ def analyze(candles, ctx: MarketContext) -> list:
     # Close below the lowest low of the last 10 candles → bearish breakout
     # (Only fires when ATR is not elevated — breakouts in high-vol regimes
     #  are unreliable, often fakeouts.)
-    if len(candles) >= 10 and not regime.get("is_volatile", False):
-        lookback = candles[-11:-1]
+    #
+    # FIX (Real issue 3, 2026-07-19): the previous version used only the
+    # last candle's close vs the lookback high/low + an ATR buffer. That
+    # misfires on:
+    #   (a) News wicks — a single-candle spike that closes inside the
+    #       range but had a high/low poke outside. We now require the
+    #       candle BODY (not just high/low) to extend beyond the level.
+    #   (b) Stop-hunt fakeouts — a candle breaks the level, the next one
+    #       reverses. We now require multi-candle confirmation: BOTH the
+    #       prior candle AND the current candle must close beyond the
+    #       level. A single-candle poke gets a weaker "unconfirmed" vote.
+    #   (c) Recent same-direction failure — if a breakout within the last
+    #       6 candles was immediately reversed, suppress the new vote
+    #       (fakeout-pattern anti-trigger).
+    if len(candles) >= 12 and not regime.get("is_volatile", False):
+        # Use a 10-candle lookback that EXCLUDES both the current and prior
+        # candle — so the "level" being broken is a level established
+        # BEFORE the prior candle. Both prior and current closing above
+        # this level = confirmed breakout.
+        lookback = candles[-12:-2]
         recent_high = max(x["high"] for x in lookback)
         recent_low = min(x["low"] for x in lookback)
-        # Only count as breakout if close is meaningfully beyond the level
-        # (not just a 1-pip poke).
         buffer = atr * 0.15 if atr > 0 else 0
-        if close > recent_high + buffer:
-            results.append(ModuleResult(
-                module_name="trend_follow", direction="CALL", score=3, confidence=62,
-                signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
-                reasons=[f"Breakout above 10-candle high ({recent_high:.5f}) → CALL continuation"]))
-        elif close < recent_low - buffer:
-            results.append(ModuleResult(
-                module_name="trend_follow", direction="PUT", score=3, confidence=62,
-                signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
-                reasons=[f"Breakdown below 10-candle low ({recent_low:.5f}) → PUT continuation"]))
+        prior_close = candles[-2]["close"]
+
+        # Anti-fakeout: scan the last 6 closed candles (excluding current)
+        # for a same-direction breakout attempt that was reversed next candle.
+        # FIX M2 (2026-07-19): removed unreachable `if abs(i) > len(candles) - 1`
+        # guard — the enclosing block requires len(candles) >= 12, so for
+        # i ∈ {-7,…,-2} we have abs(i) ∈ {2,…,7} which is always <= 11. The
+        # guard was dead and misleading.
+        recent_failed_bull = False
+        recent_failed_bear = False
+        for i in range(-7, -1):
+            c = candles[i]
+            nc = candles[i + 1] if (i + 1) < 0 else None
+            if nc is None:
+                continue
+            # Bullish attempt: candle i closed above recent_high, next closed back below
+            if c["close"] > recent_high and nc["close"] < recent_high:
+                recent_failed_bull = True
+            # Bearish attempt: candle i closed below recent_low, next closed back above
+            if c["close"] < recent_low and nc["close"] > recent_low:
+                recent_failed_bear = True
+
+        # Bullish breakout: current close above recent_high + buffer AND body extends
+        # beyond the level (filters out upper-wick-only pokes).
+        if close > recent_high + buffer and (close - max(o, recent_high)) > buffer:
+            # Multi-candle confirmation: prior candle also closed above the level.
+            confirmed = prior_close > recent_high
+            if recent_failed_bull:
+                # Recent fakeout → skip (anti-trigger)
+                pass
+            elif confirmed:
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="CALL", score=3, confidence=62,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
+                    reasons=[f"Confirmed breakout above 10-candle high ({recent_high:.5f}, body-confirmed, prior close {prior_close:.5f}) → CALL continuation"]))
+            else:
+                # Single-candle breakout, no confirmation yet — weaker vote.
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="CALL", score=2, confidence=55,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
+                    reasons=[f"Unconfirmed breakout above 10-candle high ({recent_high:.5f}, prior close {prior_close:.5f}) → CALL (weak, no multi-candle confirm)"]))
+        # Bearish breakout (mirror)
+        elif close < recent_low - buffer and (min(o, recent_low) - close) > buffer:
+            confirmed = prior_close < recent_low
+            if recent_failed_bear:
+                pass
+            elif confirmed:
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="PUT", score=3, confidence=62,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
+                    reasons=[f"Confirmed breakdown below 10-candle low ({recent_low:.5f}, body-confirmed, prior close {prior_close:.5f}) → PUT continuation"]))
+            else:
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="PUT", score=2, confidence=55,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
+                    reasons=[f"Unconfirmed breakdown below 10-candle low ({recent_low:.5f}, prior close {prior_close:.5f}) → PUT (weak, no multi-candle confirm)"]))
 
     # ── SIGNAL 4: Higher-high / higher-low structure ─────────────────────
     # Classic Dow Theory uptrend: each swing high higher than previous,

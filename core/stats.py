@@ -80,7 +80,8 @@ def compute_module_stats(db_path=None):
         FROM signal_log
         WHERE signal IN ('CALL', 'PUT')
         ORDER BY ts DESC
-    """).fetchall()
+        LIMIT ?
+    """, (int(os.environ.get("STATS_MAX_ROWS", "5000")),)).fetchall()
 
     for row in rows:
         asset = row["asset"]

@@ -22,6 +22,22 @@ def analyze(candles, ctx: MarketContext) -> list:
     Returns list of ModuleResult objects. Body-derived signals share
     group="BODY" (will be collapsed by blender). Wick signals use
     group="WICK" (independent).
+
+    FIX (OTC issue 2, 2026-07-19): the BODY-group reversal signals
+    (streak, big body, close-in-range, shrinking body) used to fire
+    REVERSAL regardless of trend context. In a strong TREND, a same-
+    direction streak + big body + close at the range top is the
+    DEFINITION of trend momentum — calling it REVERSAL makes the
+    engine structurally incapable of following a trend.
+
+    We now pull `regime` AT THE TOP and compute a `body_aligns_with_trend`
+    flag. When the BODY reversal signal's direction OPPOSES the trend
+    (i.e. the signal is predicting a reversal back INTO the trend's
+    starting direction... no wait, BODY reversal predicts OPPOSITE-of-
+    streak-direction = OPPOSITE-of-trend-direction when aligned), we
+    dampen the score/confidence. The signal still fires (in case the
+    trend IS exhausting), but with weaker conviction so the blender
+    doesn't get a strong counter-trend vote.
     """
     results = []
     if not candles or len(candles) < 3:
@@ -36,6 +52,21 @@ def analyze(candles, ctx: MarketContext) -> list:
     stats = ctx.stats
     vol_pct = ctx.vol_pct
 
+    # FIX (OTC issue 2): pull regime at the TOP so all BODY-group signals
+    # can be trend-aware, not just the continuation signals at the bottom.
+    regime = ctx.regime
+    is_trending = regime.get("is_trending", False)
+    trend_regime = regime.get("regime", "RANGE")
+    trend_strength = regime.get("trend_strength", 0.0)
+    # Does the current candle's body align with the confirmed trend?
+    # body > 0 in TREND_UP, or body < 0 in TREND_DOWN.
+    body_aligns_with_strong_trend = (
+        is_trending
+        and trend_strength > 0.5
+        and ((trend_regime == "TREND_UP" and body > 0)
+             or (trend_regime == "TREND_DOWN" and body < 0))
+    )
+
     # ── Volatility-scaled thresholds ─────────────────────────────────────
     if vol_pct > 1.3:
         streak_thresh_5, streak_thresh_4, streak_thresh_3 = 6, 5, 4
@@ -48,43 +79,70 @@ def analyze(candles, ctx: MarketContext) -> list:
         body_mult = 1.5
 
     # ── SIGNAL 1: Consecutive streak reversal (BODY group) ───────────────
+    # FIX (OTC issue 2, 2026-07-19): when the streak ALIGNS with a strong
+    # trend, the reversal interpretation is wrong — a 3-candle up streak
+    # in a TREND_UP is momentum, not exhaustion. Soft-gate: dampen score
+    # and confidence when aligned-with-strong-trend; full strength only
+    # when counter-trend or in a range/volatile regime.
     consec = stats["current_streak"]
     streak_dir = stats["streak_direction"]
+    streak_aligns_with_strong_trend = (
+        is_trending
+        and trend_strength > 0.5
+        and ((trend_regime == "TREND_UP" and streak_dir == 1)
+             or (trend_regime == "TREND_DOWN" and streak_dir == -1))
+    )
+    # Dampening factors (applied to score & confidence)
+    if streak_aligns_with_strong_trend and trend_strength > 0.7:
+        s5_score, s5_conf = 1, 56   # was 4/75 — strong dampen
+        s4_score, s4_conf = 1, 53   # was 3/60
+        s3_score, s3_conf = 1, 51   # was 2/55
+    elif streak_aligns_with_strong_trend:
+        s5_score, s5_conf = 2, 62   # moderate dampen
+        s4_score, s4_conf = 2, 56
+        s3_score, s3_conf = 1, 52
+    else:
+        s5_score, s5_conf = 4, 75
+        s4_score, s4_conf = 3, 60
+        s3_score, s3_conf = 2, 55
+
     if consec >= streak_thresh_5:
         if streak_dir == 1:
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="PUT", score=4, confidence=75,
+                module_name="candle_reaction", direction="PUT", score=s5_score, confidence=s5_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"{consec}+ UP streak → PUT reversal (75% win rate, rarity={stats['streak_rarity']:.0%})"]))
+                reasons=[f"{consec}+ UP streak → PUT reversal ({s5_conf}% win rate, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f})"]))
         elif streak_dir == -1:
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="CALL", score=4, confidence=75,
+                module_name="candle_reaction", direction="CALL", score=s5_score, confidence=s5_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"{consec}+ DOWN streak → CALL reversal (75% win rate, rarity={stats['streak_rarity']:.0%})"]))
+                reasons=[f"{consec}+ DOWN streak → CALL reversal ({s5_conf}% win rate, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f})"]))
     elif consec >= streak_thresh_4:
         if streak_dir == 1:
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="PUT", score=3, confidence=60,
+                module_name="candle_reaction", direction="PUT", score=s4_score, confidence=s4_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"{consec}+ UP streak → PUT reversal (60% win rate)"]))
+                reasons=[f"{consec}+ UP streak → PUT reversal ({s4_conf}% win rate, trend_str={trend_strength:.2f})"]))
         elif streak_dir == -1:
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="CALL", score=3, confidence=60,
+                module_name="candle_reaction", direction="CALL", score=s4_score, confidence=s4_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"{consec}+ DOWN streak → CALL reversal (60% win rate)"]))
+                reasons=[f"{consec}+ DOWN streak → CALL reversal ({s4_conf}% win rate, trend_str={trend_strength:.2f})"]))
     elif consec >= streak_thresh_3:
         if streak_dir == 1:
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="PUT", score=2, confidence=55,
+                module_name="candle_reaction", direction="PUT", score=s3_score, confidence=s3_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"{consec}+ UP streak → PUT reversal (62% win rate)"]))
+                reasons=[f"{consec}+ UP streak → PUT reversal ({s3_conf}% win rate, trend_str={trend_strength:.2f})"]))
         elif streak_dir == -1:
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="CALL", score=2, confidence=55,
+                module_name="candle_reaction", direction="CALL", score=s3_score, confidence=s3_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"{consec}+ DOWN streak → CALL reversal (62% win rate)"]))
+                reasons=[f"{consec}+ DOWN streak → CALL reversal ({s3_conf}% win rate, trend_str={trend_strength:.2f})"]))
 
     # ── SIGNAL 2: Big body → reversal (BODY group, vol-scaled) ───────────
+    # FIX (OTC issue 2, 2026-07-19): same trend-aware dampening — a big
+    # body IN THE TREND DIRECTION is momentum, not exhaustion.
     if len(candles) >= 10:
         recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
                          for i in range(-min(20, len(candles)), 0)]
@@ -100,17 +158,24 @@ def analyze(candles, ctx: MarketContext) -> list:
             else:
                 z_boost_threshold = 2.3
             z_boost = 1 if stats["z_body"] > z_boost_threshold else 0
-            score = 3 + z_boost
+            # FIX (OTC issue 2): trend-aware dampening for big body
+            if body_aligns_with_strong_trend and trend_strength > 0.7:
+                base_score, base_conf = 1, 53  # was 3/64 — strong dampen
+            elif body_aligns_with_strong_trend:
+                base_score, base_conf = 2, 58  # moderate dampen
+            else:
+                base_score, base_conf = 3, 64
+            score = base_score + z_boost
             if body > 0:
                 results.append(ModuleResult(
-                    module_name="candle_reaction", direction="PUT", score=score, confidence=64,
+                    module_name="candle_reaction", direction="PUT", score=score, confidence=base_conf,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                    reasons=[f"Big UP body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {body_mult}x median) → PUT reversal"]))
+                    reasons=[f"Big UP body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {body_mult}x median, trend_str={trend_strength:.2f}) → PUT reversal"]))
             else:
                 results.append(ModuleResult(
-                    module_name="candle_reaction", direction="CALL", score=score, confidence=63,
+                    module_name="candle_reaction", direction="CALL", score=score, confidence=base_conf,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                    reasons=[f"Big DOWN body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {body_mult}x median) → CALL reversal"]))
+                    reasons=[f"Big DOWN body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {body_mult}x median, trend_str={trend_strength:.2f}) → CALL reversal"]))
 
     # ── SIGNAL 3: Wick rejection (WICK group — independent) ──────────────
     if rng > 0:
@@ -178,10 +243,10 @@ def analyze(candles, ctx: MarketContext) -> list:
     #  where reversal interpretation is correct.
     # ═══════════════════════════════════════════════════════════════════════
 
-    regime = ctx.regime
-    is_trending = regime.get("is_trending", False)
-    trend_regime = regime.get("regime", "RANGE")
-    trend_strength = regime.get("trend_strength", 0.0)
+    # FIX (OTC issue 2, 2026-07-19): regime / is_trending / trend_regime /
+    # trend_strength are now pulled at the TOP of analyze() so the
+    # BODY-group reversal signals above can also be trend-aware. The
+    # continuation signals below reuse the same variables.
 
     # ── CONTINUATION SIGNAL 6: Rising/falling closes momentum ────────────
     # 3+ consecutive candles with monotonically rising closes + each body

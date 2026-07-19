@@ -87,29 +87,48 @@ def _bollinger(closes, period=20, num_std=2):
 
 
 def _stochastic(candles, k_period=14, d_period=3):
-    """Stochastic Oscillator: %K and %D."""
+    """Stochastic Oscillator: %K and %D for the last closed candle, plus
+    the PREVIOUS candle's %K and %D so callers can detect true crossovers.
+
+    FIX (Bug E, 2026-07-19): the previous version returned only current %K
+    and %D, which made it impossible to detect a true %K/%D crossover —
+    downstream code fell back to a state check (`k > 80 and k < d`) that
+    fires on every candle in an overbought zone, piling on stale reversal
+    votes. Now also returns `k_prev` and `d_prev` so callers can detect
+    the actual sign change of `(k - d)` between the prior candle and now.
+
+    Returns: (k, d, k_prev, d_prev)
+    """
     if len(candles) < k_period:
-        return 50, 50
-    recent = candles[-k_period:]
-    highest = max(c["high"] for c in recent)
-    lowest = min(c["low"] for c in recent)
-    close = candles[-1]["close"]
-    if highest == lowest:
-        k = 50
-    else:
-        k = ((close - lowest) / (highest - lowest)) * 100
-    # %D = SMA of last d_period %K values
-    k_values = []
-    for i in range(d_period, 0, -1):
-        idx = len(candles) - i
-        if idx >= k_period:
-            r = candles[idx - k_period + 1:idx + 1]
-            hh = max(c["high"] for c in r)
-            ll = min(c["low"] for c in r)
-            cc = candles[idx]["close"]
-            k_values.append(((cc - ll) / (hh - ll) * 100) if hh != ll else 50)
+        return 50, 50, 50, 50
+
+    def _k_at(idx):
+        """Compute %K at candle index `idx` using the trailing k_period."""
+        if idx < k_period - 1:
+            return 50.0
+        r = candles[idx - k_period + 1: idx + 1]
+        hh = max(c["high"] for c in r)
+        ll = min(c["low"] for c in r)
+        cc = candles[idx]["close"]
+        return ((cc - ll) / (hh - ll) * 100) if hh != ll else 50.0
+
+    # Current %K
+    k = _k_at(len(candles) - 1)
+    # Current %D = SMA of last d_period %K values
+    k_values = [_k_at(len(candles) - 1 - i) for i in range(d_period)]
+    k_values.reverse()  # oldest → newest, for SMA readability
     d = sum(k_values) / len(k_values) if k_values else k
-    return k, d
+
+    # Previous %K and %D (one candle earlier)
+    if len(candles) >= k_period + 1:
+        k_prev = _k_at(len(candles) - 2)
+        k_values_prev = [_k_at(len(candles) - 2 - i) for i in range(d_period)]
+        k_values_prev.reverse()
+        d_prev = sum(k_values_prev) / len(k_values_prev) if k_values_prev else k_prev
+    else:
+        k_prev, d_prev = k, d
+
+    return k, d, k_prev, d_prev
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -207,22 +226,36 @@ def analyze(candles, ctx: MarketContext) -> list:
         # Skip vote — just informational
 
     # ── INDICATOR 5: Stochastic ──────────────────────────────────────────
-    # FIX (Bug #10, 2026-07-17): removed the mid-zone momentum branches
-    # (k>50, k<50 with confidence 51%) — pure noise that fired on nearly
-    # every candle. Stochastic now only fires on classic overbought/oversold
-    # reversals: %K crosses %D from above (>80) or from below (<20).
-    k, d = _stochastic(candles, 14, 3)
-    if k > 80 and k < d:
-        # %K above 80 and crossing below %D → bearish signal
+    # FIX (Bug E, 2026-07-19): the previous check was `k > 80 and k < d`
+    # (and `k < 20 and k > d`). That is NOT a crossover detector — it's a
+    # state check ("K is overbought AND currently below D"). It fires on
+    # every candle of a multi-candle overbought unwind, piling on stale
+    # reversal votes and producing false confluence with other indicators.
+    #
+    # A true bearish stochastic crossover is: on the previous candle
+    # (k_prev >= d_prev) AND on the current candle (k < d), with the
+    # crossover happening INSIDE the overbought zone (k > 80 or recently
+    # was > 80). The bullish case is the mirror.
+    #
+    # We use a slightly relaxed zone check (k > 70 / k < 30) because the
+    # crossover candle itself often dips just below 80 / just above 20 as
+    # %K turns — strict >80 would miss the very signal we're trying to
+    # detect. The crossover requirement (sign change of k-d) is the
+    # critical part that prevents stale repeat signals.
+    k, d, k_prev, d_prev = _stochastic(candles, 14, 3)
+    fresh_bear_cross = (k_prev >= d_prev) and (k < d)
+    fresh_bull_cross = (k_prev <= d_prev) and (k > d)
+    if fresh_bear_cross and k > 70:
+        # %K crossed below %D from overbought zone → bearish reversal
         results.append(ModuleResult(
             module_name="indicator", direction="PUT", score=2, confidence=57,
             signal_type="REVERSAL", reliability="INDICATOR", group="IND_STOCH",
-            reasons=[f"Stochastic bearish cross (%K={k:.0f} > 80, crossing %D) → PUT"]))
-    elif k < 20 and k > d:
-        # %K below 20 and crossing above %D → bullish signal
+            reasons=[f"Stochastic fresh bearish cross (%K={k:.0f}, %D={d:.0f}, was {k_prev:.0f}/{d_prev:.0f}) → PUT"]))
+    elif fresh_bull_cross and k < 30:
+        # %K crossed above %D from oversold zone → bullish reversal
         results.append(ModuleResult(
             module_name="indicator", direction="CALL", score=2, confidence=57,
             signal_type="REVERSAL", reliability="INDICATOR", group="IND_STOCH",
-            reasons=[f"Stochastic bullish cross (%K={k:.0f} < 20, crossing %D) → CALL"]))
+            reasons=[f"Stochastic fresh bullish cross (%K={k:.0f}, %D={d:.0f}, was {k_prev:.0f}/{d_prev:.0f}) → CALL"]))
 
     return results

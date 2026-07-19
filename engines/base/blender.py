@@ -101,7 +101,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     module_names = config.module_names
 
     if not candles or len(candles) < 3:
-        return _neutral("INSUFFICIENT_DATA", {}, asset, weight_adapter)
+        return _neutral("INSUFFICIENT_DATA", {}, asset, weight_adapter,
+                         module_names=module_names, htf_trend=htf_trend)
 
     # ── Step 1: Compute shared context ONCE ──────────────────────────────
     ctx = compute_context(candles)
@@ -116,7 +117,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     all_results += module_6_fn(candles, ctx)
 
     if not all_results:
-        return _neutral("NO_SIGNAL", ctx.regime, asset, weight_adapter)
+        return _neutral("NO_SIGNAL", ctx.regime, asset, weight_adapter,
+                         module_names=module_names, htf_trend=htf_trend)
 
     # ── Step 3: Collapse correlated groups (BODY → 1 vote) ───────────────
     body_signals = [r for r in all_results if r.group == "BODY"]
@@ -311,7 +313,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             f"[{_exhaustion_detail}]")
 
     if total_groups == 0:
-        return _neutral(all_reasons or ["NO_SIGNAL"], regime, asset, weight_adapter, ctx)
+        return _neutral(all_reasons or ["NO_SIGNAL"], regime, asset, weight_adapter,
+                         ctx, module_names=module_names, htf_trend=htf_trend)
 
     net = call_score - put_score
     total = call_score + put_score
@@ -535,15 +538,32 @@ def _module_breakdown(adjusted: list, all_results: list, module_names: tuple) ->
 
 
 def _neutral(reasons, regime, asset="", weight_adapter=None, ctx=None,
-             htf_trend="SIDEWAYS") -> dict:
-    """Return a NEUTRAL prediction."""
+             module_names: tuple = None, htf_trend="SIDEWAYS") -> dict:
+    """Return a NEUTRAL prediction.
+
+    Args:
+        reasons: list of reason strings (or a single string).
+        regime: regime dict from MarketContext (or {} when ctx not yet built).
+        asset: pair name.
+        weight_adapter: PairWeightAdapter (for pair profile lookup).
+        ctx: MarketContext if available (currently unused for module breakdown
+            since fired=False entries aren't rendered by the UI — kept for
+            future use / API consumers).
+        module_names: tuple of 6 module names (from BlenderConfig). Required
+            to build the per-module breakdown dict if you want empty
+            `fired: False` entries on NEUTRAL returns.
+        htf_trend: MUST be threaded through from the caller — otherwise the
+            UI shows stale "SIDEWAYS" for every NEUTRAL prediction (Bug C1).
+    """
     modules = {}
     pair_profile = "default"
     if weight_adapter is not None:
         pair_profile = weight_adapter.get_profile(asset)
-        if ctx is not None:
-            # Use the engine's module names for the breakdown display
-            modules = _module_breakdown([], [], weight_adapter.module_names)
+        # Build empty per-module breakdown so the UI's module panel stays
+        # consistent (all entries show fired=False). Skip if module_names
+        # not provided (defensive — older callers).
+        if module_names:
+            modules = _module_breakdown([], [], module_names)
     return {
         "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
         "score": 0, "reasons": reasons if isinstance(reasons, list) else [reasons],

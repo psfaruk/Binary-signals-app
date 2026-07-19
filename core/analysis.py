@@ -431,13 +431,32 @@ def check_level_confluence(candles, levels, atr):
     A level is "near" if the close is within 30% of ATR from it.
     The action is classified as:
       - "bounce": price approached the level but didn't break through
-      - "breakout": price crossed the level between the previous and current close
+      - "breakout": price closed beyond the level (true breakout)
+      - "wick_rejection": intrabar wick crossed the level but close pulled
+        back — a fakeout / rejection (NOT a real breakout)
+
+    FIX (Bug D, 2026-07-19): the previous version only compared
+    `prev_close` vs `close` to decide bounce vs breakout. That completely
+    ignored the candle's high/low, so a candle that wicked THROUGH a
+    level and closed back inside was miscategorized as a "bounce" (close
+    on the original side) — but in reality it's a failed breakout
+    (rejection). Conversely, a candle that gapped past a level intrabar
+    and closed just barely inside would also be miscalled "bounce".
+
+    Now uses full OHLC of the last candle + prev_close:
+      - breakout   : close beyond level (the only reliable breakout signal)
+      - wick_reject: intrabar high/low crossed level, but close pulled
+                     back to the original side (failed breakout / rejection)
+      - bounce     : approached level, no intrabar cross, close on original side
+
+    The "wick_rejection" action is a STRONGER reversal signal than
+    "bounce" because it represents a real test of the level that failed.
 
     Returns dict:
         near_level: bool
         level_type: "support" | "resistance" | None
         level_price: float | None
-        action: "bounce" | "breakout" | None
+        action: "bounce" | "breakout" | "wick_rejection" | None
         distance_atr: float (how far from the level, in ATR units)
     """
     if not levels or not candles or len(candles) < 2 or atr <= 0:
@@ -448,6 +467,9 @@ def check_level_confluence(candles, levels, atr):
     prev = candles[-2]
     close = last["close"]
     prev_close = prev["close"]
+    open_ = last["open"]
+    high = last["high"]
+    low = last["low"]
     tol = atr * 0.30
 
     nearest = None
@@ -462,26 +484,38 @@ def check_level_confluence(candles, levels, atr):
         return {"near_level": False, "level_type": None,
                 "level_price": None, "action": None, "distance_atr": 0}
 
-    # Determine action: bounce or breakout
+    level_price = nearest["price"]
+
+    # FIX (Bug D): use full OHLC to classify the interaction with the level.
+    # For RESISTANCE (price below): "beyond" = above; "approach side" = below.
+    # For SUPPORT (price above):    "beyond" = below; "approach side" = above.
     if nearest["type"] == "resistance":
-        # Resistance: price coming up to it and rejecting = bounce (PUT)
-        # Price pushing through it = breakout (CALL)
-        if prev_close <= nearest["price"] < close:
+        # True breakout: close pushed ABOVE the resistance level.
+        if close > level_price:
             action = "breakout"
+        # Wick rejection: intrabar high touched/poked above the level but
+        # close pulled back below — a failed breakout (bearish rejection).
+        elif high > level_price and close < level_price:
+            action = "wick_rejection"
+        # Plain bounce: never crossed intrabar, close stayed below.
         else:
             action = "bounce"
     else:  # support
-        # Support: price coming down to it and rejecting = bounce (CALL)
-        # Price pushing through it = breakdown = breakout (PUT)
-        if prev_close >= nearest["price"] > close:
-            action = "breakout"
+        # True breakdown: close pushed BELOW the support level.
+        if close < level_price:
+            action = "breakout"  # "breakout" here means breakdown
+        # Wick rejection: intrabar low poked below the level but close
+        # pulled back above — a failed breakdown (bullish rejection).
+        elif low < level_price and close > level_price:
+            action = "wick_rejection"
+        # Plain bounce: never crossed intrabar, close stayed above.
         else:
             action = "bounce"
 
     return {
         "near_level": True,
         "level_type": nearest["type"],
-        "level_price": nearest["price"],
+        "level_price": level_price,
         "action": action,
         "distance_atr": round(nearest_dist / atr, 3),
     }
@@ -546,6 +580,8 @@ def compute_statistical_edge(candles, lookback=50):
         streak = 0
         streak_rarity = 0
     else:
+        # Measure the CURRENT streak (looking backward from the last candle).
+        # This is the streak whose rarity we want to assess.
         streak = 1
         for i in range(len(candles) - 2, -1, -1):
             b = _body(candles[i])
@@ -555,11 +591,26 @@ def compute_statistical_edge(candles, lookback=50):
             else:
                 break
 
-        # Count all streaks in history and compute rarity
+        # FIX (Bug C, 2026-07-19): the previous version built `all_streaks`
+        # from the FULL candle history INCLUDING the last candle — meaning
+        # the current streak itself was counted in both the numerator AND
+        # denominator of the rarity calculation. A 5-candle streak in a
+        # history where the longest prior streak was 3 would compute
+        # rarity = 1/N (just itself qualifies) — a misleadingly LOW
+        # rarity that suppresses the reversal boost even though the
+        # streak IS historically rare.
+        #
+        # Now we compute historical streaks from `candles[:-len_of_current_streak]`
+        # — the window BEFORE the current streak started. The current streak
+        # is no longer self-influencing. If the current streak is the
+        # longest on record, rarity will be 0 (no historical streak >= it),
+        # which is the correct "this is unprecedented" signal.
+        cutoff = len(candles) - streak  # index where current streak started
+        historical = candles[:max(0, cutoff)]
         all_streaks = []
         cur_dir = 0
         cur_len = 0
-        for c in candles:
+        for c in historical:
             b = _body(c)
             d = 1 if b > 0 else (-1 if b < 0 else 0)
             if d == 0:
@@ -579,7 +630,9 @@ def compute_statistical_edge(candles, lookback=50):
             longer = sum(1 for s in all_streaks if s >= streak)
             streak_rarity = longer / len(all_streaks)
         else:
-            streak_rarity = 0
+            # No historical streaks to compare against — treat as neutral
+            # rather than artificially rare.
+            streak_rarity = 0.5
 
     return {
         "z_body": round(z_body, 2),

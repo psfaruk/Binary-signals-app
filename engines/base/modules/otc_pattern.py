@@ -78,17 +78,37 @@ def analyze(candles, ctx: MarketContext) -> list:
     # Rare streaks (<10% occurrence) get a reversal boost. Keep this one
     # un-gated because a truly rare streak IS more likely to reverse even
     # in a trend (statistical edge overrides regime).
+    #
+    # FIX (OTC issue 1+4, 2026-07-19): the comment above lied — the signal
+    # was un-gated and fired REVERSAL even in a strong TREND where a rare
+    # same-direction streak is the DEFINITION of trend momentum, not
+    # exhaustion. Now soft-gated by trend strength:
+    #   - trend_strength > 0.7 AND streak direction aligns with trend →
+    #     skip (this is a trend continuation, not a reversal setup)
+    #   - trend_strength 0.5–0.7 AND aligned → dampen score/confidence
+    #   - trend_strength < 0.5 OR counter-trend → fire at full strength
     if consec >= 3 and stats["streak_rarity"] < 0.10:
-        if streak_dir == 1:
-            results.append(ModuleResult(
-                module_name="otc_pattern", direction="PUT", score=2, confidence=65,
-                signal_type="REVERSAL", reliability="OTC", group="OTC_RARITY",
-                reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}) → PUT reversal boost"]))
-        elif streak_dir == -1:
-            results.append(ModuleResult(
-                module_name="otc_pattern", direction="CALL", score=2, confidence=65,
-                signal_type="REVERSAL", reliability="OTC", group="OTC_RARITY",
-                reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}) → CALL reversal boost"]))
+        aligned_with_trend = (
+            is_trending
+            and ((trend_regime == "TREND_UP" and streak_dir == 1)
+                 or (trend_regime == "TREND_DOWN" and streak_dir == -1))
+        )
+        if not (aligned_with_trend and trend_strength > 0.7):
+            # Dampen for moderate-trend aligned streaks; full strength otherwise.
+            if aligned_with_trend and trend_strength > 0.5:
+                score, conf = 1, 56
+            else:
+                score, conf = 2, 65
+            if streak_dir == 1:
+                results.append(ModuleResult(
+                    module_name="otc_pattern", direction="PUT", score=score, confidence=conf,
+                    signal_type="REVERSAL", reliability="OTC", group="OTC_RARITY",
+                    reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f}) → PUT reversal boost"]))
+            elif streak_dir == -1:
+                results.append(ModuleResult(
+                    module_name="otc_pattern", direction="CALL", score=score, confidence=conf,
+                    signal_type="REVERSAL", reliability="OTC", group="OTC_RARITY",
+                    reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f}) → CALL reversal boost"]))
 
     # ── REVERSAL SIGNAL 3: Z-score extreme reversal ──────────────────────
     vol_pct = ctx.vol_pct
@@ -99,32 +119,76 @@ def analyze(candles, ctx: MarketContext) -> list:
     else:
         z_threshold = 2.3
 
+    # FIX (OTC issue 1, 2026-07-19): z-score extreme fires REVERSAL on a
+    # big body — but a big body IN THE DIRECTION OF A STRONG TREND is a
+    # momentum candle (continuation), not exhaustion. Soft-gate: when the
+    # body aligns with a strong trend (str > 0.7), suppress this signal;
+    # moderate trend (str 0.5–0.7) gets a dampened version.
     if stats["z_body"] > z_threshold:
         last = candles[-1]
         body = last["close"] - last["open"]
-        if body > 0:
-            results.append(ModuleResult(
-                module_name="otc_pattern", direction="PUT", score=2, confidence=63,
-                signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
-                reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f} > {z_threshold}, vol={vol_pct:.1f}x) → PUT reversal (statistical edge)"]))
-        elif body < 0:
-            results.append(ModuleResult(
-                module_name="otc_pattern", direction="CALL", score=2, confidence=63,
-                signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
-                reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f} > {z_threshold}, vol={vol_pct:.1f}x) → CALL reversal (statistical edge)"]))
+        body_aligns_with_trend = (
+            is_trending
+            and ((trend_regime == "TREND_UP" and body > 0)
+                 or (trend_regime == "TREND_DOWN" and body < 0))
+        )
+        # Decide gating level. Default: full strength reversal.
+        if body_aligns_with_trend and trend_strength > 0.7:
+            # Strong-trend momentum candle — don't bet against it.
+            fire_z, z_score, z_conf = False, 0, 0
+        elif body_aligns_with_trend and trend_strength > 0.5:
+            fire_z, z_score, z_conf = True, 1, 56
+        else:
+            fire_z, z_score, z_conf = True, 2, 63
+
+        if fire_z:
+            if body > 0:
+                results.append(ModuleResult(
+                    module_name="otc_pattern", direction="PUT", score=z_score, confidence=z_conf,
+                    signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
+                    reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f} > {z_threshold}, vol={vol_pct:.1f}x, trend_str={trend_strength:.2f}) → PUT reversal"]))
+            elif body < 0:
+                results.append(ModuleResult(
+                    module_name="otc_pattern", direction="CALL", score=z_score, confidence=z_conf,
+                    signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
+                    reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f} > {z_threshold}, vol={vol_pct:.1f}x, trend_str={trend_strength:.2f}) → CALL reversal"]))
 
     # ── REVERSAL SIGNAL 4: Close percentile extreme ──────────────────────
+    # FIX (OTC issue 1, 2026-07-19): same gating as Signal 3 — a close at
+    # the 95th percentile during a strong uptrend is trend continuation,
+    # not reversal. Soft-gate aligned-with-trend extremes.
     pctile = stats["close_percentile"]
-    if pctile >= 95:
-        results.append(ModuleResult(
-            module_name="otc_pattern", direction="PUT", score=2, confidence=61,
-            signal_type="REVERSAL", reliability="OTC", group="OTC_PCTILE",
-            reasons=[f"Close at {pctile:.0f}th percentile (extreme high) → PUT reversal"]))
-    elif pctile <= 5:
-        results.append(ModuleResult(
-            module_name="otc_pattern", direction="CALL", score=2, confidence=61,
-            signal_type="REVERSAL", reliability="OTC", group="OTC_PCTILE",
-            reasons=[f"Close at {pctile:.0f}th percentile (extreme low) → CALL reversal"]))
+    pctile_aligns_with_trend = (
+        is_trending
+        and ((trend_regime == "TREND_UP" and pctile >= 95)
+             or (trend_regime == "TREND_DOWN" and pctile <= 5))
+    )
+    if pctile_aligns_with_trend and trend_strength > 0.7:
+        # Strong trend continuation — skip reversal vote entirely.
+        pass
+    elif pctile_aligns_with_trend and trend_strength > 0.5:
+        # Moderate trend — dampen but keep a weak reversal vote.
+        if pctile >= 95:
+            results.append(ModuleResult(
+                module_name="otc_pattern", direction="PUT", score=1, confidence=55,
+                signal_type="REVERSAL", reliability="OTC", group="OTC_PCTILE",
+                reasons=[f"Close at {pctile:.0f}th percentile (extreme high, trend_str={trend_strength:.2f}) → weak PUT reversal (dampened)"]))
+        elif pctile <= 5:
+            results.append(ModuleResult(
+                module_name="otc_pattern", direction="CALL", score=1, confidence=55,
+                signal_type="REVERSAL", reliability="OTC", group="OTC_PCTILE",
+                reasons=[f"Close at {pctile:.0f}th percentile (extreme low, trend_str={trend_strength:.2f}) → weak CALL reversal (dampened)"]))
+    else:
+        if pctile >= 95:
+            results.append(ModuleResult(
+                module_name="otc_pattern", direction="PUT", score=2, confidence=61,
+                signal_type="REVERSAL", reliability="OTC", group="OTC_PCTILE",
+                reasons=[f"Close at {pctile:.0f}th percentile (extreme high) → PUT reversal"]))
+        elif pctile <= 5:
+            results.append(ModuleResult(
+                module_name="otc_pattern", direction="CALL", score=2, confidence=61,
+                signal_type="REVERSAL", reliability="OTC", group="OTC_PCTILE",
+                reasons=[f"Close at {pctile:.0f}th percentile (extreme low) → CALL reversal"]))
 
     # ── REVERSAL SIGNAL 5: Alternation bias (very weak, gated) ───────────
     if consec == 1 and stats["streak_rarity"] > 0.30 and stats["z_body"] < 0.5:
@@ -171,7 +235,10 @@ def analyze(candles, ctx: MarketContext) -> list:
     # Close breaks above the recent N-candle high (or below low) with an
     # above-average body. This is a classic breakout continuation signal
     # that works in OTC when the broker's algorithm allows a trend to run.
-    if len(candles) >= 20:
+    # FIX M4 (2026-07-19): bumped guard from >=20 to >=21 so candles[-21:-1]
+    # actually yields 20 candles (was 19 when len==20 because Python slicing
+    # clamps the negative start to 0).
+    if len(candles) >= 21:
         recent = candles[-21:-1]  # last 20 closed candles (exclude current)
         recent_high = max(c["high"] for c in recent)
         recent_low = min(c["low"] for c in recent)

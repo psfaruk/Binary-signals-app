@@ -496,20 +496,23 @@ class QuotexFeed:
 
     # ── EOC analysis (same logic as feed.py) ──────────────────────────────
 
-    def _analyze_core(self, asset, period, candles, ticks, running_ticks=None,
+    async def _analyze_core(self, asset, period, candles, ticks, running_ticks=None,
                       stream=None):
+        """Analyze a candle for prediction + micro history.
+
+        FIX (H2, 2026-07-19): converted from sync → async to match feed.py.
+        All SQLite I/O is now wrapped in asyncio.to_thread() so the shared
+        event loop is NOT blocked when ~20 always-on sim streams re-evaluate
+        concurrently. Previously each _db.get_micro_history call blocked the
+        loop for several ms, causing visible tick stutter under load.
+        """
         if len(candles) < 5:
             return None, []
-        micro_hist = _db.get_micro_history(asset, period, n=5, before_ctime=candles[-1]["time"])
-        # Use cached accuracy if stream provided (avoids DB query on every
-        # LIVE re-eval). Fall back to DB query for background trackers.
-        if stream is not None:
-            acc, n_acc = stream.cached_accuracy
-        else:
-            try:
-                acc, n_acc = _db.recent_accuracy(asset, period, n=20)
-            except Exception:
-                acc, n_acc = None, 0
+        # FIX M3 (2026-07-19): removed dead `acc, n_acc` block — fetched
+        # but never used. Saves a wasted DB round-trip on every LIVE re-eval.
+        # Wrap micro-history fetch in asyncio.to_thread (sqlite3 blocks).
+        micro_hist = await asyncio.to_thread(
+            _db.get_micro_history, asset, period, 5, candles[-1]["time"])
         # 6-MODULE ENGINE (2026-07-14)
         # Runs 6 independent modules + Smart Blender with per-pair adaptation.
         # FIX (2026-07-17): predict_from_candle now auto-routes to
@@ -539,7 +542,7 @@ class QuotexFeed:
             stream.cached_accuracy = (None, 0)
         # Reset flip-suppression tracker for new candle.
         stream.live_signal_history = []
-        result, micro_hist = self._analyze_core(stream.asset, stream.period,
+        result, micro_hist = await self._analyze_core(stream.asset, stream.period,
                                                   closed, base_ticks, stream=stream)
         if result is None:
             return None
@@ -734,7 +737,12 @@ class QuotexFeed:
         if len(stream.candles) > 500:
             stream.candles = stream.candles[-400:]
         _micro_snap = self._analyze_microstructure(stream.ticks, stream.candle_open_price) if len(stream.ticks) >= 10 else None
-        accuracy = self._grade_and_log(stream.asset, stream.period, closed, stream.prediction, _micro_snap, stream.candles)
+        # FIX (H2, 2026-07-19): wrap _grade_and_log + _save_micro in
+        # asyncio.to_thread — they do synchronous sqlite3 I/O that would
+        # otherwise block the shared event loop (parity with feed.py).
+        accuracy = await asyncio.to_thread(
+            self._grade_and_log, stream.asset, stream.period, closed,
+            stream.prediction, _micro_snap, stream.candles)
         if accuracy in ("correct", "wrong"):
             _reg = (stream.prediction or {}).get("regime") or {}
             # FIX (BUG-2, 2026-07-18): use correct regime/zone keys.
@@ -757,7 +765,9 @@ class QuotexFeed:
         # SIGNAL_DELAY_SEC seconds after the new candle opens.
         stream.signal_delay_until = time.time() + SIGNAL_DELAY_SEC
         if _micro_snap:
-            self._save_micro(stream.asset, stream.period, closed, _micro_snap, stream.candles, list(stream.ticks))
+            await asyncio.to_thread(
+                self._save_micro, stream.asset, stream.period, closed,
+                _micro_snap, stream.candles, list(stream.ticks))
         stream.candle_open_time = new_open_time
         stream.candle_open_price = first_tick
         stream.candle_open_is_real = open_is_real
@@ -877,13 +887,16 @@ class QuotexFeed:
 
                     if len(stream.ticks) - stream._live_reeval_ticks >= reeval_interval:
                         try:
-                            fresh, _ = self._analyze_core(stream.asset, stream.period,
+                            fresh, _ = await self._analyze_core(stream.asset, stream.period,
                                                            stream.base_candles, stream.base_ticks,
                                                            running_ticks=list(stream.ticks),
                                                            stream=stream)
                             stream._live_reeval_ticks = len(stream.ticks)
                             if fresh and fresh.get("signal") in ("CALL", "PUT"):
-                                # Flip suppression (2026-07-10)
+                                # Flip suppression (2026-07-10) — track signal
+                                # history for chop detection. Used to demote
+                                # strength (NOT change direction — direction is
+                                # locked below per ONE SIGNAL PER CANDLE rule).
                                 sig = fresh["signal"]
                                 stream.live_signal_history.append(
                                     (len(stream.ticks), sig, time.time()))
@@ -896,27 +909,94 @@ class QuotexFeed:
                                 for i in range(1, len(dirs)):
                                     if dirs[i] != dirs[i-1]:
                                         flips += 1
-                                if flips >= 3 and len(dirs) >= 4:
-                                    fresh = dict(fresh)
-                                    fresh["signal"] = "NEUTRAL"
-                                    fresh["strength"] = "WEAK"
-                                    fresh.setdefault("reasons", []).append(
-                                        f"FLIP_SUPPRESS: {flips} flips in last 10s → NEUTRAL")
-                                    stream.prediction = fresh
-                                    pred_changed = True
-                                    # NOTE: do NOT `continue` — fall through
-                                    # to broadcast so client sees NEUTRAL.
-                                elif flips >= 2 and len(dirs) >= 3:
-                                    fresh = dict(fresh)
-                                    if fresh.get("strength") != "WEAK":
-                                        fresh["strength"] = "WEAK"
-                                        fresh.setdefault("reasons", []).append(
+                                # Compute strength demotion flag (do NOT
+                                # change CALL/PUT direction — see lock below).
+                                demote_to_weak = (
+                                    (flips >= 3 and len(dirs) >= 4)
+                                    or (flips >= 2 and len(dirs) >= 3
+                                        and fresh.get("strength") != "WEAK"))
+                                flip_neutralize = (flips >= 3 and len(dirs) >= 4)
+
+                                # ── ONE SIGNAL PER CANDLE (2026-07-19 fix H1) ──
+                                # Ported from feed.py: the signal direction
+                                # is LOCKED at EOC. LIVE re-eval can only
+                                # update score/confidence/strength — NEVER
+                                # CALL↔PUT. This brings sim_feed in parity
+                                # with feed.py and prevents the "signal
+                                # flipping on same candle" issue.
+                                locked_dir = (stream.prediction or {}).get("signal")
+                                fresh_dir = fresh.get("signal")
+
+                                if locked_dir in ("CALL", "PUT"):
+                                    if fresh_dir == locked_dir:
+                                        # Same direction — update score/
+                                        # confidence/strength in place.
+                                        merged = {
+                                            **stream.prediction,
+                                            "score": fresh.get("score",
+                                                stream.prediction.get("score")),
+                                            "confidence": fresh.get("confidence",
+                                                stream.prediction.get("confidence")),
+                                            "agree": fresh.get("agree",
+                                                stream.prediction.get("agree")),
+                                            "total": fresh.get("total",
+                                                stream.prediction.get("total")),
+                                        }
+                                        # Flip-suppression: demote strength
+                                        # without changing direction.
+                                        if demote_to_weak:
+                                            merged["strength"] = "WEAK"
+                                            merged.setdefault("reasons", []).append(
+                                                f"FLIP_DEMOTE: {flips} flips in last 10s → WEAK")
+                                        # Reason refresh — keep latest module
+                                        # breakdown for transparency.
+                                        merged["modules"] = fresh.get("modules",
+                                            stream.prediction.get("modules"))
+                                        merged["reasons"] = fresh.get("reasons",
+                                            stream.prediction.get("reasons"))
+                                        if demote_to_weak and "FLIP_DEMOTE" not in " ".join(merged.get("reasons", [])):
+                                            merged.setdefault("reasons", []).append(
+                                                f"FLIP_DEMOTE: {flips} flips in last 10s → WEAK")
+                                        stream.prediction = merged
+                                        pred_changed = True
+                                    # else: different direction → IGNORE.
+                                    # The original EOC signal stays locked.
+                                elif locked_dir == "NEUTRAL" and fresh_dir in ("CALL", "PUT"):
+                                    # Original was NEUTRAL but live data
+                                    # now shows a clear direction → allow
+                                    # one-time upgrade to CALL/PUT.
+                                    # FIX H1/M5: preserve candle/payout keys
+                                    # that _run_eoc added to stream.prediction.
+                                    new_pred = {**(stream.prediction or {}), **fresh}
+                                    if flip_neutralize:
+                                        # Even on initial upgrade, if chop is
+                                        # severe, stay NEUTRAL (skip upgrade).
+                                        pass
+                                    else:
+                                        if demote_to_weak:
+                                            new_pred["strength"] = "WEAK"
+                                            new_pred.setdefault("reasons", []).append(
+                                                f"FLIP_DEMOTE: {flips} flips in last 10s → WEAK")
+                                        stream.prediction = new_pred
+                                        pred_changed = True
+                                elif locked_dir is None:
+                                    # No prior prediction — first LIVE re-eval.
+                                    # FIX M5: merge with stream.prediction
+                                    # (which may carry candle/payout from
+                                    # _run_eoc) instead of overwriting.
+                                    new_pred = {**(stream.prediction or {}), **fresh}
+                                    if demote_to_weak:
+                                        new_pred["strength"] = "WEAK"
+                                        new_pred.setdefault("reasons", []).append(
                                             f"FLIP_DEMOTE: {flips} flips in last 10s → WEAK")
-                                    stream.prediction = {**(stream.prediction or {}), **fresh}
+                                    stream.prediction = new_pred
                                     pred_changed = True
-                                else:
-                                    stream.prediction = {**(stream.prediction or {}), **fresh}
-                                    pred_changed = True
+                                # If flip_neutralize fires on a LOCKED CALL/PUT,
+                                # we used to force NEUTRAL — but per the lock
+                                # rule, we CANNOT change direction. Instead we
+                                # demote to WEAK (handled above). The original
+                                # NEUTRALize-on-flip behavior was a violation
+                                # of ONE SIGNAL PER CANDLE and is removed.
                         except Exception as exc:
                             import traceback as tb
                             print(f"[sim] LIVE re-eval error: {exc}")

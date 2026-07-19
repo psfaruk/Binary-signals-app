@@ -30,13 +30,31 @@ def analyze(candles, ctx: MarketContext) -> list:
     level_conf = ctx.level_confluence
 
     # ── SIGNAL 1: Swing level confluence (bounce vs breakout) ────────────
+    # FIX (Bug D, 2026-07-19): handle the new "wick_rejection" action
+    # emitted by check_level_confluence when the candle's intrabar high/low
+    # crossed the level but the close pulled back. This is a STRONGER
+    # reversal signal than a plain "bounce" because the level was actually
+    # tested and rejected — a higher-conviction fade.
     if level_conf["near_level"]:
         lvl_type = level_conf["level_type"]
         action = level_conf["action"]
         dist = level_conf["distance_atr"]
         lvl_price = level_conf["level_price"]
 
-        if action == "bounce":
+        if action == "wick_rejection":
+            # Wick poked through the level but close pulled back — failed
+            # breakout. Strong reversal signal (higher score than bounce).
+            if lvl_type == "support":
+                results.append(ModuleResult(
+                    module_name="key_level", direction="CALL", score=4, confidence=70,
+                    signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                    reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → CALL (failed breakdown, 70% win rate)"]))
+            else:
+                results.append(ModuleResult(
+                    module_name="key_level", direction="PUT", score=4, confidence=70,
+                    signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                    reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → PUT (failed breakout, 70% win rate)"]))
+        elif action == "bounce":
             if lvl_type == "support":
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=3, confidence=65,

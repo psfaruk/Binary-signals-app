@@ -360,6 +360,58 @@ def _ema_simple(prices: list[float], period: int) -> float:
     return ema
 
 
+def _aggregate_5m_closes(candles_1m: list[dict], period: int = 60) -> list[float]:
+    """Aggregate 1m candles into 5m closes by timestamp-boundary alignment.
+
+    FIX (Bug A, 2026-07-19): the old HTF code took every 5th 1m close as
+    a 5m close. That is only correct if the 1m buffer happens to start on
+    a 5-minute wall boundary — which a rolling 105-candle window almost
+    never does. Misalignment shifts the 5m boundary by up to 4 minutes,
+    producing 5m "candles" that span wall boundaries and inject artificial
+    momentum/reversal noise into ema9 vs ema21.
+
+    This helper floors each 1m candle's `time` to its 5-minute bucket
+    (5 * period seconds), groups all 1m candles in the same bucket, and
+    emits the close of the LAST 1m candle in each bucket as that bucket's
+    5m close. Buckets with no candles are skipped (the next bucket's close
+    still represents a true 5-minute boundary).
+
+    Args:
+        candles_1m: list of candle dicts with at least "time" and "close".
+            `time` may be in seconds (Quotex) or milliseconds (some feeds);
+            we auto-detect by magnitude.
+        period: the 1m candle period in seconds (default 60).
+
+    Returns:
+        List of 5m close prices, ordered oldest → newest.
+    """
+    if not candles_1m:
+        return []
+    # Auto-detect seconds vs milliseconds. Quotex uses seconds, but be safe.
+    sample_ts = candles_1m[0].get("time", 0)
+    ms_mode = sample_ts > 10_000_000_000  # > year 2286 in seconds
+    bucket_seconds = 5 * period
+    closes_5m: list[float] = []
+    current_bucket: int | None = None
+    for c in candles_1m:
+        t = c.get("time", 0)
+        if ms_mode:
+            t = t / 1000
+        bucket = (int(t) // bucket_seconds) * bucket_seconds
+        if current_bucket is None or bucket != current_bucket:
+            # New 5m bucket started — flush previous (its close was already
+            # captured as the last 1m close before this bucket began).
+            # The first bucket just initializes; subsequent ones emit.
+            if current_bucket is not None:
+                closes_5m.append(prev_close)
+            current_bucket = bucket
+        prev_close = c["close"]
+    # Flush the last bucket
+    if current_bucket is not None:
+        closes_5m.append(prev_close)
+    return closes_5m
+
+
 # ── Per-asset stream state ────────────────────────────────────────────────────
 # Everything that used to live directly on QuotexFeed (one asset at a time)
 # now lives on its own _AssetStream instance, owned for its whole life by one
@@ -519,10 +571,15 @@ class QuotexFeed:
         self._last_db_cleanup: float = 0.0
 
         # ── Higher Timeframe (HTF) trend cache ──
-        # {asset: {"trend": "UPTREND"/"DOWNTREND"/"SIDEWAYS",
-        #          "fetched_at": float, "ema9": float, "ema21": float}}
-        # Refreshed every 60s per asset. Used to filter 1m signals: if 1m
-        # signal opposes 5m trend, strength is demoted.
+        # Key = (asset, period) — see FIX below.
+        # Value = {"trend": "UPTREND"/"DOWNTREND"/"SIDEWAYS",
+        #          "fetched_at": float, "ema9": float, "ema21": float}
+        # Refreshed every 60s per (asset, period). Used to filter 1m signals:
+        # if 1m signal opposes 5m trend, strength is demoted.
+        #
+        # FIX (Bug A+B, 2026-07-19): cache key was just `asset` — same asset
+        # streaming under multiple periods would collide and reuse a stale
+        # trend from a different stream. Now keyed by `(asset, period)`.
         #
         # NOTE (2026-07-13): the NTP time-offset subsystem that used to live
         # here was removed — it computed an offset that no caller consumed
@@ -530,7 +587,7 @@ class QuotexFeed:
         # If real NTP correction is needed, use ntplib AND replace every
         # time.time() in the candle-boundary / signal-delay / stale-detection
         # paths with the corrected clock in one go.
-        self._htf_cache: dict[str, dict] = {}
+        self._htf_cache: dict[tuple[str, int], dict] = {}
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -539,49 +596,64 @@ class QuotexFeed:
         Returns 'UPTREND', 'DOWNTREND', or 'SIDEWAYS'.
 
         Derives the 5m trend from the EXISTING 1m closed candles in
-        stream.candles (every 5th 1m candle = 1 5m candle). Cached per-asset
-        for 60 seconds. Uses only closed 1m candles that are already in
-        memory — zero extra network/subscriptions.
+        stream.candles, aggregated into proper 5m candles by timestamp
+        boundary alignment (NOT every-5th close — that was incorrect when
+        the 1m candle buffer wasn't aligned to a 5-minute wall boundary).
+        Cached per (asset, period) for 60 seconds. Uses only closed 1m
+        candles that are already in memory — zero extra network/subscriptions.
 
-        FIX (2026-07-13): the previous version took only the last 30 1m
-        candles (=> 6 5m closes) and called `_ema_simple(closes_5m, min(9, 6))`
-        and `min(21, 6)` — both EMAs ended up with period=6, so ema9 == ema21,
-        sep == 0, and trend was ALWAYS SIDEWAYS. Now takes the last 105 1m
-        candles (=> 21 5m closes) so ema21 can actually use period=21.
+        FIX (Bug A, 2026-07-19): the previous version accepted as few as 25
+        1m candles (=> 5 5m closes), then ran `_ema_simple(closes_5m,
+        min(9, 5))` and `min(21, 5)` — both EMAs degenerated to period=5,
+        so ema9 == ema21, separation == 0, and trend was ALWAYS SIDEWAYS.
+        Now requires >= 105 1m candles (=> 21 5m closes) so ema21 can use
+        its full period. Anything below that returns SIDEWAYS rather than
+        emitting a noise-driven false trend.
+
+        FIX (Bug B, 2026-07-19): cache key was just `asset` — same asset
+        streaming under multiple periods would collide and reuse a stale
+        trend from a different stream. Now keyed by `(asset, period)`.
+
+        FIX (Bug A, 2026-07-19, 5m alignment): previously, 5m closes were
+        built by chunking every 5 consecutive 1m closes — this only yields
+        correct 5m candles when the 1m buffer starts on a 5-minute wall
+        boundary. With a rolling 105-candle window that's almost never the
+        case. Now we use each 1m candle's `time` field, floor to its
+        5-minute bucket, and aggregate OHLC properly. The close of each
+        5m bucket becomes the input to the EMA.
         """
+        # Determine period from the stream (default to 60s = 1m).
+        period = stream.period if stream is not None else 60
+        cache_key = (asset, period)
+
         # Check cache (60s TTL)
-        cached = self._htf_cache.get(asset)
+        cached = self._htf_cache.get(cache_key)
         if cached and (time.time() - cached["fetched_at"]) < 60:
             return cached.get("trend", "SIDEWAYS")
 
         # Use the stream's existing 1m closed candles (NO network call)
         candles_1m = stream.candles if stream is not None else []
-        # Need >= 105 1m candles to derive 21 5m closes (ema21 needs period=21).
-        # If we have fewer, return SIDEWAYS rather than making a network call
-        # that would re-subscribe.
-        if len(candles_1m) < 25:
+        # FIX (Bug A): require >= 105 1m candles so ema21 actually uses
+        # period=21. With fewer, we don't have enough 5m closes to compute
+        # a meaningful EMA21 — returning SIDEWAYS is safer than emitting a
+        # noise-driven false trend that downstream trend_follow would
+        # amplify into wrong predictions.
+        if len(candles_1m) < 105:
             return "SIDEWAYS"
 
         try:
-            # Build 5m closes from 1m candles: group every 5 consecutive
-            # 1m candles into one 5m candle and take its close.
-            # Take as many 1m candles as we have (up to 105) so ema21 gets
-            # its full period once we have >= 105.
+            # Cap at the last 105 1m candles (=> up to 21 5m closes).
             window = candles_1m[-105:]
-            closes_1m = [c["close"] for c in window]
-            closes_5m = []
-            for i in range(0, len(closes_1m), 5):
-                chunk = closes_1m[i:i+5]
-                if chunk:
-                    closes_5m.append(chunk[-1])  # close of last 1m in group
-
-            if len(closes_5m) < 5:
+            closes_5m = _aggregate_5m_closes(window, period)
+            if len(closes_5m) < 21:
+                # The 105 1m candles didn't align into 21 full 5m buckets
+                # (rare — happens only if the 1m feed has gaps). Bail.
                 return "SIDEWAYS"
 
-            # Compute EMA on the 5m closes. min() guards short histories;
-            # once we have >=21 closes, ema21 actually uses period=21.
-            ema9  = _ema_simple(closes_5m, min(9,  len(closes_5m)))
-            ema21 = _ema_simple(closes_5m, min(21, len(closes_5m)))
+            # Compute EMA on the 5m closes. With >=21 closes both EMAs use
+            # their full period — no degeneration.
+            ema9  = _ema_simple(closes_5m, 9)
+            ema21 = _ema_simple(closes_5m, 21)
             sep = abs(ema9 - ema21) / ema21 if ema21 > 0 else 0
 
             if ema9 > ema21 and sep > 0.0003:
@@ -591,7 +663,7 @@ class QuotexFeed:
             else:
                 trend = "SIDEWAYS"
 
-            self._htf_cache[asset] = {
+            self._htf_cache[cache_key] = {
                 "trend": trend,
                 "fetched_at": time.time(),
                 "ema9": ema9,
@@ -599,7 +671,7 @@ class QuotexFeed:
             }
             return trend
         except Exception as exc:
-            print(f"[feed] HTF trend fetch failed for {asset}: {exc}")
+            print(f"[feed] HTF trend fetch failed for {asset} (period={period}): {exc}")
             return "SIDEWAYS"
 
     def available_pairs(self) -> dict:
@@ -870,6 +942,12 @@ class QuotexFeed:
         Common cause: Quotex token expired mid-session. The WS connection
         shows 'connected' but no data flows. Auto-fallback lets the user
         keep using the app while the real feed reconnects in background.
+
+        FIX (H4, 2026-07-19): previously this method started a sim feed
+        but DID NOT stop the real feed's run() loop — leaving a zombie
+        real-feed manager fighting with the sim feed over broadcasts.
+        Now we mark the real feed as "abandoned" so the run() loop exits
+        cleanly before starting the sim feed.
         """
         try:
             await asyncio.sleep(30)
@@ -884,6 +962,24 @@ class QuotexFeed:
             if stream.task:
                 stream.task.cancel()
             self._streams.pop((asset, period), None)
+            # FIX H4: stop the real-feed manager loop before starting sim.
+            # Without this, the real feed's run() keeps retrying Quotex
+            # connections in the background and racing the sim feed for
+            # broadcast/_streams mutations.
+            self._abandoned = True
+            if getattr(self, '_manager_task', None) is not None:
+                self._manager_task.cancel()
+                try:
+                    await self._manager_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # Cancel every other real-feed stream task too — they all share
+            # the same broken Quotex connection.
+            for key, s in list(self._streams.items()):
+                if s.task and not s.task.done():
+                    s._evicting = True
+                    s.task.cancel()
+            self._streams.clear()
             # Force sim mode by setting the env flag + recreating feed
             os.environ["USE_SIM"] = "1"
             # Reload sim feed dynamically
@@ -894,6 +990,11 @@ class QuotexFeed:
             sim_stream = _sim_module.QuotexFeed()
             # Copy pairs list so sim has the same pairs
             sim_stream._pairs_list = self._pairs_list
+            # FIX H4: replace the server's feed reference so future
+            # ensure_stream calls go to the sim feed, not the dead real one.
+            # We can't reassign server.feed directly from here, so we mark
+            # the real feed as sim-delegated and ensure_stream routes to sim.
+            self._sim_delegate = sim_stream
             await sim_stream.run(self._broadcast)
         except asyncio.CancelledError:
             pass
@@ -1047,7 +1148,11 @@ class QuotexFeed:
                     if asyncio.isfuture(result) or asyncio.iscoroutine(result):
                         await asyncio.wait_for(result, timeout=3)
                     return   # success — stop trying alternatives
-                except Exception:
+                except Exception as _e:
+                    # FIX L6 (2026-07-19): log the failure so connection-leak
+                    # debugging is possible — was silently swallowed before.
+                    print(f"[feed] _close_client {meth}() failed: "
+                          f"{type(_e).__name__}: {_e}")
                     continue   # this method failed — try the next one
 
     async def _connect(self) -> bool:
@@ -1233,16 +1338,11 @@ class QuotexFeed:
                 _db.get_micro_history,
                 asset, period, 5, candles[-1]["time"])
 
-        # Use cached accuracy if a stream is provided (avoids DB query on
-        # every LIVE re-eval in the last 10s). Fall back to DB query for
-        # background trackers that don't have a stream context.
-        if stream is not None:
-            acc, n_acc = stream.cached_accuracy
-        else:
-            try:
-                acc, n_acc = _db.recent_accuracy(asset, period, n=20)
-            except Exception:
-                acc, n_acc = None, 0
+        # FIX M3 (2026-07-19): removed dead `acc, n_acc` block. Was fetched
+        # from cache or DB but never passed to the prediction engine or used
+        # afterward — pure wasted I/O (and a sqlite query on every LIVE
+        # re-eval for background trackers). If accuracy-aware prediction
+        # is needed later, wire it through `predict_from_candle` explicitly.
 
         # Get HTF (5m) trend for confluence filtering.
         # CRITICAL: pass `stream` so it uses existing 1m candles in memory
@@ -2058,6 +2158,11 @@ class QuotexFeed:
         except Exception:
             stream.payout = None
 
+        # FIX (H3, 2026-07-19): if `stream.candles` is already populated
+        # (preserved by watchdog restart), don't blindly overwrite it with
+        # the freshly-fetched history. Instead, only append candles newer
+        # than the latest preserved one. This honors the watchdog's intent:
+        # the chart continues seamlessly instead of briefly blanking.
         history = await self._load_history(asset, period)
         stream.last_real_tick_wall = time.time()
 
@@ -2067,12 +2172,53 @@ class QuotexFeed:
             # scratch.
             print(f"[feed] no history for {asset}@{period}s "
                   f"— starting from ticks only")
+            # If watchdog preserved candles, keep them — don't blank the chart.
+            if not stream.candles:
+                await self._broadcast({
+                    "type":       "snapshot",
+                    "asset":      asset,
+                    "period":     period,
+                    "candles":    [],
+                    "prediction": None,
+                })
+            return
+
+        # If watchdog preserved state, merge instead of overwrite.
+        if stream.candles:
+            preserved_last_time = stream.candles[-1].get("time", 0)
+            # Append only history candles newer than the latest preserved.
+            new_candles = [c for c in history if c.get("time", 0) > preserved_last_time]
+            if new_candles:
+                stream.candles.extend(new_candles)
+                # Trim to last 400 to avoid unbounded growth.
+                if len(stream.candles) > 500:
+                    stream.candles = stream.candles[-400:]
+                print(f"[feed] watchdog-merged {len(new_candles)} new candles "
+                      f"into preserved {len(stream.candles) - len(new_candles)} "
+                      f"for {asset}@{period}s")
+            # Update open time/price only if a new candle started.
+            new_last = stream.candles[-1]
+            new_open_time = new_last["time"] + period
+            if new_open_time > stream.candle_open_time:
+                stream.candle_open_time  = new_open_time
+                stream.candle_open_price = new_last["close"]
+                stream.candle_open_is_real = False
+            # Don't clear ticks — preserved ticks are still valid for the
+            # current running candle.
+            if not stream.ticks:
+                stream.ticks.append(new_last["close"])
+                self._track_tick(stream, new_last["close"])
+            # Reset micro cache + recompute prediction (cheap, no DB I/O
+            # for the prediction engine itself; _run_eoc does the to_thread).
+            self._reset_micro_cache(stream)
+            stream.prediction = await self._run_eoc(stream, actual_open=new_last["close"])
+            stream.signal_delay_until = 0.0
             await self._broadcast({
                 "type":       "snapshot",
                 "asset":      asset,
                 "period":     period,
-                "candles":    [],
-                "prediction": None,
+                "candles":    stream.candles[-300:],
+                "prediction": stream.prediction,
             })
             return
 
@@ -3056,6 +3202,17 @@ class QuotexFeed:
         _db.init()          # create DB tables if not exist
         _db.cleanup()       # prune rows older than 7 days
 
+        # FIX (H4, 2026-07-19): record this manager task so the
+        # _fallback_to_sim_if_stuck can cancel it cleanly. Without this,
+        # the real feed's run() keeps retrying Quotex connections forever
+        # after sim fallback kicks in, racing the sim feed for broadcasts.
+        try:
+            self._manager_task = asyncio.current_task()
+        except Exception:
+            self._manager_task = None
+        self._abandoned = False
+        self._sim_delegate = None
+
         # ── Auto-login on startup (2026-07-11) ─────────────────────────────
         # If QX_EMAIL + QX_PASSWORD are set but the connection keeps failing
         # (e.g., token expired, Cloudflare blocking), try a fresh browser-login
@@ -3063,16 +3220,22 @@ class QuotexFeed:
         # auto-connecting — no manual token refresh needed.
         await self._auto_login_startup()
 
-        HOUSEKEEP_SECS    = 5
+        # FIX L2 (2026-07-19): make housekeep/watchdog intervals env-tunable
+        # so ops can dial them in for production tuning.
+        HOUSEKEEP_SECS    = int(os.environ.get("HOUSEKEEP_SECS", "5"))
         # Global staleness reuses the module-level STALE_SECS (overridable via
         # env) — see top of file. Was previously a separate GLOBAL_STALE_SECS.
         # FIX (2026-07-17): always_on watchdog runs every 30s (6 housekeep
         # ticks). Separate counter so it doesn't interfere with the existing
         # 5s housekeeping cadence.
         _last_watchdog_run = 0.0
-        WATCHDOG_INTERVAL  = 30.0   # seconds between watchdog checks
+        WATCHDOG_INTERVAL  = float(os.environ.get("WATCHDOG_INTERVAL", "30.0"))
 
         while True:
+            # FIX H4: exit cleanly if sim fallback has taken over.
+            if self._abandoned:
+                print("[feed] run() exiting — sim feed has taken over")
+                return
             try:
                 # ── Connect (shared across all streams) ───────────────────
                 if not self._connected:
