@@ -455,14 +455,17 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # showed single-group confidence-100 predictions were only 35% accurate
     # on the real engine. Tightened to 65/55/48 — still allows meaningful
     # single-group predictions but prevents the 70-100% overconfidence.
+    # FIX (calibration v2, 2026-07-20): further tightened after 4h backtest
+    # showed 100-109% bin at 40% accuracy and 80-89% at 41.7%. Now caps at
+    # 55/48/42 to prevent any single-group prediction from exceeding 55%.
     if total_groups == 1:
         max_eff = majority_score
         if max_eff >= 6:
-            cap = 65
-        elif max_eff >= 4:
             cap = 55
-        else:
+        elif max_eff >= 4:
             cap = 48
+        else:
+            cap = 42
         confidence = min(confidence, cap)
 
     # FIX (SIDEWAYS-dampener, 2026-07-20): backtest showed predictions made
@@ -471,6 +474,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # predict. Apply a 5-point confidence dampener to prevent overconfidence.
     if htf_trend == "SIDEWAYS" and regime.get("is_ranging", False):
         confidence = max(0, confidence - 5)
+
+    # FIX (high-confidence cap, 2026-07-20): 4h backtest showed 80-89% bin
+    # at 41.7% accuracy and 100% at 40%. Cap ALL predictions at 75% unless
+    # they have 3+ groups AND net_margin >= 0.6 (strong consensus).
+    if confidence > 75:
+        if not (total_groups >= 3 and net_margin >= 0.6):
+            confidence = min(confidence, 75)
 
     # ── Step 9: Pattern confluence check for STRONG ──────────────────────
     # FIX (BUG-BQ, 2026-07-20): pattern_agrees only checked reliability ==

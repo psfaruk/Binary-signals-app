@@ -24,12 +24,16 @@ from core.constants import REAL_MODULES
 
 
 # ── Reliability tier multipliers (Real-market tuning) ────────────────────
+# FIX (trend_follow calibration, 2026-07-20): backtest showed trend_follow
+# module has 28.9% win rate — dampened TREND tier from 1.3 to 1.0 until the
+# module improves. INDICATOR also dampened slightly (1.3→1.2) since
+# indicators overlap with trend_follow logic.
 RELIABILITY = {
     "PATTERN":   1.5,   # multi-candle patterns (highest conviction)
     "STAT":      1.3,   # statistical edge (Z-score, rarity)
     "LEVEL":     1.3,   # key S/R level confluence
-    "TREND":     1.3,   # REAL engine trend-following signals (real-market trends are reliable)
-    "INDICATOR": 1.3,   # REAL-MARKET: indicators reflect real order flow (was 1.0 in OTC)
+    "TREND":     1.0,   # was 1.3 — trend_follow underperforming, dampened
+    "INDICATOR": 1.2,   # was 1.3 — slight dampen due to overlap with trend_follow
     "CANDLE":    1.0,   # single-candle signals (baseline)
     "OTC":       1.2,   # kept for dict compat (Real engine uses TREND module instead)
     "MICRO":     0.7,   # REAL-MARKET: tick microstructure is more meaningful (real volume) — was 0.6

@@ -104,10 +104,12 @@ def analyze(candles, ctx: MarketContext) -> list:
     # ── SIGNAL 2: EMA alignment confirmation ─────────────────────────────
     # EMA9 > EMA21 + price above EMA9 → uptrend continuation
     # EMA9 < EMA21 + price below EMA9 → downtrend continuation
-    # Only fires when EMA separation is meaningful (>0.02% of price).
+    # FIX (trend_follow calibration, 2026-07-20): backtest showed 28.9% win
+    # rate — the 0.02% separation threshold was way too low, firing on noise.
+    # Raised to 0.10% (10 pips on EURUSD) for meaningful trend confirmation.
     if ema9 > 0 and ema21 > 0:
         sep_pct = abs(ema9 - ema21) / max(ema21, 0.0001) * 100
-        if sep_pct > 0.02:
+        if sep_pct > 0.10:
             if ema9 > ema21 and close > ema9:
                 results.append(ModuleResult(
                     module_name="trend_follow", direction="CALL", score=2, confidence=58,
