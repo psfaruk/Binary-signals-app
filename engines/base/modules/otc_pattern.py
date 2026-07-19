@@ -191,15 +191,24 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reasons=[f"Close at {pctile:.0f}th percentile (extreme low) → CALL reversal"]))
 
     # ── REVERSAL SIGNAL 5: Alternation bias (very weak, gated) ───────────
+    # FIX (Bug 16, deep audit 2026-07-19): the previous `not results`
+    # check made this signal almost never fire — any other OTC signal in
+    # the results list blocked it. Now we check only for prior OTC
+    # reversal signals (not all signals) — alternation bias is a fallback
+    # when no strong reversal signal fired, NOT a fallback when nothing
+    # at all fired. The signal remains weak (score 1, conf 53).
     if consec == 1 and stats["streak_rarity"] > 0.30 and stats["z_body"] < 0.5:
         last = candles[-1]
         body = last["close"] - last["open"]
-        if body > 0 and not results:
+        prior_reversal_fired = any(
+            r.signal_type == "REVERSAL" for r in results
+        )
+        if body > 0 and not prior_reversal_fired:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=1, confidence=53,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_ALTERNATE",
                 reasons=["OTC alternation bias (small body, 53% opposite) → PUT"]))
-        elif body < 0 and not results:
+        elif body < 0 and not prior_reversal_fired:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=1, confidence=53,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_ALTERNATE",

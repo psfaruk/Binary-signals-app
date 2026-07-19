@@ -23,12 +23,22 @@ from engines.base.types import ModuleResult, MarketContext
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _ema(values, period):
-    """Exponential Moving Average."""
-    if not values or len(values) < period:
+    """Exponential Moving Average.
+
+    FIX (Bug 9, deep audit 2026-07-19): previously required
+    `len(values) >= period` and returned 0 otherwise. This silently failed
+    EMA checks when len < period (cold-start, short lookback). Now adapts
+    the seed to whatever length is available — same logic as
+    core.analysis._ema. With fewer values than `period`, the EMA is mostly
+    an SMA of all available values, which is still a useful (if noisier)
+    trend direction indicator.
+    """
+    if not values:
         return 0
     k = 2 / (period + 1)
-    ema = sum(values[:period]) / period
-    for v in values[period:]:
+    seed_n = min(period, len(values))
+    ema = sum(values[:seed_n]) / seed_n
+    for v in values[seed_n:]:
         ema = v * k + ema * (1 - k)
     return ema
 
@@ -204,13 +214,26 @@ def analyze(candles, ctx: MarketContext) -> list:
     # trend, piling on continuation votes for stale momentum. Now only
     # fires on a FRESH crossover within the last 2 candles: histogram
     # flips sign between candle N-2 and N-1 (or N-1 and N).
+    #
+    # FIX (Bug 15, deep audit 2026-07-19): added magnitude filter. The
+    # previous check `hist_prev <= 0 and histogram > 0` fired on ANY sign
+    # flip, including noise-level flips where histogram was 1e-7 on both
+    # sides of zero. In OTC feeds especially, this caused phantom
+    # crossover signals that contributed to false confluence. Now the
+    # post-crossover histogram magnitude must exceed a small price-relative
+    # threshold (0.0001 * close = ~1 pip on EURUSD, ~1.5 pip on USDJPY).
     MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
     macd_line, signal_line, histogram = _macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
     # Detect sign change in histogram by recomputing on truncated closes.
     if len(closes) >= MACD_SLOW + MACD_SIGNAL + 1:
         _ml_prev, _sl_prev, hist_prev = _macd(closes[:-1], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-        fresh_bull_cross = hist_prev <= 0 and histogram > 0
-        fresh_bear_cross = hist_prev >= 0 and histogram < 0
+        # Magnitude filter: post-crossover histogram must be meaningful
+        # (>0.01% of close). Filters noise-level sign flips.
+        mag_threshold = abs(last_close) * 0.0001 if last_close > 0 else 0.0001
+        fresh_bull_cross = (hist_prev <= 0 and histogram > 0
+                            and abs(histogram) > mag_threshold)
+        fresh_bear_cross = (hist_prev >= 0 and histogram < 0
+                            and abs(histogram) > mag_threshold)
     else:
         fresh_bull_cross = fresh_bear_cross = False
 
@@ -297,13 +320,23 @@ def analyze(candles, ctx: MarketContext) -> list:
     k, d, k_prev, d_prev = _stochastic(candles, 14, 3)
     fresh_bear_cross = (k_prev >= d_prev) and (k < d)
     fresh_bull_cross = (k_prev <= d_prev) and (k > d)
-    if fresh_bear_cross and k > 70:
+    # FIX (Bug 14, deep audit 2026-07-19): the previous zone check used
+    # `k > 70` (current K) for bearish crossover and `k < 30` for bullish.
+    # But immediately after a crossover, K has already moved AWAY from the
+    # extreme — a bearish crossover from overbought typically has K dropping
+    # from 82 → 68, so `k > 70` FAILS and the signal is missed. The correct
+    # check is on the PRIOR candle's K (the candle that was actually in the
+    # overbought zone BEFORE the crossover). Now we check `k_prev > 70` for
+    # bearish and `k_prev < 30` for bullish, with a relaxed `max(k, k_prev)`
+    # fallback so we don't miss signals where K was just barely below the
+    # threshold on the prior candle.
+    if fresh_bear_cross and (k_prev > 70 or max(k, k_prev) > 75):
         # %K crossed below %D from overbought zone → bearish reversal
         results.append(ModuleResult(
             module_name="indicator", direction="PUT", score=2, confidence=57,
             signal_type="REVERSAL", reliability="INDICATOR", group="IND_STOCH",
             reasons=[f"Stochastic fresh bearish cross (%K={k:.0f}, %D={d:.0f}, was {k_prev:.0f}/{d_prev:.0f}) → PUT"]))
-    elif fresh_bull_cross and k < 30:
+    elif fresh_bull_cross and (k_prev < 30 or min(k, k_prev) < 25):
         # %K crossed above %D from oversold zone → bullish reversal
         results.append(ModuleResult(
             module_name="indicator", direction="CALL", score=2, confidence=57,

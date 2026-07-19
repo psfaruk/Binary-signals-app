@@ -46,13 +46,19 @@ def analyze(candles, ctx: MarketContext) -> list:
     # Opposite of the OTC engine which treats 3+ streaks as reversal.
     consec = stats["current_streak"]
     streak_dir = stats["streak_direction"]
+    # FIX (Bug 13, deep audit 2026-07-19): cap the lookback to
+    # min(consec, len(candles)) so `range(-consec, 0)` never indexes past
+    # the start of the list. Previously, if `consec > len(candles)` (rare
+    # but possible at cold-start when streak is computed from a long
+    # virtual history but the candle list is short), `candles[-consec]`
+    # would raise IndexError.
     if consec >= 3 and len(candles) >= 4:
-        # Check if bodies are RISING (increasing commitment)
+        lookback = min(consec, len(candles))
         bodies = [abs(candles[i]["close"] - candles[i]["open"])
-                  for i in range(-consec, 0)]
+                  for i in range(-lookback, 0)]
         rising_bodies = all(bodies[i] >= bodies[i-1] * 0.85
                             for i in range(1, len(bodies)) if bodies[i-1] > 0)
-        if rising_bodies:
+        if rising_bodies and len(bodies) >= 3:
             # Continuation: 3+ rising-body candles → next candle continues
             if streak_dir == 1:
                 results.append(ModuleResult(
@@ -145,7 +151,15 @@ def analyze(candles, ctx: MarketContext) -> list:
 
         recent_failed_bull = False
         recent_failed_bear = False
-        for i in range(-7, -1):
+        # FIX (Bug 18, deep audit 2026-07-19): the previous loop
+        # `range(-7, -1)` only checked 6 candles, missing older failed
+        # breakouts within the lookback window. Now we scan
+        # `range(-min(11, len(candles)-1), -1)` so we check up to 10 prior
+        # candles (matching the 10-candle lookback used for recent_high).
+        scan_start = -min(11, len(candles) - 1)
+        for i in range(scan_start, -1):
+            if abs(i) > len(candles) - 1:
+                continue
             c = candles[i]
             nc = candles[i + 1] if (i + 1) < 0 else None
             if nc is None:

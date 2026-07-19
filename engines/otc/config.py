@@ -167,18 +167,10 @@ PAIR_CONFIGS = {
         },
         "description": "Major OTC — trending, indicators reliable",
     },
-    "EURJPY": {
-        "profile": "trending",
-        "weights": {
-            "candle_reaction": 1.0,
-            "running_tick":    1.0,
-            "pattern":         1.2,
-            "indicator":       1.1,
-            "key_level":       1.2,
-            "otc_pattern":     1.0,
-        },
-        "description": "JPY cross — trending, round levels important",
-    },
+    # FIX (Bug 20, deep audit 2026-07-19): removed the phantom "EURJPY"
+    # entry (without _otc suffix) — it was dead code that never matched
+    # any real asset (OTC asset is "EURJPY_otc", already defined below).
+    # The duplicate was misleading maintainers and could mask typos.
     "USDJPY_otc": {
         "profile": "trending",
         "weights": {

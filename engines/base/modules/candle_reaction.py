@@ -208,37 +208,83 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reasons=[f"Lower wick rejection ({lw_pct:.0f}%) → CALL (56% win rate)"]))
 
     # ── SIGNAL 4: Close position in range (BODY group) ───────────────────
+    # FIX (Bug 7, deep audit 2026-07-19): apply same trend-aware dampening
+    # as Signals 1 and 2. A close at the range top during a strong uptrend
+    # is trend CONTINUATION (momentum push), not reversal. The signal
+    # still fires (in case the trend IS exhausting), but with dampened
+    # conviction so the blender doesn't get a strong counter-trend vote.
     if rng > 0:
         close_pos = max(0, min(100, (c - l) / rng * 100))
         if close_pos >= 80:
             percentile_boost = 1 if stats["close_percentile"] >= 90 else 0
+            close_aligns_with_strong_trend = (
+                is_trending
+                and trend_strength > 0.5
+                and trend_regime == "TREND_UP"
+            )
+            if close_aligns_with_strong_trend and trend_strength > 0.7:
+                base_score, base_conf = 1, 53   # strong dampen
+            elif close_aligns_with_strong_trend:
+                base_score, base_conf = 1, 56   # moderate dampen
+            else:
+                base_score, base_conf = 2, 62
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="PUT", score=2 + percentile_boost, confidence=62,
+                module_name="candle_reaction", direction="PUT", score=base_score + percentile_boost, confidence=base_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"Close at range top ({close_pos:.0f}%, pctile={stats['close_percentile']:.0f}) → PUT"]))
+                reasons=[f"Close at range top ({close_pos:.0f}%, pctile={stats['close_percentile']:.0f}, trend_str={trend_strength:.2f}) → PUT"]))
         elif close_pos <= 20:
             percentile_boost = 1 if stats["close_percentile"] <= 10 else 0
+            close_aligns_with_strong_trend = (
+                is_trending
+                and trend_strength > 0.5
+                and trend_regime == "TREND_DOWN"
+            )
+            if close_aligns_with_strong_trend and trend_strength > 0.7:
+                base_score, base_conf = 1, 53
+            elif close_aligns_with_strong_trend:
+                base_score, base_conf = 1, 56
+            else:
+                base_score, base_conf = 2, 60
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="CALL", score=2 + percentile_boost, confidence=60,
+                module_name="candle_reaction", direction="CALL", score=base_score + percentile_boost, confidence=base_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"Close at range bottom ({close_pos:.0f}%, pctile={stats['close_percentile']:.0f}) → CALL"]))
+                reasons=[f"Close at range bottom ({close_pos:.0f}%, pctile={stats['close_percentile']:.0f}, trend_str={trend_strength:.2f}) → CALL"]))
 
     # ── SIGNAL 5: Body shrinking → exhaustion (BODY group) ───────────────
     # FIX (doji bug, 2026-07-19, AUDIT-ENGINES #15): same fix as Signal 2 —
     # `if body > 0: PUT else: CALL` fired CALL on doji. Now uses elif.
+    #
+    # FIX (Bug 8, deep audit 2026-07-19): apply trend-aware dampening.
+    # In a strong uptrend, a shrinking bull body is CONSOLIDATION (trend
+    # pausing before continuation), not exhaustion. The signal still fires
+    # (consolidation can precede reversal in rare cases), but with
+    # dampened conviction.
     if len(candles) >= 2:
         prev_body = abs(candles[-2]["close"] - candles[-2]["open"])
         if prev_body > 0 and abs(body) < prev_body * 0.5 and abs(body) > 0:
-            if body > 0:
-                results.append(ModuleResult(
-                    module_name="candle_reaction", direction="PUT", score=1, confidence=54,
-                    signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                    reasons=["Shrinking bull body → PUT exhaustion (54% win rate)"]))
-            elif body < 0:
-                results.append(ModuleResult(
-                    module_name="candle_reaction", direction="CALL", score=1, confidence=54,
-                    signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                    reasons=["Shrinking bear body → CALL exhaustion (54% win rate)"]))
+            shrink_aligns_with_trend = (
+                is_trending
+                and trend_strength > 0.5
+                and ((trend_regime == "TREND_UP" and body > 0)
+                     or (trend_regime == "TREND_DOWN" and body < 0))
+            )
+            if shrink_aligns_with_trend and trend_strength > 0.7:
+                s5_score, s5_conf = 0, 50    # strong dampen, near-zero
+            elif shrink_aligns_with_trend:
+                s5_score, s5_conf = 1, 52    # moderate dampen
+            else:
+                s5_score, s5_conf = 1, 54
+            if s5_score > 0:
+                if body > 0:
+                    results.append(ModuleResult(
+                        module_name="candle_reaction", direction="PUT", score=s5_score, confidence=s5_conf,
+                        signal_type="REVERSAL", reliability="CANDLE", group="BODY",
+                        reasons=[f"Shrinking bull body ({body_pct:.0f}% of range, trend_str={trend_strength:.2f}) → PUT exhaustion"]))
+                elif body < 0:
+                    results.append(ModuleResult(
+                        module_name="candle_reaction", direction="CALL", score=s5_score, confidence=s5_conf,
+                        signal_type="REVERSAL", reliability="CANDLE", group="BODY",
+                        reasons=[f"Shrinking bear body ({body_pct:.0f}% of range, trend_str={trend_strength:.2f}) → CALL exhaustion"]))
             # body == 0: doji — skip (a doji is ALREADY an exhaustion
             # signal but is handled by Signal 3 wick analysis).
 
@@ -315,22 +361,48 @@ def analyze(candles, ctx: MarketContext) -> list:
     # This signal fires INSTEAD OF Signal 3 when the wick aligns with
     # a confirmed trend. We use group="WICK_CONT" (not "WICK") so the
     # blender doesn't double-count with Signal 3.
+    #
+    # FIX (Bug 19, deep audit 2026-07-19): the previous check required
+    # `body > 0` (bullish close) for CALL continuation in an uptrend. But
+    # a lower-wick with body < 0 (bearish close) in an uptrend is ALSO a
+    # continuation signal — it means sellers tried to push price down,
+    # buyers defended the low, but the close ended slightly bearish. The
+    # key signal is the LOWER WICK itself (buyers defended), not the
+    # direction of the small body. Now we allow body < 0 with a slightly
+    # lower score (still continuation, but weaker conviction since sellers
+    # did win the close).
     if is_trending and trend_strength > 0.4 and rng > 0:
         upper_wick = h - max(o, c)
         lower_wick = min(o, c) - l
         uw_pct = upper_wick / rng * 100
         lw_pct = lower_wick / rng * 100
         # Lower wick rejection in uptrend = buyers defended the low → CALL continuation
-        if lw_pct > 40 and body_pct < 35 and trend_regime == "TREND_UP" and body > 0:
-            results.append(ModuleResult(
-                module_name="candle_reaction", direction="CALL", score=2, confidence=58,
-                signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
-                reasons=[f"Trend-aligned lower wick ({lw_pct:.0f}%, uptrend str={trend_strength:.2f}) → CALL continuation (58% win rate)"]))
+        if lw_pct > 40 and body_pct < 35 and trend_regime == "TREND_UP":
+            if body > 0:
+                # Bullish close + lower wick = clean continuation
+                results.append(ModuleResult(
+                    module_name="candle_reaction", direction="CALL", score=2, confidence=58,
+                    signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
+                    reasons=[f"Trend-aligned lower wick ({lw_pct:.0f}%, uptrend str={trend_strength:.2f}) → CALL continuation (58% win rate)"]))
+            else:
+                # Bearish close but lower wick = buyers defended, weaker conviction
+                results.append(ModuleResult(
+                    module_name="candle_reaction", direction="CALL", score=1, confidence=54,
+                    signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
+                    reasons=[f"Trend-aligned lower wick ({lw_pct:.0f}%, bearish close, str={trend_strength:.2f}) → weak CALL continuation (54% win rate)"]))
         # Upper wick rejection in downtrend = sellers defended the high → PUT continuation
-        elif uw_pct > 40 and body_pct < 35 and trend_regime == "TREND_DOWN" and body < 0:
-            results.append(ModuleResult(
-                module_name="candle_reaction", direction="PUT", score=2, confidence=58,
-                signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
-                reasons=[f"Trend-aligned upper wick ({uw_pct:.0f}%, downtrend str={trend_strength:.2f}) → PUT continuation (58% win rate)"]))
+        elif uw_pct > 40 and body_pct < 35 and trend_regime == "TREND_DOWN":
+            if body < 0:
+                # Bearish close + upper wick = clean continuation
+                results.append(ModuleResult(
+                    module_name="candle_reaction", direction="PUT", score=2, confidence=58,
+                    signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
+                    reasons=[f"Trend-aligned upper wick ({uw_pct:.0f}%, downtrend str={trend_strength:.2f}) → PUT continuation (58% win rate)"]))
+            else:
+                # Bullish close but upper wick = sellers defended, weaker conviction
+                results.append(ModuleResult(
+                    module_name="candle_reaction", direction="PUT", score=1, confidence=54,
+                    signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
+                    reasons=[f"Trend-aligned upper wick ({uw_pct:.0f}%, bullish close, str={trend_strength:.2f}) → weak PUT continuation (54% win rate)"]))
 
     return results

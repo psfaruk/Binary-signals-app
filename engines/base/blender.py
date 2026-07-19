@@ -121,10 +121,26 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                          module_names=module_names, htf_trend=htf_trend)
 
     # ── Step 3: Collapse correlated groups (BODY → 1 vote) ───────────────
-    body_signals = [r for r in all_results if r.group == "BODY"]
-    non_body = [r for r in all_results if r.group != "BODY"]
+    # FIX (Bug 10, deep audit 2026-07-19): previously only collapsed
+    # group="BODY", leaving BODY_CONT and WICK_CONT to vote independently.
+    # Since candle_reaction can produce 4 signals in a strong trend
+    # (BODY + BODY_CONT + WICK + WICK_CONT), the module could cast 4
+    # separate votes — over-weighting one source. BODY_CONT and BODY both
+    # use recent close prices, so they share underlying data and should
+    # be collapsed together. WICK_CONT and WICK similarly share wick data.
+    body_signals = [r for r in all_results if r.group in ("BODY", "BODY_CONT")]
+    wick_signals = [r for r in all_results if r.group in ("WICK", "WICK_CONT")]
+    non_body_wick = [r for r in all_results
+                     if r.group not in ("BODY", "BODY_CONT", "WICK", "WICK_CONT")]
     collapsed_body = _collapse_body_group(body_signals)
-    grouped_results = non_body + ([collapsed_body] if collapsed_body else [])
+    collapsed_wick = _collapse_body_group(wick_signals)
+    grouped_results = non_body_wick
+    if collapsed_body:
+        grouped_results.append(collapsed_body)
+    if collapsed_wick:
+        collapsed_wick.module_name = "candle_reaction"  # keep source label
+        collapsed_wick.group = "WICK"  # normalize for breakdown display
+        grouped_results.append(collapsed_wick)
 
     # ── Step 4: Exhaustion gate detection ────────────────────────────────
     # FIX (2026-07-18, structural bias): the original exhaustion gate had
@@ -182,11 +198,17 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
 
     # Check 4: Volume-price divergence — INDEPENDENT of modules.
     # High tick activity but small net move = price stalling = exhaustion.
+    # FIX (Bug 23, deep audit 2026-07-19): threshold `tick_count >= 30`
+    # was too loose — most running candles have 100+ ticks, so this fired
+    # on almost every prediction, contributing to over-triggering of the
+    # exhaustion gate. Raised to `tick_count >= 60` (still below typical
+    # 1-minute OTC tick count of 200-600, but high enough to filter
+    # genuinely low-activity candles where divergence is meaningless).
     if micro and isinstance(micro, dict):
         tick_count = micro.get("tick_count", 0)
         net_move = abs(micro.get("net", 0))
         atr = ctx.atr if ctx.atr > 0 else 0.0001
-        if tick_count >= 30 and net_move < atr * 0.3:
+        if tick_count >= 60 and net_move < atr * 0.3:
             exhaustion_indicators += 1
             exhaustion_reasons.append(
                 f"volume-price divergence ({tick_count} ticks, net={net_move/atr:.2f}x ATR)")

@@ -347,18 +347,46 @@ def classify_market_regime(candles, lookback=30):
     trend_strength = min(abs(ema_diff) / 0.002, 1.0)
 
     # Swing structure: count HH/HL vs LH/LL in the lookback
+    # FIX (Bug 5, deep audit 2026-07-19): the previous version compared each
+    # swing high to `recent[max(0, i - 3)]["high"]` (candle 3 positions back),
+    # NOT to the previous swing high. That's NOT a real Higher-High check —
+    # it's "swing high higher than a random candle 3 positions back", which
+    # is essentially noise. Also `hh_hl` only counted HH (when is_swing_high)
+    # and `lh_ll` only counted LH (when is_swing_low) — HL and LL were
+    # NEVER counted, so half the Dow theory structure was missing.
+    #
+    # Now we track previous swing highs and lows separately, and count:
+    #   HH = current swing high > previous swing high
+    #   LH = current swing high < previous swing high
+    #   HL = current swing low  > previous swing low
+    #   LL = current swing low  < previous swing low
+    # `hh_hl` = HH + HL (uptrend structure count)
+    # `lh_ll` = LH + LL (downtrend structure count)
+    # This is the actual Dow-theory trend classification.
     hh_hl = 0
     lh_ll = 0
+    prev_swing_high = None
+    prev_swing_low = None
     for i in range(2, len(recent) - 2):
         c = recent[i]
         is_swing_high = (c["high"] >= recent[i - 1]["high"] and c["high"] >= recent[i - 2]["high"]
                          and c["high"] >= recent[i + 1]["high"] and c["high"] >= recent[i + 2]["high"])
         is_swing_low = (c["low"] <= recent[i - 1]["low"] and c["low"] <= recent[i - 2]["low"]
                         and c["low"] <= recent[i + 1]["low"] and c["low"] <= recent[i + 2]["low"])
-        if is_swing_high and c["high"] > recent[max(0, i - 3)]["high"]:
-            hh_hl += 1
-        if is_swing_low and c["low"] < recent[max(0, i - 3)]["low"]:
-            lh_ll += 1
+        if is_swing_high:
+            if prev_swing_high is not None:
+                if c["high"] > prev_swing_high:
+                    hh_hl += 1   # Higher High
+                else:
+                    lh_ll += 1   # Lower High
+            prev_swing_high = c["high"]
+        if is_swing_low:
+            if prev_swing_low is not None:
+                if c["low"] > prev_swing_low:
+                    hh_hl += 1   # Higher Low
+                else:
+                    lh_ll += 1   # Lower Low
+            prev_swing_low = c["low"]
 
     # Volatility: current short-term ATR vs longer-term ATR
     atr_now = _atr(candles[-10:] if len(candles) >= 10 else candles, 10)
@@ -553,11 +581,21 @@ def compute_statistical_edge(candles, lookback=50):
     ranges = [_range(c) for c in recent]
 
     mean_body = sum(bodies) / len(bodies) if bodies else 0
-    var_body = sum((b - mean_body) ** 2 for b in bodies) / len(bodies) if bodies else 1
+    # FIX (Bug 6, deep audit 2026-07-19): use SAMPLE variance (/(N-1)) instead
+    # of POPULATION variance (/N). For small lookbacks (e.g., 10 candles
+    # during cold-start), population variance understates std by ~5-10%,
+    # which inflates Z-scores and triggers false "extreme body" reversal
+    # signals from otc_pattern Signal 3. Sample variance is the correct
+    # estimator for a finite sample drawn from an unknown distribution.
+    _n_body = len(bodies)
+    var_body = (sum((b - mean_body) ** 2 for b in bodies) / (_n_body - 1)
+                if _n_body > 1 else 1)
     std_body = math.sqrt(var_body) if var_body > 0 else 1
 
     mean_range = sum(ranges) / len(ranges) if ranges else 0
-    var_range = sum((r - mean_range) ** 2 for r in ranges) / len(ranges) if ranges else 1
+    _n_range = len(ranges)
+    var_range = (sum((r - mean_range) ** 2 for r in ranges) / (_n_range - 1)
+                 if _n_range > 1 else 1)
     std_range = math.sqrt(var_range) if var_range > 0 else 1
 
     last = candles[-1]
@@ -568,9 +606,18 @@ def compute_statistical_edge(candles, lookback=50):
     z_range = (last_range - mean_range) / std_range if std_range > 0 else 0
 
     # Close percentile: where does the close sit relative to recent closes?
-    recent_closes = sorted([c["close"] for c in recent])
-    close_rank = sum(1 for cl in recent_closes if cl <= last["close"])
-    close_percentile = (close_rank / len(recent_closes)) * 100
+    # FIX (Bug 24, deep audit 2026-07-19): previously included the current
+    # candle's close in `recent_closes`, so the rank computation counted
+    # the current close in its own percentile. That biased percentiles
+    # upward (the current close was always >= itself, contributing +1 to
+    # the rank). Now we exclude the current candle from the comparison
+    # set so percentile reflects where the close sits vs PRIOR closes.
+    prior_closes = [c["close"] for c in recent[:-1]] if len(recent) > 1 else []
+    if prior_closes:
+        close_rank = sum(1 for cl in prior_closes if cl <= last["close"])
+        close_percentile = (close_rank / len(prior_closes)) * 100
+    else:
+        close_percentile = 50
 
     # Streak computation
     last_body_signed = _body(last)

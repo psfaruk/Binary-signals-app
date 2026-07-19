@@ -1430,10 +1430,26 @@ class QuotexFeed:
         # 6-MODULE ENGINE (active since 2026-07-14)
         # Runs 6 independent modules + Smart Blender with per-pair adaptation.
         from candle_reaction import predict_from_candle
+        # FIX (Bug 4, deep audit 2026-07-19): use core.microstructure.build_micro
+        # for the prediction path. The richer micro dict includes `last_velocity`
+        # which the blender's exhaustion gate (Check 3: tick velocity
+        # deceleration) reads via `micro.get("last_velocity")`. Without it,
+        # Check 3 NEVER fires in real-feed predictions, leaving the gate
+        # with only 3 working checks (1, 2, 4) instead of 4.
+        # The UI tick-broadcast path continues to use feed's own
+        # _analyze_microstructure (cheaper, no need for last_velocity there).
+        # Also merge ending_direction from feed's own analyzer since
+        # build_micro doesn't include it but running_tick module needs it.
+        from core.microstructure import build_micro as _build_micro_for_pred
         _micro_for_pred = None
         if ticks and len(ticks) >= 10:
-            _micro_for_pred = self._analyze_microstructure(
+            _micro_for_pred = _build_micro_for_pred(
                 list(ticks), candles[-1]["open"] if candles else ticks[0])
+            if _micro_for_pred is not None:
+                _feed_micro = self._analyze_microstructure(
+                    list(ticks), candles[-1]["open"] if candles else ticks[0])
+                if _feed_micro and "ending_direction" in _feed_micro:
+                    _micro_for_pred["ending_direction"] = _feed_micro["ending_direction"]
         # FIX (Bug #1, 2026-07-17): htf_trend was computed above but never
         # passed to the prediction engine. Now threaded through so the
         # blender can apply HTF confluence weighting (aligned ×1.1,
@@ -1445,9 +1461,13 @@ class QuotexFeed:
         # to engines.otc or engines.real based on asset name (auto-detect:
         # ends with "_otc" → otc, otherwise → real). No explicit category
         # arg needed here — the router in engines/__init__.py handles it.
+        # FIX (Bug 17, deep audit 2026-07-19): stream can be None when
+        # called from a background tracker (signature allows None). Use
+        # the `period` arg in that case instead of crashing on stream.period.
+        _period_for_pred = stream.period if stream is not None else period
         result = predict_from_candle(candles, ticks=list(ticks) if ticks else [],
                                      micro=_micro_for_pred, asset=asset,
-                                     htf_trend=htf_trend, period=stream.period)
+                                     htf_trend=htf_trend, period=_period_for_pred)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,

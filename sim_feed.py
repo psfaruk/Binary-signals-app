@@ -576,8 +576,22 @@ class QuotexFeed:
             htf_sim = "SIDEWAYS"
         _micro_for_pred = None
         if ticks and len(ticks) >= 10:
-            from analyze_eoc import _build_micro
-            _micro_for_pred = _build_micro(ticks, candles[-1]["open"] if candles else ticks[0])
+            # FIX (Bug 3, deep audit 2026-07-19): use core.microstructure.build_micro
+            # directly (same as feed.py). The rich micro dict includes
+            # `last_velocity` which the blender's exhaustion gate Check 3
+            # reads via `micro.get("last_velocity")`. The previous call to
+            # `_build_micro` from analyze_eoc returned the same dict via
+            # the shim, but build_micro does NOT include `ending_direction`
+            # which running_tick module needs. Fix: merge in ending_direction
+            # from sim_feed's own _analyze_microstructure method.
+            from core.microstructure import build_micro as _build_micro_for_pred
+            _micro_for_pred = _build_micro_for_pred(
+                ticks, candles[-1]["open"] if candles else ticks[0])
+            if _micro_for_pred is not None:
+                _sim_micro = self._analyze_microstructure(
+                    ticks, candles[-1]["open"] if candles else ticks[0])
+                if _sim_micro and "ending_direction" in _sim_micro:
+                    _micro_for_pred["ending_direction"] = _sim_micro["ending_direction"]
         result = predict_from_candle(candles, ticks=ticks, micro=_micro_for_pred,
                                      asset=asset, period=period, htf_trend=htf_sim)
         return result, micro_hist

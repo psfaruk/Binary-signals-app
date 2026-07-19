@@ -87,25 +87,30 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Support breakdown ({lvl_price:.5f}) → PUT"]))
 
     # ── SIGNAL 2: Round number proximity ─────────────────────────────────
+    # FIX (Bug 21, deep audit 2026-07-19): the previous check
+    # `if close > prev_close and lvl < close` did NOT verify the round
+    # number was actually crossed. If prev_close was already above lvl,
+    # the signal misfired as "broke above" when price was just rising
+    # further away from an already-crossed level. Now we require
+    # `prev_close <= lvl < close` (true upward cross) for breakout-up,
+    # and `prev_close >= lvl > close` (true downward cross) for breakout-down.
     lvl, dist, strength = _round_level(close)
     if strength in ("BIG", "MID") and atr > 0:
-        # Check if price is bouncing off or breaking through the round level
         prev_close = candles[-2]["close"] if len(candles) >= 2 else close
         tol = atr * 0.15
         if abs(close - lvl) < tol:
-            # Near round number — determine direction
-            if close > prev_close and lvl < close:
-                # Broke above round number → CALL continuation
+            # True upward cross of round number → CALL continuation
+            if prev_close <= lvl < close:
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=2, confidence=56,
                     signal_type="CONTINUATION", reliability="LEVEL", group="ROUND",
-                    reasons=[f"Round {strength} level {lvl:.5f} broken up → CALL"]))
-            elif close < prev_close and lvl > close:
-                # Broke below round number → PUT continuation
+                    reasons=[f"Round {strength} level {lvl:.5f} broken up (prev {prev_close:.5f} → now {close:.5f}) → CALL"]))
+            # True downward cross of round number → PUT continuation
+            elif prev_close >= lvl > close:
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=2, confidence=56,
                     signal_type="CONTINUATION", reliability="LEVEL", group="ROUND",
-                    reasons=[f"Round {strength} level {lvl:.5f} broken down → PUT"]))
+                    reasons=[f"Round {strength} level {lvl:.5f} broken down (prev {prev_close:.5f} → now {close:.5f}) → PUT"]))
             elif close > prev_close:
                 # Approaching from below, bouncing → CALL reversal
                 results.append(ModuleResult(
