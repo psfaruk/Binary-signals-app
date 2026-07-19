@@ -63,7 +63,7 @@ class BlenderConfig:
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
-            period: int = 60, config=None) -> dict:
+            period: int = 60, config=None, recent_accuracy=None) -> dict:
     """Run 6 modules + smart blend using the given engine config.
 
     Args:
@@ -76,6 +76,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         config: BlenderConfig dataclass (REQUIRED) — encapsulates the
             engine-specific reliability multipliers, weight adapter, and
             the 6th module.
+        recent_accuracy: optional tuple (accuracy_float, sample_count) from
+            db.recent_accuracy(). When provided AND sample_count >= 8, the
+            blender applies accuracy-aware self-correction:
+              - recent_accuracy < 0.45 → confidence *= 0.85 (dampen)
+              - recent_accuracy > 0.60 → confidence *= 1.05 (boost, capped 100)
+            This lets the engine self-correct when it's been wrong recently.
 
     Returns dict with:
         signal: "CALL" | "PUT" | "NEUTRAL"
@@ -216,8 +222,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # Thresholds: with only 4 independent checks (was 6), require 2 for
     # "exhausting" and 3 for "strongly exhausting". This keeps the gate
     # selective — it fires only when multiple independent signals agree.
-    is_exhausting = exhaustion_indicators >= 2
-    is_strongly_exhausting = exhaustion_indicators >= 3
+    # FIX (BUG-T tuning, 2026-07-20): backtest showed the exhaustion gate
+    # fired too often (37% of predictions had is_exhausting=True) and those
+    # predictions were LESS accurate (47%) than non-exhausting (52%).
+    # Raised threshold to 3 for "exhausting" and 4 for "strongly exhausting"
+    # — now fires only on genuine multi-signal exhaustion.
+    is_exhausting = exhaustion_indicators >= 3
+    is_strongly_exhausting = exhaustion_indicators >= 4
 
     # Store exhaustion reasons for the prediction output so the UI can
     # show WHY the gate fired (transparency for the independent checks).
@@ -409,8 +420,23 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     majority_score = max(call_score, put_score)
     weight_ratio = (majority_score / total) if total > 0 else 0
 
-    # Geometric mean: sensitive to BOTH breadth and depth.
-    confidence = int(math.sqrt(vote_ratio * weight_ratio) * 100)
+    # FIX (BUG-G, deep audit 2026-07-20): the previous confidence formula
+    # `sqrt(vote_ratio * weight_ratio) * 100` saturated to ~100% whenever a
+    # single group of weak votes dominated. With 2 groups where 1 fires
+    # strongly (vote_ratio=0.5) AND has all the score (weight_ratio=1.0),
+    # sqrt(0.5*1.0)=0.707 → 71% — already "MEDIUM" with no real consensus.
+    # Worse: with 1 group only (vote_ratio=1.0, weight_ratio=1.0),
+    # confidence = 100 — clearly bogus. We now scale by NET EDGE MARGIN
+    # so confidence tracks the actual winning margin, not the ceiling.
+    #   net_margin = |call_score - put_score| / total
+    # Confidence = sqrt(vote_ratio * weight_ratio * (0.5 + 0.5*net_margin)) * 100
+    # — when net_margin → 1 (unanimous), confidence = sqrt(vote_ratio*weight_ratio)*100 (original)
+    # — when net_margin → 0 (dead heat), confidence = sqrt(vote_ratio*weight_ratio) * ~70
+    # Combined with the single-group cap below, this prevents weak consensus
+    # from ever showing as 90-100%.
+    net_margin = (abs(net) / total) if total > 0 else 0
+    edge_factor = 0.5 + 0.5 * net_margin  # ∈ [0.5, 1.0]
+    confidence = int(math.sqrt(vote_ratio * weight_ratio * edge_factor) * 100)
 
     # HTF alignment bonus.
     if htf_trend == "UPTREND" and signal == "CALL":
@@ -424,29 +450,67 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         confidence = max(0, confidence - 5)
 
     # Adaptive single-group cap.
+    # FIX (BUG-CA, 2026-07-20): the previous caps (70/62/55) still allowed
+    # single-group predictions to show 70%+ confidence, but the backtest
+    # showed single-group confidence-100 predictions were only 35% accurate
+    # on the real engine. Tightened to 65/55/48 — still allows meaningful
+    # single-group predictions but prevents the 70-100% overconfidence.
     if total_groups == 1:
         max_eff = majority_score
         if max_eff >= 6:
-            cap = 70
+            cap = 65
         elif max_eff >= 4:
-            cap = 62
-        else:
             cap = 55
+        else:
+            cap = 48
         confidence = min(confidence, cap)
 
+    # FIX (SIDEWAYS-dampener, 2026-07-20): backtest showed predictions made
+    # when HTF is SIDEWAYS AND regime is RANGE were only 45% accurate on OTC.
+    # This is the "no trend on either timeframe" condition — the hardest to
+    # predict. Apply a 5-point confidence dampener to prevent overconfidence.
+    if htf_trend == "SIDEWAYS" and regime.get("is_ranging", False):
+        confidence = max(0, confidence - 5)
+
     # ── Step 9: Pattern confluence check for STRONG ──────────────────────
+    # FIX (BUG-BQ, 2026-07-20): pattern_agrees only checked reliability ==
+    # "PATTERN", missing "OTC" reliability (otc_pattern module). An OTC
+    # pattern agreement now counts toward pattern confluence.
     pattern_agrees = any(
-        r.reliability == "PATTERN" and r.direction == signal
+        r.reliability in ("PATTERN", "OTC") and r.direction == signal
         for r, e in adjusted
     )
     strong_non_pattern_agrees = any(
-        r.reliability != "PATTERN" and r.direction == signal and e >= 3
+        r.reliability not in ("PATTERN", "OTC") and r.direction == signal and e >= 3
         for r, e in adjusted
     )
     has_pattern_confluence = pattern_agrees and strong_non_pattern_agrees
 
     agree = majority_group_n
     abs_net = abs(net)
+
+    # FIX (BUG-I, 2026-07-20): accuracy-aware self-correction.
+    # When recent_accuracy is provided AND we have enough samples (>=8),
+    # scale confidence based on recent performance:
+    #   - recent_accuracy < 0.45 → confidence *= 0.85 (dampen — engine is cold)
+    #   - recent_accuracy > 0.60 → confidence *= 1.05 (boost — engine is hot)
+    # This lets the engine self-correct when it's been wrong recently,
+    # preventing overconfidence during cold streaks.
+    accuracy_note = ""
+    if recent_accuracy is not None:
+        try:
+            acc_val, acc_n = recent_accuracy
+            if acc_n >= 8 and acc_val is not None:
+                if acc_val < 0.45:
+                    confidence = int(confidence * 0.85)
+                    accuracy_note = f"_ACCURACY_CORRECT: recent {acc_val:.0%} ({acc_n} samples) → confidence ×0.85"
+                elif acc_val > 0.60:
+                    confidence = min(100, int(confidence * 1.05))
+                    accuracy_note = f"_ACCURACY_CORRECT: recent {acc_val:.0%} ({acc_n} samples) → confidence ×1.05"
+        except (TypeError, ValueError):
+            pass
+    if accuracy_note:
+        all_reasons.append(accuracy_note)
 
     if (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
             and has_pattern_confluence):

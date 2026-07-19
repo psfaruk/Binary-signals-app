@@ -47,7 +47,7 @@ def category_of(asset: str) -> str:
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
-            period: int = 60, category: str = None) -> dict:
+            period: int = 60, category: str = None, recent_accuracy=None) -> dict:
     """Route to the correct engine based on `category`.
 
     Args:
@@ -58,6 +58,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             If None, auto-detected from asset name:
                 ends with "_otc" → "otc"
                 else             → "real"
+        recent_accuracy: optional (accuracy, sample_count) tuple from
+            db.recent_accuracy(). Passed through to the engine for
+            accuracy-aware self-correction.
 
     Returns:
         The engine's prediction dict (signal, confidence, strength, etc.)
@@ -86,11 +89,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     if category == "otc":
         result = _otc_engine.predict(
             candles, ticks, micro, asset=asset,
-            htf_trend=htf_trend, period=period)
+            htf_trend=htf_trend, period=period,
+            recent_accuracy=recent_accuracy)
     elif category == "real":
         result = _real_engine.predict(
             candles, ticks, micro, asset=asset,
-            htf_trend=htf_trend, period=period)
+            htf_trend=htf_trend, period=period,
+            recent_accuracy=recent_accuracy)
     else:
         raise ValueError(
             f"unknown category {category!r}; expected 'otc' or 'real'")

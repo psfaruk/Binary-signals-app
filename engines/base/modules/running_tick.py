@@ -84,6 +84,18 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
     # direction against the PRIOR CLOSED candle's body direction, NOT by
     # whether sub-votes unanimously agreed. This is what CONTINUATION vs
     # REVERSAL actually means in the regime-weighting context.
+    # FIX (BUG-A, deep audit 2026-07-20): when prior candle was doji
+    # (prior_dir==0), the old code fell back to streak_direction. But
+    # streak_direction is the direction of the CURRENT streak — which by
+    # definition is the direction of the most recent non-doji candle.
+    # Calling a CALL "CONTINUATION" because the streak is up (regardless
+    # of how stale that streak is) inflates continuation votes during
+    # range/doji conditions — exactly when continuation is the wrong call.
+    # We now return NEUTRAL signal_type attribution by classifying the
+    # doji case as REVERSAL-by-default (since continuation requires a
+    # prior directional candle to continue). With prior doji, a fresh
+    # tick-direction vote is conceptually a NEW direction, not a
+    # continuation of anything.
     prior_dir = 0  # 1=up, -1=down, 0=doji/unknown
     if len(candles) >= 2:
         prev = candles[-2]
@@ -95,7 +107,6 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
 
     if call_sum > put_sum:
         composite_score = min(4, call_sum - put_sum)
-        # FIX M1 (2026-07-19): removed dead `vote_dir = 1` — assigned but never read.
         if prior_dir == 1:
             composite_type = "CONTINUATION"  # ticks pushing up after up candle
             type_reason = "continues prior up"
@@ -103,10 +114,13 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
             composite_type = "REVERSAL"  # ticks pushing up after down candle
             type_reason = "reverses prior down"
         else:
-            # Prior was doji — use streak alignment as fallback
-            streak_dir = ctx.stats.get("streak_direction", 0)
-            composite_type = "CONTINUATION" if streak_dir == 1 else "REVERSAL"
-            type_reason = "prior doji, streak-aligned"
+            # Prior was doji — no direction to continue. Treat as REVERSAL
+            # (a fresh tick-direction push after a doji is a new direction,
+            # not a continuation of a non-existent trend). Score is dampened
+            # since the prior doji gives no directional confirmation.
+            composite_type = "REVERSAL"
+            type_reason = "prior doji, fresh-direction"
+            composite_score = max(1, composite_score - 1)
         return [ModuleResult(
             module_name="running_tick", direction="CALL", score=composite_score,
             confidence=min(60, composite_score * 20),
@@ -115,7 +129,6 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
 
     # put_sum > call_sum
     composite_score = min(4, put_sum - call_sum)
-    # FIX M1 (2026-07-19): removed dead `vote_dir = -1` — assigned but never read.
     if prior_dir == -1:
         composite_type = "CONTINUATION"  # ticks pushing down after down candle
         type_reason = "continues prior down"
@@ -123,9 +136,10 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
         composite_type = "REVERSAL"  # ticks pushing down after up candle
         type_reason = "reverses prior up"
     else:
-        streak_dir = ctx.stats.get("streak_direction", 0)
-        composite_type = "CONTINUATION" if streak_dir == -1 else "REVERSAL"
-        type_reason = "prior doji, streak-aligned"
+        # Prior was doji — fresh-direction, dampened.
+        composite_type = "REVERSAL"
+        type_reason = "prior doji, fresh-direction"
+        composite_score = max(1, composite_score - 1)
     return [ModuleResult(
         module_name="running_tick", direction="PUT", score=composite_score,
         confidence=min(60, composite_score * 20),

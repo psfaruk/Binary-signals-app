@@ -71,7 +71,13 @@ def compute_module_stats(db_path=None):
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     try:
-        return _compute_module_stats_inner(cur, total_query=total)
+        # FIX (BUG-STATS-1, deep audit 2026-07-20): the previous call passed
+        # `total_query=total` but `total` was never defined in this scope —
+        # it's only defined INSIDE _compute_module_stats_inner. This was a
+        # latent NameError that would fire the moment /api/stats was hit.
+        # The `total_query` parameter itself was never read by the inner
+        # function (also removed in the same fix) — pure dead arg.
+        return _compute_module_stats_inner(cur)
     finally:
         conn.close()
 

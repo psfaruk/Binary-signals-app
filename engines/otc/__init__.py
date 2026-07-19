@@ -35,7 +35,7 @@ from engines.otc.config import CONFIG as _OTC_CONFIG, CONFIG
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
-            period: int = 60) -> dict:
+            period: int = 60, recent_accuracy=None) -> dict:
     """OTC engine prediction — routes to the shared blender with OTC config.
 
     Args:
@@ -45,12 +45,14 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         asset: OTC pair name (e.g. "EURUSD_otc")
         htf_trend: "UPTREND" | "DOWNTREND" | "SIDEWAYS"
         period: candle period in seconds (default 60)
+        recent_accuracy: optional (accuracy, sample_count) for self-correction
 
     Returns:
         Prediction dict (signal, confidence, strength, score, reasons, etc.)
     """
     return _base_predict(candles, ticks=ticks, micro=micro, asset=asset,
-                         htf_trend=htf_trend, period=period, config=_OTC_CONFIG)
+                         htf_trend=htf_trend, period=period, config=_OTC_CONFIG,
+                         recent_accuracy=recent_accuracy)
 
 
 __all__ = ["predict", "CONFIG"]

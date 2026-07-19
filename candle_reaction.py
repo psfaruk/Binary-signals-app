@@ -10,7 +10,8 @@ from engines import predict
 
 
 def predict_from_candle(candles, ticks=None, micro=None, asset="",
-                        htf_trend="SIDEWAYS", period=60, category=None):
+                        htf_trend="SIDEWAYS", period=60, category=None,
+                        recent_accuracy=None):
     """Predict next candle direction.
 
     Delegates to engines.predict() which routes to engines.otc.predict or
@@ -25,9 +26,11 @@ def predict_from_candle(candles, ticks=None, micro=None, asset="",
         htf_trend: "UPTREND" | "DOWNTREND" | "SIDEWAYS" from 5m EMA confluence
         period: candle period in seconds
         category: "otc" | "real" | None (auto-detected from asset name if None)
+        recent_accuracy: optional (accuracy, sample_count) for self-correction
 
     Returns:
         Prediction dict with signal, confidence, strength, category, etc.
     """
     return predict(candles, ticks, micro, asset=asset,
-                   htf_trend=htf_trend, period=period, category=category)
+                   htf_trend=htf_trend, period=period, category=category,
+                   recent_accuracy=recent_accuracy)

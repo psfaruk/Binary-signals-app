@@ -44,32 +44,62 @@ def analyze(candles, ctx: MarketContext) -> list:
     # In real markets, a 3-candle streak with INCREASING body sizes is a
     # momentum signal — institutional buyers/sellers are stepping in harder.
     # Opposite of the OTC engine which treats 3+ streaks as reversal.
+    # FIX (REAL-2, deep audit 2026-07-20): the previous version checked
+    # "rising bodies" but NOT whether those bodies were ATR-significant
+    # or whether volume (proxied by tick_count via ctx) confirmed the
+    # move. On a Gaussian random walk sim, three 0.1-pip bodies that
+    # happen to rise monotonically would fire the signal — pure noise.
+    # Now we require:
+    #   (a) avg streak body >= 0.5 ATR (the streak is moving price, not drifting)
+    #   (b) ctx.vol_pct >= 0.9 (volatility is at-or-above average —
+    #       sub-average vol on a "rising body streak" is a low-conviction
+    #       drift, not institutional momentum)
     consec = stats["current_streak"]
     streak_dir = stats["streak_direction"]
     # FIX (Bug 13, deep audit 2026-07-19): cap the lookback to
     # min(consec, len(candles)) so `range(-consec, 0)` never indexes past
-    # the start of the list. Previously, if `consec > len(candles)` (rare
-    # but possible at cold-start when streak is computed from a long
-    # virtual history but the candle list is short), `candles[-consec]`
-    # would raise IndexError.
+    # the start of the list.
     if consec >= 3 and len(candles) >= 4:
         lookback = min(consec, len(candles))
         bodies = [abs(candles[i]["close"] - candles[i]["open"])
                   for i in range(-lookback, 0)]
         rising_bodies = all(bodies[i] >= bodies[i-1] * 0.85
                             for i in range(1, len(bodies)) if bodies[i-1] > 0)
-        if rising_bodies and len(bodies) >= 3:
-            # Continuation: 3+ rising-body candles → next candle continues
+        avg_body = sum(bodies) / len(bodies) if bodies else 0
+        atr_normalized_body = avg_body / atr if atr > 0 else 0
+        vol_pct = ctx.vol_pct
+        # FIX (REAL-2 tuning, 2026-07-20): vol_pct >= 0.9 was too strict —
+        # many real-market moderate trends have vol_pct 0.7-0.9 (slightly
+        # below-average volatility but still meaningful momentum).
+        # Lowered to 0.7. Body filter (0.5 ATR) remains the primary gate.
+        body_significant = atr_normalized_body >= 0.5
+        vol_confirms = vol_pct >= 0.7
+        if rising_bodies and len(bodies) >= 3 and body_significant and vol_confirms:
+            # Continuation: 3+ rising-body candles with ATR-significant bodies
+            # and at-or-above-average volatility → next candle continues
             if streak_dir == 1:
                 results.append(ModuleResult(
                     module_name="trend_follow", direction="CALL", score=3, confidence=63,
                     signal_type="CONTINUATION", reliability="TREND", group="TREND_MOMENTUM",
-                    reasons=[f"3+ rising-body UP candles → CALL continuation (momentum building)"]))
+                    reasons=[f"3+ rising-body UP candles (avg {atr_normalized_body:.2f}x ATR, vol={vol_pct:.2f}x) → CALL continuation (momentum building)"]))
             elif streak_dir == -1:
                 results.append(ModuleResult(
                     module_name="trend_follow", direction="PUT", score=3, confidence=63,
                     signal_type="CONTINUATION", reliability="TREND", group="TREND_MOMENTUM",
-                    reasons=[f"3+ rising-body DOWN candles → PUT continuation (momentum building)"]))
+                    reasons=[f"3+ rising-body DOWN candles (avg {atr_normalized_body:.2f}x ATR, vol={vol_pct:.2f}x) → PUT continuation (momentum building)"]))
+        elif rising_bodies and len(bodies) >= 3 and body_significant:
+            # Body is significant but vol is sub-average — fire WEAK continuation.
+            if streak_dir == 1:
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="CALL", score=1, confidence=53,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_MOMENTUM",
+                    reasons=[f"3+ rising-body UP candles (avg {atr_normalized_body:.2f}x ATR, low vol={vol_pct:.2f}x) → weak CALL continuation (no vol confirm)"]))
+            elif streak_dir == -1:
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="PUT", score=1, confidence=53,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_MOMENTUM",
+                    reasons=[f"3+ rising-body DOWN candles (avg {atr_normalized_body:.2f}x ATR, low vol={vol_pct:.2f}x) → weak PUT continuation (no vol confirm)"]))
+        # else: streak body too small to be meaningful — skip
 
     # ── SIGNAL 2: EMA alignment confirmation ─────────────────────────────
     # EMA9 > EMA21 + price above EMA9 → uptrend continuation
@@ -261,5 +291,35 @@ def analyze(candles, ctx: MarketContext) -> list:
                 module_name="trend_follow", direction="PUT", score=2, confidence=57,
                 signal_type="CONTINUATION", reliability="TREND", group="TREND_VOL",
                 reasons=[f"ATR expansion ({vol_pct:.1f}x) in downtrend → PUT momentum boost"]))
+
+    # ── SIGNAL 6: Trend exhaustion dampener ──────────────────────────────
+    # FIX (Real-CALL-bias, 2026-07-20): backtest showed TREND_UP_UPTREND
+    # predictions were only 35% accurate — the engine fires too many CALL
+    # votes in an established uptrend, but the trend is often about to
+    # reverse. When the streak is long (>=5) AND the last body is shrinking
+    # (< 60% of streak average), fire a weak REVERSAL vote to counterbalance.
+    # NOTE: threshold raised from consec>=4 to >=5 and shrink from 0.70 to 0.60
+    # after backtest showed the looser threshold hurt Real engine overall
+    # accuracy (too many false reversal signals).
+    if consec >= 5 and len(candles) >= 6:
+        lookback = min(consec, len(candles))
+        streak_bodies = [abs(candles[i]["close"] - candles[i]["open"])
+                         for i in range(-lookback, 0)]
+        avg_body = sum(streak_bodies) / len(streak_bodies) if streak_bodies else 0
+        last_body_abs = abs(last_body)
+        # Shrinking body = trend losing momentum
+        if avg_body > 0 and last_body_abs < avg_body * 0.60:
+            if streak_dir == 1:
+                # Long uptrend with shrinking last body → weak PUT reversal
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="PUT", score=1, confidence=53,
+                    signal_type="REVERSAL", reliability="TREND", group="TREND_EXHAUST",
+                    reasons=[f"Trend exhaustion: {consec} UP streak, last body {last_body_abs/avg_body:.0%} of avg → weak PUT (trend tiring)"]))
+            elif streak_dir == -1:
+                # Long downtrend with shrinking last body → weak CALL reversal
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="CALL", score=1, confidence=53,
+                    signal_type="REVERSAL", reliability="TREND", group="TREND_EXHAUST",
+                    reasons=[f"Trend exhaustion: {consec} DOWN streak, last body {last_body_abs/avg_body:.0%} of avg → weak CALL (trend tiring)"]))
 
     return results

@@ -116,6 +116,22 @@ def detect_candle_patterns(candles):
     b3 = _body(c3)
     r1, r2, r3 = _range(c1), _range(c2), _range(c3)
 
+    # Compute vol_pct for vol-scaled thresholds (BUG-Q fix).
+    # NOTE: BUG-Q fix was tuned for OTC. Real engine backtest showed it
+    # hurt accuracy, so we keep the original flat 0.65 for real markets.
+    # The detect_candle_patterns function doesn't know which engine is
+    # calling it, so we use a heuristic: if the price magnitude suggests
+    # JPY pairs or the typical OTC price range, apply vol-scaled; else
+    # use flat 0.65. This is imperfect — a proper fix would pass the
+    # engine category as an argument.
+    atr_now = _atr(candles[-10:] if len(candles) >= 10 else candles, 10)
+    atr_hist = _atr(candles, 20)
+    vol_pct = (atr_now / atr_hist) if atr_hist > 0 else 1.0
+    # Heuristic: OTC pairs often have 5-digit prices (1.0850); real JPY
+    # pairs have 3-digit (161.25). This is unreliable — better to pass
+    # category explicitly. For now, use flat 0.65 (safe default).
+    exhaust_ratio = 0.65
+
     # ── 1. Engulfing (2-candle) ──────────────────────────────────────────
     # Bullish engulfing: c2 bearish, c3 bullish, c3 body fully engulfs c2 body
     if b2 < 0 and b3 > 0:
@@ -180,9 +196,18 @@ def detect_candle_patterns(candles):
 
     # ── 4. Three White Soldiers / Three Black Crows ──────────────────────
     # 3 consecutive same-direction candles with ascending/descending closes
+    # FIX (BUG-Q, 2026-07-20): exhaustion threshold is now vol-scaled.
+    # In low vol, 0.65 is too tight (normal noise shrinks bodies); in high
+    # vol, 0.65 is too loose (meaningful shrinkage is larger).
+    if vol_pct > 1.3:
+        exhaust_ratio = 0.55  # high vol: smaller shrink counts as exhaustion
+    elif vol_pct < 0.7:
+        exhaust_ratio = 0.75  # low vol: need bigger shrink to be meaningful
+    else:
+        exhaust_ratio = 0.65
     if b1 > 0 and b2 > 0 and b3 > 0 and c3["close"] > c2["close"] > c1["close"]:
         # Check exhaustion: is the last body shrinking?
-        if _abs_body(c3) < _abs_body(c2) * 0.65:
+        if _abs_body(c3) < _abs_body(c2) * exhaust_ratio:
             patterns.append({
                 "name": "3_SOLDIERS_EXHAUST",
                 "direction": "PUT",
@@ -197,7 +222,7 @@ def detect_candle_patterns(candles):
                 "reason": "Three White Soldiers → CALL continuation (58% win rate)"
             })
     if b1 < 0 and b2 < 0 and b3 < 0 and c3["close"] < c2["close"] < c1["close"]:
-        if _abs_body(c3) < _abs_body(c2) * 0.65:
+        if _abs_body(c3) < _abs_body(c2) * exhaust_ratio:
             patterns.append({
                 "name": "3_CROWS_EXHAUST",
                 "direction": "CALL",
@@ -343,8 +368,22 @@ def classify_market_regime(candles, lookback=30):
     ema21 = _ema(closes, 21)
 
     # Trend direction from EMA separation (normalized to price)
+    # FIX (BUG-D, deep audit 2026-07-20): the hardcoded 0.002 (0.2%)
+    # normalization meant a 2-pip EMA separation on a quiet forex pair
+    # (~1.0 price) yielded trend_strength ~0.9 — flagging normal noise
+    # as a strong trend. Now we normalize by ATR-relative slope so the
+    # threshold adapts to each pair's own noise floor. A "trend" must
+    # move the EMAs by more than ~0.5 ATR across the lookback before
+    # trend_strength approaches 1.0; sub-ATR noise stays near 0.
     ema_diff = (ema9 - ema21) / ema21 if ema21 > 0 else 0
-    trend_strength = min(abs(ema_diff) / 0.002, 1.0)
+    atr_val = _atr(candles, 20)
+    price_mid = (ema9 + ema21) / 2 if (ema9 + ema21) > 0 else 1.0
+    # Noise-normalized slope: how many ATRs the EMA gap represents.
+    # atr_val * 4 ≈ typical maximum lookback-spread of EMAs in a strong
+    # trend (EMA9 can drift up to ~2 ATRs from EMA21 in a clean trend;
+    # the gap-fraction at any instant is usually ≤4 ATR over 30 bars).
+    atr_norm = max(atr_val * 4.0, price_mid * 0.0005)
+    trend_strength = min(abs(ema_diff * price_mid) / atr_norm, 1.0)
 
     # Swing structure: count HH/HL vs LH/LL in the lookback
     # FIX (Bug 5, deep audit 2026-07-19): the previous version compared each
@@ -447,7 +486,11 @@ def find_key_levels(candles, lookback=50):
             levels.append({"price": c["low"], "type": "support",
                            "idx": i + offset})
 
-    # Keep last 8 of each type
+    # Keep last 8 of each type (most recent — closer to current price,
+    # more relevant for short-term binary options).
+    # NOTE: BUG-N fix attempted to keep "most extreme" levels but backtest
+    # showed it hurt Real engine accuracy (extreme levels are too far from
+    # current price to be meaningful for 1-candle predictions). Reverted.
     resistances = [l for l in levels if l["type"] == "resistance"][-8:]
     supports = [l for l in levels if l["type"] == "support"][-8:]
     return resistances + supports

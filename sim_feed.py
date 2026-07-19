@@ -592,8 +592,12 @@ class QuotexFeed:
                     ticks, candles[-1]["open"] if candles else ticks[0])
                 if _sim_micro and "ending_direction" in _sim_micro:
                     _micro_for_pred["ending_direction"] = _sim_micro["ending_direction"]
+        # FIX (BUG-I, 2026-07-20): pass recent_accuracy from stream cache
+        # so the blender can apply accuracy-aware self-correction.
+        _recent_acc = getattr(stream, 'cached_accuracy', None) if stream is not None else None
         result = predict_from_candle(candles, ticks=ticks, micro=_micro_for_pred,
-                                     asset=asset, period=period, htf_trend=htf_sim)
+                                     asset=asset, period=period, htf_trend=htf_sim,
+                                     recent_accuracy=_recent_acc)
         return result, micro_hist
 
     async def _run_eoc(self, stream, actual_open=None):
@@ -810,6 +814,18 @@ class QuotexFeed:
         accuracy = await asyncio.to_thread(
             self._grade_and_log, stream.asset, stream.period, closed,
             stream.prediction, _micro_snap, stream.candles)
+
+        # FIX (BUG-I, 2026-07-20): invalidate DB-adaptation cache after each
+        # signal_log write so the next prediction reflects fresh accuracy data.
+        if accuracy in ("correct", "wrong"):
+            try:
+                from engines.otc.config import weight_adapter as _otc_adapter
+                from engines.real.config import weight_adapter as _real_adapter
+                _otc_adapter.invalidate_cache(stream.asset, stream.period)
+                _real_adapter.invalidate_cache(stream.asset, stream.period)
+            except Exception:
+                pass
+
         if accuracy in ("correct", "wrong"):
             _reg = (stream.prediction or {}).get("regime") or {}
             # FIX (BUG-2, 2026-07-18): use correct regime/zone keys.

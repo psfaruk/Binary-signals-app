@@ -329,9 +329,40 @@ async def module_stats():
     undercounting Real-engine signals in the per-module report. Now uses
     the shared `core.stats.compute_module_stats()` which sources module
     names from `core.constants.MODULE_NAMES` — the single source of truth.
+
+    FIX (BUG-I, 2026-07-20): also reports DB-adaptation status — which
+    pairs have enough graded samples for adaptation, and what the current
+    learned weights are.
     """
     from core.stats import compute_module_stats
-    return compute_module_stats(_db.DB_PATH)
+    stats = compute_module_stats(_db.DB_PATH)
+
+    # Add adaptation status per pair
+    try:
+        from engines.otc.config import weight_adapter as _otc_adapter
+        from engines.real.config import weight_adapter as _real_adapter
+        adaptation_status = {}
+        for asset in list(_otc_adapter.pair_configs.keys()) + list(_real_adapter.pair_configs.keys()):
+            adapter = _otc_adapter if asset.endswith("_otc") else _real_adapter
+            stats_data = _db.per_module_accuracy(asset, period=60, n=200)
+            adapted = adapter.get_weights(asset, period=60, use_db=False)
+            adapted_db = adapter.get_weights(asset, period=60, use_db=True)
+            adaptation_status[asset] = {
+                "has_enough_samples": any(
+                    s.get("total", 0) >= 20 for s in stats_data.values()
+                ),
+                "static_weights": adapted,
+                "adapted_weights": adapted_db,
+                "module_accuracy": {
+                    m: {"win_rate": s.get("win_rate"), "total": s.get("total", 0)}
+                    for m, s in stats_data.items() if s.get("total", 0) > 0
+                },
+            }
+        stats["adaptation_status"] = adaptation_status
+    except Exception as e:
+        stats["adaptation_error"] = str(e)
+
+    return stats
 
 
 @app.get("/api/signals/{asset}/{period}")

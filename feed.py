@@ -1465,9 +1465,14 @@ class QuotexFeed:
         # called from a background tracker (signature allows None). Use
         # the `period` arg in that case instead of crashing on stream.period.
         _period_for_pred = stream.period if stream is not None else period
+        # FIX (BUG-I, 2026-07-20): pass recent_accuracy from the per-candle
+        # cache so the blender can apply accuracy-aware self-correction.
+        # stream.cached_accuracy is refreshed once at candle open by _run_eoc.
+        _recent_acc = getattr(stream, 'cached_accuracy', None) if stream is not None else None
         result = predict_from_candle(candles, ticks=list(ticks) if ticks else [],
                                      micro=_micro_for_pred, asset=asset,
-                                     htf_trend=htf_trend, period=_period_for_pred)
+                                     htf_trend=htf_trend, period=_period_for_pred,
+                                     recent_accuracy=_recent_acc)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
@@ -2124,6 +2129,24 @@ class QuotexFeed:
         accuracy = await asyncio.to_thread(
             self._grade_and_log, stream.asset, stream.period, closed,
             stream.prediction, _micro_snap, stream.candles)
+
+        # FIX (BUG-I, 2026-07-20): invalidate DB-adaptation cache after each
+        # signal_log write so the next prediction reflects fresh accuracy data.
+        # Without this, the cache only refreshes on TTL expiry (60s), meaning
+        # up to 60 graded signals could be ignored before adaptation kicks in.
+        # Now the cache is invalidated immediately after a new grade is logged,
+        # so the very next prediction uses the updated win rates.
+        if accuracy in ("correct", "wrong"):
+            try:
+                # Invalidate both OTC and Real adapters (one will be a no-op
+                # since the asset belongs to only one engine, but both adapters
+                # share the same cache key structure).
+                from engines.otc.config import weight_adapter as _otc_adapter
+                from engines.real.config import weight_adapter as _real_adapter
+                _otc_adapter.invalidate_cache(stream.asset, stream.period)
+                _real_adapter.invalidate_cache(stream.asset, stream.period)
+            except Exception:
+                pass  # adapters not loaded (e.g. test context) — skip
 
         # Update the chop-guard streak using the regime/zone the JUST-RESOLVED
         # prediction was made under (stream.prediction, before _run_eoc below

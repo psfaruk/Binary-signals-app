@@ -59,20 +59,37 @@ def analyze(candles, ctx: MarketContext) -> list:
     # producing contradictory REVERSAL+CONTINUATION votes for the same
     # event. Now both use 0.5 so they're mutually exclusive: above 0.5
     # only continuation fires, below 0.5 only reversal fires.
+    # FIX (OTC ATR-streak, deep audit 2026-07-20): the streak threshold
+    # was a flat "consec >= 3". A 3-candle streak where each candle has a
+    # tiny body (<0.2 ATR) is NOT a reversal setup — it's a drift, and
+    # betting against it is just noise. We now require the streak's
+    # average body to be >=0.4 ATR before firing. This filters out
+    # micro-streaks that the broker algo naturally produces without any
+    # real directional pressure.
     consec = stats["current_streak"]
     streak_dir = stats["streak_direction"]
     mean_rev_gated = (is_trending and trend_strength > 0.5)
-    if consec >= 3 and not mean_rev_gated:
+    # ATR-normalized streak filter: average body of the streak must be
+    # at least 0.3 ATR (lowered from 0.4 — backtest showed 0.4 was too
+    # strict and filtered out genuine OTC mean-reversion setups).
+    atr_val = ctx.atr if ctx.atr > 0 else 0.0001
+    streak_bodies = [
+        abs(candles[i]["close"] - candles[i]["open"])
+        for i in range(-min(consec, len(candles)), 0)
+    ]
+    avg_streak_body = (sum(streak_bodies) / len(streak_bodies)) if streak_bodies else 0
+    streak_is_meaningful = avg_streak_body >= atr_val * 0.3
+    if consec >= 3 and not mean_rev_gated and streak_is_meaningful:
         if streak_dir == 1:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=2, confidence=62,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_MEANREV",
-                reasons=[f"OTC mean-rev: {consec}+ UP → PUT (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
+                reasons=[f"OTC mean-rev: {consec}+ UP (avg body {avg_streak_body/atr_val:.2f}x ATR) → PUT (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
         elif streak_dir == -1:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=2, confidence=62,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_MEANREV",
-                reasons=[f"OTC mean-rev: {consec}+ DOWN → CALL (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
+                reasons=[f"OTC mean-rev: {consec}+ DOWN (avg body {avg_streak_body/atr_val:.2f}x ATR) → CALL (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
 
     # ── REVERSAL SIGNAL 2: Streak rarity boost ───────────────────────────
     # Rare streaks (<10% occurrence) get a reversal boost. Keep this one
@@ -157,6 +174,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     # FIX (OTC issue 1, 2026-07-19): same gating as Signal 3 — a close at
     # the 95th percentile during a strong uptrend is trend continuation,
     # not reversal. Soft-gate aligned-with-trend extremes.
+    # FIX (OTC-6 backtest, 2026-07-20): also check streak alignment — if
+    # the close is at the 95th percentile but the streak is DOWN (a
+    # counter-trend bounce to the upside), firing PUT reversal is wrong
+    # (the bounce is already exhausting). Skip when streak opposes the
+    # percentile direction.
     pctile = stats["close_percentile"]
     pctile_aligns_with_trend = (
         is_trending
@@ -267,25 +289,34 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"OTC breakout DOWN: close {last['close']:.5f} < 20-candle low {recent_low:.5f} (body {last_body_abs/median_body:.1f}x median) → PUT continuation"]))
 
     # ── CONTINUATION SIGNAL 8: Strong-trend streak ───────────────────────
-    # In a confirmed TREND regime (trend_strength > 0.5), a 2+ same-dir
-    # streak gets a continuation vote. This directly counterbalances
-    # Signal 1 (mean-rev) which is gated OFF at trend_strength > 0.5.
+    # In a confirmed TREND regime (trend_strength > 0.35 after BUG-D fix),
+    # a 2+ same-dir streak gets a continuation vote. This directly
+    # counterbalances Signal 1 (mean-rev) which is gated OFF at
+    # trend_strength > 0.5.
     #
-    # FIX (2026-07-18, conflict bug): Signal 1 threshold AND this
-    # threshold must match exactly — otherwise in the gap zone both fire
-    # and produce contradictory votes. Both now use 0.5 (strict >).
-    # Below 0.5: only reversal (Signal 1) fires.
-    # Above 0.5: only continuation (Signal 8) fires.
-    # At exactly 0.5: neither fires (clean neutral — rare edge case).
-    if is_trending and trend_strength > 0.5 and consec >= 2:
+    # FIX (OTC-3, deep audit 2026-07-20): the previous threshold was 0.5 —
+    # but OTC regimes rarely exceed trend_strength 0.5 (broker-suppressed
+    # trends). The result was that Signal 8 NEVER fired in real OTC
+    # markets, leaving the engine structurally biased toward reversal
+    # (Signal 1). We now fire Signal 8 at trend_strength > 0.35 (matched
+    # against the new ATR-normalized slope so noise doesn't trip it).
+    # Signal 1's gate remains at > 0.5, so the two signals are still
+    # mutually exclusive in the 0.5+ zone (no double-fire). In the
+    # 0.35–0.5 zone, BOTH can fire — but Signal 1 is dampened by its
+    # existing aligned-with-trend logic, while Signal 8 fires weak (score
+    # 1, conf 55) so the blender sees a mild counterbalance.
+    if is_trending and trend_strength > 0.35 and consec >= 2:
+        weak_mode = 0.35 < trend_strength <= 0.5
+        s8_score = 1 if weak_mode else 2
+        s8_conf  = 55 if weak_mode else 60
         if trend_regime == "TREND_UP" and streak_dir == 1:
             results.append(ModuleResult(
-                module_name="otc_pattern", direction="CALL", score=2, confidence=60,
+                module_name="otc_pattern", direction="CALL", score=s8_score, confidence=s8_conf,
                 signal_type="CONTINUATION", reliability="OTC", group="OTC_TRENDSTREAK",
                 reasons=[f"OTC trend streak: {consec} UP in TREND_UP (str={trend_strength:.2f}) → CALL continuation"]))
         elif trend_regime == "TREND_DOWN" and streak_dir == -1:
             results.append(ModuleResult(
-                module_name="otc_pattern", direction="PUT", score=2, confidence=60,
+                module_name="otc_pattern", direction="PUT", score=s8_score, confidence=s8_conf,
                 signal_type="CONTINUATION", reliability="OTC", group="OTC_TRENDSTREAK",
                 reasons=[f"OTC trend streak: {consec} DOWN in TREND_DOWN (str={trend_strength:.2f}) → PUT continuation"]))
 
