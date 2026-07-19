@@ -138,6 +138,10 @@ class QuotexFeed:
         self._broadcast = None
         self._streams: dict[tuple[str, int], _AssetStream] = {}
         self._max_streams = 45
+        # FIX (AUDIT-ENGINES #5, 2026-07-19): per-key lock for ensure_stream
+        # to prevent the race condition where concurrent callers both create
+        # a stream for the same (asset, period) and orphan the first task.
+        self._stream_locks: dict[tuple[str, int], asyncio.Lock] = {}
         # FIX (2026-07-17): split pair lists by category. _pairs_list kept
         # as combined backward-compat (real first, then otc).
         self._pairs_list = list(_SIM_PAIRS)
@@ -188,43 +192,66 @@ class QuotexFeed:
 
         If the stream already exists, just add the cid to interested_cids
         (and remove it from any other stream). Otherwise create the stream,
-        generate history, and launch the _run_stream task."""
+        generate history, and launch the _run_stream task.
+
+        FIX (AUDIT-ENGINES #4 + #5, 2026-07-19):
+          - _max_streams=45 was set but never enforced. Now enforced.
+          - Race condition: concurrent calls for the same (asset, period)
+            both passed the `stream is None` check, both created streams,
+            both spawned _run_stream tasks. The second overwrote the
+            first in _streams, orphaning the first task forever. Now
+            guarded by an asyncio.Lock per (asset, period) — concurrent
+            callers await the same lock, the second sees the stream the
+            first created.
+        """
         key = (asset, period)
-        stream = self._streams.get(key)
-        if stream is not None:
+        # Capacity gate (BUG #4): reject new streams beyond _max_streams.
+        # Existing streams for the same key still pass through (viewer
+        # joining an active stream doesn't create a new one).
+        if key not in self._streams and len(self._streams) >= self._max_streams:
+            return {"ok": False, "status": "capacity",
+                    "reason": f"max {self._max_streams} streams reached"}
+
+        # Race-condition guard (BUG #5): per-key lock ensures only one
+        # caller creates the stream; concurrent callers wait, then see
+        # the stream the first caller created.
+        lock = self._stream_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            stream = self._streams.get(key)
+            if stream is not None:
+                if cid:
+                    stream.interested_cids.add(cid)
+                    for k, s in self._streams.items():
+                        if k != key:
+                            s.interested_cids.discard(cid)
+                stream.idle_since = None
+                # Signal delay (2026-07-10): a joiner inside the opening-tick
+                # confirmation window gets prediction=None (PENDING), same gate
+                # a live viewer would see — mirrors feed.py.
+                gated_prediction = stream.prediction
+                if (stream.signal_delay_until > 0
+                        and time.time() < stream.signal_delay_until):
+                    gated_prediction = None
+                return {"type": "snapshot", "ok": True, "status": "streaming",
+                        "asset": asset, "period": period,
+                        "candles": stream.candles[-300:], "prediction": gated_prediction}
+
+            pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
+            if pair and pair.get("locked"):
+                # FIX (2026-07-17): category-specific payout floor in the error
+                # message — real pairs need >= PAYOUT_FLOOR_REAL (70), OTC pairs
+                # need >= PAYOUT_FLOOR_OTC (85).
+                floor = PAYOUT_FLOOR_OTC if asset.endswith("_otc") else PAYOUT_FLOOR_REAL
+                return {"ok": False, "status": "locked", "payout": pair.get("payout"),
+                        "reason": f"Needs {floor}% payout "
+                                  f"(currently {pair.get('payout', '?')}%)"}
+
+            stream = _AssetStream(asset=asset, period=period)
             if cid:
                 stream.interested_cids.add(cid)
-                for k, s in self._streams.items():
-                    if k != key:
-                        s.interested_cids.discard(cid)
-            stream.idle_since = None
-            # Signal delay (2026-07-10): a joiner inside the opening-tick
-            # confirmation window gets prediction=None (PENDING), same gate
-            # a live viewer would see — mirrors feed.py.
-            gated_prediction = stream.prediction
-            if (stream.signal_delay_until > 0
-                    and time.time() < stream.signal_delay_until):
-                gated_prediction = None
-            return {"type": "snapshot", "ok": True, "status": "streaming",
-                    "asset": asset, "period": period,
-                    "candles": stream.candles[-300:], "prediction": gated_prediction}
-
-        pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
-        if pair and pair.get("locked"):
-            # FIX (2026-07-17): category-specific payout floor in the error
-            # message — real pairs need >= PAYOUT_FLOOR_REAL (70), OTC pairs
-            # need >= PAYOUT_FLOOR_OTC (85).
-            floor = PAYOUT_FLOOR_OTC if asset.endswith("_otc") else PAYOUT_FLOOR_REAL
-            return {"ok": False, "status": "locked", "payout": pair.get("payout"),
-                    "reason": f"Needs {floor}% payout "
-                              f"(currently {pair.get('payout', '?')}%)"}
-
-        stream = _AssetStream(asset=asset, period=period)
-        if cid:
-            stream.interested_cids.add(cid)
-        self._streams[key] = stream
-        stream.task = asyncio.create_task(self._run_stream(stream))
-        return {"ok": True, "status": "starting"}
+            self._streams[key] = stream
+            stream.task = asyncio.create_task(self._run_stream(stream))
+            return {"ok": True, "status": "starting"}
 
     async def drop_interest(self, cid: str) -> None:
         """Remove a viewer from all streams (on WS disconnect)."""

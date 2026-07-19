@@ -83,6 +83,7 @@ let lastMessageAt = 0;
 let chartLoadingTimeout = null;
 let _resizeTimer = null;
 let _countdownInterval = null, _tickRateInterval = null, _keepaliveInterval = null;
+let _marketStatusInterval = null;  // FIX (AUDIT-FRONTEND #2): track so pagehide can clear it
 
 /* Smooth-candle tween state (easeOutCubic) */
 const TWEEN_MS = 480;
@@ -1198,14 +1199,25 @@ function onEoc(msg){
   if(c.length){
     runningCandleOpenTime = c[c.length-1].time;
   }
+  // FIX (AUDIT-FRONTEND #7, 2026-07-19): lastPrediction was never cleared
+  // between candles. If a candle produced no prediction, the PREVIOUS
+  // candle's prediction was re-logged with the new candle's accuracy —
+  // double-counting signals and corrupting client-side win-rate.
+  // Now: if msg.prediction is null/undefined, clear lastPrediction BEFORE
+  // the history-logging block so addHistory is skipped for that candle.
+  // Also default msg.accuracy to 'pending' (not 'draw') when absent —
+  // 'draw' is a real graded outcome and shouldn't be the implicit default.
+  let predictionForHistory = null;
   if(msg.prediction){
     lastPrediction = msg.prediction;
+    predictionForHistory = msg.prediction;
     renderSignal(msg.prediction);
   } else {
+    lastPrediction = null;
     renderPending();
   }
-  if(lastPrediction){
-    addHistory(lastPrediction.signal || 'NEUTRAL', msg.accuracy || 'draw');
+  if(predictionForHistory){
+    addHistory(predictionForHistory.signal || 'NEUTRAL', msg.accuracy || 'pending');
     setTimeout(loadServerHistory, 500);
   }
   currentMicro = null;
@@ -1416,7 +1428,11 @@ function initApp(category){
   // Update market status indicator (LIVE / CLOSED / 24/7).
   updateMarketStatusIndicator();
   // Refresh it every 30s — Real market status flips at weekend boundary.
-  setInterval(updateMarketStatusIndicator, 30000);
+  // FIX (AUDIT-FRONTEND #2, 2026-07-19): store the interval handle so
+  // pagehide cleanup can clear it. Previously the handle was discarded,
+  // so every initApp re-entry (bfcache restore, pair switch, etc.)
+  // stacked another interval — leaking memory and referencing stale DOM.
+  _marketStatusInterval = setInterval(updateMarketStatusIndicator, 30000);
 
   // Boot.
   safeInit();
@@ -1470,6 +1486,14 @@ function initApp(category){
       // Dead-connection check — if no message in 45s, force-close.
       if(Date.now() - lastMessageAt > 45000){
         console.warn('[ws] no message in 45s — force-closing dead connection');
+        // FIX (AUDIT-FRONTEND #1, 2026-07-19): show the stale overlay
+        // BEFORE closing — previously the proactive stale-detection
+        // (staleTimeout) was scheduled but never set, so users saw a
+        // frozen chart with no indication of staleness until reconnect.
+        const staleOverlay = $('stale-overlay');
+        const staleMsg = $('stale-msg');
+        if(staleOverlay) staleOverlay.classList.add('show');
+        if(staleMsg) staleMsg.textContent = '⚠ Feed stale — no data for 45s, reconnecting...';
         try{ ws.close(); }catch(_){}
       }
     }
@@ -1481,6 +1505,7 @@ function initApp(category){
       if(_countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
       if(_tickRateInterval){ clearInterval(_tickRateInterval); _tickRateInterval = null; }
       if(_keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
+      if(_marketStatusInterval){ clearInterval(_marketStatusInterval); _marketStatusInterval = null; }
       if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
       if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
       if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }

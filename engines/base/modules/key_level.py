@@ -35,13 +35,22 @@ def analyze(candles, ctx: MarketContext) -> list:
     # crossed the level but the close pulled back. This is a STRONGER
     # reversal signal than a plain "bounce" because the level was actually
     # tested and rejected — a higher-conviction fade.
+    # FIX (AUDIT-ENGINES #16, 2026-07-19): the previous version's
+    # `if action == "wick_rejection": if lvl_type == "support": CALL else: PUT`
+    # fired PUT when `lvl_type` was None (the else branch). check_level_confluence
+    # only emits wick_rejection with a non-None lvl_type, but defensively
+    # we now guard: skip the signal entirely if lvl_type is None — a
+    # wick rejection without knowing which side the level was on is meaningless.
     if level_conf["near_level"]:
         lvl_type = level_conf["level_type"]
         action = level_conf["action"]
         dist = level_conf["distance_atr"]
         lvl_price = level_conf["level_price"]
 
-        if action == "wick_rejection":
+        # Defensive: skip if level type is unknown.
+        if lvl_type is None:
+            pass  # fall through to next signal
+        elif action == "wick_rejection":
             # Wick poked through the level but close pulled back — failed
             # breakout. Strong reversal signal (higher score than bounce).
             if lvl_type == "support":
@@ -49,7 +58,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="key_level", direction="CALL", score=4, confidence=70,
                     signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
                     reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → CALL (failed breakdown, 70% win rate)"]))
-            else:
+            else:  # resistance
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=4, confidence=70,
                     signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
@@ -60,7 +69,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="key_level", direction="CALL", score=3, confidence=65,
                     signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
                     reasons=[f"Key support bounce ({lvl_price:.5f}, {dist:.2f} ATR) → CALL boost"]))
-            else:
+            else:  # resistance
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=3, confidence=65,
                     signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
@@ -71,7 +80,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="key_level", direction="CALL", score=2, confidence=58,
                     signal_type="CONTINUATION", reliability="LEVEL", group="LEVEL",
                     reasons=[f"Resistance breakout ({lvl_price:.5f}) → CALL"]))
-            else:
+            else:  # support
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=2, confidence=58,
                     signal_type="CONTINUATION", reliability="LEVEL", group="LEVEL",
@@ -110,36 +119,52 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Round {strength} level {lvl:.5f} bounce down → PUT"]))
 
     # ── SIGNAL 3: Previous candle high/low as micro-S/R ──────────────────
+    # FIX (AUDIT-ENGINES #17, #18, 2026-07-19): the previous version used
+    # `if close < prev_high: PUT else: CALL` and `if close > prev_low: CALL else: PUT`.
+    # The `else` branch fired on EXACT EQUALITY (close == prev_high or
+    # close == prev_low) — treating an exact touch as a breakout. A close
+    # EXACTLY at the previous high is not a breakout (no penetration).
+    # Now we use strict < and > with an epsilon tolerance to handle float
+    # imprecision, and skip the signal entirely on near-equality (a touch
+    # with no penetration is ambiguous — better to abstain).
     if len(candles) >= 2 and atr > 0:
         prev = candles[-2]
         prev_high = prev["high"]
         prev_low = prev["low"]
         tol = atr * 0.10
+        # Epsilon for float equality: 1e-7 * price (handles 5-digit forex).
+        eps = abs(close) * 1e-7 + 1e-9
 
         # Close near previous high → resistance
         if abs(close - prev_high) < tol:
-            if close < prev_high:
+            if close < prev_high - eps:
+                # Clearly below prev high → rejection (PUT reversal).
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=1, confidence=52,
                     signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close near prev high ({prev_high:.5f}) → PUT rejection"]))
-            else:
+            elif close > prev_high + eps:
+                # Clearly above prev high → breakout (CALL continuation).
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=1, confidence=52,
                     signal_type="CONTINUATION", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close above prev high ({prev_high:.5f}) → CALL breakout"]))
+            # else: exact equality — skip (ambiguous).
 
         # Close near previous low → support
         elif abs(close - prev_low) < tol:
-            if close > prev_low:
+            if close > prev_low + eps:
+                # Clearly above prev low → bounce (CALL reversal).
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=1, confidence=52,
                     signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close near prev low ({prev_low:.5f}) → CALL bounce"]))
-            else:
+            elif close < prev_low - eps:
+                # Clearly below prev low → breakdown (PUT continuation).
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=1, confidence=52,
                     signal_type="CONTINUATION", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close below prev low ({prev_low:.5f}) → PUT breakdown"]))
+            # else: exact equality — skip (ambiguous).
 
     return results

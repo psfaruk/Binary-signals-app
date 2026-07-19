@@ -721,6 +721,10 @@ class QuotexFeed:
     def available_pairs(self) -> dict:
         """Return the current forex pair lists and payout floors for /api/pairs.
 
+        FIX (AUDIT-FEED #2, 2026-07-19): if sim fallback is active, return
+        the sim feed's pair list — the real feed's pair list is stale
+        (Quotex connection is dead).
+
         Returns a dict with TWO separate pair lists so the frontend can
         render Real Market and OTC Market as two distinct categories:
 
@@ -744,6 +748,8 @@ class QuotexFeed:
         because the user can't trade them. OTC pairs are always open
         (24/7 broker-generated), so they're never filtered.
         """
+        if getattr(self, '_sim_delegate', None) is not None:
+            return self._sim_delegate.available_pairs()
         active_real = [p for p in self._real_pairs_list if p["status"] == "live"]
         active_otc  = [p for p in self._otc_pairs_list  if p["status"] == "otc"]
         return {
@@ -907,7 +913,16 @@ class QuotexFeed:
         isn't already running, subject to the capacity cap / error cooldown.
         An already-running stream is NEVER rejected or torn down here — those
         guards only gate the creation of a brand-new stream.
+
+        FIX (AUDIT-FEED #2, 2026-07-19): if sim fallback has fired
+        (self._sim_delegate is set), route the call to the sim feed
+        instead of trying to use the dead real feed. Previously the
+        delegate was set but never consulted — new subscribers would
+        hang forever because the real feed's _client was None.
         """
+        # Route to sim delegate if sim fallback has taken over.
+        if getattr(self, '_sim_delegate', None) is not None:
+            return await self._sim_delegate.ensure_stream(asset, period, cid=cid)
         key = (asset, period)
         stream = self._streams.get(key)
         if stream is not None:
@@ -1015,8 +1030,12 @@ class QuotexFeed:
                 self._manager_task.cancel()
                 try:
                     await self._manager_task
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
+                    # Expected — the task was cancelled. Don't swallow
+                    # other exceptions though (those indicate real bugs).
                     pass
+                except Exception as exc:
+                    print(f"[feed] manager task cleanup error: {exc}")
             # Cancel every other real-feed stream task too — they all share
             # the same broken Quotex connection.
             for key, s in list(self._streams.items()):
@@ -1047,9 +1066,16 @@ class QuotexFeed:
 
     async def drop_interest(self, cid: str) -> None:
         """A viewer disconnected — stop counting it toward any stream's
-        interested_cids (idle-eviction sweep does the rest)."""
+        interested_cids (idle-eviction sweep does the rest).
+
+        FIX (AUDIT-FEED #2, 2026-07-19): also drop interest on the sim
+        delegate if one is active — otherwise the sim feed leaks viewer
+        slots and idle-eviction never fires for streams the user left.
+        """
         for s in self._streams.values():
             s.interested_cids.discard(cid)
+        if getattr(self, '_sim_delegate', None) is not None:
+            await self._sim_delegate.drop_interest(cid)
 
     def stream_status(self) -> dict:
         """Return active stream count and capacity info for the status endpoint."""
@@ -2154,6 +2180,10 @@ class QuotexFeed:
 
         await self._client.start_candles_stream(asset, period)
         stream.sub_started = True
+        # FIX (AUDIT-FEED #5, 2026-07-19): record which client instance
+        # started this subscription, so _run_stream's finally block can
+        # detect a stale-client post-rebuild and skip stop_candles_stream.
+        stream._sub_client_id = id(self._client)
 
         # ── Register event-driven tick callback (raw-WS backend only) ──
         # When the raw-WS backend is active, register a callback that pushes
@@ -2893,8 +2923,18 @@ class QuotexFeed:
                 # asset may already be starting — calling stop here would
                 # unsubscribe the NEW stream. The new stream's own
                 # start_candles_stream will re-subscribe cleanly.
+                # FIX (AUDIT-FEED #5, 2026-07-19): also skip if the stream's
+                # subscription was started on a DIFFERENT client than the
+                # current one (i.e. after a client rebuild). The old client
+                # is gone; calling stop_candles_stream on the NEW client
+                # would unsubscribe a live stream that the new client owns.
+                # Track which client started the subscription via stream._sub_client_id.
+                sub_client_id = getattr(stream, '_sub_client_id', None)
+                current_client_id = id(self._client) if self._client else None
+                sub_matches_current = (sub_client_id is None) or (sub_client_id == current_client_id)
                 if (self._client and stream.sub_started
-                        and not getattr(stream, '_evicting', False)):
+                        and not getattr(stream, '_evicting', False)
+                        and sub_matches_current):
                     await self._client.stop_candles_stream(stream.asset)
             except Exception:
                 pass
@@ -2918,6 +2958,12 @@ class QuotexFeed:
                 if self._client:
                     await self._client.start_candles_stream(stream.asset, stream.period)
                     stream.sub_started = True
+                    # FIX (AUDIT-FEED #5, 2026-07-19): record which client
+                    # instance this subscription was started on, so the
+                    # finally block in _run_stream can detect that the
+                    # subscription belongs to a STALE client (post-rebuild)
+                    # and skip stop_candles_stream on the new client.
+                    stream._sub_client_id = id(self._client)
                     stream.last_real_tick_wall = time.time()
 
                     # Re-register the event-driven tick callback if the new

@@ -143,11 +143,22 @@ def analyze(candles, ctx: MarketContext) -> list:
     # ── SIGNAL 2: Big body → reversal (BODY group, vol-scaled) ───────────
     # FIX (OTC issue 2, 2026-07-19): same trend-aware dampening — a big
     # body IN THE TREND DIRECTION is momentum, not exhaustion.
+    # FIX (doji bug, 2026-07-19, AUDIT-ENGINES #14): the previous
+    # version fired `if body > 0: PUT else: CALL` — meaning a DOJI
+    # (body == 0, which is not > 0) fell into the else branch and fired
+    # CALL. A doji is a NEUTRAL candle by definition; calling it a big-
+    # body CALL reversal is wrong. Now we use `if body > 0: PUT elif
+    # body < 0: CALL` — doji (body == 0) skips this signal entirely.
+    # Also: the threshold `abs(body) > median_body * body_mult` is
+    # never satisfied by body == 0 anyway (0 > anything_positive is
+    # False), so the doji case was already unreachable in practice —
+    # but the structural elif fix is still important for correctness
+    # and to prevent regressions if the threshold changes.
     if len(candles) >= 10:
         recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
                          for i in range(-min(20, len(candles)), 0)]
         median_body = sorted(recent_bodies)[len(recent_bodies) // 2]
-        if median_body > 0 and abs(body) > median_body * body_mult:
+        if median_body > 0 and abs(body) > median_body * body_mult and abs(body) > 0:
             # FIX (Bug #19, 2026-07-17): Z-score boost threshold is now
             # volatility-scaled (was static Z > 2.0). Matches the same
             # scaling used in otc_pattern.SIGNAL 3 for consistency.
@@ -171,11 +182,13 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="candle_reaction", direction="PUT", score=score, confidence=base_conf,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
                     reasons=[f"Big UP body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {body_mult}x median, trend_str={trend_strength:.2f}) → PUT reversal"]))
-            else:
+            elif body < 0:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="CALL", score=score, confidence=base_conf,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
                     reasons=[f"Big DOWN body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {body_mult}x median, trend_str={trend_strength:.2f}) → CALL reversal"]))
+            # body == 0 (doji): skip — body_pct would be 0, which fails
+            # the > median_body * body_mult threshold anyway, but be safe.
 
     # ── SIGNAL 3: Wick rejection (WICK group — independent) ──────────────
     if rng > 0:
@@ -211,6 +224,8 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reasons=[f"Close at range bottom ({close_pos:.0f}%, pctile={stats['close_percentile']:.0f}) → CALL"]))
 
     # ── SIGNAL 5: Body shrinking → exhaustion (BODY group) ───────────────
+    # FIX (doji bug, 2026-07-19, AUDIT-ENGINES #15): same fix as Signal 2 —
+    # `if body > 0: PUT else: CALL` fired CALL on doji. Now uses elif.
     if len(candles) >= 2:
         prev_body = abs(candles[-2]["close"] - candles[-2]["open"])
         if prev_body > 0 and abs(body) < prev_body * 0.5 and abs(body) > 0:
@@ -219,11 +234,13 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="candle_reaction", direction="PUT", score=1, confidence=54,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
                     reasons=["Shrinking bull body → PUT exhaustion (54% win rate)"]))
-            else:
+            elif body < 0:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="CALL", score=1, confidence=54,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
                     reasons=["Shrinking bear body → CALL exhaustion (54% win rate)"]))
+            # body == 0: doji — skip (a doji is ALREADY an exhaustion
+            # signal but is handled by Signal 3 wick analysis).
 
     # ═══════════════════════════════════════════════════════════════════════
     #  CONTINUATION SIGNALS (NEW, 2026-07-18)

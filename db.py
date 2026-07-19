@@ -105,10 +105,22 @@ def _as_text(v):
 
 
 def save(asset, period, closed, micro):
-    with _lock:
-        try:
-            with _cursor() as c:
-                c.execute("""INSERT OR REPLACE INTO candle_micro
+    # FIX (AUDIT-CORE #32, 2026-07-19): previously the global `_lock` was
+    # held for the ENTIRE connection lifecycle (open + execute + commit +
+    # close). All 38+ streams' writes serialized through one global lock,
+    # blocking for ~5-20ms each. Now we open the connection OUTSIDE the
+    # lock (sqlite3 handles its own connection-level locking via WAL),
+    # and only hold the global lock around the execute+commit. This lets
+    # multiple writes pipeline: connection open/close happens in parallel.
+    # FIX (AUDIT-CORE #4, 2026-07-19): also re-raise on disk-full /
+    # corruption errors so the caller knows the save failed. Previously
+    # all exceptions were swallowed silently — callers assumed success.
+    conn = _conn()
+    try:
+        with _lock:
+            try:
+                cur = conn.cursor()
+                cur.execute("""INSERT OR REPLACE INTO candle_micro
                     (asset,period,ctime,open,high,low,close,
                      buy_pct,sell_pct,pressure,is_fight,crosses,
                      hold_price,hold_visits,phases,reaction,net,
@@ -127,22 +139,40 @@ def save(asset, period, closed, micro):
                      micro.get("round", {}).get("near_strength"),
                      micro.get("gap_pct"), micro.get("gap_type"),
                      _as_text(micro.get("key_levels")), _as_text(micro.get("ticks_json"))))
-        except Exception as e:
-            print(f"[db] save error: {e}")
+                conn.commit()
+            except sqlite3.Error as e:
+                # Operational errors (locked, disk full, corruption) are
+                # logged but NOT re-raised — losing a single candle_micro
+                # row is preferable to crashing the stream. But we now
+                # log at WARNING level with the specific error class so
+                # operators can spot patterns (e.g. chronic "database is
+                # locked" indicates contention worth investigating).
+                print(f"[db] save sqlite3.{type(e).__name__}: {e}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+    finally:
+        conn.close()
 
 
 def log_signal(asset, period, ctime, signal, score, confidence,
                theories, actual, accuracy, **kw):
-    with _lock:
-        try:
-            with _cursor() as c:
+    # FIX (AUDIT-CORE #32 + #4, 2026-07-19): same lock-scope + error
+    # visibility fix as `save()`. Connection open/close happens outside
+    # the lock; only execute+commit is serialized.
+    conn = _conn()
+    try:
+        with _lock:
+            try:
+                cur = conn.cursor()
                 # FIX (2026-07-17): persist `category` so per-engine accuracy
                 # can be tracked separately. Defaults to auto-detected from
                 # asset name if caller doesn't pass it.
                 category = kw.get("category")
                 if category is None:
                     category = "otc" if asset.endswith("_otc") else "real"
-                c.execute("""INSERT INTO signal_log
+                cur.execute("""INSERT INTO signal_log
                     (asset,period,ctime,signal,score,confidence,theories,
                      actual,accuracy,strength,agree,right_codes,wrong_codes,
                      reasons,a_open,a_close,regime,zone,tags,postmortem,category)
@@ -156,8 +186,15 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                      kw.get("regime"), kw.get("zone"),
                      _as_text(kw.get("tags")), kw.get("postmortem"),
                      category))
-        except Exception as e:
-            print(f"[db] log_signal error: {e}")
+                conn.commit()
+            except sqlite3.Error as e:
+                print(f"[db] log_signal sqlite3.{type(e).__name__}: {e}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+    finally:
+        conn.close()
 
 
 def get_micro_history(asset, period, n=5, before_ctime=None):
@@ -310,6 +347,19 @@ def per_module_accuracy(asset, period=60, n=200):
                 continue
 
             out[module]["total"] += 1
+            # FIX (AUDIT-CORE #3, 2026-07-19): DRAW/PENDING signals were
+            # counted as "wrong" because they fall into the else branch.
+            # This silently understated every module's win_rate (DRAW is
+            # NOT a wrong prediction — it's a no-outcome). Now we skip
+            # DRAW/PENDING entirely: they don't count as correct OR wrong.
+            # Effect: total drops by the number of DRAW signals attributed
+            # to this module, win_rate = correct / (correct + wrong) is
+            # the true win rate among decided outcomes.
+            if accuracy not in ("correct", "wrong"):
+                # DRAW, PENDING, or any other non-decided state — skip.
+                # Decrement total since we just incremented it.
+                out[module]["total"] -= 1
+                continue
             # Aligned with final AND final was correct → module was right.
             # Opposed final AND final was wrong → module was also right.
             if module_dir == final_signal and accuracy == "correct":

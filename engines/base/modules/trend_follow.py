@@ -102,23 +102,47 @@ def analyze(candles, ctx: MarketContext) -> list:
     #   (c) Recent same-direction failure — if a breakout within the last
     #       6 candles was immediately reversed, suppress the new vote
     #       (fakeout-pattern anti-trigger).
-    if len(candles) >= 12 and not regime.get("is_volatile", False):
-        # Use a 10-candle lookback that EXCLUDES both the current and prior
-        # candle — so the "level" being broken is a level established
-        # BEFORE the prior candle. Both prior and current closing above
-        # this level = confirmed breakout.
+    #
+    # FIX (anti-fakeout no-op, 2026-07-19, AUDIT-ENGINES #19): the
+    # anti-fakeout loop scanned candles[-7:-1] and compared each candle's
+    # close against `recent_high` / `recent_low`. But `recent_high` was
+    # computed from `candles[-12:-2]` — which OVERLAPS the scan range
+    # ([-7,-2] is inside [-12,-2]). So a candle that set the high would
+    # trivially have `c["close"] > recent_high` only if it closed ABOVE
+    # its OWN high — impossible. The condition `c["close"] > recent_high`
+    # was structurally always False (a candle's close is at most its
+    # high, and recent_high is the MAX high over a window that includes
+    # the candle itself). The anti-fakeout was therefore a no-op.
+    # Fix: compute the level from a window that EXCLUDES the scan range.
+    # The scan checks candles[-7:-1] (6 candles). The level must come
+    # from candles BEFORE that, i.e. candles[-13:-7]. This way the
+    # scan can actually find failed breakouts against a real prior level.
+    if len(candles) >= 14 and not regime.get("is_volatile", False):
+        # Level window: candles[-12:-2] (10 candles, EXCLUDES current + prior).
         lookback = candles[-12:-2]
         recent_high = max(x["high"] for x in lookback)
         recent_low = min(x["low"] for x in lookback)
         buffer = atr * 0.15 if atr > 0 else 0
         prior_close = candles[-2]["close"]
 
-        # Anti-fakeout: scan the last 6 closed candles (excluding current)
-        # for a same-direction breakout attempt that was reversed next candle.
-        # FIX M2 (2026-07-19): removed unreachable `if abs(i) > len(candles) - 1`
-        # guard — the enclosing block requires len(candles) >= 12, so for
-        # i ∈ {-7,…,-2} we have abs(i) ∈ {2,…,7} which is always <= 11. The
-        # guard was dead and misleading.
+        # Anti-fakeout: scan the last 6 closed candles (excluding current).
+        # FIX (AUDIT-ENGINES #19): use a SEPARATE pre-level window that
+        # does NOT overlap the scan range, so failed breakouts against a
+        # real prior level can actually be detected.
+        # Pre-level window: candles[-13:-7] (6 candles before the scan range).
+        # Requires len(candles) >= 14 (one extra for the offset).
+        pre_level_window = candles[-13:-7]
+        pre_level_high = max(x["high"] for x in pre_level_window)
+        pre_level_low = min(x["low"] for x in pre_level_window)
+        # If pre_level_high < recent_high, the level ROSE between the two
+        # windows — use the older (pre-level) high as the "broken level".
+        # If pre_level_high > recent_high, the level FELL — use recent_high.
+        # The actual level being tested for failure is the OLDER one
+        # (pre_level), because the scan range candles were attempting to
+        # break THAT level, not the newer one.
+        failed_level_high = pre_level_high
+        failed_level_low = pre_level_low
+
         recent_failed_bull = False
         recent_failed_bear = False
         for i in range(-7, -1):
@@ -126,11 +150,13 @@ def analyze(candles, ctx: MarketContext) -> list:
             nc = candles[i + 1] if (i + 1) < 0 else None
             if nc is None:
                 continue
-            # Bullish attempt: candle i closed above recent_high, next closed back below
-            if c["close"] > recent_high and nc["close"] < recent_high:
+            # Bullish attempt: candle i closed above the failed level,
+            # next candle closed back below — failed breakout.
+            if c["close"] > failed_level_high and nc["close"] < failed_level_high:
                 recent_failed_bull = True
-            # Bearish attempt: candle i closed below recent_low, next closed back above
-            if c["close"] < recent_low and nc["close"] > recent_low:
+            # Bearish attempt: candle i closed below the failed level,
+            # next candle closed back above — failed breakdown.
+            if c["close"] < failed_level_low and nc["close"] > failed_level_low:
                 recent_failed_bear = True
 
         # Bullish breakout: current close above recent_high + buffer AND body extends
@@ -201,15 +227,22 @@ def analyze(candles, ctx: MarketContext) -> list:
     # ── SIGNAL 5: ATR expansion in trend direction ───────────────────────
     # When volatility is expanding (vol_pct > 1.0) AND regime is trending,
     # the trend has fuel — boost continuation signals.
+    # FIX (AUDIT-ENGINES #20, 2026-07-19): the previous version used
+    # `regime_dir = "TREND_UP" if regime.get("regime") == "TREND_UP" else "TREND_DOWN"`
+    # — meaning RANGE and VOLATILE regimes defaulted to TREND_DOWN, firing
+    # a PUT momentum boost in non-trending markets. Now we only fire this
+    # signal when the regime is EXPLICITLY TREND_UP or TREND_DOWN (the
+    # enclosing `if` already requires is_trending=True, but we now check
+    # the regime name explicitly to avoid the else-default bug).
     vol_pct = ctx.vol_pct
-    if vol_pct > 1.1 and regime.get("is_trending", False):
-        regime_dir = "TREND_UP" if regime.get("regime") == "TREND_UP" else "TREND_DOWN"
-        if regime_dir == "TREND_UP":
+    regime_name = regime.get("regime", "RANGE")
+    if vol_pct > 1.1 and regime.get("is_trending", False) and regime_name in ("TREND_UP", "TREND_DOWN"):
+        if regime_name == "TREND_UP":
             results.append(ModuleResult(
                 module_name="trend_follow", direction="CALL", score=2, confidence=57,
                 signal_type="CONTINUATION", reliability="TREND", group="TREND_VOL",
                 reasons=[f"ATR expansion ({vol_pct:.1f}x) in uptrend → CALL momentum boost"]))
-        else:
+        else:  # TREND_DOWN
             results.append(ModuleResult(
                 module_name="trend_follow", direction="PUT", score=2, confidence=57,
                 signal_type="CONTINUATION", reliability="TREND", group="TREND_VOL",

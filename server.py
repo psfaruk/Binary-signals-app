@@ -356,7 +356,13 @@ async def get_signal_detail(asset: str, period: int, ctime: int):
 # FIX (Bug #16, 2026-07-17): previously any integer was accepted, which
 # could create bogus streams (e.g., period=-1 or period=999999) that
 # wasted resources and corrupted the stream registry.
-_ALLOWED_PERIODS = {15, 30, 60, 120, 180, 300, 600, 900, 1800, 3600}
+# FIX (AUDIT-CORE #1, 2026-07-19): import from core.constants instead
+# of duplicating the literal set. The previous local definition would
+# silently drift if core.constants.ALLOWED_PERIODS changed — e.g. if a
+# new period (e.g. 15s) was added to the canonical constant, the WS
+# endpoint would still reject it. Now both server and constants share
+# one source of truth.
+from core.constants import ALLOWED_PERIODS as _ALLOWED_PERIODS
 
 
 @app.websocket("/ws")
@@ -368,9 +374,27 @@ async def ws_endpoint(ws: WebSocket):
     clients[cid] = ws
     print(f"[server] {cid} connected ({len(clients)} total)")
 
+    # FIX (AUDIT-CORE #8, 2026-07-19): WS idle timeout. Previously a
+    # client that connected and never sent would hold the WS open
+    # forever, registered in `clients`, counted in len(clients). A
+    # malicious/buggy client could exhaust server FDs by opening
+    # thousands of idle connections. Now we apply a per-receive timeout
+    # of WS_IDLE_TIMEOUT (default 300s) — if no message arrives within
+    # that window, we close the connection with code 1008 (policy
+    # violation) and free the slot.
+    WS_IDLE_TIMEOUT = float(os.environ.get("WS_IDLE_TIMEOUT", "300.0"))
+
     try:
         while True:
-            raw = await ws.receive_text()
+            try:
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=WS_IDLE_TIMEOUT)
+            except asyncio.TimeoutError:
+                print(f"[server] {cid} idle timeout ({WS_IDLE_TIMEOUT}s) — closing")
+                try:
+                    await ws.close(code=1008, reason="idle timeout")
+                except Exception:
+                    pass
+                break
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -448,7 +472,12 @@ async def ws_endpoint(ws: WebSocket):
                         "error": f"invalid period {period!r}",
                     }))
                     continue
-                sigs = _db.get_recent_signals(asset, period, 50)
+                # FIX (AUDIT-CORE #7, 2026-07-19): wrap the synchronous
+                # SQLite call in asyncio.to_thread so the event loop is
+                # not blocked. Previously this endpoint would block all
+                # other WS clients for the duration of the query — under
+                # load this caused visible tick stutter for everyone else.
+                sigs = await asyncio.to_thread(_db.get_recent_signals, asset, period, 50)
                 await ws.send_text(json.dumps({
                     "type": "signals",
                     "signals": sigs,

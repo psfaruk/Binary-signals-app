@@ -139,6 +139,13 @@ def analyze(candles, ctx: MarketContext) -> list:
     """Run all 5 technical indicators.
 
     Returns list of ModuleResult objects, one per indicator that fires.
+
+    FIX (AUDIT-ENGINES, 2026-07-19): RSI/Bollinger/Stochastic reversal
+    signals are now TREND-AWARE. In a strong trend, RSI > 70 is the
+    DEFINITION of trend strength (not overbought), Bollinger band
+    touches ride the band, and stochastic can stay pegged. Firing
+    reversal on these in a trend = the same structural bias that
+    candle_reaction had before its trend-aware fix.
     """
     results = []
     if len(candles) < 30:
@@ -147,23 +154,49 @@ def analyze(candles, ctx: MarketContext) -> list:
     closes = ctx.closes
     last_close = closes[-1]
 
+    # FIX (trend-aware indicators): pull regime once at the top so all
+    # reversal indicators can be gated consistently.
+    regime = ctx.regime
+    is_trending = regime.get("is_trending", False)
+    trend_regime = regime.get("regime", "RANGE")
+    trend_strength = regime.get("trend_strength", 0.0)
+    strong_trend = is_trending and trend_strength > 0.6
+
     # ── INDICATOR 1: RSI (14) ────────────────────────────────────────────
     # FIX (Bug #7, 2026-07-17): removed the "mild momentum" branches that
     # fired on 60<RSI<70 and 30<RSI<40 — these were essentially noise
     # (confidence 52%, score 1) that fired on most candles in a trending
     # market. Now RSI only votes on the classic overbought/oversold zones
     # (>70 / <30) where there is a real statistical edge.
+    # FIX (AUDIT-ENGINES, 2026-07-19): in a strong trend, RSI > 70 (uptrend)
+    # or RSI < 30 (downtrend) is momentum confirmation, NOT a reversal
+    # signal. Fire as CONTINUATION in that case. RSI > 70 in a DOWNTREND
+    # (rare but possible — a counter-trend spike) is still reversal.
     rsi = _rsi(closes, 14)
     if rsi > 70:
-        results.append(ModuleResult(
-            module_name="indicator", direction="PUT", score=3, confidence=62,
-            signal_type="REVERSAL", reliability="INDICATOR", group="IND_RSI",
-            reasons=[f"RSI overbought ({rsi:.0f}) → PUT reversal (62% win rate)"]))
+        if strong_trend and trend_regime == "TREND_UP":
+            # RSI > 70 in a strong uptrend = momentum, not reversal.
+            results.append(ModuleResult(
+                module_name="indicator", direction="CALL", score=2, confidence=58,
+                signal_type="CONTINUATION", reliability="INDICATOR", group="IND_RSI",
+                reasons=[f"RSI overbought ({rsi:.0f}) in strong uptrend (str={trend_strength:.2f}) → CALL continuation (momentum)"]))
+        else:
+            results.append(ModuleResult(
+                module_name="indicator", direction="PUT", score=3, confidence=62,
+                signal_type="REVERSAL", reliability="INDICATOR", group="IND_RSI",
+                reasons=[f"RSI overbought ({rsi:.0f}) → PUT reversal (62% win rate)"]))
     elif rsi < 30:
-        results.append(ModuleResult(
-            module_name="indicator", direction="CALL", score=3, confidence=60,
-            signal_type="REVERSAL", reliability="INDICATOR", group="IND_RSI",
-            reasons=[f"RSI oversold ({rsi:.0f}) → CALL reversal (60% win rate)"]))
+        if strong_trend and trend_regime == "TREND_DOWN":
+            # RSI < 30 in a strong downtrend = momentum.
+            results.append(ModuleResult(
+                module_name="indicator", direction="PUT", score=2, confidence=58,
+                signal_type="CONTINUATION", reliability="INDICATOR", group="IND_RSI",
+                reasons=[f"RSI oversold ({rsi:.0f}) in strong downtrend (str={trend_strength:.2f}) → PUT continuation (momentum)"]))
+        else:
+            results.append(ModuleResult(
+                module_name="indicator", direction="CALL", score=3, confidence=60,
+                signal_type="REVERSAL", reliability="INDICATOR", group="IND_RSI",
+                reasons=[f"RSI oversold ({rsi:.0f}) → CALL reversal (60% win rate)"]))
 
     # ── INDICATOR 2: MACD (crossover detection) ─────────────────────────
     # FIX (Bug #8, 2026-07-17): the old version checked STATE (macd_line vs
@@ -209,19 +242,38 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reasons=[f"EMA9 < EMA21 ({ema_diff_pct:.2f}%) → PUT downtrend"]))
 
     # ── INDICATOR 4: Bollinger Bands ─────────────────────────────────────
+    # FIX (AUDIT-ENGINES, 2026-07-19): Bollinger band touches in a strong
+    # trend ride the band (price hugs upper band in uptrend, lower in
+    # downtrend) — calling these "reversal" was the same structural bias
+    # as RSI. Now: in a strong trend aligned with the band touch, fire as
+    # CONTINUATION (weaker score). Otherwise fire as REVERSAL (mean reversion).
     bb_mid, bb_upper, bb_lower = _bollinger(closes, 20, 2)
     if bb_upper > 0 and bb_lower > 0:
         bb_width = (bb_upper - bb_lower) / bb_mid if bb_mid > 0 else 0
         if last_close >= bb_upper:
-            results.append(ModuleResult(
-                module_name="indicator", direction="PUT", score=2, confidence=58,
-                signal_type="REVERSAL", reliability="INDICATOR", group="IND_BB",
-                reasons=[f"Close above upper Bollinger band → PUT reversal (mean reversion)"]))
+            if strong_trend and trend_regime == "TREND_UP":
+                # Riding the upper band in an uptrend = continuation.
+                results.append(ModuleResult(
+                    module_name="indicator", direction="CALL", score=1, confidence=54,
+                    signal_type="CONTINUATION", reliability="INDICATOR", group="IND_BB",
+                    reasons=[f"Close riding upper Bollinger band in uptrend (str={trend_strength:.2f}) → CALL continuation"]))
+            else:
+                results.append(ModuleResult(
+                    module_name="indicator", direction="PUT", score=2, confidence=58,
+                    signal_type="REVERSAL", reliability="INDICATOR", group="IND_BB",
+                    reasons=[f"Close above upper Bollinger band → PUT reversal (mean reversion)"]))
         elif last_close <= bb_lower:
-            results.append(ModuleResult(
-                module_name="indicator", direction="CALL", score=2, confidence=58,
-                signal_type="REVERSAL", reliability="INDICATOR", group="IND_BB",
-                reasons=[f"Close below lower Bollinger band → CALL reversal (mean reversion)"]))
+            if strong_trend and trend_regime == "TREND_DOWN":
+                # Riding the lower band in a downtrend = continuation.
+                results.append(ModuleResult(
+                    module_name="indicator", direction="PUT", score=1, confidence=54,
+                    signal_type="CONTINUATION", reliability="INDICATOR", group="IND_BB",
+                    reasons=[f"Close riding lower Bollinger band in downtrend (str={trend_strength:.2f}) → PUT continuation"]))
+            else:
+                results.append(ModuleResult(
+                    module_name="indicator", direction="CALL", score=2, confidence=58,
+                    signal_type="REVERSAL", reliability="INDICATOR", group="IND_BB",
+                    reasons=[f"Close below lower Bollinger band → CALL reversal (mean reversion)"]))
         # Squeeze detection (very narrow bands → pending breakout, no direction)
         # Skip vote — just informational
 

@@ -55,13 +55,33 @@ def compute_module_stats(db_path=None):
     if not os.path.exists(db_path):
         return {"error": "signals.db not found", "db_path": db_path}
 
-    conn = sqlite3.connect(db_path, timeout=10)
+    # FIX (AUDIT-CORE #4, 2026-07-19): use db._conn() so we inherit WAL
+    # mode + synchronous=NORMAL. Previously this opened a raw sqlite3
+    # connection WITHOUT WAL, causing lock contention with the feed's
+    # WAL writers — every /api/stats refresh could block writes for
+    # 100ms+ on slow disks. Also wrap in try/finally so the connection
+    # is closed even on exception (previously leaked on any error
+    # between connect and conn.close()).
+    try:
+        import db as _db
+        conn = _db._conn()
+    except Exception:
+        # Fallback: raw connect (no WAL) if db module isn't importable.
+        conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+    try:
+        return _compute_module_stats_inner(cur, total_query=total)
+    finally:
+        conn.close()
 
+
+def _compute_module_stats_inner(cur, total_query=None):
+    """Inner stats computation — takes a cursor, returns the stats dict.
+    Split out so the connection lifecycle can be managed separately.
+    """
     total = cur.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
     if total == 0:
-        conn.close()
         return {"total_signals": 0, "message": "No signals logged yet"}
 
     # Per-module global stats
@@ -205,7 +225,7 @@ def compute_module_stats(db_path=None):
         if pair_modules:
             pairs_summary[asset] = pair_modules
 
-    conn.close()
+    # Connection is closed by the caller (try/finally in compute_module_stats).
 
     return {
         "total_signals": total,

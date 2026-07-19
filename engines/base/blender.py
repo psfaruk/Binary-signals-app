@@ -270,10 +270,39 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         p_mult = pair_weights.get(r.module_name, 1.0)
 
         # HTF confluence multiplier.
+        # FIX (HTF vs exhaustion conflict, 2026-07-19, AUDIT-ENGINES #10):
+        # The previous version applied HTF ×0.7 unconditionally to
+        # counter-trend signals. But when the exhaustion gate has fired
+        # (is_exhausting/is_strongly_exhausting), the whole POINT of the
+        # gate is to BOOST counter-trend reversal signals (×1.2 in the
+        # regime multiplier). Applying HTF ×0.7 on top negates that
+        # boost: 1.2 × 0.7 = 0.84 — the exact reversal the exhaustion
+        # gate wants to boost gets DAMPENED, not boosted.
+        # Now: when the exhaustion gate has fired AND the signal is a
+        # REVERSAL, skip the HTF ×0.7 penalty (use 1.0). The HTF ×1.1
+        # bonus for aligned continuation signals is preserved — those
+        # represent trend resumption, which is fine even when the gate
+        # has fired (the gate is just a "watch out" flag, not a hard
+        # reversal guarantee).
         if htf_trend == "UPTREND":
-            h_mult = 1.1 if r.direction == "CALL" else 0.7
+            if r.direction == "CALL":
+                h_mult = 1.1
+            else:
+                # Counter-trend PUT in an UPTREND. If the exhaustion gate
+                # has fired, this reversal signal is what the gate wants
+                # to amplify — don't let HTF ×0.7 undo that.
+                if is_exhausting and r.signal_type == "REVERSAL":
+                    h_mult = 1.0  # neutral — let regime ×1.2 stand
+                else:
+                    h_mult = 0.7
         elif htf_trend == "DOWNTREND":
-            h_mult = 1.1 if r.direction == "PUT" else 0.7
+            if r.direction == "PUT":
+                h_mult = 1.1
+            else:
+                if is_exhausting and r.signal_type == "REVERSAL":
+                    h_mult = 1.0
+                else:
+                    h_mult = 0.7
         else:
             h_mult = 1.0
 
@@ -286,13 +315,28 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         adjusted.append((r, effective))
 
     # ── Step 7: Blend ────────────────────────────────────────────────────
+    # FIX (suppressed-group inflation, 2026-07-19, AUDIT-ENGINES #84):
+    # The previous version computed `total_groups` from `adjusted` only
+    # — meaning a group whose every signal was suppressed (effective=0)
+    # would simply VANISH from the denominator. This inflates vote_ratio
+    # and confidence: e.g. if 3 groups fired but 1 was fully suppressed,
+    # vote_ratio = majority/2 instead of majority/3.
+    # Now we compute total_groups from the ORIGINAL grouped_results
+    # (pre-suppression), so suppressed groups still count as "fired but
+    # dampened to zero" — they don't disappear from the denominator.
     call_score = sum(e for r, e in adjusted if r.direction == "CALL")
     put_score = sum(e for r, e in adjusted if r.direction == "PUT")
 
     call_groups = set(r.group for r, e in adjusted if r.direction == "CALL")
     put_groups = set(r.group for r, e in adjusted if r.direction == "PUT")
-    all_groups = call_groups | put_groups
-    total_groups = len(all_groups)
+    # Original groups (before suppression) — used for the denominator.
+    original_groups = set(r.group for r in grouped_results)
+    fired_groups = call_groups | put_groups
+    # Use original_groups for denominator so suppressed groups count.
+    total_groups = len(original_groups) if original_groups else 0
+    # If nothing survived suppression, fired_groups is empty — but
+    # original_groups may be non-empty (all suppressed). In that case
+    # we still want to report NEUTRAL, not crash on divide-by-zero.
 
     all_reasons = []
     for r, e in adjusted:
@@ -443,27 +487,55 @@ def _collapse_body_group(body_signals: list) -> ModuleResult:
     are NOT collapsed with BODY/WICK — they vote independently. This
     ensures continuation signals aren't drowned out by the reversal
     majority in the BODY group.
+
+    FIX (tie-breaker, 2026-07-19, AUDIT-ENGINES #11): the previous
+    version returned None on a tie (call_sum == put_sum), silently
+    DROPPING the entire BODY group. This had two bad effects:
+      (a) If BODY was the only group that fired, total_groups == 0
+          and the engine returned NEUTRAL — even though real signals
+          fired. The user sees no signal when there genuinely is one.
+      (b) If other groups fired too, total_groups was 1 less than it
+          should be — inflating vote_ratio and confidence.
+    Now we resolve the tie deterministically: pick the direction with
+    more signals (count), then by max single score, then default to
+    NEUTRAL (return None) only if BOTH are completely empty.
     """
     if not body_signals:
         return None
 
-    call_sum = sum(r.score for r in body_signals if r.direction == "CALL")
-    put_sum = sum(r.score for r in body_signals if r.direction == "PUT")
-    call_n = sum(1 for r in body_signals if r.direction == "CALL")
-    put_n = sum(1 for r in body_signals if r.direction == "PUT")
+    call_signals = [r for r in body_signals if r.direction == "CALL"]
+    put_signals  = [r for r in body_signals if r.direction == "PUT"]
+    call_sum = sum(r.score for r in call_signals)
+    put_sum  = sum(r.score for r in put_signals)
+    call_n = len(call_signals)
+    put_n  = len(put_signals)
 
     if call_sum > put_sum:
         direction = "CALL"
-        max_score = max(r.score for r in body_signals if r.direction == "CALL")
+        max_score = max(r.score for r in call_signals)
         agree_n = call_n
-        # Majority direction's signal_type wins (score-weighted).
-        majority_signals = [r for r in body_signals if r.direction == "CALL"]
+        majority_signals = call_signals
     elif put_sum > call_sum:
         direction = "PUT"
-        max_score = max(r.score for r in body_signals if r.direction == "PUT")
+        max_score = max(r.score for r in put_signals)
         agree_n = put_n
-        majority_signals = [r for r in body_signals if r.direction == "PUT"]
+        majority_signals = put_signals
+    elif call_n != put_n:
+        # Tie on score — break by count (more signals of one direction).
+        direction = "CALL" if call_n > put_n else "PUT"
+        majority_signals = call_signals if direction == "CALL" else put_signals
+        max_score = max(r.score for r in majority_signals)
+        agree_n = len(majority_signals)
+    elif call_n > 0:
+        # Total tie — pick the direction with the strongest single signal.
+        max_call = max(r.score for r in call_signals)
+        max_put  = max(r.score for r in put_signals)
+        if max_call >= max_put:
+            direction, majority_signals, max_score, agree_n = "CALL", call_signals, max_call, call_n
+        else:
+            direction, majority_signals, max_score, agree_n = "PUT", put_signals, max_put, put_n
     else:
+        # Truly empty (shouldn't happen — caught above) — return None.
         return None
 
     bonus = 1 if agree_n >= 3 else 0
