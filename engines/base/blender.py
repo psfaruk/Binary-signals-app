@@ -412,32 +412,6 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # Geometric mean: sensitive to BOTH breadth and depth.
     confidence = int(math.sqrt(vote_ratio * weight_ratio) * 100)
 
-    # FIX (BUG G — confidence != conviction, 2026-07-19):
-    # The geometric-mean above can read ~100% even when two groups vote
-    # CALL with the weakest possible scores (1+1) and nothing opposes them
-    # (vote_ratio=1.0, weight_ratio~1.0). That advertises a "STRONG, 100%
-    # confident" CALL that is really a coin-flip — the #1 reason users see
-    # high-confidence signals that turn out wrong.
-    #
-    # Now we scale confidence by the EDGE MARGIN: how decisively the majority
-    # score beats the minority score, relative to total conviction.
-    #   margin = abs(call_score - put_score) / (call_score + put_score)
-    # A unanimous, large, one-sided vote => margin ~1.0 (no discount).
-    # A 1-vs-0 or 1+1 vs 0 vote => margin ~1.0 too, BUT a tiny-score 1+1
-    # vs 0 has low `total`, so we additionally require a minimum net score.
-    # We cap the discount so a genuinely strong vote is never punished.
-    if total > 0:
-        margin = abs(call_score - put_score) / total
-        # A weak vote (abs_net < 3) is at best a MEDIUM-confidence idea.
-        # Blend the geometric confidence with the margin so it can never
-        # exceed ~ (margin-driven ceiling).
-        margin_ceiling = int(45 + 50 * margin)  # margin 0->45, 1->95
-        confidence = min(confidence, margin_ceiling)
-        # Floor the "single tiny vote" case: a lone score-1 vote is at most
-        # ~55% even if margin is high (low sample of conviction).
-        if abs_net < 3:
-            confidence = min(confidence, 55)
-
     # HTF alignment bonus.
     if htf_trend == "UPTREND" and signal == "CALL":
         confidence = min(100, confidence + 5)
