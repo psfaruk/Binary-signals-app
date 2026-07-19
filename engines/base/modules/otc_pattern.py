@@ -128,13 +128,16 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f}) → CALL reversal boost"]))
 
     # ── REVERSAL SIGNAL 3: Z-score extreme reversal ──────────────────────
+    # FIX (deep diagnostic, 2026-07-20): z-score had 47.9% win rate —
+    # thresholds too low (2.0/2.3/2.8). Raised to 2.5/3.0/3.5 for more
+    # extreme bodies only. Also reduced score (2→1) since signal is weak.
     vol_pct = ctx.vol_pct
     if vol_pct >= 1.3:
-        z_threshold = 2.0
+        z_threshold = 2.5
     elif vol_pct <= 0.7:
-        z_threshold = 2.8
+        z_threshold = 3.5
     else:
-        z_threshold = 2.3
+        z_threshold = 3.0
 
     # FIX (OTC issue 1, 2026-07-19): z-score extreme fires REVERSAL on a
     # big body — but a big body IN THE DIRECTION OF A STRONG TREND is a
@@ -154,9 +157,9 @@ def analyze(candles, ctx: MarketContext) -> list:
             # Strong-trend momentum candle — don't bet against it.
             fire_z, z_score, z_conf = False, 0, 0
         elif body_aligns_with_trend and trend_strength > 0.5:
-            fire_z, z_score, z_conf = True, 1, 56
+            fire_z, z_score, z_conf = True, 1, 54
         else:
-            fire_z, z_score, z_conf = True, 2, 63
+            fire_z, z_score, z_conf = True, 1, 58
 
         if fire_z:
             if body > 0:
@@ -269,22 +272,26 @@ def analyze(candles, ctx: MarketContext) -> list:
     # FIX M4 (2026-07-19): bumped guard from >=20 to >=21 so candles[-21:-1]
     # actually yields 20 candles (was 19 when len==20 because Python slicing
     # clamps the negative start to 0).
+    # FIX (deep diagnostic, 2026-07-20): OTC breakout had 48.7% win rate —
+    # the 1.2x median body filter is too loose, and OTC breakouts often
+    # fail (broker reverses them). Raised body filter to 1.5x median and
+    # reduced score from 3 to 2.
     if len(candles) >= 21:
         recent = candles[-21:-1]  # last 20 closed candles (exclude current)
         recent_high = max(c["high"] for c in recent)
         recent_low = min(c["low"] for c in recent)
         recent_bodies = [abs(c["close"] - c["open"]) for c in recent]
         median_body = sorted(recent_bodies)[len(recent_bodies) // 2] if recent_bodies else 0
-        # Breakout requires body > 1.2x median (not just a wick poke)
-        if median_body > 0 and last_body_abs > median_body * 1.2:
+        # Breakout requires body > 1.5x median (raised from 1.2x)
+        if median_body > 0 and last_body_abs > median_body * 1.5:
             if last["close"] > recent_high and last_body > 0:
                 results.append(ModuleResult(
-                    module_name="otc_pattern", direction="CALL", score=3, confidence=61,
+                    module_name="otc_pattern", direction="CALL", score=2, confidence=56,
                     signal_type="CONTINUATION", reliability="OTC", group="OTC_BREAKOUT",
                     reasons=[f"OTC breakout UP: close {last['close']:.5f} > 20-candle high {recent_high:.5f} (body {last_body_abs/median_body:.1f}x median) → CALL continuation"]))
             elif last["close"] < recent_low and last_body < 0:
                 results.append(ModuleResult(
-                    module_name="otc_pattern", direction="PUT", score=3, confidence=61,
+                    module_name="otc_pattern", direction="PUT", score=2, confidence=56,
                     signal_type="CONTINUATION", reliability="OTC", group="OTC_BREAKOUT",
                     reasons=[f"OTC breakout DOWN: close {last['close']:.5f} < 20-candle low {recent_low:.5f} (body {last_body_abs/median_body:.1f}x median) → PUT continuation"]))
 

@@ -241,34 +241,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Unconfirmed breakdown below 10-candle low ({recent_low:.5f}, prior close {prior_close:.5f}) → PUT (weak, no multi-candle confirm)"]))
 
     # ── SIGNAL 4: Higher-high / higher-low structure ─────────────────────
-    # Classic Dow Theory uptrend: each swing high higher than previous,
-    # each swing low higher than previous. Only check on the last ~10
-    # candles so the structure is recent.
-    if len(candles) >= 10:
-        # Find last 2 swing highs and last 2 swing lows in the last 10 candles
-        window = candles[-10:]
-        swing_highs = []
-        swing_lows = []
-        for i in range(2, len(window) - 2):
-            cx = window[i]
-            if (cx["high"] >= window[i-1]["high"] and cx["high"] >= window[i-2]["high"]
-                    and cx["high"] >= window[i+1]["high"] and cx["high"] >= window[i+2]["high"]):
-                swing_highs.append(cx["high"])
-            if (cx["low"] <= window[i-1]["low"] and cx["low"] <= window[i-2]["low"]
-                    and cx["low"] <= window[i+1]["low"] and cx["low"] <= window[i+2]["low"]):
-                swing_lows.append(cx["low"])
-        # HH + HL → uptrend; LH + LL → downtrend
-        if len(swing_highs) >= 2 and len(swing_lows) >= 2:
-            if swing_highs[-1] > swing_highs[-2] and swing_lows[-1] > swing_lows[-2]:
-                results.append(ModuleResult(
-                    module_name="trend_follow", direction="CALL", score=2, confidence=60,
-                    signal_type="CONTINUATION", reliability="TREND", group="TREND_STRUCTURE",
-                    reasons=["HH + HL structure → CALL continuation (Dow uptrend)"]))
-            elif swing_highs[-1] < swing_highs[-2] and swing_lows[-1] < swing_lows[-2]:
-                results.append(ModuleResult(
-                    module_name="trend_follow", direction="PUT", score=2, confidence=60,
-                    signal_type="CONTINUATION", reliability="TREND", group="TREND_STRUCTURE",
-                    reasons=["LH + LL structure → PUT continuation (Dow downtrend)"]))
+    # DISABLED (deep diagnostic, 2026-07-20): backtest showed 44.4% win rate
+    # — the 10-candle window is too short to detect meaningful Dow structure.
+    # On 1m candles, swing highs/lows within 10 candles are mostly noise.
+    # The signal is counterproductive — removing it improves accuracy.
+    # if len(candles) >= 10:
+    #     ... (original code removed)
 
     # ── SIGNAL 5: ATR expansion in trend direction ───────────────────────
     # When volatility is expanding (vol_pct > 1.0) AND regime is trending,

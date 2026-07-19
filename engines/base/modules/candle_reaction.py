@@ -191,19 +191,22 @@ def analyze(candles, ctx: MarketContext) -> list:
             # the > median_body * body_mult threshold anyway, but be safe.
 
     # ── SIGNAL 3: Wick rejection (WICK group — independent) ──────────────
+    # FIX (deep diagnostic, 2026-07-20): candle_wick had 48.9% win rate —
+    # the 40% wick threshold is too loose for 1m candles. Raised to 50%
+    # wick for more extreme rejection. Score reduced (3→2).
     if rng > 0:
         upper_wick = h - max(o, c)
         lower_wick = min(o, c) - l
         uw_pct = upper_wick / rng * 100
         lw_pct = lower_wick / rng * 100
-        if uw_pct > 40 and body_pct < 35:
+        if uw_pct > 50 and body_pct < 30:
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="PUT", score=3, confidence=59,
+                module_name="candle_reaction", direction="PUT", score=2, confidence=55,
                 signal_type="REVERSAL", reliability="CANDLE", group="WICK",
                 reasons=[f"Upper wick rejection ({uw_pct:.0f}%) → PUT (59% win rate)"]))
-        elif lw_pct > 40 and body_pct < 35:
+        elif lw_pct > 50 and body_pct < 30:
             results.append(ModuleResult(
-                module_name="candle_reaction", direction="CALL", score=3, confidence=56,
+                module_name="candle_reaction", direction="CALL", score=2, confidence=54,
                 signal_type="REVERSAL", reliability="CANDLE", group="WICK",
                 reasons=[f"Lower wick rejection ({lw_pct:.0f}%) → CALL (56% win rate)"]))
 

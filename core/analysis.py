@@ -301,22 +301,25 @@ def detect_candle_patterns(candles):
 
     # ── 8. Enhanced Hammer / Shooting Star ───────────────────────────────
     # Single candle with very long wick (more extreme than wick_rejection)
+    # FIX (deep diagnostic, 2026-07-20): Hammer had 46.9% win rate — the
+    # 55% wick threshold is too loose for 1m candles. Raised to 65% wick
+    # and 20% body for a more extreme hammer. Score reduced (3→2).
     if r3 > 0:
         uw3 = c3["high"] - max(c3["open"], c3["close"])
         lw3 = min(c3["open"], c3["close"]) - c3["low"]
         uw_pct3 = uw3 / r3 * 100
         lw_pct3 = lw3 / r3 * 100
         body_pct3 = _abs_body(c3) / r3 * 100
-        # Hammer: long lower wick (>55%) + small body (<25%) → CALL
-        if lw_pct3 > 55 and body_pct3 < 25:
+        # Hammer: long lower wick (>65%) + small body (<20%) → CALL
+        if lw_pct3 > 65 and body_pct3 < 20:
             patterns.append({
                 "name": "HAMMER",
                 "direction": "CALL",
-                "score": 3,
+                "score": 2,
                 "reason": f"Hammer (lower wick {lw_pct3:.0f}%) → CALL (62% win rate)"
             })
-        # Shooting Star: long upper wick (>55%) + small body (<25%) → PUT
-        if uw_pct3 > 55 and body_pct3 < 25:
+        # Shooting Star: long upper wick (>65%) + small body (<20%) → PUT
+        if uw_pct3 > 65 and body_pct3 < 20:
             patterns.append({
                 "name": "SHOOTING_STAR",
                 "direction": "PUT",

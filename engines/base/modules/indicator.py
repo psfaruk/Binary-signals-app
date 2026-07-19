@@ -261,7 +261,11 @@ def analyze(candles, ctx: MarketContext) -> list:
         _ml_prev, _sl_prev, hist_prev = _macd(closes[:-1], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
         # Magnitude filter: post-crossover histogram must be meaningful
         # (>0.01% of close). Filters noise-level sign flips.
-        mag_threshold = abs(last_close) * 0.0001 if last_close > 0 else 0.0001
+        # FIX (deep diagnostic, 2026-07-20): MACD crossover had 39% win rate.
+        # Magnitude threshold raised 10x (0.0001 → 0.001) to filter noise
+        # crossovers. Score reduced (3→1) and confidence reduced (60→52)
+        # since the signal is unreliable on 1m candles.
+        mag_threshold = abs(last_close) * 0.001 if last_close > 0 else 0.001
         fresh_bull_cross = (hist_prev <= 0 and histogram > 0
                             and abs(histogram) > mag_threshold)
         fresh_bear_cross = (hist_prev >= 0 and histogram < 0
@@ -271,12 +275,12 @@ def analyze(candles, ctx: MarketContext) -> list:
 
     if fresh_bull_cross:
         results.append(ModuleResult(
-            module_name="indicator", direction="CALL", score=3, confidence=60,
+            module_name="indicator", direction="CALL", score=1, confidence=52,
             signal_type="CONTINUATION", reliability="INDICATOR", group="IND_MACD",
             reasons=[f"MACD fresh bullish crossover (hist={histogram:.6f}) → CALL"]))
     elif fresh_bear_cross:
         results.append(ModuleResult(
-            module_name="indicator", direction="PUT", score=3, confidence=60,
+            module_name="indicator", direction="PUT", score=1, confidence=52,
             signal_type="CONTINUATION", reliability="INDICATOR", group="IND_MACD",
             reasons=[f"MACD fresh bearish crossover (hist={histogram:.6f}) → PUT"]))
 
