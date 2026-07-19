@@ -342,9 +342,29 @@ def classify_market_regime(candles, lookback=30):
     ema9 = _ema(closes, 9)
     ema21 = _ema(closes, 21)
 
-    # Trend direction from EMA separation (normalized to price)
+    # Trend direction from EMA separation (normalized to price).
+    # FIX (BUG D — deep regime fix, 2026-07-19):
+    # The previous normalization used a HARDCODED 0.2% threshold
+    # (abs(ema_diff) / 0.002). For a quiet EURUSD pair where 2-pip moves
+    # are normal, that meant EMA9/EMA21 drifting by 2 pips (0.18%) read as
+    # trend_strength ~0.9 — so the regime flipped TREND_UP <-> TREND_DOWN
+    # on ordinary noise. That randomly toggled the blender's +/-0.7 and
+    # x1.3 regime multipliers every few candles, making the prediction
+    # direction itself unstable (a primary cause of "high-confidence wrong").
+    #
+    # Now we normalize against the market's OWN scale: the ATR of the
+    # lookback window. A trend is only "strong" when the EMA separation is
+    # a meaningful fraction of typical candle range. A 2-pip EMA gap on a
+    # 10-pip ATR pair => ~0.2 strength (noise); the same 2-pip gap on a
+    # 2-pip ATR pair => ~1.0 (genuinely persistent). The regime now reflects
+    # real directional commitment, not absolute pip size.
+    atr_window = (_atr(candles[-lookback:], 20) if len(candles) >= 20
+                  else (_atr(candles, len(candles)) if len(candles) > 0 else 0.0001))
     ema_diff = (ema9 - ema21) / ema21 if ema21 > 0 else 0
-    trend_strength = min(abs(ema_diff) / 0.002, 1.0)
+    if atr_window > 0:
+        trend_strength = min(abs(ema_diff) / max(atr_window / ema21, 1e-9), 1.0)
+    else:
+        trend_strength = min(abs(ema_diff) / 0.002, 1.0)
 
     # Swing structure: count HH/HL vs LH/LL in the lookback
     # FIX (Bug 5, deep audit 2026-07-19): the previous version compared each
