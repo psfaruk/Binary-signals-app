@@ -132,30 +132,44 @@ def detect_candle_patterns(candles):
     # category explicitly. For now, use flat 0.65 (safe default).
     exhaust_ratio = 0.65
 
-    # ── 1. Engulfing (2-candle) ──────────────────────────────────────────
-    # Bullish engulfing: c2 bearish, c3 bullish, c3 body fully engulfs c2 body
+    # ── 1. Engulfing (2-candle) — TIGHTENED (ultra-deep, 2026-07-20)
+    # Backtest showed 48.1% win rate on 4367 signals — too loose.
+    # Now requires body ratio > 2.0× (was 1.5×) for score 4, and
+    # minimum body ratio 1.3× (was just engulf condition) to fire at all.
     if b2 < 0 and b3 > 0:
         if c3["close"] >= c2["open"] and c3["open"] <= c2["close"]:
-            # Stronger if c3 body is bigger than c2 body
             ratio = _abs_body(c3) / _abs_body(c2) if _abs_body(c2) > 0 else 1
-            score = 4 if ratio > 1.5 else 3
-            patterns.append({
-                "name": "BULL_ENGULF",
-                "direction": "CALL",
-                "score": score,
-                "reason": f"Bullish Engulfing (body ratio {ratio:.1f}x) → CALL ({65 if score == 4 else 60}% win rate)"
-            })
-    # Bearish engulfing
+            if ratio > 2.0:
+                patterns.append({
+                    "name": "BULL_ENGULF",
+                    "direction": "CALL",
+                    "score": 3,
+                    "reason": f"Bullish Engulfing (body ratio {ratio:.1f}x, strong) → CALL"
+                })
+            elif ratio > 1.3:
+                patterns.append({
+                    "name": "BULL_ENGULF",
+                    "direction": "CALL",
+                    "score": 2,
+                    "reason": f"Bullish Engulfing (body ratio {ratio:.1f}x) → CALL"
+                })
     if b2 > 0 and b3 < 0:
         if c3["open"] >= c2["close"] and c3["close"] <= c2["open"]:
             ratio = _abs_body(c3) / _abs_body(c2) if _abs_body(c2) > 0 else 1
-            score = 4 if ratio > 1.5 else 3
-            patterns.append({
-                "name": "BEAR_ENGULF",
-                "direction": "PUT",
-                "score": score,
-                "reason": f"Bearish Engulfing (body ratio {ratio:.1f}x) → PUT ({65 if score == 4 else 60}% win rate)"
-            })
+            if ratio > 2.0:
+                patterns.append({
+                    "name": "BEAR_ENGULF",
+                    "direction": "PUT",
+                    "score": 3,
+                    "reason": f"Bearish Engulfing (body ratio {ratio:.1f}x, strong) → PUT"
+                })
+            elif ratio > 1.3:
+                patterns.append({
+                    "name": "BEAR_ENGULF",
+                    "direction": "PUT",
+                    "score": 2,
+                    "reason": f"Bearish Engulfing (body ratio {ratio:.1f}x) → PUT"
+                })
 
     # ── 2. Morning/Evening Star (3-candle) ───────────────────────────────
     # Morning star: bearish + small-body (doji-like) + bullish closing above c1 midpoint
@@ -277,27 +291,17 @@ def detect_candle_patterns(candles):
                 "reason": "Bearish Harami (small bearish inside big bullish) → PUT (58% win rate)"
             })
 
-    # ── 7. Inside Bar Breakout (3-candle) ────────────────────────────────
-    # c2 was inside c1's range, c3 breaks out of c1's range
-    if len(candles) >= 4:
-        c0 = candles[-4] if len(candles) >= 4 else candles[-3]
-        # Check if c2 (the candle before last) was an inside bar relative to c1
-        if (c2["high"] <= c1["high"] and c2["low"] >= c1["low"]
-                and _range(c2) < _range(c1) * 0.7):
-            if c3["close"] > c1["high"]:
-                patterns.append({
-                    "name": "INSIDE_BREAK_UP",
-                    "direction": "CALL",
-                    "score": 2,
-                    "reason": "Inside Bar breakout up → CALL (58% win rate)"
-                })
-            elif c3["close"] < c1["low"]:
-                patterns.append({
-                    "name": "INSIDE_BREAK_DN",
-                    "direction": "PUT",
-                    "score": 2,
-                    "reason": "Inside Bar breakout down → PUT (58% win rate)"
-                })
+    # ── 7. Inside Bar Breakout (3-candle) — DISABLED (ultra-deep, 2026-07-20)
+    # Backtest showed 47% win rate — inside bar breakouts on 1m candles are
+    # mostly false breakouts. Real market needs larger timeframe for this.
+    # if len(candles) >= 4:
+    #     c0 = candles[-4] if len(candles) >= 4 else candles[-3]
+    #     if (c2["high"] <= c1["high"] and c2["low"] >= c1["low"]
+    #             and _range(c2) < _range(c1) * 0.7):
+    #         if c3["close"] > c1["high"]:
+    #             patterns.append({"name": "INSIDE_BREAK_UP", "direction": "CALL", "score": 2, "reason": "Inside Bar breakout up → CALL"})
+    #         elif c3["close"] < c1["low"]:
+    #             patterns.append({"name": "INSIDE_BREAK_DN", "direction": "PUT", "score": 2, "reason": "Inside Bar breakout down → PUT"})
 
     # ── 8. Enhanced Hammer / Shooting Star ───────────────────────────────
     # Single candle with very long wick (more extreme than wick_rejection)

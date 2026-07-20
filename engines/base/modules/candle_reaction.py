@@ -328,56 +328,13 @@ def analyze(candles, ctx: MarketContext) -> list:
                     signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
                     reasons=[f"Falling closes momentum (3 DOWN, str={trend_strength:.2f}) → PUT continuation (62% win rate)"]))
 
-    # ── CONTINUATION SIGNAL 7: Trend-aligned wick rejection ──────────────
-    # Signal 3 (WICK) always treats wick rejection as REVERSAL. But a
-    # lower-wick rejection during an UPTREND is actually a CONTINUATION
-    # signal — it means buyers stepped in at the low and pushed price
-    # back up, confirming the trend. Similarly for upper-wick in downtrend.
-    # This signal fires INSTEAD OF Signal 3 when the wick aligns with
-    # a confirmed trend. We use group="WICK_CONT" (not "WICK") so the
-    # blender doesn't double-count with Signal 3.
-    #
-    # FIX (Bug 19, deep audit 2026-07-19): the previous check required
-    # `body > 0` (bullish close) for CALL continuation in an uptrend. But
-    # a lower-wick with body < 0 (bearish close) in an uptrend is ALSO a
-    # continuation signal — it means sellers tried to push price down,
-    # buyers defended the low, but the close ended slightly bearish. The
-    # key signal is the LOWER WICK itself (buyers defended), not the
-    # direction of the small body. Now we allow body < 0 with a slightly
-    # lower score (still continuation, but weaker conviction since sellers
-    # did win the close).
-    if is_trending and trend_strength > 0.4 and rng > 0:
-        upper_wick = h - max(o, c)
-        lower_wick = min(o, c) - l
-        uw_pct = upper_wick / rng * 100
-        lw_pct = lower_wick / rng * 100
-        # Lower wick rejection in uptrend = buyers defended the low → CALL continuation
-        if lw_pct > 40 and body_pct < 35 and trend_regime == "TREND_UP":
-            if body > 0:
-                # Bullish close + lower wick = clean continuation
-                results.append(ModuleResult(
-                    module_name="candle_reaction", direction="CALL", score=2, confidence=58,
-                    signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
-                    reasons=[f"Trend-aligned lower wick ({lw_pct:.0f}%, uptrend str={trend_strength:.2f}) → CALL continuation (58% win rate)"]))
-            else:
-                # Bearish close but lower wick = buyers defended, weaker conviction
-                results.append(ModuleResult(
-                    module_name="candle_reaction", direction="CALL", score=1, confidence=54,
-                    signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
-                    reasons=[f"Trend-aligned lower wick ({lw_pct:.0f}%, bearish close, str={trend_strength:.2f}) → weak CALL continuation (54% win rate)"]))
-        # Upper wick rejection in downtrend = sellers defended the high → PUT continuation
-        elif uw_pct > 40 and body_pct < 35 and trend_regime == "TREND_DOWN":
-            if body < 0:
-                # Bearish close + upper wick = clean continuation
-                results.append(ModuleResult(
-                    module_name="candle_reaction", direction="PUT", score=2, confidence=58,
-                    signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
-                    reasons=[f"Trend-aligned upper wick ({uw_pct:.0f}%, downtrend str={trend_strength:.2f}) → PUT continuation (58% win rate)"]))
-            else:
-                # Bullish close but upper wick = sellers defended, weaker conviction
-                results.append(ModuleResult(
-                    module_name="candle_reaction", direction="PUT", score=1, confidence=54,
-                    signal_type="CONTINUATION", reliability="CANDLE", group="WICK_CONT",
-                    reasons=[f"Trend-aligned upper wick ({uw_pct:.0f}%, bullish close, str={trend_strength:.2f}) → weak PUT continuation (54% win rate)"]))
+    # ── CONTINUATION SIGNAL 7: Trend-aligned wick rejection — DISABLED
+    # (ultra-deep, 2026-07-20): backtest showed 41.4% win rate on 70 signals.
+    # The "bearish close but lower wick = continuation" logic is wrong —
+    # a bearish close means sellers won, not that buyers defended.
+    # The wick rejection Signal 3 already handles wick analysis correctly
+    # (as REVERSAL). This continuation version was counterproductive.
+    # if is_trending and trend_strength > 0.4 and rng > 0:
+    #     ... (disabled)
 
     return results

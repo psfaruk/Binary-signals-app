@@ -284,19 +284,21 @@ def analyze(candles, ctx: MarketContext) -> list:
             signal_type="CONTINUATION", reliability="INDICATOR", group="IND_MACD",
             reasons=[f"MACD fresh bearish crossover (hist={histogram:.6f}) → PUT"]))
 
-    # ── INDICATOR 3: EMA Crossover (9 vs 21) ─────────────────────────────
+    # ── INDICATOR 3: EMA Crossover (9 vs 21) — TIGHTENED (ultra-deep, 2026-07-20)
+    # Backtest showed 47.9% win rate — 0.05% threshold is too loose.
+    # Raised to 0.15% for meaningful EMA separation. Score reduced 2→1.
     ema9 = ctx.ema9
     ema21 = ctx.ema21
     if ema9 > 0 and ema21 > 0:
         ema_diff_pct = (ema9 - ema21) / ema21 * 100 if ema21 > 0 else 0
-        if ema9 > ema21 and ema_diff_pct > 0.05:
+        if ema9 > ema21 and ema_diff_pct > 0.15:
             results.append(ModuleResult(
-                module_name="indicator", direction="CALL", score=2, confidence=56,
+                module_name="indicator", direction="CALL", score=1, confidence=52,
                 signal_type="CONTINUATION", reliability="INDICATOR", group="IND_EMA",
                 reasons=[f"EMA9 > EMA21 ({ema_diff_pct:.2f}%) → CALL uptrend"]))
-        elif ema9 < ema21 and ema_diff_pct < -0.05:
+        elif ema9 < ema21 and ema_diff_pct < -0.15:
             results.append(ModuleResult(
-                module_name="indicator", direction="PUT", score=2, confidence=56,
+                module_name="indicator", direction="PUT", score=1, confidence=52,
                 signal_type="CONTINUATION", reliability="INDICATOR", group="IND_EMA",
                 reasons=[f"EMA9 < EMA21 ({ema_diff_pct:.2f}%) → PUT downtrend"]))
 

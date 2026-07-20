@@ -219,15 +219,15 @@ def analyze(candles, ctx: MarketContext) -> list:
                 pass
             elif confirmed:
                 results.append(ModuleResult(
-                    module_name="trend_follow", direction="CALL", score=3, confidence=62,
+                    module_name="trend_follow", direction="CALL", score=2, confidence=56,
                     signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
                     reasons=[f"Confirmed breakout above 10-candle high ({recent_high:.5f}, body-confirmed, prior close {prior_close:.5f}) → CALL continuation"]))
-            else:
-                # Single-candle breakout, no confirmation yet — weaker vote.
-                results.append(ModuleResult(
-                    module_name="trend_follow", direction="CALL", score=2, confidence=55,
-                    signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
-                    reasons=[f"Unconfirmed breakout above 10-candle high ({recent_high:.5f}, prior close {prior_close:.5f}) → CALL (weak, no multi-candle confirm)"]))
+            # DISABLED unconfirmed breakout (ultra-deep: 48.3% win rate)
+            # else:
+            #     results.append(ModuleResult(
+            #         module_name="trend_follow", direction="CALL", score=2, confidence=55,
+            #         signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
+            #         reasons=[f"Unconfirmed breakout above 10-candle high → CALL (weak)"]))
         # Bearish breakout (mirror)
         elif close < recent_low - buffer and (min(o, recent_low) - close) > buffer:
             confirmed = prior_close < recent_low
@@ -235,14 +235,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                 pass
             elif confirmed:
                 results.append(ModuleResult(
-                    module_name="trend_follow", direction="PUT", score=3, confidence=62,
+                    module_name="trend_follow", direction="PUT", score=2, confidence=56,
                     signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
                     reasons=[f"Confirmed breakdown below 10-candle low ({recent_low:.5f}, body-confirmed, prior close {prior_close:.5f}) → PUT continuation"]))
-            else:
-                results.append(ModuleResult(
-                    module_name="trend_follow", direction="PUT", score=2, confidence=55,
-                    signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
-                    reasons=[f"Unconfirmed breakdown below 10-candle low ({recent_low:.5f}, prior close {prior_close:.5f}) → PUT (weak, no multi-candle confirm)"]))
+            # DISABLED unconfirmed breakdown (ultra-deep: 48.3% win rate)
+            # else:
+            #     results.append(...)
 
     # ── SIGNAL 4: Higher-high / higher-low structure ─────────────────────
     # DISABLED (deep diagnostic, 2026-07-20): backtest showed 44.4% win rate
@@ -259,22 +257,13 @@ def analyze(candles, ctx: MarketContext) -> list:
     # `regime_dir = "TREND_UP" if regime.get("regime") == "TREND_UP" else "TREND_DOWN"`
     # — meaning RANGE and VOLATILE regimes defaulted to TREND_DOWN, firing
     # a PUT momentum boost in non-trending markets. Now we only fire this
-    # signal when the regime is EXPLICITLY TREND_UP or TREND_DOWN (the
-    # enclosing `if` already requires is_trending=True, but we now check
-    # the regime name explicitly to avoid the else-default bug).
-    vol_pct = ctx.vol_pct
+    # signal when the regime is EXPLICITLY TREND_UP or TREND_DOWN.
+    # DISABLED (ultra-deep, 2026-07-20): 47.4% win rate — ATR expansion
+    # on 1m candles is noise, not momentum fuel. Removed.
+    # vol_pct = ctx.vol_pct
+    # regime_name = regime.get("regime", "RANGE")
+    # if vol_pct > 1.1 and ... (disabled)
     regime_name = regime.get("regime", "RANGE")
-    if vol_pct > 1.1 and regime.get("is_trending", False) and regime_name in ("TREND_UP", "TREND_DOWN"):
-        if regime_name == "TREND_UP":
-            results.append(ModuleResult(
-                module_name="trend_follow", direction="CALL", score=2, confidence=57,
-                signal_type="CONTINUATION", reliability="TREND", group="TREND_VOL",
-                reasons=[f"ATR expansion ({vol_pct:.1f}x) in uptrend → CALL momentum boost"]))
-        else:  # TREND_DOWN
-            results.append(ModuleResult(
-                module_name="trend_follow", direction="PUT", score=2, confidence=57,
-                signal_type="CONTINUATION", reliability="TREND", group="TREND_VOL",
-                reasons=[f"ATR expansion ({vol_pct:.1f}x) in downtrend → PUT momentum boost"]))
 
     # ── SIGNAL 6: Trend exhaustion dampener ──────────────────────────────
     # FIX (Real-CALL-bias, 2026-07-20): backtest showed TREND_UP_UPTREND
@@ -344,46 +333,34 @@ def analyze(candles, ctx: MarketContext) -> list:
     # NEW SIGNAL 8: EMA Bounce (NEW — classic)
     # In an uptrend, price bounces off EMA9 → CALL
     # In a downtrend, price bounces off EMA9 → PUT
-    # ═══════════════════════════════════════════════════════════════════════
-    if is_trending and trend_strength > 0.3 and ema9 > 0 and atr > 0:
-        # Check if last candle's low touched EMA9 but close above
-        if trend_regime == "TREND_UP":
-            if last["low"] <= ema9 * 1.002 and last["close"] > ema9:
-                # Bounced off EMA9 in uptrend → CALL
-                results.append(ModuleResult(
-                    module_name="trend_follow", direction="CALL", score=2, confidence=60,
-                    signal_type="CONTINUATION", reliability="TREND", group="TREND_EMA_BOUNCE",
-                    reasons=[f"EMA9 bounce in uptrend (low={last['low']:.5f}, EMA9={ema9:.5f}) → CALL continuation"]))
-        elif trend_regime == "TREND_DOWN":
-            if last["high"] >= ema9 * 0.998 and last["close"] < ema9:
-                # Bounced off EMA9 in downtrend → PUT
-                results.append(ModuleResult(
-                    module_name="trend_follow", direction="PUT", score=2, confidence=60,
-                    signal_type="CONTINUATION", reliability="TREND", group="TREND_EMA_BOUNCE",
-                    reasons=[f"EMA9 bounce in downtrend (high={last['high']:.5f}, EMA9={ema9:.5f}) → PUT continuation"]))
+    # DISABLED (ultra-deep, 2026-07-20): 47.5% win rate on 2388 signals —
+    # EMA9 bounce on 1m candles is noise. The EMA9 * 1.002 tolerance is too
+    # wide, catching almost every candle near EMA9. Removed.
+    # if is_trending and trend_strength > 0.3 and ema9 > 0 and atr > 0:
+    #     ... (disabled)
 
     # ═══════════════════════════════════════════════════════════════════════
     # NEW SIGNAL 9: Momentum Divergence (NEW — classic)
     # Price makes higher high but body shrinks = bearish divergence
     # Price makes lower low but body shrinks = bullish divergence
-    # ═══════════════════════════════════════════════════════════════════════
+    # TIGHTENED (ultra-deep, 2026-07-20): 48.9% win rate on 2309 signals.
+    # Now requires body shrink < 0.4× (was 0.6×) for more extreme divergence.
+    # Score reduced 2→1 since signal is weak on 1m candles.
     if len(candles) >= 5 and atr > 0:
         window = candles[-5:]
-        # Check for bearish divergence: higher highs but shrinking bodies
-        if (window[-1]["high"] > window[-3]["high"]  # higher high
-                and abs(window[-1]["close"] - window[-1]["open"]) < abs(window[-3]["close"] - window[-3]["open"]) * 0.6
-                and window[-1]["close"] > window[-1]["open"]):  # last is bullish
+        if (window[-1]["high"] > window[-3]["high"]
+                and abs(window[-1]["close"] - window[-1]["open"]) < abs(window[-3]["close"] - window[-3]["open"]) * 0.4
+                and window[-1]["close"] > window[-1]["open"]):
             results.append(ModuleResult(
-                module_name="trend_follow", direction="PUT", score=2, confidence=58,
+                module_name="trend_follow", direction="PUT", score=1, confidence=53,
                 signal_type="REVERSAL", reliability="TREND", group="TREND_DIVERGE",
-                reasons=[f"Bearish divergence: higher high but shrinking body → PUT reversal"]))
-        # Check for bullish divergence: lower lows but shrinking bodies
-        elif (window[-1]["low"] < window[-3]["low"]  # lower low
-                and abs(window[-1]["close"] - window[-1]["open"]) < abs(window[-3]["close"] - window[-3]["open"]) * 0.6
-                and window[-1]["close"] < window[-1]["open"]):  # last is bearish
+                reasons=[f"Bearish divergence: higher high but body <40% of prior → PUT reversal"]))
+        elif (window[-1]["low"] < window[-3]["low"]
+                and abs(window[-1]["close"] - window[-1]["open"]) < abs(window[-3]["close"] - window[-3]["open"]) * 0.4
+                and window[-1]["close"] < window[-1]["open"]):
             results.append(ModuleResult(
-                module_name="trend_follow", direction="CALL", score=2, confidence=58,
+                module_name="trend_follow", direction="CALL", score=1, confidence=53,
                 signal_type="REVERSAL", reliability="TREND", group="TREND_DIVERGE",
-                reasons=[f"Bullish divergence: lower low but shrinking body → CALL reversal"]))
+                reasons=[f"Bullish divergence: lower low but body <40% of prior → CALL reversal"]))
 
     return results

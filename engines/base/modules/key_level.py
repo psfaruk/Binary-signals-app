@@ -74,44 +74,18 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Key resistance bounce ({lvl_price:.5f}, {dist:.2f} ATR) → PUT boost"]))
         elif action == "breakout":
             if lvl_type == "resistance":
-                results.append(ModuleResult(
-                    module_name="key_level", direction="CALL", score=2, confidence=58,
-                    signal_type="CONTINUATION", reliability="LEVEL", group="LEVEL",
-                    reasons=[f"Resistance breakout ({lvl_price:.5f}) → CALL"]))
+                # DISABLED breakout signals (ultra-deep: 47.3% win rate)
+                # breakouts on 1m candles are mostly false breakouts
+                pass
             else:
-                results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=2, confidence=58,
-                    signal_type="CONTINUATION", reliability="LEVEL", group="LEVEL",
-                    reasons=[f"Support breakdown ({lvl_price:.5f}) → PUT"]))
+                pass
 
     # ═══════════════════════════════════════════════════════════════════════
-    # SIGNAL 2: Round number proximity (ORIGINAL — kept)
-    # ═══════════════════════════════════════════════════════════════════════
-    lvl, dist, strength = _round_level(close)
-    if strength in ("BIG", "MID") and atr > 0:
-        prev_close = candles[-2]["close"] if len(candles) >= 2 else close
-        tol = atr * 0.15
-        if abs(close - lvl) < tol:
-            if prev_close <= lvl < close:
-                results.append(ModuleResult(
-                    module_name="key_level", direction="CALL", score=2, confidence=56,
-                    signal_type="CONTINUATION", reliability="LEVEL", group="ROUND",
-                    reasons=[f"Round {strength} level {lvl:.5f} broken up (prev {prev_close:.5f} → now {close:.5f}) → CALL"]))
-            elif prev_close >= lvl > close:
-                results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=2, confidence=56,
-                    signal_type="CONTINUATION", reliability="LEVEL", group="ROUND",
-                    reasons=[f"Round {strength} level {lvl:.5f} broken down (prev {prev_close:.5f} → now {close:.5f}) → PUT"]))
-            elif close > prev_close:
-                results.append(ModuleResult(
-                    module_name="key_level", direction="CALL", score=1, confidence=53,
-                    signal_type="REVERSAL", reliability="LEVEL", group="ROUND",
-                    reasons=[f"Round {strength} level {lvl:.5f} bounce up → CALL"]))
-            elif close < prev_close:
-                results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=1, confidence=53,
-                    signal_type="REVERSAL", reliability="LEVEL", group="ROUND",
-                    reasons=[f"Round {strength} level {lvl:.5f} bounce down → PUT"]))
+    # SIGNAL 2: Round number proximity — DISABLED (ultra-deep, 2026-07-20)
+    # Backtest showed 44.1% win rate — round number proximity is noise on
+    # 1m candles. Real market doesn't respect round numbers at this timeframe.
+    # lvl, dist, strength = _round_level(close)
+    # ... (disabled)
 
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 3: Previous candle high/low as micro-S/R (ORIGINAL — kept)
@@ -190,46 +164,13 @@ def analyze(candles, ctx: MarketContext) -> list:
                     break  # only one fib signal per candle
 
     # ═══════════════════════════════════════════════════════════════════════
-    # SIGNAL 5: Double Top / Double Bottom (NEW — classic reversal pattern)
-    # Two similar highs within 10 candles = double top (bearish)
-    # Two similar lows within 10 candles = double bottom (bullish)
-    # ═══════════════════════════════════════════════════════════════════════
-    if len(candles) >= 15 and atr > 0:
-        window = candles[-15:]
-        # Find swing highs and lows
-        swing_highs = []
-        swing_lows = []
-        for i in range(2, len(window) - 2):
-            c = window[i]
-            if (c["high"] >= window[i-1]["high"] and c["high"] >= window[i-2]["high"]
-                    and c["high"] >= window[i+1]["high"] and c["high"] >= window[i+2]["high"]):
-                swing_highs.append((i, c["high"]))
-            if (c["low"] <= window[i-1]["low"] and c["low"] <= window[i-2]["low"]
-                    and c["low"] <= window[i+1]["low"] and c["low"] <= window[i+2]["low"]):
-                swing_lows.append((i, c["low"]))
-
-        # Double top: two swing highs within 0.5 ATR
-        if len(swing_highs) >= 2:
-            h1_idx, h1 = swing_highs[-2]
-            h2_idx, h2 = swing_highs[-1]
-            if abs(h1 - h2) < atr * 0.5 and (h2_idx - h1_idx) >= 3:
-                # Price is near the double top level → PUT
-                if abs(close - h2) < atr * 0.3:
-                    results.append(ModuleResult(
-                        module_name="key_level", direction="PUT", score=3, confidence=62,
-                        signal_type="REVERSAL", reliability="LEVEL", group="DOUBLE_TOP",
-                        reasons=[f"Double top ({h1:.5f}, {h2:.5f}) → PUT reversal"]))
-
-        # Double bottom
-        if len(swing_lows) >= 2:
-            l1_idx, l1 = swing_lows[-2]
-            l2_idx, l2 = swing_lows[-1]
-            if abs(l1 - l2) < atr * 0.5 and (l2_idx - l1_idx) >= 3:
-                if abs(close - l2) < atr * 0.3:
-                    results.append(ModuleResult(
-                        module_name="key_level", direction="CALL", score=3, confidence=62,
-                        signal_type="REVERSAL", reliability="LEVEL", group="DOUBLE_BOT",
-                        reasons=[f"Double bottom ({l1:.5f}, {l2:.5f}) → CALL reversal"]))
+    # SIGNAL 5: Double Top / Double Bottom — DISABLED (ultra-deep, 2026-07-20)
+    # Backtest showed 44.5% win rate — double top/bottom on 1m candles is
+    # noise. Real double tops need 30+ candle spacing, not 10.
+    # if len(candles) >= 15 and atr > 0:
+    #     ... (disabled)
+    # window = candles[-15:]
+    # (double top/bottom code removed — was 44.5% win rate)
 
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 6: Support/Resistance Flip (NEW — classic)
