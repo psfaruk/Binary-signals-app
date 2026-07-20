@@ -118,6 +118,9 @@ class _AssetStream:
     live_signal_history: list = field(default_factory=list)
     # Signal delay (2026-07-10)
     signal_delay_until: float = 0.0
+    # BRAIN-LEARNED: loss cluster cooldown fields
+    _consecutive_losses: int = 0
+    _loss_cooldown_until: float = 0.0
     # Sim-specific
     _sim_price: float = 0.0
     _sim_momentum: float = 0.0
@@ -603,6 +606,18 @@ class QuotexFeed:
     async def _run_eoc(self, stream, actual_open=None):
         closed = stream.candles
         base_ticks = list(stream.ticks)
+
+        # BRAIN-LEARNED: loss cluster cooldown — skip prediction if pair
+        # is in cooldown after 5+ consecutive losses.
+        try:
+            cooldown_until = getattr(stream, '_loss_cooldown_until', 0)
+            if cooldown_until and time.time() < cooldown_until:
+                remaining = int((cooldown_until - time.time()) / 60)
+                print(f"[sim] {stream.asset} in loss cooldown ({remaining} min remaining) — skipping prediction")
+                stream.prediction = None
+                return None
+        except Exception:
+            pass  # never let cooldown check break the feed
         # Refresh per-candle accuracy cache ONCE here (at candle open).
         # asyncio.to_thread: sqlite3 I/O would otherwise block the shared
         # event loop for every concurrent stream (2026-07-10).
@@ -814,6 +829,41 @@ class QuotexFeed:
         accuracy = await asyncio.to_thread(
             self._grade_and_log, stream.asset, stream.period, closed,
             stream.prediction, _micro_snap, stream.candles)
+
+        # BRAIN-LEARNED: loss cluster protection (sim_feed parity with feed.py)
+        try:
+            if accuracy == "wrong":
+                stream._consecutive_losses = getattr(stream, '_consecutive_losses', 0) + 1
+                if stream._consecutive_losses >= 5:
+                    stream._loss_cooldown_until = time.time() + 1800  # 30 min
+                    print(f"[sim] {stream.asset} hit {stream._consecutive_losses} consecutive losses — cooling down")
+            elif accuracy == "correct":
+                stream._consecutive_losses = 0
+        except Exception:
+            pass
+
+        # BRAIN: record full prediction context for learning
+        if accuracy in ("correct", "wrong"):
+            try:
+                from core.brain import record_prediction
+                actual_dir = "UP" if closed["close"] > closed["open"] else (
+                    "DRAW" if closed["close"] == closed["open"] else "DOWN")
+                await asyncio.to_thread(
+                    record_prediction,
+                    stream.prediction or {}, stream.asset, stream.period,
+                    closed["time"], actual_dir, accuracy, closed, _micro_snap)
+            except Exception:
+                pass
+
+            # BRAIN: run analysis every 50 graded signals
+            try:
+                _brain_counter = getattr(self, '_brain_analyze_counter', 0) + 1
+                self._brain_analyze_counter = _brain_counter
+                if _brain_counter % 50 == 0:
+                    from core.brain import analyze_and_learn
+                    await asyncio.to_thread(analyze_and_learn)
+            except Exception:
+                pass
 
         # FIX (BUG-I, 2026-07-20): invalidate DB-adaptation cache after each
         # signal_log write so the next prediction reflects fresh accuracy data.
@@ -1121,8 +1171,34 @@ class QuotexFeed:
             print(f"[sim] stream {key} error: {exc}")
             tb.print_exc()
         finally:
-            self._streams.pop(key, None)
-            print(f"[sim] stream {key} stopped")
+            # DON'T pop the stream immediately — let the watchdog restart it.
+            # If we pop here, there's a gap (up to 30s) where the stream
+            # doesn't exist and no ticks flow. Instead, mark it as needing
+            # restart and let the watchdog handle it on next cycle (within 5s).
+            # BUT: if the stream was idle-evicted (not always_on), do pop it.
+            if key in self._streams:
+                s = self._streams[key]
+                if not s.always_on:
+                    self._streams.pop(key, None)
+                    print(f"[sim] stream {key} stopped (idle eviction)")
+                else:
+                    # always_on stream died — restart IMMEDIATELY (don't wait for watchdog)
+                    print(f"[sim] stream {key} stopped — restarting immediately (always_on)")
+                    try:
+                        new_stream = _AssetStream(
+                            asset=stream.asset, period=60, always_on=True,
+                            candles=stream.candles)
+                        new_stream.ticks.extend(list(stream.ticks))
+                        new_stream._sim_price = getattr(stream, '_sim_price', 0)
+                        new_stream._sim_momentum = getattr(stream, '_sim_momentum', 0)
+                        new_stream._sim_volatility = getattr(stream, '_sim_volatility', 0)
+                        new_stream.candle_open_time = stream.candle_open_time
+                        new_stream.candle_open_price = stream.candle_open_price
+                        self._streams[key] = new_stream
+                        new_stream.task = asyncio.create_task(self._run_stream(new_stream))
+                    except Exception as restart_exc:
+                        print(f"[sim] FAILED to restart {key}: {restart_exc}")
+                        self._streams.pop(key, None)
 
     # ── Manager loop ───────────────────────────────────────────────────────
 
