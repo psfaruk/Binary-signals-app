@@ -222,65 +222,61 @@ def record_prediction(prediction: dict, asset: str, period: int,
         score = prediction.get("score", 0)
         net_margin = abs(score) / 10.0 if score else 0  # rough estimate
 
-        # Insert brain_predictions
-        cur.execute("""INSERT INTO brain_predictions (
-            ts, asset, period, ctime, category,
-            signal, confidence, strength, score,
-            actual, accuracy,
-            regime, regime_strength, htf_trend,
-            vol_pct, atr,
-            ema9, ema21,
-            streak, streak_dir, streak_rarity,
-            close_percentile, z_body,
-            near_level, level_action,
-            tick_count, buy_pct, sell_pct, pressure,
-            net_move, tick_speed_accel,
-            orderflow_imbalance, vap_migration,
-            v_shape, momentum_shift, last_react,
-            htf_aligned, regime_aligned,
-            call_groups, put_groups, total_groups,
-            net_margin,
-            signal_type,
-            session_hour, session_name,
-            reasons_json, modules_json
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                time.time(), asset, period, ctime,
-                "otc" if asset.endswith("_otc") else "real",
-                signal, prediction.get("confidence", 0),
-                prediction.get("strength", "NEUTRAL"),
-                prediction.get("score", 0),
-                actual, accuracy,
-                regime_name,
-                regime.get("trend_strength", 0),
-                htf_trend,
-                regime.get("volatility_pct", 1.0),
-                0,  # atr — not in prediction dict, would need ctx
-                regime.get("ema9", 0), regime.get("ema21", 0),
-                0, 0, 0,  # streak — not in prediction, would need ctx
-                0, 0,  # close_percentile, z_body — would need ctx
-                "", "",  # near_level, level_action
-                micro.get("tick_count", 0),
-                micro.get("buy_pct", 50),
-                micro.get("sell_pct", 50),
-                micro.get("pressure", "FIGHT"),
-                micro.get("net", 0),
-                last_vel.get("accel", 1.0),
-                orderflow.get("imbalance", 0),
-                vap.get("dir", "FLAT"),
-                micro.get("v_shape"),
-                micro.get("momentum_shift"),
-                micro.get("last_react"),
-                htf_aligned, regime_aligned,
-                prediction.get("agree", 0),
-                prediction.get("total", 0) - prediction.get("agree", 0),
-                prediction.get("total", 0),
-                net_margin,
-                "CONTINUATION" if "continuation" in " ".join(reasons).lower() else "REVERSAL",
-                hour, session,
-                json.dumps(reasons),
-                json.dumps(modules),
-            ))
+        # Insert brain_predictions — using dict-based insert to avoid column mismatch
+        pred_data = {
+            "ts": time.time(),
+            "asset": asset,
+            "period": period,
+            "ctime": ctime,
+            "category": "otc" if asset.endswith("_otc") else "real",
+            "signal": signal,
+            "confidence": prediction.get("confidence", 0),
+            "strength": prediction.get("strength", "NEUTRAL"),
+            "score": prediction.get("score", 0),
+            "actual": actual,
+            "accuracy": accuracy,
+            "regime": regime_name,
+            "regime_strength": regime.get("trend_strength", 0),
+            "htf_trend": htf_trend,
+            "vol_pct": regime.get("volatility_pct", 1.0),
+            "atr": 0,
+            "ema9": regime.get("ema9", 0),
+            "ema21": regime.get("ema21", 0),
+            "streak": 0,
+            "streak_dir": 0,
+            "streak_rarity": 0,
+            "close_percentile": 0,
+            "z_body": 0,
+            "near_level": "",
+            "level_action": "",
+            "tick_count": micro.get("tick_count", 0),
+            "buy_pct": micro.get("buy_pct", 50),
+            "sell_pct": micro.get("sell_pct", 50),
+            "pressure": micro.get("pressure", "FIGHT"),
+            "net_move": micro.get("net", 0),
+            "tick_speed_accel": last_vel.get("accel", 1.0),
+            "orderflow_imbalance": orderflow.get("imbalance", 0),
+            "vap_migration": vap.get("dir", "FLAT"),
+            "v_shape": micro.get("v_shape"),
+            "momentum_shift": micro.get("momentum_shift"),
+            "last_react": micro.get("last_react"),
+            "htf_aligned": htf_aligned,
+            "regime_aligned": regime_aligned,
+            "call_groups": prediction.get("agree", 0),
+            "put_groups": prediction.get("total", 0) - prediction.get("agree", 0),
+            "total_groups": prediction.get("total", 0),
+            "net_margin": net_margin,
+            "signal_type": "CONTINUATION" if "continuation" in " ".join(reasons).lower() else "REVERSAL",
+            "session_hour": hour,
+            "session_name": session,
+            "reasons_json": json.dumps(reasons),
+            "modules_json": json.dumps(modules),
+        }
+
+        columns = ", ".join(pred_data.keys())
+        placeholders = ", ".join(["?"] * len(pred_data))
+        cur.execute(f"INSERT INTO brain_predictions ({columns}) VALUES ({placeholders})",
+                    list(pred_data.values()))
         pred_id = cur.lastrowid
 
         # Insert brain_module_votes
@@ -301,23 +297,29 @@ def record_prediction(prediction: dict, asset: str, period: int,
             pred_up = mdir == "CALL"
             module_correct = 1 if (pred_up == actual_up) else 0
 
-            cur.execute("""INSERT INTO brain_module_votes (
-                prediction_id, ts, asset, period,
-                module_name, direction, score, confidence,
-                signal_type, reliability, signal_group, reason,
-                actual, prediction_accuracy, module_correct,
-                regime, htf_trend
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    pred_id, time.time(), asset, period,
-                    mname, mdir,
-                    mdata.get("score", 0),
-                    mdata.get("confidence", 0),
-                    "", "", "",  # signal_type, reliability, group
-                    m_reason,
-                    actual, accuracy, module_correct,
-                    regime_name, htf_trend,
-                ))
+            vote_data = {
+                "prediction_id": pred_id,
+                "ts": time.time(),
+                "asset": asset,
+                "period": period,
+                "module_name": mname,
+                "direction": mdir,
+                "score": mdata.get("score", 0),
+                "confidence": mdata.get("confidence", 0),
+                "signal_type": "",
+                "reliability": "",
+                "signal_group": "",
+                "reason": m_reason,
+                "actual": actual,
+                "prediction_accuracy": accuracy,
+                "module_correct": module_correct,
+                "regime": regime_name,
+                "htf_trend": htf_trend,
+            }
+            v_cols = ", ".join(vote_data.keys())
+            v_ph = ", ".join(["?"] * len(vote_data))
+            cur.execute(f"INSERT INTO brain_module_votes ({v_cols}) VALUES ({v_ph})",
+                       list(vote_data.values()))
 
         conn.commit()
     except Exception as e:
