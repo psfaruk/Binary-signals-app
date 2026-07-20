@@ -1479,6 +1479,15 @@ class QuotexFeed:
                 actual_open: float | None = None) -> dict | None:
         closed = stream.candles
         base_ticks = list(stream.ticks)
+
+        # BRAIN-LEARNED: loss cluster cooldown — skip prediction if pair
+        # is in cooldown after 5+ consecutive losses.
+        cooldown_until = getattr(stream, '_loss_cooldown_until', 0)
+        if cooldown_until and time.time() < cooldown_until:
+            remaining = int((cooldown_until - time.time()) / 60)
+            print(f"[feed] {stream.asset} in loss cooldown ({remaining} min remaining) — skipping prediction")
+            stream.prediction = None
+            return None
         # running_ticks=None here: the NEW candle's ticks are empty at this
         # exact moment (they accumulate after this call). LIVE re-eval picks
         # up once ticks come in, via the periodic re-eval in the stream loop.
@@ -2129,6 +2138,17 @@ class QuotexFeed:
         accuracy = await asyncio.to_thread(
             self._grade_and_log, stream.asset, stream.period, closed,
             stream.prediction, _micro_snap, stream.candles)
+
+        # BRAIN-LEARNED (2026-07-20): loss cluster protection.
+        # If a pair has 5+ consecutive losses, skip predictions for 30 min.
+        if accuracy == "wrong":
+            stream._consecutive_losses = getattr(stream, '_consecutive_losses', 0) + 1
+            if stream._consecutive_losses >= 5:
+                stream._loss_cooldown_until = time.time() + 1800  # 30 min
+                print(f"[feed] {stream.asset} hit {stream._consecutive_losses} consecutive "
+                      f"losses — cooling down for 30 min")
+        elif accuracy == "correct":
+            stream._consecutive_losses = 0
 
         # FIX (BUG-I, 2026-07-20): invalidate DB-adaptation cache after each
         # signal_log write so the next prediction reflects fresh accuracy data.

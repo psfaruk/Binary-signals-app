@@ -486,6 +486,26 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     if htf_trend == "SIDEWAYS" and regime.get("is_ranging", False):
         confidence = max(0, confidence - 5)
 
+    # BRAIN-LEARNED (2026-07-20): live data showed TREND_UP regime has 44%
+    # accuracy. Apply confidence penalty in TREND_UP.
+    if regime.get("regime") == "TREND_UP":
+        confidence = max(0, confidence - 8)
+
+    # BRAIN-LEARNED (2026-07-20): confidence calibration from 7623 live signals
+    # 100% bin: 44% actual → cap at 50
+    # 90-99% bin: 46% actual → cap at 55
+    # 80-89% bin: 51% actual → cap at 60
+    # 70-79% bin: 50% actual → cap at 60
+    # 60-69% bin: 49% actual → cap at 55
+    if confidence >= 100:
+        confidence = min(confidence, 50)
+    elif confidence >= 90:
+        confidence = min(confidence, 55)
+    elif confidence >= 80:
+        confidence = min(confidence, 60)
+    elif confidence >= 70:
+        confidence = min(confidence, 60)
+
     # FIX (high-confidence cap, 2026-07-20): 4h backtest showed 80-89% bin
     # at 41.7% accuracy and 100% at 40%. Cap ALL predictions at 75% unless
     # they have 3+ groups AND net_margin >= 0.6 (strong consensus).
