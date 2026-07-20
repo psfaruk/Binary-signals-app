@@ -254,42 +254,14 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reasons=[f"Close at range bottom ({close_pos:.0f}%, pctile={stats['close_percentile']:.0f}, trend_str={trend_strength:.2f}) → CALL"]))
 
     # ── SIGNAL 5: Body shrinking → exhaustion (BODY group) ───────────────
-    # FIX (doji bug, 2026-07-19, AUDIT-ENGINES #15): same fix as Signal 2 —
-    # `if body > 0: PUT else: CALL` fired CALL on doji. Now uses elif.
-    #
-    # FIX (Bug 8, deep audit 2026-07-19): apply trend-aware dampening.
-    # In a strong uptrend, a shrinking bull body is CONSOLIDATION (trend
-    # pausing before continuation), not exhaustion. The signal still fires
-    # (consolidation can precede reversal in rare cases), but with
-    # dampened conviction.
-    if len(candles) >= 2:
-        prev_body = abs(candles[-2]["close"] - candles[-2]["open"])
-        if prev_body > 0 and abs(body) < prev_body * 0.5 and abs(body) > 0:
-            shrink_aligns_with_trend = (
-                is_trending
-                and trend_strength > 0.5
-                and ((trend_regime == "TREND_UP" and body > 0)
-                     or (trend_regime == "TREND_DOWN" and body < 0))
-            )
-            if shrink_aligns_with_trend and trend_strength > 0.7:
-                s5_score, s5_conf = 0, 50    # strong dampen, near-zero
-            elif shrink_aligns_with_trend:
-                s5_score, s5_conf = 1, 52    # moderate dampen
-            else:
-                s5_score, s5_conf = 1, 54
-            if s5_score > 0:
-                if body > 0:
-                    results.append(ModuleResult(
-                        module_name="candle_reaction", direction="PUT", score=s5_score, confidence=s5_conf,
-                        signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                        reasons=[f"Shrinking bull body ({body_pct:.0f}% of range, trend_str={trend_strength:.2f}) → PUT exhaustion"]))
-                elif body < 0:
-                    results.append(ModuleResult(
-                        module_name="candle_reaction", direction="CALL", score=s5_score, confidence=s5_conf,
-                        signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                        reasons=[f"Shrinking bear body ({body_pct:.0f}% of range, trend_str={trend_strength:.2f}) → CALL exhaustion"]))
-            # body == 0: doji — skip (a doji is ALREADY an exhaustion
-            # signal but is handled by Signal 3 wick analysis).
+    # DISABLED (live data, 2026-07-20): real Quotex data showed 42% win rate
+    # — shrinking bodies in OTC are broker consolidation, not exhaustion.
+    # The broker often continues the trend after a small-body pause.
+    # Removing this signal improves accuracy.
+    # if len(candles) >= 2:
+    #     prev_body = abs(candles[-2]["close"] - candles[-2]["open"])
+    #     if prev_body > 0 and abs(body) < prev_body * 0.5 and abs(body) > 0:
+    #         ... (original code removed)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  CONTINUATION SIGNALS (NEW, 2026-07-18)

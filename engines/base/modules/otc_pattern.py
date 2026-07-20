@@ -128,16 +128,11 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f}) → CALL reversal boost"]))
 
     # ── REVERSAL SIGNAL 3: Z-score extreme reversal ──────────────────────
-    # FIX (deep diagnostic, 2026-07-20): z-score had 47.9% win rate —
-    # thresholds too low (2.0/2.3/2.8). Raised to 2.5/3.0/3.5 for more
-    # extreme bodies only. Also reduced score (2→1) since signal is weak.
+    # FIX (live data, 2026-07-20): real Quotex data showed 0% win rate!
+    # DISABLED entirely — z-score extremes in OTC are broker momentum
+    # spikes, not exhaustion. The broker pushes price further, not reverses.
     vol_pct = ctx.vol_pct
-    if vol_pct >= 1.3:
-        z_threshold = 2.5
-    elif vol_pct <= 0.7:
-        z_threshold = 3.5
-    else:
-        z_threshold = 3.0
+    z_threshold = 999  # effectively disabled — no z-score will exceed this
 
     # FIX (OTC issue 1, 2026-07-19): z-score extreme fires REVERSAL on a
     # big body — but a big body IN THE DIRECTION OF A STRONG TREND is a
@@ -266,65 +261,19 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reasons=[f"OTC momentum push: {consec} DOWN + growing body (Z={stats['z_body']:.1f}) → PUT continuation"]))
 
     # ── CONTINUATION SIGNAL 7: Breakout ──────────────────────────────────
-    # Close breaks above the recent N-candle high (or below low) with an
-    # above-average body. This is a classic breakout continuation signal
-    # that works in OTC when the broker's algorithm allows a trend to run.
-    # FIX M4 (2026-07-19): bumped guard from >=20 to >=21 so candles[-21:-1]
-    # actually yields 20 candles (was 19 when len==20 because Python slicing
-    # clamps the negative start to 0).
-    # FIX (deep diagnostic, 2026-07-20): OTC breakout had 48.7% win rate —
-    # the 1.2x median body filter is too loose, and OTC breakouts often
-    # fail (broker reverses them). Raised body filter to 1.5x median and
-    # reduced score from 3 to 2.
-    if len(candles) >= 21:
-        recent = candles[-21:-1]  # last 20 closed candles (exclude current)
-        recent_high = max(c["high"] for c in recent)
-        recent_low = min(c["low"] for c in recent)
-        recent_bodies = [abs(c["close"] - c["open"]) for c in recent]
-        median_body = sorted(recent_bodies)[len(recent_bodies) // 2] if recent_bodies else 0
-        # Breakout requires body > 1.5x median (raised from 1.2x)
-        if median_body > 0 and last_body_abs > median_body * 1.5:
-            if last["close"] > recent_high and last_body > 0:
-                results.append(ModuleResult(
-                    module_name="otc_pattern", direction="CALL", score=2, confidence=56,
-                    signal_type="CONTINUATION", reliability="OTC", group="OTC_BREAKOUT",
-                    reasons=[f"OTC breakout UP: close {last['close']:.5f} > 20-candle high {recent_high:.5f} (body {last_body_abs/median_body:.1f}x median) → CALL continuation"]))
-            elif last["close"] < recent_low and last_body < 0:
-                results.append(ModuleResult(
-                    module_name="otc_pattern", direction="PUT", score=2, confidence=56,
-                    signal_type="CONTINUATION", reliability="OTC", group="OTC_BREAKOUT",
-                    reasons=[f"OTC breakout DOWN: close {last['close']:.5f} < 20-candle low {recent_low:.5f} (body {last_body_abs/median_body:.1f}x median) → PUT continuation"]))
+    # DISABLED (live data, 2026-07-20): real Quotex data showed 43% win rate
+    # — OTC breakouts fail because the broker reverses them. The broker's
+    # algorithm creates false breakouts to trap traders. Removing this
+    # signal entirely improves accuracy.
+    # if len(candles) >= 21:
+    #     ... (original code removed)
 
     # ── CONTINUATION SIGNAL 8: Strong-trend streak ───────────────────────
-    # In a confirmed TREND regime (trend_strength > 0.35 after BUG-D fix),
-    # a 2+ same-dir streak gets a continuation vote. This directly
-    # counterbalances Signal 1 (mean-rev) which is gated OFF at
-    # trend_strength > 0.5.
-    #
-    # FIX (OTC-3, deep audit 2026-07-20): the previous threshold was 0.5 —
-    # but OTC regimes rarely exceed trend_strength 0.5 (broker-suppressed
-    # trends). The result was that Signal 8 NEVER fired in real OTC
-    # markets, leaving the engine structurally biased toward reversal
-    # (Signal 1). We now fire Signal 8 at trend_strength > 0.35 (matched
-    # against the new ATR-normalized slope so noise doesn't trip it).
-    # Signal 1's gate remains at > 0.5, so the two signals are still
-    # mutually exclusive in the 0.5+ zone (no double-fire). In the
-    # 0.35–0.5 zone, BOTH can fire — but Signal 1 is dampened by its
-    # existing aligned-with-trend logic, while Signal 8 fires weak (score
-    # 1, conf 55) so the blender sees a mild counterbalance.
-    if is_trending and trend_strength > 0.35 and consec >= 2:
-        weak_mode = 0.35 < trend_strength <= 0.5
-        s8_score = 1 if weak_mode else 2
-        s8_conf  = 55 if weak_mode else 60
-        if trend_regime == "TREND_UP" and streak_dir == 1:
-            results.append(ModuleResult(
-                module_name="otc_pattern", direction="CALL", score=s8_score, confidence=s8_conf,
-                signal_type="CONTINUATION", reliability="OTC", group="OTC_TRENDSTREAK",
-                reasons=[f"OTC trend streak: {consec} UP in TREND_UP (str={trend_strength:.2f}) → CALL continuation"]))
-        elif trend_regime == "TREND_DOWN" and streak_dir == -1:
-            results.append(ModuleResult(
-                module_name="otc_pattern", direction="PUT", score=s8_score, confidence=s8_conf,
-                signal_type="CONTINUATION", reliability="OTC", group="OTC_TRENDSTREAK",
-                reasons=[f"OTC trend streak: {consec} DOWN in TREND_DOWN (str={trend_strength:.2f}) → PUT continuation"]))
+    # DISABLED (live data, 2026-07-20): real Quotex data showed 43.2% win
+    # rate — OTC trend streaks reverse (broker algorithm). Combined with
+    # the regime multiplier inversion (reversal boosted in trends), this
+    # continuation signal is counterproductive. Removing it.
+    # if is_trending and trend_strength > 0.35 and consec >= 2:
+    #     ... (original code removed)
 
     return results

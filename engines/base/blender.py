@@ -296,6 +296,17 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         else:
             r_mult = 1.0
 
+        # FIX (live data, 2026-07-20): real Quotex OTC data shows TREND_UP
+        # regime has 47.1% accuracy and TREND_DOWN has 42.9% — continuation
+        # signals are WRONG in OTC trends (broker reverses them). For OTC
+        # engine, INVERT the regime multiplier in trends: boost REVERSAL
+        # and dampen CONTINUATION. Real engine keeps normal behavior.
+        if regime["is_trending"] and config.engine_name == "otc":
+            if r.signal_type == "CONTINUATION":
+                r_mult = 0.7  # was 1.3 — OTC trends reverse, don't continue
+            else:  # REVERSAL
+                r_mult = 1.3  # was 0.8 — OTC trends reverse, reversal is right
+
         # Reliability tier multiplier
         t_mult = reliability.get(r.reliability, 1.0)
 
