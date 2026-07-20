@@ -39,6 +39,10 @@ def analyze(candles, ctx: MarketContext) -> list:
     last = candles[-1]
     close = last["close"]
     o, h, l, c = last["open"], last["high"], last["low"], last["close"]
+    # FIX: define trend variables for new signals 7-9
+    is_trending = regime.get("is_trending", False)
+    trend_regime = regime.get("regime", "RANGE")
+    trend_strength = regime.get("trend_strength", 0.0)
 
     # ── SIGNAL 1: Momentum continuation (3+ same-direction with rising bodies) ─
     # In real markets, a 3-candle streak with INCREASING body sizes is a
@@ -302,5 +306,84 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="trend_follow", direction="CALL", score=1, confidence=53,
                     signal_type="REVERSAL", reliability="TREND", group="TREND_EXHAUST",
                     reasons=[f"Trend exhaustion: {consec} DOWN streak, last body {last_body_abs/avg_body:.0%} of avg → weak CALL (trend tiring)"]))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # NEW SIGNAL 7: Pullback Entry (NEW — real market classic)
+    # In an uptrend, wait for a 2-3 candle pullback, then enter CALL
+    # when price resumes up. Mirror for downtrend.
+    # This is the "buy the dip" / "sell the rally" strategy.
+    # ═══════════════════════════════════════════════════════════════════════
+    if is_trending and trend_strength > 0.4 and len(candles) >= 5:
+        # Check for pullback: last 2 candles against trend
+        if trend_regime == "TREND_UP":
+            # Look for 2 consecutive down candles (pullback)
+            c1 = candles[-2]
+            c2 = candles[-1]
+            if (c1["close"] < c1["open"] and c2["close"] < c2["open"]
+                    and c2["close"] > candles[-3]["close"]  # still above prior low
+                    and c2["close"] > ema9):  # still above EMA9
+                # Pullback in uptrend → CALL
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="CALL", score=3, confidence=62,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_PULLBACK",
+                    reasons=[f"Pullback entry: 2 down candles in uptrend (str={trend_strength:.2f}) → CALL continuation (buy the dip)"]))
+        elif trend_regime == "TREND_DOWN":
+            # Look for 2 consecutive up candles (rally)
+            c1 = candles[-2]
+            c2 = candles[-1]
+            if (c1["close"] > c1["open"] and c2["close"] > c2["open"]
+                    and c2["close"] < candles[-3]["close"]  # still below prior high
+                    and c2["close"] < ema9):  # still below EMA9
+                # Rally in downtrend → PUT
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="PUT", score=3, confidence=62,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_PULLBACK",
+                    reasons=[f"Pullback entry: 2 up candles in downtrend (str={trend_strength:.2f}) → PUT continuation (sell the rally)"]))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # NEW SIGNAL 8: EMA Bounce (NEW — classic)
+    # In an uptrend, price bounces off EMA9 → CALL
+    # In a downtrend, price bounces off EMA9 → PUT
+    # ═══════════════════════════════════════════════════════════════════════
+    if is_trending and trend_strength > 0.3 and ema9 > 0 and atr > 0:
+        # Check if last candle's low touched EMA9 but close above
+        if trend_regime == "TREND_UP":
+            if last["low"] <= ema9 * 1.002 and last["close"] > ema9:
+                # Bounced off EMA9 in uptrend → CALL
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="CALL", score=2, confidence=60,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_EMA_BOUNCE",
+                    reasons=[f"EMA9 bounce in uptrend (low={last['low']:.5f}, EMA9={ema9:.5f}) → CALL continuation"]))
+        elif trend_regime == "TREND_DOWN":
+            if last["high"] >= ema9 * 0.998 and last["close"] < ema9:
+                # Bounced off EMA9 in downtrend → PUT
+                results.append(ModuleResult(
+                    module_name="trend_follow", direction="PUT", score=2, confidence=60,
+                    signal_type="CONTINUATION", reliability="TREND", group="TREND_EMA_BOUNCE",
+                    reasons=[f"EMA9 bounce in downtrend (high={last['high']:.5f}, EMA9={ema9:.5f}) → PUT continuation"]))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # NEW SIGNAL 9: Momentum Divergence (NEW — classic)
+    # Price makes higher high but body shrinks = bearish divergence
+    # Price makes lower low but body shrinks = bullish divergence
+    # ═══════════════════════════════════════════════════════════════════════
+    if len(candles) >= 5 and atr > 0:
+        window = candles[-5:]
+        # Check for bearish divergence: higher highs but shrinking bodies
+        if (window[-1]["high"] > window[-3]["high"]  # higher high
+                and abs(window[-1]["close"] - window[-1]["open"]) < abs(window[-3]["close"] - window[-3]["open"]) * 0.6
+                and window[-1]["close"] > window[-1]["open"]):  # last is bullish
+            results.append(ModuleResult(
+                module_name="trend_follow", direction="PUT", score=2, confidence=58,
+                signal_type="REVERSAL", reliability="TREND", group="TREND_DIVERGE",
+                reasons=[f"Bearish divergence: higher high but shrinking body → PUT reversal"]))
+        # Check for bullish divergence: lower lows but shrinking bodies
+        elif (window[-1]["low"] < window[-3]["low"]  # lower low
+                and abs(window[-1]["close"] - window[-1]["open"]) < abs(window[-3]["close"] - window[-3]["open"]) * 0.6
+                and window[-1]["close"] < window[-1]["open"]):  # last is bearish
+            results.append(ModuleResult(
+                module_name="trend_follow", direction="CALL", score=2, confidence=58,
+                signal_type="REVERSAL", reliability="TREND", group="TREND_DIVERGE",
+                reasons=[f"Bullish divergence: lower low but shrinking body → CALL reversal"]))
 
     return results
