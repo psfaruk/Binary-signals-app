@@ -286,7 +286,8 @@ def analyze(candles, ctx: MarketContext) -> list:
         streak_bodies = [abs(candles[i]["close"] - candles[i]["open"])
                          for i in range(-lookback, 0)]
         avg_body = sum(streak_bodies) / len(streak_bodies) if streak_bodies else 0
-        last_body_abs = abs(last_body)
+        last_body_signed = last["close"] - last["open"]
+        last_body_abs = abs(last_body_signed)
         # Shrinking body = trend losing momentum
         if avg_body > 0 and last_body_abs < avg_body * 0.60:
             if streak_dir == 1:
