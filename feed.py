@@ -2148,6 +2148,28 @@ class QuotexFeed:
             except Exception:
                 pass  # adapters not loaded (e.g. test context) — skip
 
+            # BRAIN: record full prediction context for learning
+            try:
+                from core.brain import record_prediction
+                actual_dir = "UP" if closed["close"] > closed["open"] else (
+                    "DRAW" if closed["close"] == closed["open"] else "DOWN")
+                await asyncio.to_thread(
+                    record_prediction,
+                    stream.prediction or {}, stream.asset, stream.period,
+                    closed["time"], actual_dir, accuracy, closed, _micro_snap)
+            except Exception:
+                pass
+
+            # BRAIN: run analysis every 50 graded signals
+            try:
+                _brain_counter = getattr(self, '_brain_analyze_counter', 0) + 1
+                self._brain_analyze_counter = _brain_counter
+                if _brain_counter % 50 == 0:
+                    from core.brain import analyze_and_learn
+                    await asyncio.to_thread(analyze_and_learn)
+            except Exception:
+                pass
+
         # Update the chop-guard streak using the regime/zone the JUST-RESOLVED
         # prediction was made under (stream.prediction, before _run_eoc below
         # overwrites it with the next one). A win, or the zone itself changing,

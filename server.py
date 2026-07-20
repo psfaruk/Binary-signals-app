@@ -145,6 +145,9 @@ async def lifespan(app: FastAPI):
     """Startup + shutdown lifecycle (replaces @app.on_event)."""
     print("[server] lifespan: startup beginning")
     _db.init()
+    # Initialize brain tables
+    from core.brain import init_brain
+    init_brain()
     # Start feed in background task
     feed_task = asyncio.create_task(feed.run(broadcast))
     print("[server] lifespan: feed task started")
@@ -363,6 +366,35 @@ async def module_stats():
         stats["adaptation_error"] = str(e)
 
     return stats
+
+
+@app.get("/api/brain")
+async def brain_summary():
+    """Brain summary — learning status, accuracy, insight count."""
+    from core.brain import get_brain_summary
+    return get_brain_summary()
+
+
+@app.get("/api/brain/insights")
+async def brain_insights(limit: int = 50):
+    """Get auto-generated insights and recommendations."""
+    from core.brain import get_insights
+    return {"insights": get_insights(active_only=True, limit=limit)}
+
+
+@app.get("/api/brain/learning")
+async def brain_learning(asset: str = None, limit: int = 100):
+    """Get learned weights per pair per module."""
+    from core.brain import get_learning
+    return {"learning": get_learning(asset=asset, limit=limit)}
+
+
+@app.get("/api/brain/analyze")
+async def brain_analyze():
+    """Trigger brain analysis manually."""
+    from core.brain import analyze_and_learn
+    await asyncio.to_thread(analyze_and_learn)
+    return {"status": "analysis complete"}
 
 
 @app.get("/api/signals/{asset}/{period}")
