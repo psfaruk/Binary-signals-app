@@ -467,7 +467,12 @@ class _AssetStream:
     # broadcast এর সময় চেক করা হয় — যদি এখনও delay চলছে, prediction কে
     # broadcast থেকে বাদ দেওয়া হয় (candle data যাবে, prediction যাবে না)।
     # যখন delay শেষ হয়, প্রথম tick-এ prediction broadcast হয়।
-    signal_delay_until: float = 0.0  # wall-time when signal can be broadcast
+    signal_delay_until: float = 0.0
+    # BRAIN-LEARNED: loss cluster cooldown fields
+    _consecutive_losses: int = 0
+    _loss_cooldown_until: float = 0.0
+    _sub_client_id: object = None  # FIX (AUDIT-FEED #5): track which client started subscription
+    tick_callback: object = None   # FIX (2026-07-13): event-driven tick callback  # wall-time when signal can be broadcast
 
     # ── Event-driven tick pipeline (2026-07-11) ──────────────────────────
     # When the raw-WS backend is active, the WS reader pushes ticks directly
@@ -1482,12 +1487,16 @@ class QuotexFeed:
 
         # BRAIN-LEARNED: loss cluster cooldown — skip prediction if pair
         # is in cooldown after 5+ consecutive losses.
-        cooldown_until = getattr(stream, '_loss_cooldown_until', 0)
-        if cooldown_until and time.time() < cooldown_until:
-            remaining = int((cooldown_until - time.time()) / 60)
-            print(f"[feed] {stream.asset} in loss cooldown ({remaining} min remaining) — skipping prediction")
-            stream.prediction = None
-            return None
+        # FIX: wrap in try/except to NEVER block the prediction pipeline.
+        try:
+            cooldown_until = getattr(stream, '_loss_cooldown_until', 0)
+            if cooldown_until and time.time() < cooldown_until:
+                remaining = int((cooldown_until - time.time()) / 60)
+                print(f"[feed] {stream.asset} in loss cooldown ({remaining} min remaining) — skipping prediction")
+                stream.prediction = None
+                return None
+        except Exception:
+            pass  # never let cooldown check break the feed
         # running_ticks=None here: the NEW candle's ticks are empty at this
         # exact moment (they accumulate after this call). LIVE re-eval picks
         # up once ticks come in, via the periodic re-eval in the stream loop.
@@ -2141,14 +2150,18 @@ class QuotexFeed:
 
         # BRAIN-LEARNED (2026-07-20): loss cluster protection.
         # If a pair has 5+ consecutive losses, skip predictions for 30 min.
-        if accuracy == "wrong":
-            stream._consecutive_losses = getattr(stream, '_consecutive_losses', 0) + 1
-            if stream._consecutive_losses >= 5:
-                stream._loss_cooldown_until = time.time() + 1800  # 30 min
-                print(f"[feed] {stream.asset} hit {stream._consecutive_losses} consecutive "
-                      f"losses — cooling down for 30 min")
-        elif accuracy == "correct":
-            stream._consecutive_losses = 0
+        # FIX: wrap in try/except to ensure this NEVER breaks the feed pipeline.
+        try:
+            if accuracy == "wrong":
+                stream._consecutive_losses = getattr(stream, '_consecutive_losses', 0) + 1
+                if stream._consecutive_losses >= 5:
+                    stream._loss_cooldown_until = time.time() + 1800  # 30 min
+                    print(f"[feed] {stream.asset} hit {stream._consecutive_losses} consecutive "
+                          f"losses — cooling down for 30 min")
+            elif accuracy == "correct":
+                stream._consecutive_losses = 0
+        except Exception:
+            pass
 
         # FIX (BUG-I, 2026-07-20): invalidate DB-adaptation cache after each
         # signal_log write so the next prediction reflects fresh accuracy data.
