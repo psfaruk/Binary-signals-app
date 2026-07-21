@@ -177,8 +177,10 @@ _FOREX_OTC = [
 # are ALWAYS-ON regardless of payout % (no payout floor). The user wants
 # 24/7 monitoring to detect Quotex algorithm changes. They use the OTC
 # engine (asset ends with _otc → routes to otc engine automatically).
+# NOTE: USDBRL is listed as BRLUSD_otc on Quotex (non-standard ISO order).
+# We use BRLUSD_otc so Quotex recognizes the symbol and streams data.
 _ALLTIME_OTC_ASSETS = frozenset({
-    "USDBDT_otc", "USDBRL_otc", "USDPKR_otc",
+    "USDBDT_otc", "BRLUSD_otc", "USDPKR_otc",
     "USDCOP_otc", "USDMXN_otc", "USDIDR_otc",
 })
 
@@ -588,8 +590,18 @@ class QuotexFeed:
         # that bypass the payout floor and are always-on. Populated in
         # _load_pairs with live payout data; defaults below so the list is
         # non-empty even before _load_pairs runs.
+        # Display names use canonical ISO order (USD first) even when the
+        # Quotex symbol is non-standard (e.g. BRLUSD_otc → "USD/BRL").
+        _ALLTIME_DISPLAY = {
+            "USDBDT_otc": "USD/BDT",
+            "BRLUSD_otc": "USD/BRL",   # Quotex lists as BRLUSD, display as USD/BRL
+            "USDPKR_otc": "USD/PKR",
+            "USDCOP_otc": "USD/COP",
+            "USDMXN_otc": "USD/MXN",
+            "USDIDR_otc": "USD/IDR",
+        }
         self._alltime_otc_pairs_list: list[dict] = [
-            {"asset": a, "display": a.replace("_otc","").replace("USD","USD/"),
+            {"asset": a, "display": _ALLTIME_DISPLAY.get(a, a.replace("_otc","")),
              "status": "otc", "payout": 85, "locked": False,
              "category": "alltime_otc"} for a in sorted(_ALLTIME_OTC_ASSETS)
         ]
@@ -917,17 +929,28 @@ class QuotexFeed:
             # tradeable (no payout floor) but we still want to show the
             # actual live payout in the UI. If the pair isn't in Quotex's
             # instrument list (rare), keep the default 85% payout.
+            # Display name uses canonical ISO order (USD first) even when
+            # Quotex's symbol is non-standard (BRLUSD_otc → "USD/BRL").
+            _ALLTIME_DISPLAY = {
+                "USDBDT_otc": "USD/BDT",
+                "BRLUSD_otc": "USD/BRL",
+                "USDPKR_otc": "USD/PKR",
+                "USDCOP_otc": "USD/COP",
+                "USDMXN_otc": "USD/MXN",
+                "USDIDR_otc": "USD/IDR",
+            }
             alltime_otc_pairs = []
             for at_pair in self._alltime_otc_pairs_list:
                 # Find matching instrument in the OTC list (by asset name).
                 matching = next((p for p in otc_pairs if p["asset"] == at_pair["asset"]), None)
+                # Use canonical display name (overrides Quotex's non-standard order).
+                canonical_display = _ALLTIME_DISPLAY.get(at_pair["asset"], at_pair["display"])
                 if matching:
-                    # Update payout + display from live data, but keep
-                    # category='alltime_otc' and locked=False (always
-                    # tradeable).
+                    # Update payout from live data, but keep category='alltime_otc'
+                    # and locked=False (always tradeable). Use canonical display.
                     alltime_otc_pairs.append({
                         "asset":    matching["asset"],
-                        "display":  matching["display"],
+                        "display":  canonical_display,
                         "status":   "otc",
                         "payout":   matching["payout"],
                         "locked":   False,  # alltime bypasses the floor
@@ -935,6 +958,7 @@ class QuotexFeed:
                     })
                 else:
                     # Pair not in Quotex instruments — keep as-is (default).
+                    at_pair["display"] = canonical_display
                     alltime_otc_pairs.append(at_pair)
             self._alltime_otc_pairs_list = alltime_otc_pairs
 
