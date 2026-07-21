@@ -131,13 +131,26 @@ def get_time_adjustment(asset, ctime):
     """Compute a multiplicative confidence adjustment based on stored patterns.
 
     Combines the per-(asset, hour), per-(asset, session), and per-(asset, dow)
-    patterns into a single multiplier in [0.5, 1.5].
+    patterns into a single multiplier.
+
+    FIX (PREDICTION-FIX-2026-07-21): the previous version used min_samples=5
+    which is far too low for binary win/loss outcomes. With n=5, statistical
+    variance alone produces observed win rates ≥80% or ≤20% ~37% of the time
+    even when the true win rate is exactly 50%. The system was treating this
+    noise as real "patterns" and scaling confidence ±30-50%.
+    Now requires n >= 30 (statistical rule of thumb for binary outcomes).
+    Also reduced the multiplier swing to match per_pair.py's conservative
+    ~9% max (was up to ±50% here). The pattern adjustment is meant to be
+    a nudge, not a swing.
 
     Logic:
       - For each dimension with data, compute deviation from 0.50 baseline.
-      - Sum the deviations, clamp to [-0.30, +0.30].
-      - Convert to multiplier: 1.0 + deviation.
-      - Skip a dimension if total < 5 (not enough data).
+      - Weight each dimension's deviation by sqrt(n) so larger samples
+        contribute more (but not linearly — diminishing returns).
+      - Average the weighted deviations.
+      - Clamp to [-0.06, +0.06] — at most ±6% adjustment (matches
+        per_pair.py's conservative adaptation range).
+      - Multiplier: 1.0 + clamped_dev (final range [0.94, 1.06]).
 
     Returns (multiplier, debug_note).
     """
@@ -148,48 +161,70 @@ def get_time_adjustment(asset, ctime):
 
     patterns = get_all_patterns(asset)
 
-    deviations = []
+    # FIX (PREDICTION-FIX-2026-07-21): raised from 5 to 30.
+    # With n=5, binomial variance is so high that pure noise produces
+    # extreme observed win rates. n=30 gives ~±18% confidence interval
+    # at p=0.5, which is acceptable for a nudge.
+    MIN_SAMPLES = 30
+
+    weighted_devs = []   # [(dev, weight), ...]
     notes = []
 
     # Hour dimension
     hour_p = patterns.get("hour", {}).get(str(hour))
-    if hour_p and hour_p["total"] >= 5:
+    if hour_p and hour_p["total"] >= MIN_SAMPLES:
         dev = hour_p["win_rate"] - 0.50
-        deviations.append(dev)
+        # Weight by sqrt(n) — larger samples count more, but with diminishing returns.
+        # Cap weight at sqrt(100) = 10 so a single huge sample doesn't dominate.
+        weight = min(10.0, (hour_p["total"] ** 0.5))
+        weighted_devs.append((dev, weight))
         notes.append(f"hour={hour}({hour_p['win_rate']:.0%},n={hour_p['total']}):{dev:+.2f}")
 
     # Session dimension
     sess_p = patterns.get("session", {}).get(session)
-    if sess_p and sess_p["total"] >= 5:
+    if sess_p and sess_p["total"] >= MIN_SAMPLES:
         dev = sess_p["win_rate"] - 0.50
-        deviations.append(dev)
+        weight = min(10.0, (sess_p["total"] ** 0.5))
+        weighted_devs.append((dev, weight))
         notes.append(f"sess={session}({sess_p['win_rate']:.0%},n={sess_p['total']}):{dev:+.2f}")
 
     # Day-of-week dimension
     dow_p = patterns.get("dow", {}).get(str(dow))
-    if dow_p and dow_p["total"] >= 5:
+    if dow_p and dow_p["total"] >= MIN_SAMPLES:
         dev = dow_p["win_rate"] - 0.50
-        deviations.append(dev)
+        weight = min(10.0, (dow_p["total"] ** 0.5))
+        weighted_devs.append((dev, weight))
         notes.append(f"dow={dow}({dow_p['win_rate']:.0%},n={dow_p['total']}):{dev:+.2f}")
 
-    if not deviations:
+    if not weighted_devs:
         return 1.0, ""
 
-    # Average the deviations (so one bad hour doesn't dominate if session+dow are neutral)
-    avg_dev = sum(deviations) / len(deviations)
-    # Clamp to [-0.30, +0.30] — at most ±30% adjustment.
-    clamped = max(-0.30, min(0.30, avg_dev))
-    # Slightly amplify the effect since averaging dilutes.
-    multiplier = 1.0 + clamped * 1.2  # 1.2x amplification, but clamped input keeps it bounded
-    # Final clamp to [0.5, 1.5]
-    multiplier = max(0.5, min(1.5, multiplier))
+    # Weighted average of deviations (so a high-n dimension with a small
+    # deviation can outweigh a low-n dimension with a large deviation).
+    total_weight = sum(w for _, w in weighted_devs)
+    weighted_avg_dev = sum(d * w for d, w in weighted_devs) / total_weight
 
-    note = "_TIME_PATTERN: " + " | ".join(notes) + f" → mult ×{multiplier:.2f}"
+    # FIX (PREDICTION-FIX-2026-07-21): clamp to ±6% (was ±30%).
+    # The previous ±30% swing was 3x more aggressive than per_pair.py's
+    # DB-adaptation (which uses a prior-weighted blend for max ~9% swing).
+    # A nudge of ±6% is enough to break ties without overriding the
+    # engine's actual prediction logic.
+    clamped = max(-0.06, min(0.06, weighted_avg_dev))
+    multiplier = 1.0 + clamped
+    # Final safety clamp.
+    multiplier = max(0.94, min(1.06, multiplier))
+
+    note = "_TIME_PATTERN: " + " | ".join(notes) + f" → mult ×{multiplier:.3f}"
     return multiplier, note
 
 
 def get_regime_adjustment(asset, regime_name):
     """Compute a multiplicative confidence adjustment based on regime pattern.
+
+    FIX (PREDICTION-FIX-2026-07-21): raised min_samples from 5 to 30 and
+    reduced multiplier swing from ±25% to ±6% (matching the time-adjustment
+    conservative range). The previous ±25% swing was 2.5x more aggressive
+    than per_pair.py's adaptation.
 
     Returns (multiplier, debug_note).
     """
@@ -197,23 +232,26 @@ def get_regime_adjustment(asset, regime_name):
         return 1.0, ""
     patterns = get_all_patterns(asset)
     reg_p = patterns.get("regime", {}).get(regime_name)
-    if not reg_p or reg_p["total"] < 5:
+    # FIX: raised from 5 to 30.
+    if not reg_p or reg_p["total"] < 30:
         return 1.0, ""
     dev = reg_p["win_rate"] - 0.50
-    # Regime is a stronger signal — allow up to ±25% adjustment.
-    clamped = max(-0.25, min(0.25, dev))
-    multiplier = 1.0 + clamped * 1.5  # 1.5x amplification
-    multiplier = max(0.6, min(1.4, multiplier))
+    # FIX: clamp to ±6% (was ±25%).
+    clamped = max(-0.06, min(0.06, dev))
+    multiplier = 1.0 + clamped
+    multiplier = max(0.94, min(1.06, multiplier))
     note = (f"_REGIME_PATTERN: {regime_name}({reg_p['win_rate']:.0%},n={reg_p['total']}) "
-            f"→ mult ×{multiplier:.2f}")
+            f"→ mult ×{multiplier:.3f}")
     return multiplier, note
 
 
 def get_tag_adjustment(asset, tags):
     """Compute adjustment based on tags (COUNTER_REGIME, WITH_REGIME, etc.).
 
-    If any tag has a known strong pattern (win_rate >= 0.55 or <= 0.45 with n >= 5),
-    apply a small boost/dampener.
+    FIX (PREDICTION-FIX-2026-07-21): raised min_samples from 5 to 30 and
+    reduced multiplier swing from ±15% to ±4%. Tags are the weakest signal
+    (often correlating with regime/condition that's already accounted for),
+    so they get the smallest adjustment range.
 
     Returns (multiplier, debug_note).
     """
@@ -225,28 +263,32 @@ def get_tag_adjustment(asset, tags):
     patterns = get_all_patterns(asset)
     tag_dim = patterns.get("tag", {})
 
-    deviations = []
+    weighted_devs = []
     notes = []
     for t in tag_list:
         tp = tag_dim.get(t)
-        if tp and tp["total"] >= 5:
+        # FIX: raised from 5 to 30.
+        if tp and tp["total"] >= 30:
             dev = tp["win_rate"] - 0.50
             if abs(dev) >= 0.05:  # only count meaningful deviations
-                deviations.append(dev)
+                weight = min(10.0, (tp["total"] ** 0.5))
+                weighted_devs.append((dev, weight))
                 notes.append(f"tag={t}({tp['win_rate']:.0%},n={tp['total']}):{dev:+.2f}")
 
-    if not deviations:
+    if not weighted_devs:
         return 1.0, ""
 
-    avg_dev = sum(deviations) / len(deviations)
-    clamped = max(-0.15, min(0.15, avg_dev))  # tags are weaker signal — max ±15%
+    total_weight = sum(w for _, w in weighted_devs)
+    weighted_avg_dev = sum(d * w for d, w in weighted_devs) / total_weight
+    # FIX: clamp to ±4% (was ±15%).
+    clamped = max(-0.04, min(0.04, weighted_avg_dev))
     multiplier = 1.0 + clamped
-    multiplier = max(0.85, min(1.15, multiplier))
-    note = "_TAG_PATTERN: " + " | ".join(notes) + f" → mult ×{multiplier:.2f}"
+    multiplier = max(0.96, min(1.04, multiplier))
+    note = "_TAG_PATTERN: " + " | ".join(notes) + f" → mult ×{multiplier:.3f}"
     return multiplier, note
 
 
-def recompute_from_signal_log(min_samples=3):
+def recompute_from_signal_log(min_samples=3, days_window=None):
     """Recompute ALL patterns from signal_log.
 
     Called by the brain on a periodic schedule (every ~100 graded signals)
@@ -256,22 +298,66 @@ def recompute_from_signal_log(min_samples=3):
     (asset, hour, session, dow, regime, tag), computes win_rate per group,
     and bulk-upserts into time_session_patterns.
 
+    FIX (PREDICTION-FIX-2026-07-21): added `days_window` parameter (default
+    reads DAYS_WINDOW env var, falls back to 14). Only signals from the
+    last N days are used. This prevents patterns from being contaminated
+    by data produced under older (buggy) engine versions. The engine has
+    undergone multiple structural fixes (structural reversal bias, HTF
+    cold-start, chop-guard conversion, etc.) — pre-fix data doesn't
+    represent the current engine's behavior, so including it would
+    bias the pattern adjustments.
+    Set days_window=0 or None to use ALL data (for backward compat or
+    offline analysis).
+
     Returns a summary dict: {asset: {dimension: pattern_count}}
     """
     # Import here to avoid circular import with db.py
     import db as _db
+
+    # FIX (PREDICTION-FIX-2026-07-21): default to last 14 days.
+    if days_window is None:
+        try:
+            days_window = int(os.environ.get("PATTERN_DAYS_WINDOW", "14"))
+        except (TypeError, ValueError):
+            days_window = 14
+
     conn = _db._conn()
     # FIX (BACKTEST-2026-07-21): db._conn() doesn't set row_factory, so
     # rows come back as tuples. Set it here so r["asset"] works.
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
-        # Pull all graded signals with category breakdown
-        rows = cur.execute("""SELECT asset, period, ctime, signal, accuracy, regime, tags,
-                                      strength, confidence
-                              FROM signal_log
-                              WHERE signal IN ('CALL','PUT')
-                                AND accuracy IN ('correct','wrong')""").fetchall()
+        # FIX (PREDICTION-FIX-2026-07-21): add time filter — only use
+        # recent data so patterns reflect the CURRENT engine's behavior.
+        # Old data was produced by previous (buggy) engine versions and
+        # would contaminate the pattern adjustments.
+        # FIX: prefer `ts` column (insert-time); fall back to `ctime`
+        # (candle-open time) for older schemas / backtest DBs that don't
+        # have `ts`. Both are unix timestamps so the comparison is valid.
+        if days_window and days_window > 0:
+            cutoff_ts = time.time() - (days_window * 86400)
+            # Try `ts` first (production schema); if column doesn't exist,
+            # fall back to `ctime`.
+            try:
+                rows = cur.execute("""SELECT asset, period, ctime, signal, accuracy, regime, tags,
+                                              strength, confidence
+                                      FROM signal_log
+                                      WHERE signal IN ('CALL','PUT')
+                                        AND accuracy IN ('correct','wrong')
+                                        AND ts >= ?""", (cutoff_ts,)).fetchall()
+            except sqlite3.OperationalError:
+                rows = cur.execute("""SELECT asset, period, ctime, signal, accuracy, regime, tags,
+                                              strength, confidence
+                                      FROM signal_log
+                                      WHERE signal IN ('CALL','PUT')
+                                        AND accuracy IN ('correct','wrong')
+                                        AND ctime >= ?""", (cutoff_ts,)).fetchall()
+        else:
+            rows = cur.execute("""SELECT asset, period, ctime, signal, accuracy, regime, tags,
+                                          strength, confidence
+                                  FROM signal_log
+                                  WHERE signal IN ('CALL','PUT')
+                                    AND accuracy IN ('correct','wrong')""").fetchall()
     finally:
         conn.close()
 
