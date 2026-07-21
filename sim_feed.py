@@ -658,10 +658,17 @@ class QuotexFeed:
         if (result["signal"] != "NEUTRAL"
                 and _key == (stream.zone_streak["regime"], stream.zone_streak["zone"])
                 and stream.zone_streak["losses"] >= ZONE_LOSS_GUARD):
-            result["strength"] = "WEAK"
+            # FIX (BACKTEST-2026-07-21): mirror the feed.py fix — convert
+            # to NEUTRAL instead of WEAK. Backtest showed WEAK signals win
+            # only 4.2% of the time; skipping is +EV.
+            _losses = stream.zone_streak['losses']
+            result["signal"] = "NEUTRAL"
+            result["strength"] = "NEUTRAL"
+            result["confidence"] = 0
             result.setdefault("reasons", []).append(
-                f"CHOP GUARD: {_key[0]}/{_key[1]} wrong "
-                f"{stream.zone_streak['losses']}x running -> WEAK")
+                f"CHOP GUARD (BACKTEST-FIX): {_key[0]}/{_key[1]} wrong "
+                f"{_losses}x running → NEUTRAL (skip). "
+                f"Backtest: WEAK signals won 4.2% — skipping is +EV.")
 
         if result["signal"] == "NEUTRAL":
             return {**result, "candle": None, "payout": stream.payout}
@@ -1116,9 +1123,13 @@ class QuotexFeed:
                                         # Flip-suppression: demote strength
                                         # without changing direction.
                                         if demote_to_weak:
-                                            merged["strength"] = "WEAK"
+                                            # FIX (BACKTEST-2026-07-21): convert to
+                                            # NEUTRAL instead of WEAK.
+                                            merged["signal"] = "NEUTRAL"
+                                            merged["strength"] = "NEUTRAL"
+                                            merged["confidence"] = 0
                                             merged.setdefault("reasons", []).append(
-                                                f"FLIP_DEMOTE: {flips} flips in last 10s → WEAK")
+                                                f"FLIP_DEMOTE (BACKTEST-FIX): {flips} flips in last 10s → NEUTRAL (skip). Backtest: WEAK won 4.2%.")
                                         # Reason refresh — keep latest module
                                         # breakdown for transparency.
                                         merged["modules"] = fresh.get("modules",
@@ -1145,9 +1156,14 @@ class QuotexFeed:
                                         pass
                                     else:
                                         if demote_to_weak:
-                                            new_pred["strength"] = "WEAK"
+                                            # FIX (BACKTEST-2026-07-21): convert to
+                                            # NEUTRAL instead of WEAK. Backtest showed
+                                            # WEAK signals win 4.2% — skip is +EV.
+                                            new_pred["signal"] = "NEUTRAL"
+                                            new_pred["strength"] = "NEUTRAL"
+                                            new_pred["confidence"] = 0
                                             new_pred.setdefault("reasons", []).append(
-                                                f"FLIP_DEMOTE: {flips} flips in last 10s → WEAK")
+                                                f"FLIP_DEMOTE (BACKTEST-FIX): {flips} flips in last 10s → NEUTRAL (skip). Backtest: WEAK won 4.2%.")
                                         stream.prediction = new_pred
                                         pred_changed = True
                                 elif locked_dir is None:
@@ -1157,9 +1173,13 @@ class QuotexFeed:
                                     # _run_eoc) instead of overwriting.
                                     new_pred = {**(stream.prediction or {}), **fresh}
                                     if demote_to_weak:
-                                        new_pred["strength"] = "WEAK"
+                                        # FIX (BACKTEST-2026-07-21): convert to
+                                        # NEUTRAL instead of WEAK.
+                                        new_pred["signal"] = "NEUTRAL"
+                                        new_pred["strength"] = "NEUTRAL"
+                                        new_pred["confidence"] = 0
                                         new_pred.setdefault("reasons", []).append(
-                                            f"FLIP_DEMOTE: {flips} flips in last 10s → WEAK")
+                                            f"FLIP_DEMOTE (BACKTEST-FIX): {flips} flips in last 10s → NEUTRAL (skip). Backtest: WEAK won 4.2%.")
                                     stream.prediction = new_pred
                                     pred_changed = True
                                 # If flip_neutralize fires on a LOCKED CALL/PUT,
