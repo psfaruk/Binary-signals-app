@@ -1,0 +1,43 @@
+/* ============================================================================
+   alltime_otc.css — All-Time OTC Market page overrides.
+   Cyan accent (#00e5ff). "ALL-TIME OTC" branding.
+   These exotic pairs (USDBDT, USDBRL, USDPKR, USDCOP, USDMXN, USDIDR)
+   are always available regardless of payout % — used for 24/7
+   algorithm-change monitoring.
+   ============================================================================ */
+
+:root{
+  --accent:#00e5ff;
+  --accent-bg:rgba(0,229,255,.12);
+  --accent-border:rgba(0,229,255,.4);
+}
+
+/* Brand title — ALL-TIME OTC */
+.brand-title .brand-name{color:var(--accent)}
+.brand-dot{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+
+/* Switch button: cyan tinted */
+#market-switch-btn{
+  background:var(--accent-bg);
+  color:var(--accent);
+  border-color:var(--accent-border);
+}
+
+/* Active engine badge default — cyan */
+.engine-label{
+  background:rgba(0,229,255,.15);
+  color:var(--accent);
+}
+
+/* 24/7 status indicator — always live (cyan) */
+#market-status-indicator.always{
+  color:var(--accent);background:var(--accent-bg);
+  border:1px solid var(--accent-border);
+}
+
+/* Signal box CALL color (cyan-tinted for this market) — kept green for
+   universal readability, but the accent trim is cyan. */
+#signal-box.call{
+  border-color:var(--green);
+  background:rgba(0,200,83,.12);
+}

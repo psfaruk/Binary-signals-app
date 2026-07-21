@@ -2320,6 +2320,24 @@ class QuotexFeed:
                 self._save_micro, stream.asset, stream.period, closed,
                 _micro_snap, stream.candles, list(stream.ticks))
 
+        # FIX (DATA-FLOW-2026-07-22): record this candle with the algorithm
+        # monitor. It maintains a rolling 30-candle window per asset and
+        # detects payout-driven algorithm switches (Quotex's behavior of
+        # cycling candle-generation algorithms when payout spikes).
+        try:
+            from core.algorithm_monitor import record_candle
+            payout = getattr(stream, 'payout', None) or 0
+            tick_count = int(_micro_snap.get('tick_count', 0)) if _micro_snap else 0
+            record_candle(
+                asset=stream.asset, ctime=closed.get('time', 0),
+                payout=payout,
+                open_=closed.get('open', 0), high=closed.get('high', 0),
+                low=closed.get('low', 0), close=closed.get('close', 0),
+                tick_count=tick_count)
+        except Exception as _e:
+            # Never let monitoring break the prediction pipeline.
+            pass
+
         # Start new candle
         stream.candle_open_time    = new_open_time
         stream.candle_open_price   = first_tick
@@ -3325,6 +3343,40 @@ class QuotexFeed:
                 s.always_on = False
                 print(f"[feed] watchdog: demoted {s.asset} (no longer eligible)")
 
+        # FIX (DATA-FLOW-2026-07-22): per-stream stuck detection.
+        # Previously the only "stuck" handler was _fallback_to_sim_if_stuck
+        # which fires ONCE 30s after initial subscribe. If ticks stop LATER
+        # (Quotex silently drops the subscription mid-session), nothing
+        # detected it — the stream's task was still alive (looping on an
+        # empty queue), so the watchdog above saw a "healthy" task.
+        # Result: 'ডেটা আসা বন্ধ হয়ে যায়' — exactly the user's complaint.
+        #
+        # Now: every watchdog tick (30s), check each stream's last_real_tick_wall.
+        # If a stream hasn't received a real tick in PER_STREAM_STALE_SECS (60s
+        # default — well within one 1m candle), re-arm JUST that stream's
+        # subscription. This is much cheaper than a full client rebuild and
+        # doesn't affect any other stream.
+        PER_STREAM_STALE_SECS = int(os.environ.get("PER_STREAM_STALE_SECS", "60"))
+        now = time.time()
+        for key, s in list(self._streams.items()):
+            # Skip streams that are already being evicted or haven't started.
+            if getattr(s, '_evicting', False) or not s.sub_started:
+                continue
+            # Skip streams with no last_real_tick_wall yet (just started).
+            if not s.last_real_tick_wall:
+                continue
+            age = now - s.last_real_tick_wall
+            if age > PER_STREAM_STALE_SECS:
+                print(f"[feed] per-stream stale: {s.asset}@{s.period}s "
+                      f"no tick for {age:.0f}s — re-arming subscription")
+                try:
+                    asyncio.create_task(self._rearm_stream(s))
+                    # Reset the timer so we don't re-arm again before this
+                    # re-arm has a chance to receive ticks.
+                    s.last_real_tick_wall = now
+                except Exception as exc:
+                    print(f"[feed] per-stream re-arm failed for {s.asset}: {exc}")
+
     async def _sweep_idle_streams(self) -> None:
         """Evict streams with no interested viewers for > IDLE_TIMEOUT.
 
@@ -3559,12 +3611,20 @@ class QuotexFeed:
                 # whole client down and rebuild it (per-stream staleness is
                 # handled inside each stream's own loop and never reaches
                 # here, since it only re-arms that one stream).
+                #
+                # FIX (DATA-FLOW-2026-07-22): raised from STALE_SECS (90s) to
+                # GLOBAL_STALE_SECS (180s default). Per-stream re-arm at 60s
+                # now handles most silent drops gracefully without a full
+                # client rebuild. The global rebuild is only needed when the
+                # WS connection itself is dead — every single stream silent
+                # for 3 minutes is a strong signal of that.
+                GLOBAL_STALE_SECS = int(os.environ.get("GLOBAL_STALE_SECS", "180"))
                 if self._streams:
                     newest = max((s.last_real_tick_wall
                                  for s in self._streams.values()), default=0.0)
-                    if newest > 0 and time.time() - newest > STALE_SECS:
-                        print("[feed] GLOBAL STALE: every active stream silent "
-                              "— rebuilding client")
+                    if newest > 0 and time.time() - newest > GLOBAL_STALE_SECS:
+                        print(f"[feed] GLOBAL STALE: every active stream silent "
+                              f"for {time.time() - newest:.0f}s — rebuilding client")
                         await self._rebuild_client()
 
                 await self._sweep_idle_streams()
