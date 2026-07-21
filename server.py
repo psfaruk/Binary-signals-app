@@ -148,6 +148,19 @@ async def lifespan(app: FastAPI):
     # Initialize brain tables
     from core.brain import init_brain
     init_brain()
+    # Initialize time/session pattern tables (BACKTEST-2026-07-21)
+    try:
+        from core.time_patterns import init_patterns, recompute_from_signal_log
+        init_patterns()
+        # Recompute patterns from existing signal_log on startup — this
+        # populates the time_session_patterns table so the blender can
+        # apply adjustments from the very first prediction.
+        summary = recompute_from_signal_log(min_samples=3)
+        total_patterns = sum(sum(dims.values()) for dims in summary.values()) if summary else 0
+        print(f"[server] patterns loaded: {total_patterns} entries across "
+              f"{len(summary)} pairs")
+    except Exception as _e:
+        print(f"[server] pattern init failed (non-fatal): {_e}")
     # Start feed in background task
     feed_task = asyncio.create_task(feed.run(broadcast))
     print("[server] lifespan: feed task started")
@@ -395,6 +408,33 @@ async def brain_analyze():
     from core.brain import analyze_and_learn
     await asyncio.to_thread(analyze_and_learn)
     return {"status": "analysis complete"}
+
+
+# ── Pattern endpoints (BACKTEST-2026-07-21) ────────────────────────────────
+
+@app.get("/api/patterns")
+async def patterns_summary():
+    """Summary of all stored time/session/regime patterns per pair."""
+    from core.time_patterns import init_patterns, get_pattern_summary
+    init_patterns()
+    return {"patterns": get_pattern_summary()}
+
+
+@app.get("/api/patterns/{asset}")
+async def patterns_for_asset(asset: str):
+    """Full pattern detail for one asset (hour, session, dow, regime, tag)."""
+    from core.time_patterns import init_patterns, get_asset_patterns_detail
+    init_patterns()
+    return {"asset": asset, "patterns": get_asset_patterns_detail(asset)}
+
+
+@app.post("/api/patterns/refresh")
+async def patterns_refresh():
+    """Recompute ALL patterns from signal_log. Call after backtest or manually."""
+    from core.time_patterns import init_patterns, recompute_from_signal_log
+    init_patterns()
+    summary = await asyncio.to_thread(recompute_from_signal_log)
+    return {"status": "refreshed", "summary": summary}
 
 
 @app.get("/api/signals/{asset}/{period}")
