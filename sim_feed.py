@@ -65,9 +65,12 @@ _SIM_OTC_PAIRS = [
 # The user wants to monitor these 24/7 to learn the algorithm patterns.
 # Payout listed is the "headline" payout; actual live payout may vary.
 # category="alltime_otc" routes them to the OTC engine (mean-reversion tuned).
+# NOTE: USDBRL is listed as BRLUSD_otc on Quotex (non-standard ISO order).
+# We use BRLUSD_otc so Quotex recognizes the symbol and streams data.
+# Display name is canonicalized to "USD/BRL" in feed.py's _load_pairs.
 _SIM_ALLTIME_OTC_PAIRS = [
     {"asset": "USDBDT_otc",  "display": "USD/BDT",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
-    {"asset": "USDBRL_otc",  "display": "USD/BRL",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
+    {"asset": "BRLUSD_otc",  "display": "USD/BRL",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
     {"asset": "USDPKR_otc",  "display": "USD/PKR",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
     {"asset": "USDCOP_otc",  "display": "USD/COP",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
     {"asset": "USDMXN_otc",  "display": "USD/MXN",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},

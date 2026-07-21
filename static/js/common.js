@@ -1765,6 +1765,8 @@ function initApp(category){
   // Default asset depends on the page's category.
   // FIX (DATA-FLOW-2026-07-22): alltime_otc defaults to USDBDT_otc
   // (first of the 6 exotic pairs the user requested).
+  // NOTE: USD/BRL is listed as BRLUSD_otc on Quotex — using the Quotex
+  // symbol so the stream actually subscribes correctly.
   if(category === 'real')               currentAsset = 'EURUSD';
   else if(category === 'alltime_otc')   currentAsset = 'USDBDT_otc';
   else                                  currentAsset = 'EURUSD_otc';
