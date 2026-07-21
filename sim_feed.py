@@ -11,9 +11,10 @@ from collections import deque
 from dataclasses import dataclass, field
 
 import db as _db
-from analyze_eoc import _round_level, _key_levels, _atr
+from core.analysis import _round_level, _key_levels, _atr
 
-PAYOUT_FLOOR = int(os.environ.get("QX_PAYOUT_FLOOR", "81"))
+# FIX (DEAD-CODE-2026-07-21): removed `PAYOUT_FLOOR = int(os.environ.get(...))`
+# — never used. Only PAYOUT_FLOOR_REAL and PAYOUT_FLOOR_OTC are referenced.
 # FIX (2026-07-17): split payout floors for REAL vs OTC. Real pairs have
 # lower broker margins → lower payouts → lower floor (default 70).
 # OTC pairs have higher headline payouts → higher floor (default 85).
@@ -557,7 +558,7 @@ class QuotexFeed:
         # feed.py (>=9 5m closes with progressive threshold). Sim uses
         # synthetic candles with proper `time` fields, so the same
         # _aggregate_5m_closes helper works.
-        from candle_reaction import predict_from_candle
+        from engines import predict as predict_from_candle
         try:
             from feed import _aggregate_5m_closes, _ema_simple
             closes_5m_sim = _aggregate_5m_closes(candles[-105:] if len(candles) > 105 else candles, period)

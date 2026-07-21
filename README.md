@@ -92,9 +92,6 @@ Binary-signals-app/
 ├── feed.py                      # Real Quotex feed (multi-asset)
 ├── sim_feed.py                  # Simulated feed (for dev / no creds)
 ├── quotex_ws.py                 # Raw WebSocket Quotex client (alt backend)
-├── candle_reaction.py           # Legacy shim → engines.predict()
-├── advanced_analysis.py         # Legacy shim → core.analysis
-├── analyze_eoc.py               # Legacy shim → core.analysis + core.microstructure
 ├── module_performance_report.py # CLI per-module win-rate report
 ├── requirements.txt
 ├── railway.json                 # Railway deployment config

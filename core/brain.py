@@ -746,16 +746,9 @@ def get_learning(asset: str = None, limit: int = 100):
         conn.close()
 
 
-def get_patterns(limit: int = 50):
-    """Get discovered patterns."""
-    conn = _conn()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM brain_patterns ORDER BY ts DESC LIMIT ?",
-            (limit,)).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+# FIX (DEAD-CODE-2026-07-21): removed get_patterns() — never called by any
+# endpoint or internal code. The /api/brain/insights endpoint uses
+# get_insights() instead.
 
 
 def get_brain_summary():

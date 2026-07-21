@@ -138,11 +138,8 @@ function _setText(id, text){
   if(el) el.textContent = text;
   return el;
 }
-function _setHtml(id, html){
-  const el = $(id);
-  if(el) el.innerHTML = html;
-  return el;
-}
+// FIX (DEAD-CODE-2026-07-21): removed _setHtml — never called. Render
+// functions use innerHTML directly when needed.
 function _setClass(id, cls){
   const el = $(id);
   if(el) el.className = cls;
