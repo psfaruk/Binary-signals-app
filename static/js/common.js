@@ -127,6 +127,33 @@ function fmtPrice(v){
   return n.toFixed(5);
 }
 
+/* ─── DOM HELPERS ────────────────────────────────────────────────────────── */
+// FIX (UI-P0-2/3/4, 2026-07-21): null-safe DOM setter helpers. Previously
+// renderPending/renderSignal/renderMicro accessed .textContent / .style
+// on raw $(...) results without null checks — if any element was missing
+// (or DOM not ready), the whole tick handler crashed silently. Now these
+// helpers no-op on null and the render functions can't throw.
+function _setText(id, text){
+  const el = $(id);
+  if(el) el.textContent = text;
+  return el;
+}
+function _setHtml(id, html){
+  const el = $(id);
+  if(el) el.innerHTML = html;
+  return el;
+}
+function _setClass(id, cls){
+  const el = $(id);
+  if(el) el.className = cls;
+  return el;
+}
+function _setStyle(id, prop, val){
+  const el = $(id);
+  if(el) el.style[prop] = val;
+  return el;
+}
+
 /* ─── AUDIO ──────────────────────────────────────────────────────────────── */
 function beep(freq=880, dur=0.12, vol=0.3){
   if(!soundEnabled) return;
@@ -458,27 +485,51 @@ function hideChartLoading(){
 }
 
 function renderPending(){
-  const signalBox = $('signal-box');
-  const signalLabel = $('signal-label');
-  signalBox.className = 'pending signal-pop';
-  signalLabel.textContent = '⏳ PENDING';
-  $('sig-score').textContent = '—';
-  $('sig-score').style.color = 'var(--text-dim)';
-  const strEl = $('sig-strength');
-  strEl.className = 'value strength-weak';
-  strEl.textContent = 'WAIT';
-  $('sig-conf-val').textContent = '—';
-  const confBar = $('sig-conf-bar');
-  confBar.style.width = '0%';
-  confBar.style.background = '#2196F3';
-  $('sig-agree').textContent = '—';
-  $('sig-regime').textContent = '—';
+  // FIX (UI-P0-2, 2026-07-21): all DOM lookups via null-safe helpers.
+  // FIX (UI-P1-2, 2026-07-21): also reset ALL microstructure fields
+  // (buyer/seller bars, pressure, reaction, fight, hold, phases, ticks,
+  // net, round level) — previously these kept stale values from the
+  // previous pair until the first tick arrived (~1-2s).
+  _setClass('signal-box', 'pending signal-pop');
+  _setText('signal-label', '⏳ PENDING');
+  _setText('sig-score', '—');
+  _setStyle('sig-score', 'color', 'var(--text-dim)');
+  _setClass('sig-strength', 'value strength-weak');
+  _setText('sig-strength', 'WAIT');
+  _setText('sig-conf-val', '—');
+  _setStyle('sig-conf-bar', 'width', '0%');
+  _setStyle('sig-conf-bar', 'background', '#2196F3');
+  _setText('sig-agree', '—');
+  _setText('sig-regime', '—');
 
-  // Reset market state panel — only trend/zone/volatility (the stale
-  // phase/structure/zigzag fields have been removed entirely).
-  const msTrend = $('ms-trend'); if(msTrend) msTrend.textContent = '—';
-  const msZone = $('ms-zone');   if(msZone) msZone.textContent = '—';
-  const msVol = $('ms-volatility'); if(msVol) msVol.textContent = '—';
+  // Market state panel
+  _setText('ms-trend', '—');
+  _setText('ms-zone', '—');
+  _setText('ms-volatility', '—');
+
+  // FIX (UI-P1-2): reset microstructure fields too.
+  _setStyle('bs-buy', 'width', '50%');
+  _setStyle('bs-sell', 'width', '50%');
+  _setText('bs-buy', '50%');
+  _setText('bs-sell', '50%');
+  _setClass('ms-pressure', 'pressure-badge fight');
+  _setText('ms-pressure', '—');
+  _setClass('ms-reaction', 'react-badge none');
+  _setText('ms-reaction', '—');
+  _setText('ms-fight', '—');
+  _setText('ms-hold', '—');
+  // Reset phase cards (Early/Mid/Late)
+  ['ph-early','ph-mid','ph-late'].forEach(id => {
+    _setClass(id, 'phase-dir flat');
+    _setText(id, '—');
+  });
+  _setClass('ms-last-react', 'react-badge none');
+  _setText('ms-last-react', '—');
+  _setClass('ms-running-conf', 'running-conf none');
+  _setText('ms-running-conf', '—');
+  _setText('ms-ticks', '0');
+  _setText('ms-net', '—');
+  _setText('ms-round', '—');
 
   const theoriesList = $('theories-list');
   if(theoriesList){
@@ -506,42 +557,41 @@ function renderSignal(pred){
     alertedSignalDirection = s;
   }
 
-  const signalBox = $('signal-box');
-  const signalLabel = $('signal-label');
+  // FIX (UI-P0-3, 2026-07-21): null-safe setters throughout. Previously
+  // any missing element crashed the entire tick handler.
   const cls = s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral';
-  signalBox.className = cls + (shouldAlert ? ' signal-pop' : '');
-  signalLabel.textContent = s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT' : '➖ NEUTRAL';
+  _setClass('signal-box', cls + (shouldAlert ? ' signal-pop' : ''));
+  _setText('signal-label', s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT' : '➖ NEUTRAL');
 
   const score = pred.score || 0;
-  const sigScore = $('sig-score');
-  sigScore.textContent = (score >= 0 ? '+' : '') + score;
-  sigScore.style.color = score >= 0 ? 'var(--green)' : 'var(--red)';
+  _setText('sig-score', (score >= 0 ? '+' : '') + score);
+  _setStyle('sig-score', 'color', score >= 0 ? 'var(--green)' : 'var(--red)');
 
   const str = (pred.strength || '').toUpperCase();
   const strCls = str === 'STRONG'
     ? (s === 'PUT' ? 'strength-strong-put' : 'strength-strong')
     : str === 'MEDIUM' ? 'strength-medium' : 'strength-weak';
-  const sigStrength = $('sig-strength');
-  sigStrength.className = 'value ' + strCls;
-  sigStrength.textContent = str || '—';
+  _setClass('sig-strength', 'value ' + strCls);
+  _setText('sig-strength', str || '—');
 
   const conf = pred.confidence || 0;
-  $('sig-conf-val').textContent = Math.round(conf) + '%';
-  const confBar = $('sig-conf-bar');
-  confBar.style.width = conf + '%';
-  confBar.style.background = s === 'CALL' ? 'var(--green)' : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
+  _setText('sig-conf-val', Math.round(conf) + '%');
+  _setStyle('sig-conf-bar', 'width', conf + '%');
+  _setStyle('sig-conf-bar', 'background',
+            s === 'CALL' ? 'var(--green)' : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)');
 
-  $('sig-agree').textContent = (pred.agree || 0) + '/' + (pred.total || 0) + ' modules';
+  _setText('sig-agree', (pred.agree || 0) + '/' + (pred.total || 0) + ' modules');
 
-  // Regime display — the regime dict has: regime, trend_strength,
-  // volatility_pct, ema9, ema21, is_trending, is_ranging, is_volatile.
+  // Regime display — clean format (no debug-looking output).
+  // FIX (UI-P1-15/16, 2026-07-21): drop the "(str=0.85)" debug suffix;
+  // the strength number is shown in Market State as a label.
   const reg = pred.regime || {};
   const regStr = (typeof reg === 'object' && reg !== null)
-    ? (reg.regime || '—') + ' (str=' + (reg.trend_strength || 0) + ')'
+    ? (reg.regime || '—')
     : String(reg || '—');
-  $('sig-regime').textContent = regStr;
+  _setText('sig-regime', regStr);
 
-  // Market State panel — only 3 live fields now (phase/structure/zigzag removed).
+  // Market State panel — only 3 live fields.
   const trendVal = reg.regime || '—';
   const zoneVal = reg.is_volatile ? 'VOLATILE'
                 : reg.is_trending ? 'TREND'
@@ -661,36 +711,38 @@ function renderModuleBreakdown(pred){
 function renderMicro(micro){
   if(!micro) return;
   currentMicro = micro;
-  const bsBuy = $('bs-buy'), bsSell = $('bs-sell');
+  // FIX (UI-P0-4, 2026-07-21): null-safe throughout.
   const buyPct = Math.max(0, Math.min(100, Math.round(micro.buy_pct || 50)));
   const sellPct = 100 - buyPct;
-  bsBuy.style.width = buyPct + '%';
-  bsSell.style.width = sellPct + '%';
-  bsBuy.textContent = buyPct + '%';
-  bsSell.textContent = sellPct + '%';
+  _setStyle('bs-buy',  'width', buyPct + '%');
+  _setStyle('bs-sell', 'width', sellPct + '%');
+  _setText('bs-buy',  buyPct + '%');
+  _setText('bs-sell', sellPct + '%');
 
   const press = (micro.pressure || '—').toUpperCase();
-  const msPressure = $('ms-pressure');
-  msPressure.textContent = press;
-  msPressure.className = 'pressure-badge ' + (press === 'BUYER' ? 'buyer' : press === 'SELLER' ? 'seller' : 'fight');
+  _setText('ms-pressure', press);
+  _setClass('ms-pressure', 'pressure-badge ' + (press === 'BUYER' ? 'buyer' : press === 'SELLER' ? 'seller' : 'fight'));
 
   const react = (micro.reaction || '—').toUpperCase();
-  const msReaction = $('ms-reaction');
-  msReaction.textContent = react === 'BUYER' ? 'BUYER REACT' : react === 'SELLER' ? 'SELLER REACT' : '—';
-  msReaction.className = 'react-badge ' + (react === 'BUYER' ? 'recovery' : react === 'SELLER' ? 'exhaust' : 'none');
+  _setText('ms-reaction', react === 'BUYER' ? 'BUYER REACT' : react === 'SELLER' ? 'SELLER REACT' : '—');
+  _setClass('ms-reaction', 'react-badge ' + (react === 'BUYER' ? 'recovery' : react === 'SELLER' ? 'exhaust' : 'none'));
 
   const msFight = $('ms-fight');
-  if(micro.is_fight){
-    msFight.innerHTML = '<span style="color:var(--yellow);font-weight:700">⚠ YES</span> <span style="color:var(--text-dim);font-size:10px">(' + (micro.crosses||0) + ' crosses)</span>';
-  } else {
-    msFight.innerHTML = 'No <span style="color:var(--text-dim);font-size:10px">(' + (micro.crosses||0) + ' crosses)</span>';
+  if(msFight){
+    if(micro.is_fight){
+      msFight.innerHTML = '<span style="color:var(--yellow);font-weight:700">⚠ YES</span> <span style="color:var(--text-dim);font-size:10px">(' + (micro.crosses||0) + ' crosses)</span>';
+    } else {
+      msFight.innerHTML = 'No <span style="color:var(--text-dim);font-size:10px">(' + (micro.crosses||0) + ' crosses)</span>';
+    }
   }
 
   const msHold = $('ms-hold');
-  if(micro.hold_price != null){
-    msHold.innerHTML = '<span style="color:var(--blue)">' + fmtPrice(micro.hold_price) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + (micro.hold_visits||0) + 'x)</span>';
-  } else {
-    msHold.textContent = '—';
+  if(msHold){
+    if(micro.hold_price != null){
+      msHold.innerHTML = '<span style="color:var(--blue)">' + fmtPrice(micro.hold_price) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + (micro.hold_visits||0) + 'x)</span>';
+    } else {
+      msHold.textContent = '—';
+    }
   }
 
   const phases = micro.phases || [];
@@ -705,27 +757,26 @@ function renderMicro(micro){
   });
 
   const lr = (micro.last_react || '').toUpperCase();
-  const msLastReact = $('ms-last-react');
-  msLastReact.textContent = lr || '—';
-  msLastReact.className = 'react-badge ' + (lr === 'EXHAUST' ? 'exhaust' : lr === 'RECOVERY' ? 'recovery' : 'none');
+  _setText('ms-last-react', lr || '—');
+  _setClass('ms-last-react', 'react-badge ' + (lr === 'EXHAUST' ? 'exhaust' : lr === 'RECOVERY' ? 'recovery' : 'none'));
 
-  const msRunningConf = $('ms-running-conf');
-  msRunningConf.textContent = runningConf === 'CONFIRMING' ? '✅ CONFIRMING'
-                            : runningConf === 'OPPOSING' ? '❌ OPPOSING' : '—';
-  msRunningConf.className = 'running-conf ' + (runningConf === 'CONFIRMING' ? 'confirming' : runningConf === 'OPPOSING' ? 'opposing' : 'none');
+  _setText('ms-running-conf', runningConf === 'CONFIRMING' ? '✅ CONFIRMING'
+                          : runningConf === 'OPPOSING' ? '❌ OPPOSING' : '—');
+  _setClass('ms-running-conf', 'running-conf ' + (runningConf === 'CONFIRMING' ? 'confirming' : runningConf === 'OPPOSING' ? 'opposing' : 'none'));
 
-  $('ms-ticks').textContent = micro.tick_count || 0;
+  _setText('ms-ticks', micro.tick_count || 0);
   const net = micro.net || 0;
-  const msNet = $('ms-net');
-  msNet.textContent = (net >= 0 ? '+' : '') + net.toFixed(5);
-  msNet.style.color = net >= 0 ? 'var(--green)' : 'var(--red)';
+  _setText('ms-net', (net >= 0 ? '+' : '') + net.toFixed(5));
+  _setStyle('ms-net', 'color', net >= 0 ? 'var(--green)' : 'var(--red)');
 
   const rl = micro.round || {};
   const msRound = $('ms-round');
-  if(rl.near_level){
-    msRound.innerHTML = '<span style="color:var(--yellow)">' + fmtPrice(rl.near_level) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + (rl.near_strength || '—') + ')</span>';
-  } else {
-    msRound.textContent = '—';
+  if(msRound){
+    if(rl.near_level){
+      msRound.innerHTML = '<span style="color:var(--yellow)">' + fmtPrice(rl.near_level) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + (rl.near_strength || '—') + ')</span>';
+    } else {
+      msRound.textContent = '—';
+    }
   }
 }
 
@@ -864,7 +915,14 @@ function onServerSignals(sigs, asset, period){
   totalCorrect = graded.filter(s => s.accuracy === 'correct').length;
   renderHistory();
   renderAccuracy();
-  setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
+  // FIX (UI-P1-7, 2026-07-21): only reset scroll to top if the user was
+  // already near the top. Previously every refresh forced scrollTop=0,
+  // disrupting users who were browsing older signals (especially after
+  // clicking "Load older signals").
+  setTimeout(() => {
+    const hl = $('history-list');
+    if(hl && hl.scrollTop < 80) hl.scrollTop = 0;
+  }, 50);
 }
 
 function renderHistory(){
@@ -965,7 +1023,19 @@ window._showSignalDetail = function(ctimeKey){
     }
   }
   if(foundIdx === -1) return;
+  // FIX (UI-P1-10 + P3-5, 2026-07-21): remember the focused row so we
+  // can restore focus when the modal closes (Escape key or close button).
+  // Also mark the background #app as inert so Tab can't escape into it.
+  window._lastFocusedRow = document.activeElement;
   showSignalDetail(foundIdx);
+  // Mark background as inert (WCAG: modal should trap focus).
+  const appEl = document.getElementById('app');
+  if(appEl && appEl.setAttribute) appEl.setAttribute('inert','');
+  // Focus the close button so the modal opens with focus inside.
+  setTimeout(() => {
+    const closeBtn = document.getElementById('detail-close');
+    if(closeBtn) closeBtn.focus();
+  }, 50);
 };
 
 window._loadMoreHistory = function(){
@@ -1194,10 +1264,16 @@ function connect(){
   };
   ws.onmessage = e => {
     lastMessageAt = Date.now();
-    try { handleMsg(JSON.parse(e.data)); } catch(err){ console.error('msg parse error', err); }
+    let msg;
+    try { msg = JSON.parse(e.data); } catch(err){ console.error('msg parse error', err); return; }
+    // FIX (UI-P3-18, 2026-07-21): wrap handleMsg in try/catch so a throw
+    // inside any render function (renderSignal/renderMicro/renderHistory)
+    // doesn't kill the WS message handler and break all subsequent messages.
+    try { handleMsg(msg); }
+    catch(err){ console.error('[ws] handleMsg error', err, msg); }
   };
   ws.onclose = () => { setStatus('disconnected'); scheduleReconnect(); };
-  ws.onerror = () => { try{ ws.close(); }catch(_){} };
+  ws.onerror = () => { try{ ws.close(); }catch(_){} /* scheduleReconnect fires via onclose */ };
 }
 
 function send(obj){
@@ -1496,11 +1572,26 @@ function wireEvents(){
   if(detailClose){
     detailClose.addEventListener('click', () => {
       if(detailOverlay) detailOverlay.classList.remove('show');
+      // FIX (UI-P3-5, 2026-07-21): remove inert from background + restore focus.
+      const appEl = document.getElementById('app');
+      if(appEl && appEl.removeAttribute) appEl.removeAttribute('inert');
+      if(window._lastFocusedRow){
+        try{ window._lastFocusedRow.focus(); }catch(_){}
+        window._lastFocusedRow = null;
+      }
     });
   }
   if(detailOverlay){
     detailOverlay.addEventListener('click', (e) => {
-      if(e.target === detailOverlay) detailOverlay.classList.remove('show');
+      if(e.target === detailOverlay){
+        detailOverlay.classList.remove('show');
+        const appEl = document.getElementById('app');
+        if(appEl && appEl.removeAttribute) appEl.removeAttribute('inert');
+        if(window._lastFocusedRow){
+          try{ window._lastFocusedRow.focus(); }catch(_){}
+          window._lastFocusedRow = null;
+        }
+      }
     });
   }
 
@@ -1512,8 +1603,70 @@ function wireEvents(){
     });
   }
 
-  // Expose signal detail opener for onclick= attributes in history rows.
-  window._showSignalDetail = showSignalDetail;
+  // FIX (UI-P1-8, 2026-07-21): mobile history drawer toggle. On phones
+  // the history panel collapses to a slim header; tap to expand into a
+  // 50vh bottom sheet (CSS handles the layout; JS just toggles the class).
+  const drawerToggle = $('history-drawer-toggle');
+  if(drawerToggle){
+    drawerToggle.addEventListener('click', () => {
+      const panel = $('history-panel');
+      if(!panel) return;
+      const isCollapsed = panel.classList.toggle('collapsed');
+      drawerToggle.setAttribute('aria-expanded', String(!isCollapsed));
+      drawerToggle.textContent = isCollapsed ? '▸' : '▾';
+    });
+    // On desktop, ensure not collapsed by default
+    if(window.innerWidth > 768){
+      const panel = $('history-panel');
+      if(panel) panel.classList.remove('collapsed');
+    }
+  }
+
+  // FIX (UI-P1-3, 2026-07-21): Microstructure section collapse toggle.
+  // On mobile it's collapsed by default (saves ~200px vertical space);
+  // tap the section title to expand.
+  const microSection = document.querySelector('.panel-section--micro');
+  if(microSection){
+    const microTitle = microSection.querySelector('.section-title');
+    if(microTitle){
+      microTitle.style.cursor = 'pointer';
+      microTitle.addEventListener('click', (e) => {
+        // Don't toggle if the user clicked inside the micro-grid (e.g. on
+        // a micro-item). Only toggle when clicking the title itself.
+        if(e.target !== microTitle) return;
+        microSection.classList.toggle('collapsed');
+      });
+    }
+  }
+
+  // FIX (UI-P0-1, 2026-07-21): previously this line OVERWROTE the
+  // ctime-aware `window._showSignalDetail` defined earlier (line ~929)
+  // with the raw `showSignalDetail(idx)` function. History rows render
+  // with `onclick="window._showSignalDetail('1721817600')"` (a ctime
+  // STRING), but the overridden function expected an integer INDEX —
+  // so signalHistory["1721817600"] was undefined and the modal never
+  // opened. The ctime-aware version is the correct one; we now SKIP
+  // the override entirely (only set it if not already defined).
+  if(!window._showSignalDetail){
+    window._showSignalDetail = showSignalDetail;
+  }
+
+  // FIX (UI-P1-10, 2026-07-21): Escape key closes the modal + focus trap.
+  if(!window._escapeWired){
+    window._escapeWired = true;
+    document.addEventListener('keydown', (e) => {
+      if(e.key === 'Escape' && detailOverlay && detailOverlay.classList.contains('show')){
+        detailOverlay.classList.remove('show');
+        // FIX (UI-P3-5): remove inert + restore focus.
+        const appEl = document.getElementById('app');
+        if(appEl && appEl.removeAttribute) appEl.removeAttribute('inert');
+        if(window._lastFocusedRow){
+          try{ window._lastFocusedRow.focus(); }catch(_){}
+          window._lastFocusedRow = null;
+        }
+      }
+    });
+  }
 }
 
 /* ─── INIT ───────────────────────────────────────────────────────────────── */
@@ -1621,18 +1774,10 @@ function initApp(category){
         statWinrate.textContent = '—';
       }
     }
-
-    const statCountdown = $('stat-countdown');
-    if(statCountdown && runningCandleOpenTime && currentPeriod){
-      const closeAt = (runningCandleOpenTime + currentPeriod) * 1000;
-      const remaining = Math.max(0, Math.floor((closeAt - Date.now()) / 1000));
-      const m = Math.floor(remaining / 60);
-      const s = remaining % 60;
-      statCountdown.textContent = (m > 0 ? m + ':' : '') + (s < 10 ? '0' : '') + s;
-      if(remaining <= 5)       statCountdown.style.color = 'var(--red)';
-      else if(remaining <= 10) statCountdown.style.color = 'var(--yellow)';
-      else                     statCountdown.style.color = 'var(--text)';
-    }
+    // FIX (UI-P1-1, 2026-07-21): removed the #stat-countdown update block
+    // — that mini-stat no longer exists in the HTML. The chart-overlay
+    // #candle-countdown is the single source of truth for the countdown,
+    // updated by _countdownInterval (200ms) with color states.
   }, 250);
 
   _keepaliveInterval = setInterval(() => {

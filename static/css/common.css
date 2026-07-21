@@ -935,3 +935,198 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   #panel{border:none}
   #chart-wrap{height:60vh;min-height:400px}
 }
+
+/* ============================================================================
+   FIX (UI-P1-17, 2026-07-21): prefers-reduced-motion — WCAG 2.3.3
+   Respect users with vestibular disorders / motion sensitivity.
+   ============================================================================ */
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{
+    animation-duration:0.01ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:0.01ms !important;
+    scroll-behavior:auto !important;
+  }
+  .brand-dot, #conn-dot.connected, #signal-box.pending, #stale-msg,
+  #candle-countdown.critical, #chart-loading-spinner{
+    animation:none !important;
+  }
+}
+
+/* ============================================================================
+   FIX (UI-P1-18, 2026-07-21): safe-area insets for notched phones.
+   viewport-fit=cover in the HTML meta tag lets content extend under the
+   notch; this padding ensures it doesn't actually overlap the notch.
+   ============================================================================ */
+#topbar{
+  padding-top:env(safe-area-inset-top, 0);
+  padding-left:env(safe-area-inset-left, 0);
+  padding-right:env(safe-area-inset-right, 0);
+}
+#bottom{
+  padding-bottom:env(safe-area-inset-bottom, 0);
+  padding-left:env(safe-area-inset-left, 0);
+  padding-right:env(safe-area-inset-right, 0);
+}
+#topbar-row1{
+  padding-left:max(14px, env(safe-area-inset-left));
+  padding-right:max(14px, env(safe-area-inset-right));
+}
+#signal-detail-modal{
+  margin-top:env(safe-area-inset-top, 0);
+  margin-bottom:env(safe-area-inset-bottom, 0);
+}
+
+/* ============================================================================
+   FIX (UI-P1-8, 2026-07-21): mobile bottom bar as collapsible drawer.
+   On phones, the history panel collapses to a slim header; tap to expand
+   into a 50vh bottom sheet. Frees up the main viewport for the chart +
+   side panel (which contains the actual signal).
+   ============================================================================ */
+#history-drawer-toggle{
+  display:none;
+  background:transparent;
+  border:1px solid var(--border);
+  color:var(--text-dim);
+  font-size:14px;
+  padding:2px 8px;
+  border-radius:4px;
+  cursor:pointer;
+  line-height:1;
+  min-height:24px;
+  min-width:32px;
+}
+#history-drawer-toggle:hover{ color:var(--text); border-color:var(--text-dim); }
+
+@media (max-width:768px){
+  /* Show the drawer toggle on mobile */
+  #history-drawer-toggle{ display:inline-block; }
+  /* Collapsed state: slim 36px header only */
+  #history-panel.collapsed{
+    max-height:40px;
+    overflow:hidden;
+  }
+  #history-panel.collapsed #history-list{
+    opacity:0;
+    pointer-events:none;
+  }
+  /* Expanded state: 50vh bottom sheet */
+  #history-panel:not(.collapsed){
+    max-height:50vh;
+  }
+  /* The tick tape is non-essential on mobile — hide it */
+  #tick-tape{ display:none; }
+  /* Accuracy bar moves inline with the history header */
+  #accuracy-bar{ font-size:10px; padding:2px 8px; }
+}
+
+/* ============================================================================
+   FIX (UI-P0-5, 2026-07-21): extract inline styles to classes so media
+   queries can override them. Previously `style="flex:1;overflow-y:auto"`
+   on the Microstructure panel-section beat all media-query rules,
+   creating a nested-scroll trap on mobile.
+   ============================================================================ */
+.panel-section--scroll{
+  flex:1;
+  overflow-y:auto;
+}
+@media (max-width:768px){
+  /* On mobile, the body is the scroll container — let the panel section
+     flow naturally instead of nesting its own scroll area. */
+  .panel-section--scroll{
+    flex:0 0 auto;
+    overflow:visible;
+  }
+}
+
+/* Signal-meta and other inline-style extractions (P2-1) */
+.signal-meta{ margin-top:8px; }
+.micro-item--full{ grid-column:1/-1; }
+.bs-bar-labels{
+  display:flex;justify-content:space-between;
+  font-size:9px;color:var(--text-dim);margin-bottom:2px;
+}
+.engine-block{ margin-top:10px; }
+.engine-active-row{
+  display:flex;justify-content:space-between;align-items:center;
+  margin-top:6px;font-size:10px;color:var(--text-dim);
+}
+.section-title--inline{ margin:0; }
+.section-title--primary{
+  font-size:11px;
+  color:var(--text);
+  font-weight:700;
+}
+
+/* ============================================================================
+   FIX (UI-P1-3, 2026-07-21): visual hierarchy for reordered panel.
+   Signal section gets a slightly larger title; collapsible Microstructure
+   section gets a collapse indicator.
+   ============================================================================ */
+.panel-section--micro{
+  border-top:1px solid var(--border-soft);
+}
+.panel-section--micro .section-collapse{
+  display:block;width:100%;text-align:left;
+  background:transparent;border:none;
+  color:var(--text-dim);font-size:10px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.8px;
+  padding:8px 0;cursor:pointer;
+  font-family:var(--sans);
+}
+.panel-section--micro .section-collapse:hover{ color:var(--text); }
+.panel-section--micro .section-collapse::after{
+  content:' ▾';float:right;color:var(--text-dim);
+}
+.panel-section--micro.collapsed .micro-grid{ display:none; }
+.panel-section--micro.collapsed .section-collapse::after{
+  content:' ▸';
+}
+
+/* Default: collapse Microstructure on mobile, expand on desktop */
+@media (max-width:768px){
+  .panel-section--micro.collapsed .micro-grid{ display:none; }
+}
+
+/* ============================================================================
+   FIX (UI-P1-14, 2026-07-21): countdown badge moved away from chart's
+   price-axis labels. Solid background for legibility.
+   ============================================================================ */
+#candle-countdown{
+  /* Override the semi-transparent blue with a solid, more legible style */
+  background:rgba(33,150,243,1);
+  border:1px solid rgba(255,255,255,.15);
+}
+#candle-countdown.idle{
+  background:rgba(48,54,61,.95);
+}
+
+/* ============================================================================
+   FIX (UI-P1-19, 2026-07-21): when stale-overlay is visible, block chart
+   interaction so users don't trade on stale data.
+   ============================================================================ */
+#chart-wrap.stale #chart-container{
+  pointer-events:none;
+}
+
+/* ============================================================================
+   FIX (UI-P1-20, 2026-07-21): 4th connection state "stale" (yellow-orange).
+   Shows when the WS is technically open but no data has flowed for >15s.
+   ============================================================================ */
+#conn-dot.stale{
+  background:#ff9800;
+  box-shadow:0 0 8px #ff9800;
+  animation:pulse-dot 1.5s infinite;
+}
+
+/* Skip-link for keyboard a11y (P3-2) */
+.skip-link{
+  position:absolute;left:-9999px;top:0;
+  background:var(--accent);color:#000;
+  padding:8px 14px;border-radius:0 0 6px 0;
+  text-decoration:none;font-weight:700;font-size:12px;
+  z-index:200;
+}
+.skip-link:focus{
+  left:0;
+}
