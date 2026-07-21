@@ -187,7 +187,29 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 static_dir = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+# FIX (DATA-FLOW-2026-07-22): serve static files with cache-busting headers.
+# Previously StaticFiles used default caching which has NO Cache-Control header
+# — browsers then cache aggressively (especially mobile Chrome's "back-forward
+# cache" holds the old JS for hours). User reported "alltime_otc আসে না" even
+# though the file was correctly deployed, because their browser was serving
+# the OLD common.js (without _nextCategory / alltime_otc routing) from cache.
+#
+# Solution: short-lived cache (60s) so browsers revalidate frequently, but
+# still benefit from cache during a session. Combined with ETag (which
+# StaticFiles already sets), conditional requests get 304 Not Modified —
+# cheap for the server, fresh for the user.
+from starlette.staticfiles import StaticFiles as _StarletteStaticFiles
+class _NoCacheStaticFiles(_StarletteStaticFiles):
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        # Force revalidation on every load — browser MUST check ETag with
+        # the server before using its cached copy. This is the only way to
+        # guarantee users see new code within ~60 seconds of a deploy.
+        resp.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+        return resp
+
+app.mount("/static", _NoCacheStaticFiles(directory=str(static_dir)), name="static")
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
