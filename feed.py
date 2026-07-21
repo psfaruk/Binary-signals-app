@@ -535,6 +535,15 @@ class QuotexFeed:
         # ── Multi-asset stream management (replaces the old singleton
         # asset/candles/ticks/... fields) ───────────────────────────────────
         self._streams: dict[tuple[str, int], _AssetStream] = {}
+        # FIX (AUDIT-CORE #71, 2026-07-21): per-(asset, period) lock so that
+        # concurrent ensure_stream() calls for the same key serialize. Without
+        # this, two viewers subscribing to the same pair simultaneously would
+        # both see stream is None, both create a new _AssetStream, and the
+        # second overwrites the first in self._streams — orphaning the first
+        # task forever (it stays subscribed to Quotex but its outputs go
+        # nowhere). The orphan eventually counts toward _max_streams and
+        # triggers at_capacity for legitimately new pairs.
+        self._stream_locks: dict[tuple[str, int], asyncio.Lock] = {}
         # Default covers ~38 always-on forex pairs (see _reconcile_always_on)
         # plus headroom for on-demand non-1m streams and the brief overlap
         # window when a pair's real/otc asset code swaps.
@@ -929,64 +938,73 @@ class QuotexFeed:
         if getattr(self, '_sim_delegate', None) is not None:
             return await self._sim_delegate.ensure_stream(asset, period, cid=cid)
         key = (asset, period)
-        stream = self._streams.get(key)
-        if stream is not None:
+        # FIX (AUDIT-CORE #71, 2026-07-21): acquire per-key lock so concurrent
+        # ensure_stream() calls for the same (asset, period) serialize. The
+        # first caller creates the stream; subsequent callers see it exists
+        # and just add their cid to interested_cids. Previously both callers
+        # raced past the `stream is None` check, both created streams, and
+        # the second orphaned the first.
+        if key not in self._stream_locks:
+            self._stream_locks[key] = asyncio.Lock()
+        async with self._stream_locks[key]:
+            stream = self._streams.get(key)
+            if stream is not None:
+                if cid:
+                    stream.interested_cids.add(cid)
+                    for k, s in list(self._streams.items()):   # a cid watches one pair at a time
+                        if k != key:
+                            s.interested_cids.discard(cid)
+                stream.idle_since = None
+                # A joining viewer only gets ongoing tick/eoc broadcasts from here
+                # on — without handing back the CURRENT candles/prediction, their
+                # chart stays empty until the next candle close (up to a full
+                # period away) even though the stream has been live the whole
+                # time. Include the snapshot directly in the response so the
+                # frontend can paint immediately, same as a brand-new stream's
+                # first broadcast.
+                # Signal delay (2026-07-10): honor the same gate a live viewer
+                # would see — a joiner landing inside the opening-tick
+                # confirmation window gets prediction=None (PENDING) instead of
+                # the still-unconfirmed raw prediction; it arrives via the next
+                # gated tick broadcast same as for existing viewers.
+                gated_prediction = stream.prediction
+                if (stream.signal_delay_until > 0
+                        and time.time() < stream.signal_delay_until):
+                    gated_prediction = None
+                return {"type": "snapshot", "ok": True, "status": "streaming",
+                        "asset": asset, "period": period,
+                        "candles": stream.candles[-SNAPSHOT_CANDLES:], "prediction": gated_prediction}
+
+            # Payout gate — only blocks starting a BRAND NEW stream, same as the
+            # cooldown/capacity checks below. If a pair's payout later drifts
+            # below the floor, anyone already watching keeps their stream (see
+            # _reconcile_always_on, which only ever demotes always_on, never
+            # tears the stream down).
+            #
+            # FIX (2026-07-17): use category-specific payout floor. Real pairs
+            # use PAYOUT_FLOOR_REAL (default 70%), OTC pairs use PAYOUT_FLOOR_OTC
+            # (default 85%). The pair's "locked" flag is already set per-category
+            # in _load_pairs, but the error message here also needs the right
+            # floor value to display correctly.
+            pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
+            if pair and pair.get("locked"):
+                floor = _payout_floor_for(asset)
+                return {"ok": False, "status": "locked", "payout": pair.get("payout"),
+                        "reason": f"Needs {floor}% payout "
+                                  f"(currently {pair.get('payout', '?')}%)"}
+
+            if time.time() < self._cooldown_until:
+                return {"ok": False, "status": "cooldown",
+                        "retry_after": round(self._cooldown_until - time.time(), 1),
+                        "reason": self._cooldown_reason}
+            if len(self._streams) >= self._max_streams:
+                return {"ok": False, "status": "at_capacity", "max": self._max_streams}
+
+            stream = _AssetStream(asset=asset, period=period)
             if cid:
                 stream.interested_cids.add(cid)
-                for k, s in self._streams.items():   # a cid watches one pair at a time
-                    if k != key:
-                        s.interested_cids.discard(cid)
-            stream.idle_since = None
-            # A joining viewer only gets ongoing tick/eoc broadcasts from here
-            # on — without handing back the CURRENT candles/prediction, their
-            # chart stays empty until the next candle close (up to a full
-            # period away) even though the stream has been live the whole
-            # time. Include the snapshot directly in the response so the
-            # frontend can paint immediately, same as a brand-new stream's
-            # first broadcast.
-            # Signal delay (2026-07-10): honor the same gate a live viewer
-            # would see — a joiner landing inside the opening-tick
-            # confirmation window gets prediction=None (PENDING) instead of
-            # the still-unconfirmed raw prediction; it arrives via the next
-            # gated tick broadcast same as for existing viewers.
-            gated_prediction = stream.prediction
-            if (stream.signal_delay_until > 0
-                    and time.time() < stream.signal_delay_until):
-                gated_prediction = None
-            return {"type": "snapshot", "ok": True, "status": "streaming",
-                    "asset": asset, "period": period,
-                    "candles": stream.candles[-SNAPSHOT_CANDLES:], "prediction": gated_prediction}
-
-        # Payout gate — only blocks starting a BRAND NEW stream, same as the
-        # cooldown/capacity checks below. If a pair's payout later drifts
-        # below the floor, anyone already watching keeps their stream (see
-        # _reconcile_always_on, which only ever demotes always_on, never
-        # tears the stream down).
-        #
-        # FIX (2026-07-17): use category-specific payout floor. Real pairs
-        # use PAYOUT_FLOOR_REAL (default 70%), OTC pairs use PAYOUT_FLOOR_OTC
-        # (default 85%). The pair's "locked" flag is already set per-category
-        # in _load_pairs, but the error message here also needs the right
-        # floor value to display correctly.
-        pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
-        if pair and pair.get("locked"):
-            floor = _payout_floor_for(asset)
-            return {"ok": False, "status": "locked", "payout": pair.get("payout"),
-                    "reason": f"Needs {floor}% payout "
-                              f"(currently {pair.get('payout', '?')}%)"}
-
-        if time.time() < self._cooldown_until:
-            return {"ok": False, "status": "cooldown",
-                    "retry_after": round(self._cooldown_until - time.time(), 1),
-                    "reason": self._cooldown_reason}
-        if len(self._streams) >= self._max_streams:
-            return {"ok": False, "status": "at_capacity", "max": self._max_streams}
-
-        stream = _AssetStream(asset=asset, period=period)
-        if cid:
-            stream.interested_cids.add(cid)
-        self._streams[key] = stream
-        stream.task = asyncio.create_task(self._run_stream(stream))
+            self._streams[key] = stream
+            stream.task = asyncio.create_task(self._run_stream(stream))
 
         # FIX (2026-07-15): "connected but no candles" problem.
         # If real feed is connected but stream fails to get any ticks/candles
@@ -1506,9 +1524,21 @@ class QuotexFeed:
         # value instead of hitting the DB ~5-10 times per candle.
         # asyncio.to_thread: sqlite3 I/O would otherwise block the shared
         # event loop for every one of the ~38 concurrent streams (2026-07-10).
+        # FIX (AUDIT-CORE #4, 2026-07-21): raised n from 20 to 50 for more
+        # stable accuracy stats. With n=20, a single win/loss swings the
+        # reported accuracy by 5%, which can flip the blender between
+        # "boost ×1.05" and "dampen ×0.85" mode on every candle — causing
+        # erratic confidence thrashing. n=50 needs ~3 consecutive
+        # wins/losses to move the same 5%, smoothing the self-correction.
+        # Env-configurable for advanced tuning.
+        try:
+            _acc_n = int(os.environ.get("RECENT_ACCURACY_N", "50"))
+        except (TypeError, ValueError):
+            _acc_n = 50
+        _acc_n = max(8, min(_acc_n, 200))
         try:
             stream.cached_accuracy = await asyncio.to_thread(
-                _db.recent_accuracy, stream.asset, stream.period, n=20)
+                _db.recent_accuracy, stream.asset, stream.period, n=_acc_n)
         except Exception:
             stream.cached_accuracy = (None, 0)
         # FIX (2026-07-13): removed cached_accuracy_at + live_signal_history

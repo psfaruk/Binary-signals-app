@@ -714,17 +714,55 @@ class QuotexFeed:
             else:
                 zone = "UNKNOWN"
             sig = prediction["signal"]
+
+            # FIX (AUDIT-CORE #46 + #47, 2026-07-21): port full tag computation
+            # and postmortem format from feed.py so sim mode produces the same
+            # rich signal_log rows as real mode. Previously sim mode only
+            # emitted the DRAW tag, missing NOISE_CANDLE / BIG_MOVE /
+            # COUNTER_REGIME / WITH_REGIME / LATE_FLIP. The postmortem was
+            # also bare (no actual direction, move magnitude, ATR %, or tags).
+            move  = closed["close"] - closed["open"]
+            c_rng = closed["high"] - closed["low"]
+            _hist = candles[-11:-1] if len(candles) >= 11 else candles[:-1]
+            atr   = (sum(x["high"] - x["low"] for x in _hist) / len(_hist)
+                     if _hist else c_rng)
             tags = []
             if is_draw:
                 tags.append("DRAW")
-            move = closed["close"] - closed["open"]
-            pm = f"{sig} s={prediction['score']:+d} {prediction.get('strength')} agree={prediction.get('agree')} regime={regime}/{zone}"
+            if atr > 0 and c_rng < atr * 0.40:
+                tags.append("NOISE_CANDLE")
+            if atr > 0 and abs(move) >= atr * 0.80:
+                tags.append("BIG_MOVE")
+            if regime in ("TREND_UP", "TREND_DOWN"):
+                if ((regime == "TREND_UP" and sig == "PUT") or
+                        (regime == "TREND_DOWN" and sig == "CALL")):
+                    tags.append("COUNTER_REGIME")
+                elif ((regime == "TREND_UP" and sig == "CALL") or
+                        (regime == "TREND_DOWN" and sig == "PUT")):
+                    tags.append("WITH_REGIME")
+            if micro_snap and micro_snap.get("last_react") == "EXHAUST":
+                tags.append("LATE_FLIP")
+
+            _atr_note = (f" ({abs(move) / atr * 100:.0f}% of ATR)"
+                         if atr > 0 else "")
+            _actual_lbl = ("FLAT" if is_draw
+                           else "UP" if actual_up else "DOWN")
+            pm = (
+                f"{sig} s={prediction['score']:+d}"
+                f" {prediction.get('strength')}"
+                f" agree={prediction.get('agree')}"
+                f" | actual {_actual_lbl}"
+                f" move={move:+.5f}{_atr_note}"
+                f" | {accuracy.upper()}"
+                f" | regime {regime}/{zone}"
+                f"{' | ' + ','.join(tags) if tags else ''}"
+            )
             # Log ANY CALL/PUT signal so the history DB actually populates.
             if sig in ("CALL", "PUT"):
                 _db.log_signal(asset, period, closed["time"], sig, prediction["score"],
                                prediction["confidence"], "",
-                               "UP" if actual_up else ("FLAT" if is_draw else "DOWN"),
-                               accuracy, strength=prediction.get("strength"),
+                               _actual_lbl, accuracy,
+                               strength=prediction.get("strength"),
                                agree=prediction.get("agree"),
                                reasons=_json.dumps(reasons),
                                a_open=closed["open"], a_close=closed["close"],

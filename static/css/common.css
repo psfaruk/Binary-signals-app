@@ -585,6 +585,34 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 .history-row.wrong:hover{background:rgba(255,23,68,.20)}
 .history-row.draw:hover{background:rgba(255,193,7,.16)}
 
+/* FIX (AUDIT-CORE #106, 2026-07-21): "Load older signals" button styles. */
+.history-load-more{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  margin:6px 4px 10px 4px;
+  padding:8px 10px;
+  font-size:11px;
+  color:var(--text-dim);
+  background:rgba(255,255,255,.03);
+  border:1px solid var(--border);
+  border-radius:6px;
+  cursor:pointer;
+  transition:background .15s ease, color .15s ease, border-color .15s ease;
+  user-select:none;
+}
+.history-load-more:hover{
+  background:rgba(255,255,255,.07);
+  color:var(--text);
+  border-color:rgba(255,255,255,.18);
+}
+.history-load-more:active{ transform:scale(.99); }
+.history-load-more:focus-visible{
+  outline:2px solid var(--accent,#4a9eff);
+  outline-offset:2px;
+}
+
 .history-row-recent{
   box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 0 10px rgba(255,255,255,.06);
 }

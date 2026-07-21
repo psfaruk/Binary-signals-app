@@ -70,6 +70,81 @@ def init():
         # FIX (2026-07-17): index for per-category accuracy queries.
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_category ON signal_log(category, asset, period)")
 
+        # FIX (AUDIT-CRITICAL #003, 2026-07-21): add UNIQUE constraint on
+        # (asset, period, ctime) so the same candle can NEVER produce two
+        # signal_log rows. Previously a watchdog restart or a race between
+        # the timer-close path and the tick-close path could call
+        # _grade_and_log twice for the same candle, inserting duplicate rows.
+        # These duplicates inflated the user-visible signal count (one of the
+        # causes of the '48-signal limit' symptom: the DB had MORE rows than
+        # the user saw, because the frontend's HISTORY_MAX clipped them).
+        # We use a UNIQUE INDEX (not a table-level UNIQUE constraint) so we
+        # can drop + recreate it during migration without rebuilding the table.
+        #
+        # Migration steps:
+        #   1. Detect existing duplicate rows for the same (asset, period, ctime).
+        #   2. If duplicates exist, keep only the LATEST one (MAX(id)) and
+        #      delete the rest — the latest has the most-complete postmortem.
+        #   3. Drop any legacy UNIQUE indexes (from prior schemas) so the
+        #      new one can be created cleanly.
+        #   4. Create the UNIQUE index.
+        try:
+            # Step 1+2: dedupe existing rows.
+            dup_count = c.execute("""
+                SELECT COUNT(*) AS n FROM signal_log s1
+                WHERE EXISTS (
+                    SELECT 1 FROM signal_log s2
+                    WHERE s2.asset = s1.asset
+                      AND s2.period = s1.period
+                      AND s2.ctime  = s1.ctime
+                      AND s2.id     > s1.id
+                )
+            """).fetchone()
+            dup_n = dup_count[0] if dup_count else 0
+            if dup_n > 0:
+                print(f"[db] dedup signal_log: removing {dup_n} duplicate rows "
+                      f"(keeping latest id per (asset,period,ctime))")
+                c.execute("""
+                    DELETE FROM signal_log
+                    WHERE id IN (
+                        SELECT s1.id FROM signal_log s1
+                        WHERE EXISTS (
+                            SELECT 1 FROM signal_log s2
+                            WHERE s2.asset = s1.asset
+                              AND s2.period = s1.period
+                              AND s2.ctime  = s1.ctime
+                              AND s2.id     > s1.id
+                        )
+                    )
+                """)
+        except Exception as _e:
+            print(f"[db] signal_log dedup skipped: {_e}")
+
+        # Step 3: drop legacy UNIQUE indexes (best-effort).
+        # FIX (AUDIT-CRITICAL #008, 2026-07-21): older deployments may have
+        # created UNIQUE indexes under different names. Drop them so the
+        # new INSERT OR REPLACE works correctly.
+        try:
+            legacy_indexes = [
+                "ux_sl_asset_period_ctime",
+                "ux_sl_legacy_asset_period_ctime",
+                "uq_sl_asset_period_ctime",
+                "unique_sl_asset_period_ctime",
+            ]
+            for idx_name in legacy_indexes:
+                c.execute(f"DROP INDEX IF EXISTS {idx_name}")
+        except Exception:
+            pass
+
+        # Step 4: create the canonical UNIQUE index.
+        try:
+            c.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_sl_asset_period_ctime
+                ON signal_log(asset, period, ctime)
+            """)
+        except Exception as _e:
+            print(f"[db] could not create UNIQUE index on signal_log: {_e}")
+
         # FIX (2026-07-17): schema migration. Older deployments created
         # signal_log WITHOUT the `category` column. Detect & add it here
         # so existing DBs upgrade transparently on next startup.
@@ -161,6 +236,11 @@ def log_signal(asset, period, ctime, signal, score, confidence,
     # FIX (AUDIT-CORE #32 + #4, 2026-07-19): same lock-scope + error
     # visibility fix as `save()`. Connection open/close happens outside
     # the lock; only execute+commit is serialized.
+    # FIX (AUDIT-CRITICAL #003, 2026-07-21): use INSERT OR REPLACE so the
+    # new UNIQUE(asset, period, ctime) index prevents duplicate rows on
+    # watchdog restarts / double-EOC. The REPLACE preserves all columns
+    # from the latest grade (postmortem, tags, etc.). id changes on REPLACE
+    # but that's acceptable — id is only used for tie-breaking in queries.
     conn = _conn()
     try:
         with _lock:
@@ -172,7 +252,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                 category = kw.get("category")
                 if category is None:
                     category = "otc" if asset.endswith("_otc") else "real"
-                cur.execute("""INSERT INTO signal_log
+                cur.execute("""INSERT OR REPLACE INTO signal_log
                     (asset,period,ctime,signal,score,confidence,theories,
                      actual,accuracy,strength,agree,right_codes,wrong_codes,
                      reasons,a_open,a_close,regime,zone,tags,postmortem,category)
@@ -214,18 +294,31 @@ def get_micro_history(asset, period, n=5, before_ctime=None):
         return [dict(r) for r in reversed(rows)]
 
 
-def get_recent_signals(asset, period, limit=20):
+def get_recent_signals(asset, period, limit=50, before_ctime=None):
     """Return recent signals with full details for frontend history display.
-    Includes postmortem (win/loss reason), tags."""
+    Includes postmortem (win/loss reason), tags.
+
+    FIX (AUDIT-CORE #005, 2026-07-21): default limit raised from 20 to 50
+    to match the WS handler and the HTTP endpoint. Previously a caller
+    forgetting to pass `limit` would silently get only 20 rows.
+    FIX (AUDIT-CRITICAL #003, 2026-07-21): supports `before_ctime` for
+    pagination — the frontend's "Load more" button uses this to fetch
+    older signals on demand, bypassing the HISTORY_MAX cap.
+    """
     with _cursor() as c:
-        rows = c.execute("""SELECT ctime, signal, accuracy, score, confidence,
+        base = """SELECT ctime, signal, accuracy, score, confidence,
                    strength, agree, theories, actual, regime, zone,
                    tags, postmortem, right_codes, wrong_codes,
                    a_open, a_close, reasons
                    FROM signal_log
-                   WHERE asset=? AND period=? AND signal IN ('CALL','PUT')
-                   ORDER BY ctime DESC, id DESC LIMIT ?""",
-                   (asset, period, limit)).fetchall()
+                   WHERE asset=? AND period=? AND signal IN ('CALL','PUT')"""
+        params = [asset, period]
+        if before_ctime is not None:
+            base += " AND ctime < ?"
+            params.append(before_ctime)
+        base += " ORDER BY ctime DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = c.execute(base, params).fetchall()
         return [dict(r) for r in reversed(rows)]
 
 

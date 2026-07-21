@@ -85,6 +85,28 @@ def init_brain():
         cur.execute("CREATE INDEX IF NOT EXISTS ix_bp_accuracy ON brain_predictions(accuracy)")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_bp_regime ON brain_predictions(regime, accuracy)")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_bp_asset_regime ON brain_predictions(asset, regime, accuracy)")
+        # FIX (AUDIT-CORE #51, 2026-07-21): UNIQUE index on (asset, period, ctime)
+        # so INSERT OR REPLACE in record_prediction() dedupes correctly. First
+        # dedupe any existing duplicates so the index creation succeeds.
+        try:
+            cur.execute("""
+                DELETE FROM brain_predictions WHERE id IN (
+                    SELECT b1.id FROM brain_predictions b1
+                    WHERE EXISTS (
+                        SELECT 1 FROM brain_predictions b2
+                        WHERE b2.asset = b1.asset
+                          AND b2.period = b1.period
+                          AND b2.ctime  = b1.ctime
+                          AND b2.id     > b1.id
+                    )
+                )
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_bp_asset_period_ctime
+                ON brain_predictions(asset, period, ctime)
+            """)
+        except Exception as _e:
+            print(f"[brain] could not create UNIQUE index on brain_predictions: {_e}")
 
         # ── brain_module_votes: per-module vote for each prediction ──
         cur.execute("""CREATE TABLE IF NOT EXISTS brain_module_votes (
@@ -139,6 +161,16 @@ def init_brain():
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_bi_status ON brain_insights(status)")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_bi_priority ON brain_insights(priority, status)")
+        # FIX (AUDIT-CORE #59, 2026-07-21): index on (insight_type, applies_to, title)
+        # so insert_insight can dedupe against recent identical insights. Without
+        # dedup, every analyze_and_learn call (every 50 graded signals) inserted
+        # new rows for the same patterns, causing brain_insights to grow
+        # unbounded with near-duplicate entries.
+        try:
+            cur.execute("""CREATE INDEX IF NOT EXISTS ix_bi_dedup
+                          ON brain_insights(insight_type, applies_to, title, ts DESC)""")
+        except Exception:
+            pass
 
         # ── brain_learning: learned weights per pair per module ──
         cur.execute("""CREATE TABLE IF NOT EXISTS brain_learning (
@@ -275,7 +307,14 @@ def record_prediction(prediction: dict, asset: str, period: int,
 
         columns = ", ".join(pred_data.keys())
         placeholders = ", ".join(["?"] * len(pred_data))
-        cur.execute(f"INSERT INTO brain_predictions ({columns}) VALUES ({placeholders})",
+        # FIX (AUDIT-CORE #51, 2026-07-21): use INSERT OR REPLACE to prevent
+        # duplicate brain_predictions rows for the same (asset, period, ctime).
+        # Previously a watchdog restart or double-EOC would insert duplicates,
+        # which the brain's analyze_and_learn then double-counted in its
+        # win-rate stats, producing wrong weight recommendations. The
+        # brain_predictions table needs a UNIQUE(asset, period, ctime) index
+        # for this to work — see init_brain().
+        cur.execute(f"INSERT OR REPLACE INTO brain_predictions ({columns}) VALUES ({placeholders})",
                     list(pred_data.values()))
         pred_id = cur.lastrowid
 
@@ -326,6 +365,55 @@ def record_prediction(prediction: dict, asset: str, period: int,
         print(f"[brain] record error: {e}")
     finally:
         conn.close()
+
+
+# FIX (AUDIT-CORE #59, 2026-07-21): helper that dedupes brain_insights
+# inserts. Checks if an active insight with the same (insight_type, title)
+# already exists within the last 24h. If so, UPDATE its description /
+# recommendation / priority / confidence (so the insight reflects the
+# latest evidence) and skip the INSERT. This prevents brain_insights from
+# growing unbounded with near-duplicate rows on every analyze_and_learn call.
+_INSIGHT_DEDUP_WINDOW_SEC = 24 * 3600  # 24 hours
+
+def _insert_insight_dedup(cur, insight_type, title, description,
+                          recommendation, priority, confidence,
+                          applies_to=None):
+    """Insert a brain_insights row, deduping against recent identical insights.
+
+    If an active insight with the same (insight_type, title) exists and was
+    inserted within the last 24h, UPDATE its description / recommendation /
+    priority / confidence in place instead of inserting a new row. This keeps
+    brain_insights bounded — one row per (insight_type, title) per 24h window.
+    """
+    now = time.time()
+    cutoff = now - _INSIGHT_DEDUP_WINDOW_SEC
+    try:
+        existing = cur.execute("""SELECT id FROM brain_insights
+            WHERE insight_type = ? AND title = ? AND ts >= ?
+            ORDER BY ts DESC LIMIT 1""",
+            (insight_type, title, cutoff)).fetchone()
+    except Exception:
+        existing = None
+    if existing:
+        try:
+            cur.execute("""UPDATE brain_insights
+                SET ts = ?, description = ?, recommendation = ?,
+                    priority = ?, confidence = ?, applies_to = ?, status = 'active'
+                WHERE id = ?""",
+                (now, description, recommendation, priority, confidence,
+                 applies_to, existing["id"]))
+        except Exception as _e:
+            print(f"[brain] insight update failed: {_e}")
+        return
+    try:
+        cur.execute("""INSERT INTO brain_insights (
+            ts, insight_type, title, description,
+            recommendation, priority, status, applies_to, confidence, auto_generated
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, 1)""",
+            (now, insight_type, title, description,
+             recommendation, priority, applies_to, confidence))
+    except Exception as _e:
+        print(f"[brain] insight insert failed: {_e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -380,8 +468,24 @@ def _analyze_module_performance(cur, min_samples):
         call_wr = row["call_correct"] / row["call_total"] if row["call_total"] > 0 else 0
         put_wr = row["put_correct"] / row["put_total"] if row["put_total"] > 0 else 0
 
-        # Recommended weight adjustment
-        if wr < 0.40:
+        # Recommended weight adjustment.
+        # FIX (AUDIT-CORE #17, 2026-07-21): the previous if/elif chain had
+        # `elif wr > 0.60` AFTER `elif wr > 0.55`, which made the 0.60
+        # branch UNREACHABLE — any wr > 0.60 also satisfies wr > 0.55, so
+        # the BOOST_STRONG (×1.5) tier never fired. Reordered so the
+        # higher threshold is checked first. Excellent modules (>60% win
+        # rate) now correctly get ×1.5 instead of ×1.3.
+        if wr > 0.60:
+            rec_weight = 1.5
+            action = "BOOST_STRONG"
+            priority = "HIGH"
+            notes = f"Module excellent ({wr:.0%}). Recommend weight ×1.5."
+        elif wr > 0.55:
+            rec_weight = 1.3
+            action = "BOOST"
+            priority = "MEDIUM"
+            notes = f"Module overperforming ({wr:.0%}). Recommend weight ×1.3."
+        elif wr < 0.40:
             rec_weight = 0.5
             action = "DAMPEN_SEVERE"
             priority = "HIGH"
@@ -391,16 +495,6 @@ def _analyze_module_performance(cur, min_samples):
             action = "DAMPEN"
             priority = "MEDIUM"
             notes = f"Module underperforming ({wr:.0%}). Recommend weight ×0.7."
-        elif wr > 0.55:
-            rec_weight = 1.3
-            action = "BOOST"
-            priority = "MEDIUM"
-            notes = f"Module overperforming ({wr:.0%}). Recommend weight ×1.3."
-        elif wr > 0.60:
-            rec_weight = 1.5
-            action = "BOOST_STRONG"
-            priority = "HIGH"
-            notes = f"Module excellent ({wr:.0%}). Recommend weight ×1.5."
         else:
             rec_weight = 1.0
             action = "NORMAL"
@@ -437,13 +531,10 @@ def _analyze_module_performance(cur, min_samples):
             desc += f"PUT: {put_wr:.0%} ({row['put_correct']}/{row['put_total']}). "
             desc += f"Recommendation: {action} (weight ×{rec_weight})."
 
-            cur.execute("""INSERT INTO brain_insights (
-                ts, insight_type, title, description,
-                recommendation, priority, status, confidence, auto_generated
-            ) VALUES (?,?,?,?,?,?, 'active', ?, 1)""",
-                (time.time(), insight_type, title, desc,
-                 f"Set {row['module_name']} weight to {rec_weight} for {row['asset']}",
-                 priority, wr))
+            # FIX (AUDIT-CORE #59, 2026-07-21): route through dedup helper.
+            _insert_insight_dedup(cur, insight_type, title, desc,
+                f"Set {row['module_name']} weight to {rec_weight} for {row['asset']}",
+                priority, wr, applies_to=row['asset'])
 
 
 def _analyze_regime_patterns(cur, min_samples):
@@ -464,16 +555,13 @@ def _analyze_regime_patterns(cur, min_samples):
             continue
         wr = counts["correct"] / total
         if wr < 0.45:
-            cur.execute("""INSERT INTO brain_insights (
-                ts, insight_type, title, description,
-                recommendation, priority, confidence, auto_generated
-            ) VALUES (?, 'REGIME_PATTERN', ?, ?, ?, 'HIGH', ?, 1)""",
-                (time.time(),
-                 f"Low accuracy in {regime}: {wr:.0%}",
-                 f"Engine wins only {wr:.0%} in {regime} regime ({counts['correct']}/{total}). "
-                 f"This regime is problematic — consider skipping signals or inverting logic.",
-                 f"Apply confidence penalty in {regime} regime",
-                 wr))
+            # FIX (AUDIT-CORE #59, 2026-07-21): route through dedup helper.
+            _insert_insight_dedup(cur, 'REGIME_PATTERN',
+                f"Low accuracy in {regime}: {wr:.0%}",
+                f"Engine wins only {wr:.0%} in {regime} regime ({counts['correct']}/{total}). "
+                f"This regime is problematic — consider skipping signals or inverting logic.",
+                f"Apply confidence penalty in {regime} regime",
+                'HIGH', wr, applies_to=regime)
 
 
 def _analyze_session_patterns(cur, min_samples):
@@ -489,16 +577,13 @@ def _analyze_session_patterns(cur, min_samples):
     for row in rows:
         wr = row["correct"] / row["total"] if row["total"] > 0 else 0
         if wr < 0.45:
-            cur.execute("""INSERT INTO brain_insights (
-                ts, insight_type, title, description,
-                recommendation, priority, confidence, auto_generated
-            ) VALUES (?, 'SESSION_PATTERN', ?, ?, ?, 'MEDIUM', ?, 1)""",
-                (time.time(),
-                 f"Low accuracy in {row['session_name']} session: {wr:.0%}",
-                 f"During {row['session_name']} session, win rate is only {wr:.0%} "
-                 f"({row['correct']}/{row['total']}). Market behavior may be different.",
-                 f"Reduce confidence in {row['session_name']} session or skip signals",
-                 wr))
+            # FIX (AUDIT-CORE #59, 2026-07-21): route through dedup helper.
+            _insert_insight_dedup(cur, 'SESSION_PATTERN',
+                f"Low accuracy in {row['session_name']} session: {wr:.0%}",
+                f"During {row['session_name']} session, win rate is only {wr:.0%} "
+                f"({row['correct']}/{row['total']}). Market behavior may be different.",
+                f"Reduce confidence in {row['session_name']} session or skip signals",
+                'MEDIUM', wr, applies_to=row['session_name'])
 
 
 def _analyze_confidence_calibration(cur, min_samples):
@@ -517,17 +602,14 @@ def _analyze_confidence_calibration(cur, min_samples):
         bin_mid = row["conf_bin"] + 5
         if wr < bin_mid / 100.0 - 0.10:
             # Significantly overconfident
-            cur.execute("""INSERT INTO brain_insights (
-                ts, insight_type, title, description,
-                recommendation, priority, confidence, auto_generated
-            ) VALUES (?, 'CONFIDENCE_CALIBRATION', ?, ?, ?, 'HIGH', ?, 1)""",
-                (time.time(),
-                 f"Overconfident at {row['conf_bin']}-{row['conf_bin']+9}%: actual {wr:.0%}",
-                 f"Predictions with confidence {row['conf_bin']}-{row['conf_bin']+9}% "
-                 f"only win {wr:.0%} ({row['correct']}/{row['total']}). "
-                 f"Expected ~{bin_mid}%. Engine is overconfident in this range.",
-                 f"Cap confidence at {row['conf_bin']-10}% for this bin",
-                 wr))
+            # FIX (AUDIT-CORE #59, 2026-07-21): route through dedup helper.
+            _insert_insight_dedup(cur, 'CONFIDENCE_CALIBRATION',
+                f"Overconfident at {row['conf_bin']}-{row['conf_bin']+9}%: actual {wr:.0%}",
+                f"Predictions with confidence {row['conf_bin']}-{row['conf_bin']+9}% "
+                f"only win {wr:.0%} ({row['correct']}/{row['total']}). "
+                f"Expected ~{bin_mid}%. Engine is overconfident in this range.",
+                f"Cap confidence at {row['conf_bin']-10}% for this bin",
+                'HIGH', wr, applies_to=f"conf_{row['conf_bin']}")
 
 
 def _analyze_signal_agreement(cur, min_samples):
@@ -553,17 +635,14 @@ def _analyze_signal_agreement(cur, min_samples):
 
         # If module has high win rate but low agreement, it's a contrarian indicator
         if wr > 0.55 and agree_rate < 0.40:
-            cur.execute("""INSERT INTO brain_insights (
-                ts, insight_type, title, description,
-                recommendation, priority, confidence, auto_generated
-            ) VALUES (?, 'CONTRARIAN_MODULE', ?, ?, ?, 'HIGH', ?, 1)""",
-                (time.time(),
-                 f"{row['module_name']} is a contrarian indicator",
-                 f"Module {row['module_name']} has {wr:.0%} win rate but only "
-                 f"agrees with final {agree_rate:.0%} of the time. "
-                 f"When it disagrees, it's often RIGHT. Consider boosting its vote.",
-                 f"Increase {row['module_name']} weight when it disagrees with majority",
-                 wr))
+            # FIX (AUDIT-CORE #59, 2026-07-21): route through dedup helper.
+            _insert_insight_dedup(cur, 'CONTRARIAN_MODULE',
+                f"{row['module_name']} is a contrarian indicator",
+                f"Module {row['module_name']} has {wr:.0%} win rate but only "
+                f"agrees with final {agree_rate:.0%} of the time. "
+                f"When it disagrees, it's often RIGHT. Consider boosting its vote.",
+                f"Increase {row['module_name']} weight when it disagrees with majority",
+                'HIGH', wr, applies_to=row['module_name'])
 
 
 def _analyze_htf_patterns(cur, min_samples):
@@ -585,16 +664,13 @@ def _analyze_htf_patterns(cur, min_samples):
             continue
         wr = counts["correct"] / total
         if wr < 0.45:
-            cur.execute("""INSERT INTO brain_insights (
-                ts, insight_type, title, description,
-                recommendation, priority, confidence, auto_generated
-            ) VALUES (?, 'HTF_PATTERN', ?, ?, ?, 'MEDIUM', ?, 1)""",
-                (time.time(),
-                 f"Low accuracy when HTF {key}: {wr:.0%}",
-                 f"When HTF trend is {key}, win rate is only {wr:.0%} "
-                 f"({counts['correct']}/{total}).",
-                 f"Reduce confidence or skip when HTF is {key}",
-                 wr))
+            # FIX (AUDIT-CORE #59, 2026-07-21): route through dedup helper.
+            _insert_insight_dedup(cur, 'HTF_PATTERN',
+                f"Low accuracy when HTF {key}: {wr:.0%}",
+                f"When HTF trend is {key}, win rate is only {wr:.0%} "
+                f"({counts['correct']}/{total}).",
+                f"Reduce confidence or skip when HTF is {key}",
+                'MEDIUM', wr, applies_to=key)
 
 
 def _analyze_loss_clusters(cur):
@@ -624,16 +700,14 @@ def _analyze_loss_clusters(cur):
         else:
             if current_streak >= 5:
                 # Record loss cluster
-                cur.execute("""INSERT INTO brain_insights (
-                    ts, insight_type, title, description,
-                    recommendation, priority, confidence, auto_generated
-                ) VALUES (?, 'LOSS_CLUSTER', ?, ?, ?, 'HIGH', 0, 1)""",
-                    (time.time(),
-                     f"{current_asset}: {current_streak} consecutive losses",
-                     f"Pair {current_asset} had {current_streak} consecutive losses "
-                     f"starting at {datetime.fromtimestamp(streak_start).isoformat()}. "
-                     f"This may indicate a regime shift or broker pattern change.",
-                     f"Skip {current_asset} for 30 minutes or reduce confidence"))
+                # FIX (AUDIT-CORE #59, 2026-07-21): route through dedup helper.
+                _insert_insight_dedup(cur, 'LOSS_CLUSTER',
+                    f"{current_asset}: {current_streak} consecutive losses",
+                    f"Pair {current_asset} had {current_streak} consecutive losses "
+                    f"starting at {datetime.fromtimestamp(streak_start).isoformat()}. "
+                    f"This may indicate a regime shift or broker pattern change.",
+                    f"Skip {current_asset} for 30 minutes or reduce confidence",
+                    'HIGH', 0.0, applies_to=current_asset)
             current_streak = 0
 
 

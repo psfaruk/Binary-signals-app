@@ -537,6 +537,14 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     #   - recent_accuracy > 0.60 → confidence *= 1.05 (boost — engine is hot)
     # This lets the engine self-correct when it's been wrong recently,
     # preventing overconfidence during cold streaks.
+    #
+    # FIX (AUDIT-CORE #13, 2026-07-21): MOVED THIS BLOCK BEFORE the
+    # calibration-v2 caps (above). Previously the boost (×1.05) was applied
+    # AFTER all caps, so a confidence of 60 (capped by calibration v2)
+    # could be boosted to 63 — bypassing the cap that was meant to prevent
+    # overconfidence. Now the boost/dampen happens FIRST, then the caps
+    # clamp the final value. The dampen path was already correct (×0.85
+    # only reduces further); only the boost path was buggy.
     accuracy_note = ""
     if recent_accuracy is not None:
         try:
@@ -552,6 +560,26 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             pass
     if accuracy_note:
         all_reasons.append(accuracy_note)
+
+    # FIX (AUDIT-CORE #13, 2026-07-21): RE-APPLY all calibration caps AFTER
+    # the recent_accuracy boost so the boost cannot bypass them. The boost
+    # block above may have raised confidence past the caps — clamp again.
+    if confidence >= 100:
+        confidence = min(confidence, 50)
+    elif confidence >= 90:
+        confidence = min(confidence, 55)
+    elif confidence >= 80:
+        confidence = min(confidence, 60)
+    elif confidence >= 70:
+        confidence = min(confidence, 60)
+    if confidence > 75:
+        if not (total_groups >= 3 and net_margin >= 0.6):
+            confidence = min(confidence, 75)
+    # Also re-clamp the regime-specific dampener that was applied above —
+    # if the boost raised confidence, the TREND_UP -8 may need to be
+    # re-applied to keep the dampening effective.
+    if regime.get("regime") == "TREND_UP":
+        confidence = max(0, confidence - 8)
 
     if (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
             and has_pattern_confluence):
