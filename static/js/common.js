@@ -31,7 +31,15 @@ const WS_URL = (location.protocol==='https:'?'wss://':'ws://')+location.host+'/w
 const RECONNECT_BASE = 1000;
 const RECONNECT_MAX = 30000;
 const TICK_TAPE_MAX = 40;
-const HISTORY_MAX = 30;
+// FIX (AUDIT-CRITICAL #002, 2026-07-21): HISTORY_MAX was 30 but server
+// returns 50. Aligned to 100 so users see a longer, accurate history.
+// Also see ISSUE-001: onEoc now always refreshes history (was gated on
+// msg.prediction being truthy, which never happens — feed.py broadcasts
+// prediction=null on EOC and delivers the real prediction via tick a few
+// seconds later). Combined with dedup-by-ctime (ISSUE-009), this fixes
+// the user-reported '48-signal limit' bug where new signals stopped
+// appearing after a fixed count.
+const HISTORY_MAX = 100;
 
 /* ─── MODULE NAMES — single source of truth (mirrors core.constants.MODULE_NAMES) ──
    7 modules total: 5 shared + 1 OTC-specific (otc_pattern) + 1 Real-specific
@@ -743,7 +751,35 @@ function renderTape(){
 }
 
 /* ─── SIGNAL HISTORY ─────────────────────────────────────────────────────── */
+// FIX (AUDIT-CRITICAL #009, 2026-07-21): dedup by ctime to prevent the
+// same candle's signal from being added twice (e.g. when a watchdog
+// restart re-broadcasts an EOC). Returns true if added, false if dup.
+function _historyHasCtime(ctime){
+  if(!ctime) return false;
+  for(let i = signalHistory.length - 1; i >= 0; i--){
+    const h = signalHistory[i];
+    if(h && h.detail && h.detail.ctime === ctime) return true;
+    // Only scan the most recent 5 — older entries are far enough back.
+    if(signalHistory.length - i > 5) break;
+  }
+  return false;
+}
+
 function addHistory(signal, accuracy, detail){
+  // FIX (AUDIT-CRITICAL #009): skip duplicate ctime entries.
+  if(detail && detail.ctime && _historyHasCtime(detail.ctime)){
+    // Update the existing entry's accuracy instead of duplicating.
+    for(let i = signalHistory.length - 1; i >= 0; i--){
+      const h = signalHistory[i];
+      if(h && h.detail && h.detail.ctime === detail.ctime){
+        h.accuracy = accuracy || h.accuracy || 'pending';
+        h.detail = Object.assign({}, h.detail, detail);
+        renderHistory();
+        return;
+      }
+    }
+    return;
+  }
   signalHistory.push({ signal, accuracy: accuracy || 'pending', detail: detail || null });
   if(signalHistory.length > HISTORY_MAX) signalHistory.shift();
   renderHistory();
@@ -756,15 +792,73 @@ function loadServerHistory(){
 }
 
 function onServerSignals(sigs, asset, period){
-  if(!sigs || !sigs.length) return;
+  if(!sigs) return;
   // Drop stale responses from a previous pair switch.
   if(asset && asset !== currentAsset) return;
   if(period && period !== currentPeriod) return;
-  signalHistory = sigs.slice(-HISTORY_MAX).map(s => ({
-    signal: s.signal,
-    accuracy: s.accuracy,
-    detail: s,
-  }));
+  if(!sigs.length){
+    // Empty list — render the empty state but don't wipe locally-added
+    // entries that haven't been persisted yet (e.g. just-graded candle).
+    if(!signalHistory.length) renderHistory();
+    return;
+  }
+  // FIX (AUDIT-CRITICAL #007, 2026-07-21): merge instead of wholesale
+  // replace. Previously a fresh server fetch WIPED any locally-added
+  // entries (e.g. a just-graded candle whose row hadn't been written
+  // yet) — causing the newest signal to vanish for ~500ms until the
+  // next refresh. Now we dedupe by ctime and keep newer local data.
+  // FIX (AUDIT-CORE #106, 2026-07-21): also support pagination. If the
+  // server response includes `before_ctime` (from a Load-more request),
+  // the new sigs are PREPENDED to signalHistory instead of replacing.
+  const serverByCtime = {};
+  const orderedCtimes = [];
+  for(const s of sigs){
+    const key = s.ctime || ('idx_' + orderedCtimes.length);
+    serverByCtime[key] = s;
+    orderedCtimes.push(key);
+  }
+  // Build the incoming server entries (oldest→newest).
+  const incoming = [];
+  for(const key of orderedCtimes){
+    const s = serverByCtime[key];
+    incoming.push({ signal: s.signal, accuracy: s.accuracy, detail: s });
+  }
+  // Determine if this is a pagination response (server sent before_ctime
+  // in the response — server.py includes it when the request had it).
+  // We detect by checking if the newest incoming ctime is OLDER than the
+  // oldest existing local ctime — if so, this is a Load-more response.
+  const isNewestIncomingOlder = (signalHistory.length > 0
+    && signalHistory[0] && signalHistory[0].detail
+    && signalHistory[0].detail.ctime
+    && incoming.length > 0
+    && incoming[incoming.length - 1].detail
+    && incoming[incoming.length - 1].detail.ctime
+    && incoming[incoming.length - 1].detail.ctime < signalHistory[0].detail.ctime);
+
+  let merged;
+  if(isNewestIncomingOlder){
+    // Pagination response — prepend incoming to existing history.
+    // Dedupe by ctime (in case of overlap at the boundary).
+    const existingCtimes = new Set(
+      signalHistory.filter(h => h && h.detail && h.detail.ctime)
+                   .map(h => h.detail.ctime));
+    const uniqueIncoming = incoming.filter(
+      h => !h.detail || !h.detail.ctime || !existingCtimes.has(h.detail.ctime));
+    merged = uniqueIncoming.concat(signalHistory);
+  } else {
+    // Normal refresh — preserve local entries whose ctime isn't in the
+    // server response (they're newer than the server's snapshot).
+    const preserved = [];
+    for(const h of signalHistory){
+      if(h && h.detail && h.detail.ctime && !serverByCtime[h.detail.ctime]){
+        preserved.push(h);
+      }
+    }
+    merged = incoming.concat(preserved);
+  }
+  // Cap at HISTORY_MAX (keep the newest).
+  if(merged.length > HISTORY_MAX) merged.splice(0, merged.length - HISTORY_MAX);
+  signalHistory = merged;
   const graded = sigs.filter(s => s.accuracy === 'correct' || s.accuracy === 'wrong');
   totalSignals = graded.length;
   totalCorrect = graded.filter(s => s.accuracy === 'correct').length;
@@ -822,7 +916,13 @@ function renderHistory(){
     const time = (h.detail && h.detail.ctime)
       ? new Date(h.detail.ctime * 1000).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false})
       : '--:--';
-    const clickable = h.detail ? `onclick="window._showSignalDetail(${i})"` : '';
+    // FIX (AUDIT-CORE #74, 2026-07-21): use ctime as the lookup key (not
+    // the array index) so a click always opens the right signal even if
+    // signalHistory was mutated between render and click. Index-based
+    // lookup was fragile — pair-switch / addHistory / onServerSignals
+    // could all shift indices.
+    const clickKey = (h.detail && h.detail.ctime) ? String(h.detail.ctime) : '';
+    const clickable = clickKey ? `onclick="window._showSignalDetail('${clickKey}')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._showSignalDetail('${clickKey}')}"` : '';
     html += `<div class="history-row${accCls}${recentCls}" ${clickable}>`
          +  `<span class="history-time">${time}</span>`
          +  `<span class="history-signal ${sigCls}">${h.signal}</span>`
@@ -834,8 +934,53 @@ function renderHistory(){
          +  `</span>`
          +  `</div>`;
   }
+  // FIX (AUDIT-CORE #106, 2026-07-21): add a "Load more" button at the
+  // bottom so users can page through older signals beyond HISTORY_MAX.
+  // The button uses the oldest visible signal's ctime as the cursor and
+  // requests the next 100 signals from the server via the WS `signals`
+  // message with a `before_ctime` field (newly supported by server.py).
+  const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
+    ? signalHistory[0].detail.ctime : 0;
+  if(oldestCtime){
+    html += `<div id="history-load-more" class="history-load-more" `
+         +  `onclick="window._loadMoreHistory()" role="button" tabindex="0" `
+         +  `onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._loadMoreHistory()}">`
+         +  `Load older signals ↓</div>`;
+  }
   historyList.innerHTML = html;
 }
+
+// FIX (AUDIT-CORE #74 + #106, 2026-07-21): ctime-based signal detail
+// lookup + Load-more helper. Both are exposed on window so inline
+// onclick handlers can reach them.
+window._showSignalDetail = function(ctimeKey){
+  if(ctimeKey == null || ctimeKey === '') return;
+  const ctime = parseInt(ctimeKey, 10);
+  // Find the entry by ctime — robust to array reordering.
+  let foundIdx = -1;
+  for(let i = 0; i < signalHistory.length; i++){
+    if(signalHistory[i] && signalHistory[i].detail
+       && signalHistory[i].detail.ctime === ctime){
+      foundIdx = i; break;
+    }
+  }
+  if(foundIdx === -1) return;
+  showSignalDetail(foundIdx);
+};
+
+window._loadMoreHistory = function(){
+  if(!ws || ws.readyState !== WebSocket.OPEN) return;
+  if(!signalHistory.length || !signalHistory[0] || !signalHistory[0].detail
+     || !signalHistory[0].detail.ctime) return;
+  const beforeCtime = signalHistory[0].detail.ctime;
+  // Send the signals request with before_ctime — server returns the
+  // 100 signals older than the cursor. onServerSignals merges them.
+  send({ type: 'signals', asset: currentAsset, period: currentPeriod,
+         before_ctime: beforeCtime, limit: 100 });
+  // Optimistically disable the load-more button to prevent double-clicks.
+  const btn = $('history-load-more');
+  if(btn){ btn.textContent = 'Loading…'; btn.style.opacity = '0.6'; }
+};
 
 function showSignalDetail(idx){
   const h = signalHistory[idx];
@@ -1199,27 +1344,37 @@ function onEoc(msg){
   if(c.length){
     runningCandleOpenTime = c[c.length-1].time;
   }
-  // FIX (AUDIT-FRONTEND #7, 2026-07-19): lastPrediction was never cleared
-  // between candles. If a candle produced no prediction, the PREVIOUS
-  // candle's prediction was re-logged with the new candle's accuracy —
-  // double-counting signals and corrupting client-side win-rate.
-  // Now: if msg.prediction is null/undefined, clear lastPrediction BEFORE
-  // the history-logging block so addHistory is skipped for that candle.
-  // Also default msg.accuracy to 'pending' (not 'draw') when absent —
-  // 'draw' is a real graded outcome and shouldn't be the implicit default.
-  let predictionForHistory = null;
+  // FIX (AUDIT-CRITICAL #001, 2026-07-21): the previous block ONLY called
+  // addHistory and loadServerHistory when msg.prediction was truthy. But
+  // feed.py ALWAYS broadcasts prediction=null on EOC (the real prediction
+  // arrives 3s later via tick). So this code was DEAD — the frontend's
+  // signalHistory never updated from EOC, freezing the display at whatever
+  // was loaded at pair-switch. This is the ROOT CAUSE of the user-reported
+  // '48-signal limit' bug.
+  //
+  // Now: ALWAYS trigger a server history refresh on EOC. Use the previous
+  // prediction (lastPrediction) for the optimistic local add so the user
+  // sees the entry immediately; the server refresh corrects it 500ms later.
+  // Don't null-out lastPrediction on EOC (the prediction is still valid —
+  // it's just being re-evaluated; nulling it causes the signal panel to
+  // flash to PENDING confusingly).
+  const accuracyForHistory = msg.accuracy || 'pending';
   if(msg.prediction){
     lastPrediction = msg.prediction;
-    predictionForHistory = msg.prediction;
     renderSignal(msg.prediction);
+    addHistory(lastPrediction.signal || 'NEUTRAL', accuracyForHistory, msg.prediction);
+  } else if(lastPrediction){
+    // EOC grades the PREVIOUS candle's prediction against the just-closed
+    // candle. Update the existing history entry's accuracy in place.
+    addHistory(lastPrediction.signal || 'NEUTRAL', accuracyForHistory, lastPrediction);
+    // Don't renderSignal — keep showing the previous prediction until the
+    // new one arrives via tick (prevents PENDING flash).
   } else {
-    lastPrediction = null;
     renderPending();
   }
-  if(predictionForHistory){
-    addHistory(predictionForHistory.signal || 'NEUTRAL', msg.accuracy || 'pending');
-    setTimeout(loadServerHistory, 500);
-  }
+  // ALWAYS refresh from server — the DB has the authoritative graded row
+  // with postmortem, tags, regime, etc. that the live optimistic add lacks.
+  setTimeout(loadServerHistory, 500);
   currentMicro = null;
   runningConf = null;
 }

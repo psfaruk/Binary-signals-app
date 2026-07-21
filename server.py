@@ -398,8 +398,13 @@ async def brain_analyze():
 
 
 @app.get("/api/signals/{asset}/{period}")
-async def get_signals(asset: str, period: int, limit: int = 50):
-    return {"signals": _db.get_recent_signals(asset, period, limit)}
+async def get_signals(asset: str, period: int, limit: int = 100, before_ctime: int = None):
+    # FIX (AUDIT-CRITICAL #002, 2026-07-21): default limit raised from 50
+    # to 100 to match the frontend's HISTORY_MAX=100. Also accepts
+    # `before_ctime` for pagination (the frontend's "Load more" button
+    # uses this to fetch older signals on demand).
+    safe_limit = max(1, min(int(limit), 500))
+    return {"signals": _db.get_recent_signals(asset, period, safe_limit, before_ctime)}
 
 
 @app.get("/api/signals/{asset}/{period}/{ctime}")
@@ -540,10 +545,29 @@ async def ws_endpoint(ws: WebSocket):
                 # not blocked. Previously this endpoint would block all
                 # other WS clients for the duration of the query — under
                 # load this caused visible tick stutter for everyone else.
-                sigs = await asyncio.to_thread(_db.get_recent_signals, asset, period, 50)
+                # FIX (AUDIT-CRITICAL #002, 2026-07-21): limit raised from
+                # 50 to 100 to match the frontend's HISTORY_MAX. Also
+                # supports `before_ctime` for pagination and a `limit`
+                # field from the message (capped at 200).
+                try:
+                    req_limit = int(msg.get("limit", 100))
+                except (TypeError, ValueError):
+                    req_limit = 100
+                req_limit = max(1, min(req_limit, 200))
+                before_ctime = msg.get("before_ctime")
+                if before_ctime is not None:
+                    try:
+                        before_ctime = int(before_ctime)
+                    except (TypeError, ValueError):
+                        before_ctime = None
+                sigs = await asyncio.to_thread(
+                    _db.get_recent_signals, asset, period, req_limit, before_ctime)
                 await ws.send_text(json.dumps({
                     "type": "signals",
                     "signals": sigs,
+                    "asset": asset,
+                    "period": period,
+                    "before_ctime": before_ctime,
                 }))
 
     except WebSocketDisconnect:
