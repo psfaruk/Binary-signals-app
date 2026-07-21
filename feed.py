@@ -166,7 +166,21 @@ _FOREX_OTC = [
     "USDMXN_otc", "USDTRY_otc", "USDPKR_otc", "USDCOP_otc",
     "USDBDT_otc", "INRUSD_otc", "EURSGD_otc",
     "BRLUSD_otc", "USDARS_otc", "USDDZD_otc",
+    # FIX (DATA-FLOW-2026-07-22): All-Time OTC pairs — 6 exotics the user
+    # wants monitored 24/7 regardless of payout %. USDIDR_otc is new;
+    # USDBRL_otc is the canonical ISO form (BRLUSD_otc above is the
+    # broker's non-standard listing — kept both so either works).
+    "USDBRL_otc", "USDIDR_otc",
 ]
+
+# FIX (DATA-FLOW-2026-07-22): All-Time OTC pair set — these 6 exotic pairs
+# are ALWAYS-ON regardless of payout % (no payout floor). The user wants
+# 24/7 monitoring to detect Quotex algorithm changes. They use the OTC
+# engine (asset ends with _otc → routes to otc engine automatically).
+_ALLTIME_OTC_ASSETS = frozenset({
+    "USDBDT_otc", "USDBRL_otc", "USDPKR_otc",
+    "USDCOP_otc", "USDMXN_otc", "USDIDR_otc",
+})
 
 # Logical base symbols (no _otc suffix) that count as forex — used to filter
 # the REAL Quotex instrument list in _load_pairs, not just this fallback. A
@@ -570,6 +584,15 @@ class QuotexFeed:
         self._pairs_list: list[dict] = list(_DEFAULT_PAIRS)
         self._real_pairs_list: list[dict] = []   # populated by _load_pairs
         self._otc_pairs_list:  list[dict] = list(_DEFAULT_PAIRS)  # default to OTC list (matches old behavior)
+        # FIX (DATA-FLOW-2026-07-22): all-time OTC pair list — 6 exotic pairs
+        # that bypass the payout floor and are always-on. Populated in
+        # _load_pairs with live payout data; defaults below so the list is
+        # non-empty even before _load_pairs runs.
+        self._alltime_otc_pairs_list: list[dict] = [
+            {"asset": a, "display": a.replace("_otc","").replace("USD","USD/"),
+             "status": "otc", "payout": 85, "locked": False,
+             "category": "alltime_otc"} for a in sorted(_ALLTIME_OTC_ASSETS)
+        ]
         self._last_pairs_refresh: float = 0.0
 
         # NOTE (refactor 2026-07-14): the per-pair mute gate that used to live
@@ -767,13 +790,19 @@ class QuotexFeed:
             return self._sim_delegate.available_pairs()
         active_real = [p for p in self._real_pairs_list if p["status"] == "live"]
         active_otc  = [p for p in self._otc_pairs_list  if p["status"] == "otc"]
+        # FIX (DATA-FLOW-2026-07-22): all-time OTC pairs — always in the
+        # active list (never locked, never closed). Exotic OTC pairs cycle
+        # payout 30%↔90% but the user wants them tradeable regardless.
+        active_alltime = list(self._alltime_otc_pairs_list)
         return {
             "real_pairs": active_real,
             "otc_pairs":  active_otc,
+            "alltime_otc_pairs": active_alltime,
             "payout_floor_real": PAYOUT_FLOOR_REAL,
             "payout_floor_otc":  PAYOUT_FLOOR_OTC,
-            # Backward compat: combined list (real first, then otc)
-            "pairs":        active_real + active_otc,
+            "payout_floor_alltime_otc": 0,  # no floor — always tradeable
+            # Backward compat: combined list (real + otc + alltime)
+            "pairs":        active_real + active_otc + active_alltime,
             "payout_floor": PAYOUT_FLOOR_OTC,
         }
 
@@ -883,16 +912,43 @@ class QuotexFeed:
 
             self._real_pairs_list = real_pairs
             self._otc_pairs_list  = otc_pairs
-            # Backward-compat: combined list (real first, then otc). Old code
+            # FIX (DATA-FLOW-2026-07-22): update alltime_otc pair list with
+            # live payout data from Quotex instruments. The pair is always
+            # tradeable (no payout floor) but we still want to show the
+            # actual live payout in the UI. If the pair isn't in Quotex's
+            # instrument list (rare), keep the default 85% payout.
+            alltime_otc_pairs = []
+            for at_pair in self._alltime_otc_pairs_list:
+                # Find matching instrument in the OTC list (by asset name).
+                matching = next((p for p in otc_pairs if p["asset"] == at_pair["asset"]), None)
+                if matching:
+                    # Update payout + display from live data, but keep
+                    # category='alltime_otc' and locked=False (always
+                    # tradeable).
+                    alltime_otc_pairs.append({
+                        "asset":    matching["asset"],
+                        "display":  matching["display"],
+                        "status":   "otc",
+                        "payout":   matching["payout"],
+                        "locked":   False,  # alltime bypasses the floor
+                        "category": "alltime_otc",
+                    })
+                else:
+                    # Pair not in Quotex instruments — keep as-is (default).
+                    alltime_otc_pairs.append(at_pair)
+            self._alltime_otc_pairs_list = alltime_otc_pairs
+
+            # Backward-compat: combined list (real + otc + alltime). Old code
             # that reads self._pairs_list still works.
-            self._pairs_list = real_pairs + otc_pairs
+            self._pairs_list = real_pairs + otc_pairs + alltime_otc_pairs
             self._last_pairs_refresh = time.time()
 
             print(f"[feed] pairs loaded: "
                   f"{len(real_pairs)} real ({sum(1 for p in real_pairs if p['status']=='live')} live, "
                   f"{sum(1 for p in real_pairs if p['locked'])} locked <{PAYOUT_FLOOR_REAL}%) | "
                   f"{len(otc_pairs)} OTC ({sum(1 for p in otc_pairs if p['status']=='otc')} open, "
-                  f"{sum(1 for p in otc_pairs if p['locked'])} locked <{PAYOUT_FLOOR_OTC}%)")
+                  f"{sum(1 for p in otc_pairs if p['locked'])} locked <{PAYOUT_FLOOR_OTC}%) | "
+                  f"{len(alltime_otc_pairs)} all-time OTC (always tradeable)")
 
             if broadcast:
                 await broadcast({
@@ -900,8 +956,10 @@ class QuotexFeed:
                     "pairs":  self._pairs_list,            # backward compat
                     "real_pairs": real_pairs,
                     "otc_pairs":  otc_pairs,
+                    "alltime_otc_pairs": alltime_otc_pairs,
                     "payout_floor_real": PAYOUT_FLOOR_REAL,
                     "payout_floor_otc":  PAYOUT_FLOOR_OTC,
+                    "payout_floor_alltime_otc": 0,
                     "payout_floor": PAYOUT_FLOOR_OTC,      # backward compat
                 })
 
@@ -988,7 +1046,12 @@ class QuotexFeed:
             # in _load_pairs, but the error message here also needs the right
             # floor value to display correctly.
             pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
-            if pair and pair.get("locked"):
+            # FIX (DATA-FLOW-2026-07-22): all-time OTC pairs bypass the payout
+            # floor entirely. Check the dedicated list — if the asset is there,
+            # never reject it for low payout (the user explicitly wants these
+            # 6 exotic pairs tradeable regardless of payout %).
+            is_alltime = any(p["asset"] == asset for p in self._alltime_otc_pairs_list)
+            if pair and pair.get("locked") and not is_alltime:
                 floor = _payout_floor_for(asset)
                 return {"ok": False, "status": "locked", "payout": pair.get("payout"),
                         "reason": f"Needs {floor}% payout "
@@ -3227,6 +3290,13 @@ class QuotexFeed:
         # is locked, it's below its category's payout floor.
         eligible = {(p["asset"], 60) for p in self._pairs_list
                     if p["status"] in ("live", "otc") and not p.get("locked")}
+        # FIX (DATA-FLOW-2026-07-22): all-time OTC pairs are ALWAYS eligible
+        # for always-on — they bypass the payout floor entirely. Without
+        # this, the 6 exotic pairs (USDBDT, USDBRL, USDPKR, USDCOP, USDMXN,
+        # USDIDR) would never be pre-warmed → user opens the All-Time OTC
+        # page → sees "Loading..." forever because no stream is running.
+        for p in self._alltime_otc_pairs_list:
+            eligible.add((p["asset"], 60))
 
         for key, s in self._streams.items():
             if s.always_on and key not in eligible:
@@ -3273,6 +3343,11 @@ class QuotexFeed:
             p["asset"] for p in self._pairs_list
             if p["status"] in ("live", "otc") and not p.get("locked")
         }
+        # FIX (DATA-FLOW-2026-07-22): all-time OTC pairs are always eligible
+        # — they bypass the payout floor and should always be running so
+        # the All-Time OTC page has live data the moment the user opens it.
+        for p in self._alltime_otc_pairs_list:
+            eligible_assets.add(p["asset"])
 
         for asset in eligible_assets:
             key = (asset, 60)  # always_on is always 1m
