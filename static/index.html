@@ -37,6 +37,7 @@
     .router-links a:hover{transform:translateY(-1px)}
     .router-links a.real{background:rgba(0,200,83,.15);color:#00c853;border:1px solid rgba(0,200,83,.4)}
     .router-links a.otc{background:rgba(255,193,7,.15);color:#ffc107;border:1px solid rgba(255,193,7,.4)}
+    .router-links a.alltime{background:rgba(0,229,255,.15);color:#00e5ff;border:1px solid rgba(0,229,255,.4)}
     .noscript{color:#ff1744;font-size:12px;margin-top:8px}
   </style>
 </head>
@@ -46,8 +47,9 @@
   <div class="router-title">Binary Signal Terminal</div>
   <div class="router-sub">Redirecting to your last-used market…</div>
   <div class="router-links">
-    <a class="real" href="/static/real.html">Real Market</a>
-    <a class="otc"  href="/static/otc.html">OTC Market</a>
+    <a class="real"    href="/static/real.html">Real Market</a>
+    <a class="otc"     href="/static/otc.html">OTC Market</a>
+    <a class="alltime" href="/static/alltime_otc.html">All-Time OTC</a>
   </div>
   <noscript>
     <div class="noscript">JavaScript is required. Pick a market above to continue.</div>
@@ -64,7 +66,7 @@
   var category = 'otc';   // default — OTC is always open (24/7)
   try{
     var stored = localStorage.getItem('marketCategory');
-    if(stored === 'real' || stored === 'otc'){
+    if(stored === 'real' || stored === 'otc' || stored === 'alltime_otc'){
       category = stored;
     }
   }catch(_){ /* localStorage may be unavailable (private mode, etc.) */ }
@@ -72,7 +74,12 @@
   // Small delay so the spinner is visible — gives the user feedback that
   // something is happening, even on slow connections. Without this the
   // redirect is so fast it looks like the page flickered.
-  var target = '/static/' + category + '.html';
+  var targets = {
+    'real':         '/static/real.html',
+    'otc':          '/static/otc.html',
+    'alltime_otc':  '/static/alltime_otc.html',
+  };
+  var target = targets[category] || '/static/otc.html';
   setTimeout(function(){
     window.location.replace(target);
   }, 200);

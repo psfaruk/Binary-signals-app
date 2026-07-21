@@ -77,7 +77,7 @@ let lastPrediction = null;
 let signalHistory = [];
 let totalCorrect = 0, totalSignals = 0;
 let soundEnabled = false, audioCtx = null;
-let realPairsList = [], otcPairsList = [], pairsList = [];
+let realPairsList = [], otcPairsList = [], alltimeOtcPairsList = [], pairsList = [];
 let currentMicro = null, runningConf = null;
 let tapePrices = [], tapeDir = [];
 let tickTimestamps = [];
@@ -1138,19 +1138,27 @@ function renderPairs(payload){
     realPairsList = payload.real_pairs || [];
     otcPairsList  = payload.otc_pairs  || [];
   }
-  pairsList = realPairsList.concat(otcPairsList);
+  // FIX (DATA-FLOW-2026-07-22): support alltime_otc category.
+  alltimeOtcPairsList = payload.alltime_otc_pairs || [];
+  pairsList = realPairsList.concat(otcPairsList).concat(alltimeOtcPairsList);
 
   const pairSelect = $('pair-select');
   const pairsCount = $('pairs-count');
 
   // Render only the active category's pairs in the dropdown.
-  const activeList = currentCategory === 'real' ? realPairsList : otcPairsList;
+  let activeList;
+  if(currentCategory === 'real')         activeList = realPairsList;
+  else if(currentCategory === 'alltime_otc') activeList = alltimeOtcPairsList;
+  else                                   activeList = otcPairsList;
+
   pairSelect.innerHTML = '';
   if(activeList.length === 0){
     const opt = document.createElement('option');
     opt.value = '';
     if(currentCategory === 'real'){
       opt.textContent = '⚠ Real Market closed (weekend/bank holiday)';
+    } else if(currentCategory === 'alltime_otc'){
+      opt.textContent = 'No All-Time OTC pairs available';
     } else {
       opt.textContent = 'No OTC pairs available';
     }
@@ -1171,7 +1179,11 @@ function renderPairs(payload){
   }
 
   if(pairsCount){
-    pairsCount.textContent = (currentCategory === 'real' ? 'Real: ' : 'OTC: ') + activeList.length;
+    let label;
+    if(currentCategory === 'real')              label = 'Real: ';
+    else if(currentCategory === 'alltime_otc')  label = 'All-OTC: ';
+    else                                        label = 'OTC: ';
+    pairsCount.textContent = label + activeList.length;
   }
 
   // If the currently-selected asset is NOT in the active category's list,
@@ -1196,6 +1208,28 @@ function renderPairs(payload){
   if(cur && payoutLabel){
     payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
   }
+
+  // FIX (DATA-FLOW-2026-07-22): update the switch button label to show
+  // which market the user will switch to next.
+  _updateSwitchButtonLabel();
+}
+
+// FIX (DATA-FLOW-2026-07-22): update the switch button's label/title
+// based on what the NEXT market is.
+function _updateSwitchButtonLabel(){
+  const btn = $('market-switch-btn');
+  if(!btn) return;
+  const next = _nextCategory(currentCategory);
+  const labels = {
+    'real':         { text: 'Switch to Real',  title: 'Real Market (live forex, weekdays only)' },
+    'otc':          { text: 'Switch to OTC',   title: 'OTC Market (standard OTC pairs, 24/7)' },
+    'alltime_otc':  { text: 'Switch to All-OTC', title: 'All-Time OTC (exotic pairs, 24/7, no payout floor)' },
+  };
+  const lbl = labels[next] || labels.otc;
+  const textEl = btn.querySelector('.switch-text');
+  if(textEl) textEl.textContent = lbl.text;
+  btn.setAttribute('aria-label', lbl.text);
+  btn.title = lbl.title;
 }
 
 /* ─── MARKET STATUS INDICATOR ──────────────────────────────────────────────
@@ -1237,13 +1271,29 @@ function updateMarketStatusIndicator(){
    eliminates the BUG-1 class of issues entirely (each page only ever
    subscribes to pairs of its own category). */
 function setCategory(newCat){
-  if(newCat !== 'real' && newCat !== 'otc') return;
+  // FIX (DATA-FLOW-2026-07-22): added 'alltime_otc' as a 3rd category.
+  // Cycle: real → otc → alltime_otc → real.
+  if(newCat !== 'real' && newCat !== 'otc' && newCat !== 'alltime_otc') return;
   if(newCat === currentCategory) return;
   try{ localStorage.setItem('marketCategory', newCat); }catch(_){}
-  const target = newCat === 'real' ? '/static/real.html' : '/static/otc.html';
+  const targets = {
+    'real':         '/static/real.html',
+    'otc':          '/static/otc.html',
+    'alltime_otc':  '/static/alltime_otc.html',
+  };
+  const target = targets[newCat] || '/static/otc.html';
   // replace() — don't leave the old page in history so the browser back
-  // button doesn't bounce the user between the two market pages.
+  // button doesn't bounce the user between the market pages.
   window.location.replace(target);
+}
+
+// FIX (DATA-FLOW-2026-07-22): cycle through the 3 markets on switch click.
+// The switch button's label is updated by renderPairs() based on the
+// current category — see _updateSwitchButtonLabel().
+function _nextCategory(cat){
+  if(cat === 'real') return 'otc';
+  if(cat === 'otc')  return 'alltime_otc';
+  return 'real';  // alltime_otc → real
 }
 
 /* ─── WEBSOCKET ──────────────────────────────────────────────────────────── */
@@ -1592,11 +1642,12 @@ function wireEvents(){
     });
   }
 
-  // Market switch button → setCategory to the OTHER market.
+  // Market switch button → cycle to the NEXT market.
+  // FIX (DATA-FLOW-2026-07-22): cycle real → otc → alltime_otc → real.
   const switchBtn = $('market-switch-btn');
   if(switchBtn){
     switchBtn.addEventListener('click', () => {
-      setCategory(currentCategory === 'real' ? 'otc' : 'real');
+      setCategory(_nextCategory(currentCategory));
     });
   }
 
@@ -1701,7 +1752,7 @@ function initApp(category){
   chart = null; candleSeries = null; ghostSeries = null;
   candleData = []; lastPrediction = null;
   signalHistory = []; totalCorrect = 0; totalSignals = 0;
-  realPairsList = []; otcPairsList = []; pairsList = [];
+  realPairsList = []; otcPairsList = []; alltimeOtcPairsList = []; pairsList = [];
   currentMicro = null; runningConf = null;
   tapePrices = []; tapeDir = [];
   tickTimestamps = []; lastLivePrice = 0; lastTickAt = 0;
@@ -1712,7 +1763,11 @@ function initApp(category){
 
   currentCategory = category;
   // Default asset depends on the page's category.
-  currentAsset = (category === 'real') ? 'EURUSD' : 'EURUSD_otc';
+  // FIX (DATA-FLOW-2026-07-22): alltime_otc defaults to USDBDT_otc
+  // (first of the 6 exotic pairs the user requested).
+  if(category === 'real')               currentAsset = 'EURUSD';
+  else if(category === 'alltime_otc')   currentAsset = 'USDBDT_otc';
+  else                                  currentAsset = 'EURUSD_otc';
 
   // Persist the user's choice so the router index.html picks the right
   // page on next visit.
@@ -1755,8 +1810,17 @@ function initApp(category){
 
     const statActiveCat = $('stat-active-cat');
     if(statActiveCat){
-      statActiveCat.textContent = currentCategory.toUpperCase();
-      statActiveCat.style.color = currentCategory === 'real' ? 'var(--green)' : 'var(--yellow)';
+      // FIX (DATA-FLOW-2026-07-22): 3 categories with distinct colors.
+      let label, color;
+      if(currentCategory === 'real'){
+        label = 'REAL'; color = 'var(--green)';
+      } else if(currentCategory === 'alltime_otc'){
+        label = 'ALL-OTC'; color = 'var(--accent, #00e5ff)';
+      } else {
+        label = 'OTC'; color = 'var(--yellow)';
+      }
+      statActiveCat.textContent = label;
+      statActiveCat.style.color = color;
     }
     const statSignals = $('stat-signals');
     if(statSignals) statSignals.textContent = totalSignals;

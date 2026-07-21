@@ -59,6 +59,21 @@ _SIM_OTC_PAIRS = [
     {"asset": "EURCHF_otc", "display": "EUR/CHF", "status": "otc", "payout": 81, "locked": False, "category": "otc"},
 ]
 
+# FIX (DATA-FLOW-2026-07-22): All-time OTC pairs — always available regardless
+# of payout % (no payout floor). These exotic pairs cycle between low payout
+# (~30%) and high payout (~85-92%), with algorithm changes when payout spikes.
+# The user wants to monitor these 24/7 to learn the algorithm patterns.
+# Payout listed is the "headline" payout; actual live payout may vary.
+# category="alltime_otc" routes them to the OTC engine (mean-reversion tuned).
+_SIM_ALLTIME_OTC_PAIRS = [
+    {"asset": "USDBDT_otc",  "display": "USD/BDT",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
+    {"asset": "USDBRL_otc",  "display": "USD/BRL",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
+    {"asset": "USDPKR_otc",  "display": "USD/PKR",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
+    {"asset": "USDCOP_otc",  "display": "USD/COP",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
+    {"asset": "USDMXN_otc",  "display": "USD/MXN",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
+    {"asset": "USDIDR_otc",  "display": "USD/IDR",  "status": "otc", "payout": 85, "locked": False, "category": "alltime_otc"},
+]
+
 # Combined backward-compat list (real first, then otc) — matches feed.py
 _SIM_PAIRS = _SIM_REAL_PAIRS + _SIM_OTC_PAIRS
 
@@ -151,13 +166,16 @@ class QuotexFeed:
         self._pairs_list = list(_SIM_PAIRS)
         self._real_pairs_list = list(_SIM_REAL_PAIRS)
         self._otc_pairs_list  = list(_SIM_OTC_PAIRS)
+        # FIX (DATA-FLOW-2026-07-22): all-time OTC pairs (always available,
+        # no payout floor — used for 24/7 algorithm monitoring).
+        self._alltime_otc_pairs_list = list(_SIM_ALLTIME_OTC_PAIRS)
         # NOTE (refactor 2026-07-14): `_muted_theories` + `_last_perf_refresh`
         # removed — the prediction engine is candle_reaction (no theories).
         self._last_db_cleanup = 0.0
         self._last_pairs_refresh = 0.0
 
     def available_pairs(self) -> dict:
-        """Return Real + OTC pair lists with their respective payout floors.
+        """Return Real + OTC + All-time OTC pair lists with their payout floors.
 
         Matches feed.py's available_pairs() structure so the frontend
         doesn't care which feed (real or sim) it's talking to.
@@ -168,14 +186,21 @@ class QuotexFeed:
         full lists (including closed) are kept as `_real_pairs_list` /
         `_otc_pairs_list` instance attrs for debugging — call those
         directly if you need to see closed pairs.
+
+        FIX (DATA-FLOW-2026-07-22): added alltime_otc_pairs list. These
+        exotic OTC pairs have no payout floor — they're always tradeable
+        and are meant for 24/7 algorithm-change monitoring.
         """
         active_real = [p for p in self._real_pairs_list if p["status"] == "live"]
         active_otc  = [p for p in self._otc_pairs_list  if p["status"] == "otc"]
+        active_alltime = list(self._alltime_otc_pairs_list)
         return {
             "real_pairs": active_real,
             "otc_pairs":  active_otc,
+            "alltime_otc_pairs": active_alltime,
             "payout_floor_real": PAYOUT_FLOOR_REAL,
             "payout_floor_otc":  PAYOUT_FLOOR_OTC,
+            "payout_floor_alltime_otc": 0,  # no floor — always tradeable
             # Backward compat
             "pairs":        active_real + active_otc,
             "payout_floor": PAYOUT_FLOOR_OTC,
@@ -240,8 +265,16 @@ class QuotexFeed:
                         "asset": asset, "period": period,
                         "candles": stream.candles[-300:], "prediction": gated_prediction}
 
+            # FIX (DATA-FLOW-2026-07-22): check alltime_otc list too — these
+            # pairs bypass the payout floor entirely.
             pair = next((p for p in self._pairs_list if p["asset"] == asset), None)
-            if pair and pair.get("locked"):
+            if pair is None:
+                pair = next((p for p in self._alltime_otc_pairs_list
+                             if p["asset"] == asset), None)
+            # All-time OTC pairs are never locked (no payout floor).
+            is_alltime = any(p["asset"] == asset and p.get("category") == "alltime_otc"
+                             for p in self._alltime_otc_pairs_list)
+            if pair and pair.get("locked") and not is_alltime:
                 # FIX (2026-07-17): category-specific payout floor in the error
                 # message — real pairs need >= PAYOUT_FLOOR_REAL (70), OTC pairs
                 # need >= PAYOUT_FLOOR_OTC (85).
@@ -947,6 +980,19 @@ class QuotexFeed:
             await asyncio.to_thread(
                 self._save_micro, stream.asset, stream.period, closed,
                 _micro_snap, stream.candles, list(stream.ticks))
+        # FIX (DATA-FLOW-2026-07-22): record candle for algorithm monitor.
+        try:
+            from core.algorithm_monitor import record_candle
+            payout = getattr(stream, 'payout', None) or 0
+            tick_count = int(_micro_snap.get('tick_count', 0)) if _micro_snap else 0
+            record_candle(
+                asset=stream.asset, ctime=closed.get('time', 0),
+                payout=payout,
+                open_=closed.get('open', 0), high=closed.get('high', 0),
+                low=closed.get('low', 0), close=closed.get('close', 0),
+                tick_count=tick_count)
+        except Exception:
+            pass
         stream.candle_open_time = new_open_time
         stream.candle_open_price = first_tick
         stream.candle_open_is_real = open_is_real

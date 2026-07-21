@@ -161,6 +161,13 @@ async def lifespan(app: FastAPI):
               f"{len(summary)} pairs")
     except Exception as _e:
         print(f"[server] pattern init failed (non-fatal): {_e}")
+    # FIX (DATA-FLOW-2026-07-22): initialize algorithm-change monitor.
+    try:
+        from core.algorithm_monitor import init_algorithm_monitor
+        init_algorithm_monitor()
+        print("[server] algorithm monitor initialized")
+    except Exception as _e:
+        print(f"[server] algorithm monitor init failed (non-fatal): {_e}")
     # Start feed in background task
     feed_task = asyncio.create_task(feed.run(broadcast))
     print("[server] lifespan: feed task started")
@@ -272,9 +279,16 @@ async def get_pairs_by_category(category: str):
             "pairs": all_pairs["otc_pairs"],
             "payout_floor": all_pairs["payout_floor_otc"],
         }
+    # FIX (DATA-FLOW-2026-07-22): alltime_otc category — no payout floor.
+    if cat == "alltime_otc":
+        return {
+            "category": "alltime_otc",
+            "pairs": all_pairs.get("alltime_otc_pairs", []),
+            "payout_floor": 0,
+        }
     raise HTTPException(
         status_code=404,
-        detail=f"unknown category {category!r}; expected 'real' or 'otc'")
+        detail=f"unknown category {category!r}; expected 'real', 'otc', or 'alltime_otc'")
 
 
 @app.get("/api/status")
@@ -437,6 +451,26 @@ async def patterns_refresh():
     return {"status": "refreshed", "summary": summary}
 
 
+# ── Algorithm-change endpoints (DATA-FLOW-2026-07-22) ──────────────────────
+
+@app.get("/api/algorithm-changes")
+async def algorithm_changes(hours: int = 24, limit: int = 100):
+    """Recent algorithm changes across all pairs (default: last 24h)."""
+    from core.algorithm_monitor import get_recent_changes, get_change_summary
+    changes = get_recent_changes(asset=None, hours=hours, limit=limit)
+    summary = get_change_summary(asset=None, hours=hours)
+    return {"changes": changes, "summary": summary}
+
+
+@app.get("/api/algorithm-changes/{asset}")
+async def algorithm_changes_for_asset(asset: str, hours: int = 24, limit: int = 50):
+    """Recent algorithm changes for one pair."""
+    from core.algorithm_monitor import get_recent_changes, get_current_state
+    changes = get_recent_changes(asset=asset, hours=hours, limit=limit)
+    state = get_current_state(asset)
+    return {"asset": asset, "changes": changes, "current_state": state}
+
+
 @app.get("/api/signals/{asset}/{period}")
 async def get_signals(asset: str, period: int, limit: int = 100, before_ctime: int = None):
     # FIX (AUDIT-CRITICAL #002, 2026-07-21): default limit raised from 50
@@ -535,23 +569,32 @@ async def ws_endpoint(ws: WebSocket):
                 # be analyzed by the Real engine (defeating the whole point
                 # of having two engines).
                 category = (msg.get("category") or "").lower().strip()
-                if category and category not in ("real", "otc"):
+                # FIX (DATA-FLOW-2026-07-22): accept 'alltime_otc' as a 3rd
+                # category. It routes to the OTC engine (asset ends with _otc).
+                if category and category not in ("real", "otc", "alltime_otc"):
                     await ws.send_text(json.dumps({
                         "type": "error",
                         "error": f"invalid category {category!r}; "
-                                 f"expected 'real' or 'otc'",
+                                 f"expected 'real', 'otc', or 'alltime_otc'",
                     }))
                     continue
                 # If category is specified, validate it matches the asset.
+                # 'alltime_otc' and 'otc' both require asset to end with _otc.
                 if category:
-                    expected_cat = "otc" if asset.endswith("_otc") else "real"
-                    if category != expected_cat:
+                    is_otc_asset = asset.endswith("_otc")
+                    if category in ("otc", "alltime_otc") and not is_otc_asset:
                         await ws.send_text(json.dumps({
                             "type": "error",
                             "error": f"category/asset mismatch: category={category!r} "
-                                     f"but asset {asset!r} belongs to {expected_cat!r}. "
-                                     f"Switch to the {expected_cat!r} category in the 3-dot "
-                                     f"menu to subscribe to this pair.",
+                                     f"but asset {asset!r} is not an OTC pair "
+                                     f"(must end with '_otc').",
+                        }))
+                        continue
+                    if category == "real" and is_otc_asset:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "error": f"category/asset mismatch: category='real' "
+                                     f"but asset {asset!r} is an OTC pair.",
                         }))
                         continue
                 result = await feed.ensure_stream(asset, period, cid=cid)
