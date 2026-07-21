@@ -194,21 +194,47 @@ def analyze(candles, ctx: MarketContext) -> list:
     # FIX (deep diagnostic, 2026-07-20): candle_wick had 48.9% win rate —
     # the 40% wick threshold is too loose for 1m candles. Raised to 50%
     # wick for more extreme rejection. Score reduced (3→2).
+    #
+    # FIX (PREDICTION-FIX-2026-07-21): trend-aligned exclusion. Previously
+    # Signal 3 would fire a PUT for an upper-wick rejection even during a
+    # strong TREND_UP — but in a strong uptrend, an upper wick is normal
+    # profit-taking, not a reversal signal. Conversely, in TREND_DOWN a
+    # lower wick is just bargain-hunting, not bullish reversal.
+    # The old code's "fires INSTEAD OF Signal 3" comment was misleading —
+    # nothing was actually excluded, so Signal 3 double-counted with the
+    # (now-disabled) Signal 7 trend-aligned wick continuation, AND fired
+    # counter-trend reversals that backtest at ~42% win rate.
+    # Now: skip Signal 3 entirely when the trend strongly opposes the
+    # reversal direction. Keep firing when trend is RANGE/VOLATILE or
+    # aligned with the reversal (counter-trend exhaustion case).
     if rng > 0:
         upper_wick = h - max(o, c)
         lower_wick = min(o, c) - l
         uw_pct = upper_wick / rng * 100
         lw_pct = lower_wick / rng * 100
+        # trend_aligned_reversal: a reversal signal that aligns with the
+        # trend (e.g. PUT in TREND_DOWN) is actually counter-trend exhaustion
+        # — keep those. A reversal that opposes the trend (PUT in TREND_UP)
+        # is the problematic case → skip when trend_strength is high.
+        strong_trend = is_trending and trend_strength > 0.4
         if uw_pct > 50 and body_pct < 30:
-            results.append(ModuleResult(
-                module_name="candle_reaction", direction="PUT", score=2, confidence=55,
-                signal_type="REVERSAL", reliability="CANDLE", group="WICK",
-                reasons=[f"Upper wick rejection ({uw_pct:.0f}%) → PUT (59% win rate)"]))
+            # Upper-wick rejection → PUT (bearish reversal)
+            # Skip if strong TREND_UP (counter-trend → noise)
+            if not (strong_trend and trend_regime == "TREND_UP"):
+                results.append(ModuleResult(
+                    module_name="candle_reaction", direction="PUT", score=2, confidence=55,
+                    signal_type="REVERSAL", reliability="CANDLE", group="WICK",
+                    reasons=[f"Upper wick rejection ({uw_pct:.0f}%) → PUT (59% win rate)"]))
+            # else: skipped — counter-trend wick in strong TREND_UP is noise
         elif lw_pct > 50 and body_pct < 30:
-            results.append(ModuleResult(
-                module_name="candle_reaction", direction="CALL", score=2, confidence=54,
-                signal_type="REVERSAL", reliability="CANDLE", group="WICK",
-                reasons=[f"Lower wick rejection ({lw_pct:.0f}%) → CALL (56% win rate)"]))
+            # Lower-wick rejection → CALL (bullish reversal)
+            # Skip if strong TREND_DOWN (counter-trend → noise)
+            if not (strong_trend and trend_regime == "TREND_DOWN"):
+                results.append(ModuleResult(
+                    module_name="candle_reaction", direction="CALL", score=2, confidence=54,
+                    signal_type="REVERSAL", reliability="CANDLE", group="WICK",
+                    reasons=[f"Lower wick rejection ({lw_pct:.0f}%) → CALL (56% win rate)"]))
+            # else: skipped — counter-trend wick in strong TREND_DOWN is noise
 
     # ── SIGNAL 4: Close position in range (BODY group) ───────────────────
     # FIX (Bug 7, deep audit 2026-07-19): apply same trend-aware dampening
