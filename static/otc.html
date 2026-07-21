@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="/static/css/otc.css">
 </head>
 <body>
+<!-- FIX (UI-P3-2, 2026-07-21): skip-link for keyboard a11y. -->
+<a href="#main" class="skip-link">Skip to chart</a>
 <div id="app">
 
   <!-- ════════════════════════════════════════════════════════════════════
@@ -87,6 +89,11 @@
         <span class="status-dot" aria-hidden="true"></span>OTC MARKET — 24/7
       </span>
 
+      <!-- FIX (UI-P1-1, 2026-07-21): removed "Next Candle" mini-stat.
+           The chart already has a floating countdown badge
+           (#candle-countdown) that shows the same value with color
+           states (idle/warn/critical). Two timers showing the same
+           value was confusing users — "Timer দুটি দেখাচ্ছে কেনো?". -->
       <div class="topbar-stats">
         <div class="stat-mini">
           <span class="stat-mini-label">Active</span>
@@ -99,10 +106,6 @@
         <div class="stat-mini">
           <span class="stat-mini-label">Signals</span>
           <span class="stat-mini-val" id="stat-signals">0</span>
-        </div>
-        <div class="stat-mini">
-          <span class="stat-mini-label">Next Candle</span>
-          <span class="stat-mini-val" id="stat-countdown">--:--</span>
         </div>
       </div>
 
@@ -131,11 +134,11 @@
 
       <!-- Signal box -->
       <div class="panel-section">
-        <div class="section-title">Signal</div>
+        <div class="section-title section-title--primary">Signal</div>
         <div id="signal-box" class="neutral">
           <div id="signal-label">—</div>
         </div>
-        <div style="margin-top:8px">
+        <div class="signal-meta">
           <div class="signal-row"><span class="label">Score</span><span class="value" id="sig-score">—</span></div>
           <div class="signal-row"><span class="label">Strength</span><span class="value" id="sig-strength">—</span></div>
           <div class="signal-row"><span class="label">Confidence</span><span class="value" id="sig-conf-val">—</span></div>
@@ -145,7 +148,23 @@
         </div>
       </div>
 
-      <!-- Market State (3 fields only — phase/structure/zigzag removed) -->
+      <!-- FIX (UI-P1-3, 2026-07-21): 6-Module Engine promoted to its
+           own section ABOVE Market State. Users look at Signal first
+           (the answer), then WHY (modules), then CONTEXT (market state),
+           then LIVE CONFIRMATION (microstructure). -->
+      <div class="panel-section">
+        <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
+          <span class="section-title section-title--inline">6-Module Engine</span>
+          <span class="arrow" aria-hidden="true">▶</span>
+        </button>
+        <div class="engine-active-row">
+          <span>Active Engine:</span>
+          <span id="engine-label" class="engine-label">—</span>
+        </div>
+        <div id="theories-list"></div>
+      </div>
+
+      <!-- Market State (3 fields only) -->
       <div class="panel-section" id="market-state-section">
         <div class="section-title">Market State</div>
         <div class="micro-grid">
@@ -157,21 +176,21 @@
             <span class="micro-label">Zone</span>
             <span class="micro-value" id="ms-zone">—</span>
           </div>
-          <div class="micro-item" style="grid-column:1/-1">
+          <div class="micro-item micro-item--full">
             <span class="micro-label">Volatility</span>
             <span class="micro-value" id="ms-volatility">—</span>
           </div>
         </div>
       </div>
 
-      <!-- Microstructure -->
-      <div class="panel-section" style="flex:1;overflow-y:auto">
+      <!-- Microstructure (FIX P0-5: removed inline style; using class) -->
+      <div class="panel-section panel-section--scroll panel-section--micro collapsed">
         <div class="section-title">Running Candle Microstructure</div>
 
         <div class="micro-grid">
           <!-- Buyer/Seller bar -->
           <div class="bs-bar-wrap">
-            <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--text-dim);margin-bottom:2px">
+            <div class="bs-bar-labels">
               <span>BUYER</span><span>SELLER</span>
             </div>
             <div class="bs-bars">
@@ -219,23 +238,10 @@
             <span class="micro-label">Net</span>
             <span class="micro-value" id="ms-net">—</span>
           </div>
-          <div class="micro-item" style="grid-column:1/-1">
+          <div class="micro-item micro-item--full">
             <span class="micro-label">Round Level</span>
             <span class="micro-value" id="ms-round">—</span>
           </div>
-        </div>
-
-        <!-- 6-Module Engine breakdown -->
-        <div style="margin-top:10px">
-          <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
-            <span class="section-title" style="margin:0">6-Module Engine</span>
-            <span class="arrow" aria-hidden="true">▶</span>
-          </button>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:10px;color:var(--text-dim)">
-            <span>Active Engine:</span>
-            <span id="engine-label" class="engine-label">—</span>
-          </div>
-          <div id="theories-list"></div>
         </div>
       </div>
 
@@ -244,6 +250,9 @@
 
   <!-- ════════════════════════════════════════════════════════════════════
        BOTTOM BAR — tick tape + accuracy + signal history
+       FIX (UI-P1-8, 2026-07-21): on mobile, the history panel collapses
+       into a drawer (toggle button in the section-title row). Expands
+       to a 50vh bottom-sheet on tap.
        ════════════════════════════════════════════════════════════════════ -->
   <footer id="bottom">
     <div>
@@ -254,6 +263,7 @@
       <div class="section-title">
         <span>Signal History</span>
         <span class="hint">newest on top · click row for detail</span>
+        <button id="history-drawer-toggle" type="button" aria-label="Toggle history panel" aria-expanded="true">▾</button>
       </div>
       <div id="history-list"></div>
     </div>
@@ -264,7 +274,7 @@
 <!-- Signal detail modal -->
 <div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title">
   <div id="signal-detail-modal">
-    <h3><span id="detail-title">Signal Detail</span><span class="detail-close" id="detail-close" role="button" aria-label="Close">×</span></h3>
+    <h3><span id="detail-title">Signal Detail</span><button type="button" class="detail-close" id="detail-close" aria-label="Close" style="min-height:44px;min-width:44px;padding:8px 12px;font-size:22px;background:transparent;border:none;color:var(--text-dim);cursor:pointer;border-radius:4px">×</button></h3>
     <div id="detail-body"></div>
   </div>
 </div>
