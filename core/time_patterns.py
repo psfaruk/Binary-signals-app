@@ -74,22 +74,6 @@ def session_for_hour(hour):
     return "LATE_NY"
 
 
-def upsert_pattern(asset, dimension, key, win_rate, total, correct, wrong):
-    """Insert or update a single pattern row."""
-    conn = _conn()
-    try:
-        with _lock:
-            cur = conn.cursor()
-            cur.execute("""INSERT OR REPLACE INTO time_session_patterns
-                (asset, dimension, key, win_rate, total, correct, wrong, last_updated)
-                VALUES (?,?,?,?,?,?,?,?)""",
-                (asset, dimension, str(key), float(win_rate),
-                 int(total), int(correct), int(wrong), time.time()))
-            conn.commit()
-    finally:
-        conn.close()
-
-
 def bulk_upsert_patterns(rows):
     """Bulk insert/replace many pattern rows.
     rows = list of (asset, dimension, key, win_rate, total, correct, wrong)
@@ -108,6 +92,12 @@ def bulk_upsert_patterns(rows):
             conn.commit()
     finally:
         conn.close()
+
+
+# FIX (DEAD-CODE-2026-07-21): removed upsert_pattern() and get_pattern() —
+# never called. recompute_from_signal_log uses bulk_upsert_patterns(), and
+# the API endpoints use get_all_patterns() / get_pattern_summary() /
+# get_asset_patterns_detail().
 
 
 def get_all_patterns(asset):
@@ -133,22 +123,6 @@ def get_all_patterns(asset):
                 "last_updated": r["last_updated"],
             }
         return out
-    finally:
-        conn.close()
-
-
-def get_pattern(asset, dimension, key):
-    """Return a single pattern's stats, or None."""
-    conn = _conn()
-    try:
-        cur = conn.cursor()
-        row = cur.execute("""SELECT win_rate, total, correct, wrong FROM time_session_patterns
-                             WHERE asset=? AND dimension=? AND key=?""",
-                          (asset, dimension, str(key))).fetchone()
-        if not row:
-            return None
-        return {"win_rate": row["win_rate"], "total": row["total"],
-                "correct": row["correct"], "wrong": row["wrong"]}
     finally:
         conn.close()
 

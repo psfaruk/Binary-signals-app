@@ -27,7 +27,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from analyze_eoc import _round_level, _key_levels
+from core.analysis import _round_level, _key_levels
 import db as _db
 
 # Minimum live 1-minute payout % for a forex pair to be tradeable in this
@@ -48,7 +48,8 @@ import db as _db
 PAYOUT_FLOOR_REAL = int(os.environ.get("QX_PAYOUT_FLOOR_REAL", "70"))
 PAYOUT_FLOOR_OTC  = int(os.environ.get("QX_PAYOUT_FLOOR_OTC",
                                        os.environ.get("QX_PAYOUT_FLOOR", "85")))
-PAYOUT_FLOOR      = PAYOUT_FLOOR_OTC   # legacy alias
+# FIX (DEAD-CODE-2026-07-21): removed `PAYOUT_FLOOR = PAYOUT_FLOOR_OTC`
+# legacy alias — no code reads it.
 
 
 def _payout_floor_for(asset: str) -> int:
@@ -1030,6 +1031,16 @@ class QuotexFeed:
         real-feed manager fighting with the sim feed over broadcasts.
         Now we mark the real feed as "abandoned" so the run() loop exits
         cleanly before starting the sim feed.
+
+        FIX (LIVE-DATA-2026-07-21): the previous implementation used
+        `importlib.reload(sim_feed)` which is FRAGILE — reloading a
+        module re-executes all top-level code and can break existing
+        instances. Also, `await sim_stream.run(...)` would block this
+        task forever, never returning control. Now we just instantiate
+        sim_feed.QuotexFeed() (no reload), set the delegate, and let
+        the main server lifespan start the sim feed's run() loop in a
+        separate task. The sim feed then handles ensure_stream calls
+        via the existing _sim_delegate routing.
         """
         try:
             await asyncio.sleep(30)
@@ -1040,48 +1051,60 @@ class QuotexFeed:
             print(f"[feed] {err}")
             self._last_error = err
             self._last_error_time = time.time()
+
             # Cancel the stuck stream task
             if stream.task:
                 stream.task.cancel()
-            self._streams.pop((asset, period), None)
-            # FIX H4: stop the real-feed manager loop before starting sim.
-            # Without this, the real feed's run() keeps retrying Quotex
-            # connections in the background and racing the sim feed for
-            # broadcast/_streams mutations.
+            # Use the per-key lock to safely remove from _streams
+            key = (asset, period)
+            if key in self._stream_locks:
+                async with self._stream_locks[key]:
+                    self._streams.pop(key, None)
+            else:
+                self._streams.pop(key, None)
+
+            # If a sim delegate is already set (previous fallback), don't
+            # spawn another — just return.
+            if getattr(self, '_sim_delegate', None) is not None:
+                print("[feed] sim delegate already active — skipping re-init")
+                return
+
+            # Mark the real feed as abandoned so the run() loop exits.
             self._abandoned = True
             if getattr(self, '_manager_task', None) is not None:
                 self._manager_task.cancel()
                 try:
                     await self._manager_task
                 except asyncio.CancelledError:
-                    # Expected — the task was cancelled. Don't swallow
-                    # other exceptions though (those indicate real bugs).
                     pass
                 except Exception as exc:
                     print(f"[feed] manager task cleanup error: {exc}")
+
             # Cancel every other real-feed stream task too — they all share
             # the same broken Quotex connection.
-            for key, s in list(self._streams.items()):
+            for k, s in list(self._streams.items()):
                 if s.task and not s.task.done():
                     s._evicting = True
                     s.task.cancel()
             self._streams.clear()
-            # Force sim mode by setting the env flag + recreating feed
+
+            # FIX (LIVE-DATA-2026-07-21): DO NOT importlib.reload — that's
+            # fragile and breaks existing references. Just import and
+            # instantiate. The sim module is already cached in sys.modules.
+            # Set USE_SIM=1 so any code that reads the env var also switches.
             os.environ["USE_SIM"] = "1"
-            # Reload sim feed dynamically
-            import importlib
             import sim_feed as _sim_module
-            importlib.reload(_sim_module)
-            # Start a sim stream
             sim_stream = _sim_module.QuotexFeed()
             # Copy pairs list so sim has the same pairs
             sim_stream._pairs_list = self._pairs_list
-            # FIX H4: replace the server's feed reference so future
-            # ensure_stream calls go to the sim feed, not the dead real one.
-            # We can't reassign server.feed directly from here, so we mark
-            # the real feed as sim-delegated and ensure_stream routes to sim.
+            # Copy broadcast fn (set later by run())
+            sim_stream._broadcast = self._broadcast
+            # Mark as delegate — ensure_stream() will route to it.
             self._sim_delegate = sim_stream
-            await sim_stream.run(self._broadcast)
+            # Start the sim feed's run() loop in a background task —
+            # don't await it (would block forever).
+            sim_stream._manager_task = asyncio.create_task(sim_stream.run(self._broadcast))
+            print(f"[feed] sim delegate started — feed is now in SIM mode")
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -1452,7 +1475,7 @@ class QuotexFeed:
         # The candle_reaction engine doesn't take a muted-set argument.
         # 6-MODULE ENGINE (active since 2026-07-14)
         # Runs 6 independent modules + Smart Blender with per-pair adaptation.
-        from candle_reaction import predict_from_candle
+        from engines import predict as predict_from_candle
         # FIX (Bug 4, deep audit 2026-07-19): use core.microstructure.build_micro
         # for the prediction path. The richer micro dict includes `last_velocity`
         # which the blender's exhaustion gate (Check 3: tick velocity

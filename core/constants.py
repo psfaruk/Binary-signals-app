@@ -51,16 +51,9 @@ REAL_MODULES = (
 # (e.g. period=-1 or period=999999) from being created.
 ALLOWED_PERIODS = frozenset({15, 30, 60, 120, 180, 300, 600, 900, 1800, 3600})
 
-# Category payout floors — Real pairs have lower broker margins → lower
-# payouts → lower floor (default 70%). OTC pairs have higher headline
-# payouts → higher floor (default 85%).
-DEFAULT_PAYOUT_FLOOR_REAL = 70
-DEFAULT_PAYOUT_FLOOR_OTC = 85
-
-# Signal delay: withhold prediction for N seconds after candle open so
-# opening ticks can confirm gap direction.
-DEFAULT_SIGNAL_DELAY_SEC = 3.0
-
-# Chop guard: if the same (regime, zone) produces wrong signals N times in
-# a row, demote the next signal in that regime/zone to WEAK.
-ZONE_LOSS_GUARD = 3
+# FIX (DEAD-CODE-2026-07-21): removed DEFAULT_PAYOUT_FLOOR_REAL,
+# DEFAULT_PAYOUT_FLOOR_OTC, DEFAULT_SIGNAL_DELAY_SEC, ZONE_LOSS_GUARD —
+# all four were never imported anywhere. feed.py and sim_feed.py read
+# these values directly from os.environ.get(...) with their own hardcoded
+# defaults, and ZONE_LOSS_GUARD is defined locally in both feed.py and
+# sim_feed.py.
