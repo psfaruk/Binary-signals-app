@@ -1320,13 +1320,20 @@ class QuotexFeed:
         # + payout_floor_real + payout_floor_otc) so the frontend 3-dot menu
         # can populate both category counts. Backward-compat `pairs` and
         # `payout_floor` keys are kept for any older client.
+        # FIX (P1-ISSUE-076, 2026-07-22): include alltime_otc_pairs + floor
+        # so the All-Time OTC page's dropdown populates immediately on first
+        # load (before any /api/pairs call). Without this, the dropdown shows
+        # "No All-Time OTC pairs available" for up to 5 minutes (until the
+        # next pairs refresh).
         await self._broadcast({
             "type": "pairs",
             "pairs":  self._pairs_list,                  # backward compat
             "real_pairs": self._real_pairs_list,
             "otc_pairs":  self._otc_pairs_list,
+            "alltime_otc_pairs": self._alltime_otc_pairs_list,
             "payout_floor_real": PAYOUT_FLOOR_REAL,
             "payout_floor_otc":  PAYOUT_FLOOR_OTC,
+            "payout_floor_alltime_otc": 0,
             "payout_floor": PAYOUT_FLOOR_OTC,            # backward compat
         })
 
