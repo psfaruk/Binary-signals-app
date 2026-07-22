@@ -93,6 +93,9 @@ let _resizeTimer = null;
 let _countdownInterval = null, _tickRateInterval = null, _keepaliveInterval = null;
 let _marketStatusInterval = null;  // FIX (AUDIT-FRONTEND #2): track so pagehide can clear it
 
+/* Active tab — 'chart' (default) | 'history' | 'accuracy' */
+let currentTab = 'chart';
+
 /* Smooth-candle tween state (easeOutCubic) */
 const TWEEN_MS = 480;
 let _priceLines = [];
@@ -939,14 +942,29 @@ function onServerSignals(sigs, asset, period){
 function renderHistory(){
   const historyList = $('history-list');
   if(!historyList) return;
-  if(!signalHistory.length){
-    historyList.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:8px 4px">No signals yet</div>';
+
+  // When the history tab is active, only show signals from the last 1 hour
+  // (3600s). HISTORY_MAX (100) holds more than an hour of 60s candles, so this
+  // filter keeps the view focused on what the user actually wants to see.
+  // When the history tab is NOT active, render the full list (the rendering is
+  // invisible but stays in sync so switching tabs is instant).
+  const filterLastHour = (currentTab === 'history');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const oneHourAgo = nowSec - 3600;
+  const displayHistory = filterLastHour
+    ? signalHistory.filter(h => h && h.detail && h.detail.ctime && h.detail.ctime >= oneHourAgo)
+    : signalHistory;
+
+  if(!displayHistory.length){
+    historyList.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:8px 4px">'
+      + (filterLastHour ? 'No signals in the last hour' : 'No signals yet')
+      + '</div>';
     return;
   }
-  const lastIdx = signalHistory.length - 1;
+  const lastIdx = displayHistory.length - 1;
   let html = '';
   for(let i = lastIdx; i >= 0; i--){
-    const h = signalHistory[i];
+    const h = displayHistory[i];
     const isRecent = (i === lastIdx);
     // FIX (2026-07-18): clearer win/loss icons with text labels.
     //   correct  → ✅ WIN   (green)
@@ -1008,13 +1026,17 @@ function renderHistory(){
   // The button uses the oldest visible signal's ctime as the cursor and
   // requests the next 100 signals from the server via the WS `signals`
   // message with a `before_ctime` field (newly supported by server.py).
-  const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
-    ? signalHistory[0].detail.ctime : 0;
-  if(oldestCtime){
-    html += `<div id="history-load-more" class="history-load-more" `
-         +  `onclick="window._loadMoreHistory()" role="button" tabindex="0" `
-         +  `onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._loadMoreHistory()}">`
-         +  `Load older signals ↓</div>`;
+  // When filtering to last 1 hour (history tab), skip the load-more
+  // button — loading older would be outside the 1-hour window.
+  if(!filterLastHour){
+    const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
+      ? signalHistory[0].detail.ctime : 0;
+    if(oldestCtime){
+      html += `<div id="history-load-more" class="history-load-more" `
+           +  `onclick="window._loadMoreHistory()" role="button" tabindex="0" `
+           +  `onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._loadMoreHistory()}">`
+           +  `Load older signals ↓</div>`;
+    }
   }
   historyList.innerHTML = html;
 }
@@ -1126,14 +1148,257 @@ function detailRow(label, value){
 }
 
 function renderAccuracy(){
+  // Legacy: update the topbar mini-stat (elements may be gone — null-safe).
   const accPct = $('acc-pct');
   const accDetail = $('acc-detail');
-  if(!accPct) return;
-  if(!totalSignals){ accPct.textContent = '—'; if(accDetail) accDetail.textContent = ''; return; }
-  const pct = Math.round((totalCorrect / totalSignals) * 100);
-  accPct.textContent = pct + '%';
-  if(accDetail) accDetail.textContent = '(' + totalCorrect + '/' + totalSignals + ')';
-  accPct.style.color = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
+  if(accPct){
+    if(!totalSignals){ accPct.textContent = '—'; if(accDetail) accDetail.textContent = ''; }
+    else {
+      const pct = Math.round((totalCorrect / totalSignals) * 100);
+      accPct.textContent = pct + '%';
+      if(accDetail) accDetail.textContent = '(' + totalCorrect + '/' + totalSignals + ')';
+      accPct.style.color = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
+    }
+  }
+  // Always refresh the accuracy TAB content too — it's cheap, and the tab
+  // may be hidden (no-op visually) but ready for instant display on switch.
+  renderAccuracyTab();
+}
+
+/* ─── ACCURACY TAB ─────────────────────────────────────────────────────────
+   Renders the full breakdown into #tab-accuracy:
+     - Hero: overall win rate % (large, colored)
+     - Stat grid: total / wins / losses / draws
+     - Per-strength breakdown: STRONG / MEDIUM / WEAK win rates
+     - Per-regime breakdown: win rate grouped by market regime
+   Uses signalHistory as the source (already kept in sync by addHistory +
+   onServerSignals). Recomputes on every call — cheap for ≤100 entries. */
+function renderAccuracyTab(){
+  const graded = signalHistory.filter(h => h && (
+    h.accuracy === 'correct' || h.accuracy === 'wrong' || h.accuracy === 'draw'
+  ));
+  const correct = graded.filter(h => h.accuracy === 'correct').length;
+  const wrong   = graded.filter(h => h.accuracy === 'wrong').length;
+  const draws   = graded.filter(h => h.accuracy === 'draw').length;
+  const total   = graded.length;
+  const pending = signalHistory.filter(h => h && h.accuracy === 'pending').length;
+
+  // Hero pct
+  const heroPct = $('acc-hero-pct');
+  const heroDetail = $('acc-hero-detail');
+  if(heroPct){
+    if(total === 0){
+      heroPct.textContent = '—';
+      heroPct.style.color = 'var(--text-dim)';
+    } else {
+      const pct = Math.round((correct / total) * 100);
+      heroPct.textContent = pct + '%';
+      heroPct.style.color = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
+    }
+  }
+  if(heroDetail){
+    if(total === 0){
+      heroDetail.textContent = pending > 0
+        ? pending + ' signal' + (pending === 1 ? '' : 's') + ' pending'
+        : 'No graded signals yet';
+    } else {
+      heroDetail.textContent = correct + ' correct / ' + total + ' total'
+        + (pending ? ' · ' + pending + ' pending' : '');
+    }
+  }
+
+  // Stat grid
+  _setText('acc-total',  String(total));
+  _setText('acc-wins',   String(correct));
+  _setText('acc-losses', String(wrong));
+  _setText('acc-draws',  String(draws));
+
+  // Per-strength + per-regime breakdowns
+  _renderStrengthBreakdown();
+  _renderRegimeBreakdown();
+}
+
+function _renderStrengthBreakdown(){
+  const container = $('acc-strength-breakdown');
+  if(!container) return;
+  const strengths = ['STRONG', 'MEDIUM', 'WEAK'];
+  let html = '';
+  let hasAny = false;
+  strengths.forEach(s => {
+    const subset = signalHistory.filter(h =>
+      h && h.detail && (h.detail.strength || '').toUpperCase() === s
+      && (h.accuracy === 'correct' || h.accuracy === 'wrong'));
+    const t = subset.length;
+    const c = subset.filter(h => h.accuracy === 'correct').length;
+    if(t > 0) hasAny = true;
+    const pct = t > 0 ? Math.round((c / t) * 100) : 0;
+    const pctCls = t === 0 ? 'none' : pct >= 60 ? 'good' : pct >= 40 ? 'mid' : 'bad';
+    const barWidth = t > 0 ? pct : 0;
+    html += `<div class="accuracy-breakdown-row">`
+         +  `<span class="breakdown-label">${s}</span>`
+         +  `<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:${barWidth}%"></div></div>`
+         +  `<span class="breakdown-pct ${pctCls}">`
+         +    `<span class="pct-num">${t > 0 ? pct + '%' : '—'}</span>`
+         +    `<span class="breakdown-meta">${c}/${t}</span>`
+         +  `</span>`
+         +  `</div>`;
+  });
+  if(!hasAny){
+    html = '<div class="accuracy-empty">No graded signals yet</div>';
+  }
+  container.innerHTML = html;
+}
+
+function _renderRegimeBreakdown(){
+  const container = $('acc-regime-breakdown');
+  if(!container) return;
+  // Group graded signals by regime label.
+  const regimeMap = {};
+  signalHistory.forEach(h => {
+    if(!h || !h.detail) return;
+    if(h.accuracy !== 'correct' && h.accuracy !== 'wrong') return;
+    const reg = h.detail.regime;
+    let label;
+    if(typeof reg === 'object' && reg !== null){
+      label = reg.regime || 'UNKNOWN';
+    } else {
+      label = String(reg || 'UNKNOWN');
+    }
+    if(!regimeMap[label]) regimeMap[label] = { correct: 0, total: 0 };
+    regimeMap[label].total++;
+    if(h.accuracy === 'correct') regimeMap[label].correct++;
+  });
+  const regimes = Object.keys(regimeMap).sort();
+  if(regimes.length === 0){
+    container.innerHTML = '<div class="accuracy-empty">No graded signals yet</div>';
+    return;
+  }
+  let html = '';
+  regimes.forEach(r => {
+    const stats = regimeMap[r];
+    const pct = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
+    const pctCls = pct >= 60 ? 'good' : pct >= 40 ? 'mid' : 'bad';
+    html += `<div class="accuracy-breakdown-row">`
+         +  `<span class="breakdown-label">${esc(r)}</span>`
+         +  `<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:${pct}%"></div></div>`
+         +  `<span class="breakdown-pct ${pctCls}">`
+         +    `<span class="pct-num">${pct}%</span>`
+         +    `<span class="breakdown-meta">${stats.correct}/${stats.total}</span>`
+         +  `</span>`
+         +  `</div>`;
+  });
+  container.innerHTML = html;
+}
+
+/* ─── TAB SWITCHING ────────────────────────────────────────────────────────
+   switchTab(name): toggles the .active class on the 3 tab buttons and the
+   3 tab panes. Also fires tab-specific refresh logic so the just-shown
+   pane is up-to-date (cheap re-render from in-memory state). */
+function switchTab(tabName){
+  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'accuracy') return;
+  currentTab = tabName;
+
+  // Update tab buttons
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  tabBtns.forEach(btn => {
+    const isActive = btn.dataset.tab === tabName;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', String(isActive));
+  });
+
+  // Update tab panes
+  ['chart', 'history', 'accuracy'].forEach(name => {
+    const pane = $('tab-' + name);
+    if(pane) pane.classList.toggle('active', name === tabName);
+  });
+
+  // Tab-specific refresh — ensures the just-shown pane is current.
+  if(tabName === 'history'){
+    renderHistoryPairSelect();
+    // Refresh from server (no-op if WS not open) — gives the user fresh
+    // last-1-hour data every time they open the tab.
+    loadServerHistory();
+    renderHistory();
+    setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
+  } else if(tabName === 'accuracy'){
+    renderAccuracyTab();
+  } else if(tabName === 'chart'){
+    // The chart's autoSize handles hidden→visible resizes, but on some
+    // browsers the chart needs an explicit nudge after being display:none.
+    if(chart){
+      try{
+        const container = $('chart-container');
+        if(container){
+          chart.applyOptions({
+            width: container.clientWidth,
+            height: container.clientHeight,
+          });
+        }
+        if(chart.timeScale) chart.timeScale().fitContent();
+      }catch(_){}
+    }
+  }
+}
+
+/* renderHistoryPairSelect(): mirrors the topbar #pair-select into the
+   history tab's #history-pair-select dropdown. Called from renderPairs()
+   (so the dropdown stays in sync) and from switchTab('history') (so the
+   dropdown is populated on first tab open even before pairs arrive). */
+function renderHistoryPairSelect(){
+  const histPairSelect = $('history-pair-select');
+  if(!histPairSelect) return;
+  let activeList;
+  if(currentCategory === 'real')              activeList = realPairsList;
+  else if(currentCategory === 'alltime_otc')  activeList = alltimeOtcPairsList;
+  else                                        activeList = otcPairsList;
+
+  // Build new options only if the set actually changed — avoids clobbering
+  // the user's in-progress dropdown interaction on every renderPairs call.
+  const newOptions = [];
+  activeList.forEach(p => {
+    newOptions.push({
+      value: p.asset,
+      text: p.display + (p.payout ? ' (' + p.payout + '%)' : ''),
+      locked: !!p.locked,
+      selected: p.asset === currentAsset,
+    });
+  });
+  // Quick diff: if same length + same values + same selected, skip rebuild.
+  const sameCount = histPairSelect.options.length === newOptions.length;
+  let sameContent = sameCount;
+  if(sameCount){
+    for(let i = 0; i < newOptions.length; i++){
+      const opt = histPairSelect.options[i];
+      if(opt.value !== newOptions[i].value
+         || opt.textContent !== newOptions[i].text
+         || opt.disabled !== newOptions[i].locked){
+        sameContent = false; break;
+      }
+    }
+  }
+  if(sameContent){
+    // Just ensure the selected state is right.
+    if(histPairSelect.value !== currentAsset) histPairSelect.value = currentAsset;
+    return;
+  }
+  // Rebuild.
+  histPairSelect.innerHTML = '';
+  if(newOptions.length === 0){
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No pairs available';
+    opt.disabled = true;
+    histPairSelect.appendChild(opt);
+    return;
+  }
+  newOptions.forEach(o => {
+    const opt = document.createElement('option');
+    opt.value = o.value;
+    opt.textContent = o.text;
+    opt.disabled = o.locked;
+    if(o.selected) opt.selected = true;
+    histPairSelect.appendChild(opt);
+  });
 }
 
 /* ─── PAIRS ────────────────────────────────────────────────────────────────
@@ -1226,6 +1491,9 @@ function renderPairs(payload){
   // FIX (DATA-FLOW-2026-07-22): update the switch button label to show
   // which market the user will switch to next.
   _updateSwitchButtonLabel();
+
+  // TAB BAR: keep the history tab's pair dropdown in sync with the topbar's.
+  renderHistoryPairSelect();
 }
 
 // FIX (DATA-FLOW-2026-07-22): update the switch button's label/title
@@ -1610,6 +1878,43 @@ function wireEvents(){
     });
   }
 
+  // ── TAB BAR: switch between Live Chart / Signal History / Accuracy Stats
+  // The 3 buttons live in #tab-bar; clicking one calls switchTab() which
+  // toggles the .active class on both the button and the matching pane.
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tabName = btn.dataset.tab;
+      if(tabName) switchTab(tabName);
+    });
+    btn.addEventListener('keydown', e => {
+      if(e.key === 'Enter' || e.key === ' '){
+        e.preventDefault(); btn.click();
+      }
+    });
+  });
+
+  // ── History tab pair-select — mirrors the topbar #pair-select. When the
+  // user picks a different pair here, we sync the topbar select and dispatch
+  // its change event so the existing re-subscribe logic runs unchanged.
+  const histPairSelect = $('history-pair-select');
+  if(histPairSelect){
+    histPairSelect.addEventListener('change', () => {
+      const topbarSelect = $('pair-select');
+      if(!topbarSelect) return;
+      if(topbarSelect.value !== histPairSelect.value){
+        topbarSelect.value = histPairSelect.value;
+        // Dispatch a change event so the existing handler re-subscribes.
+        try{
+          topbarSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        }catch(_){
+          // Fallback for older browsers — invoke the change handler directly.
+          if(topbarSelect.onchange) topbarSelect.onchange();
+        }
+      }
+    });
+  }
+
   // Sound toggle.
   const soundBtn = $('sound-btn');
   if(soundBtn){
@@ -1794,6 +2099,19 @@ function initApp(category){
   lastMessageAt = Date.now();
   _priceLines = []; _priceLinesRange = { lo:0, hi:0, step:0 };
   _rafActive = false; _rTime = 0;
+  // Reset tab state — always start on the Live Chart tab.
+  currentTab = 'chart';
+  // Force the DOM back to the chart tab in case bfcache left another tab active.
+  // (Use document.getElementById directly — the local $ helper isn't bound yet.)
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    const isActive = btn.dataset.tab === 'chart';
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', String(isActive));
+  });
+  ['chart', 'history', 'accuracy'].forEach(name => {
+    const pane = document.getElementById('tab-' + name);
+    if(pane) pane.classList.toggle('active', name === 'chart');
+  });
 
   currentCategory = category;
   // Default asset depends on the page's category.
