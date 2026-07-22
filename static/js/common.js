@@ -482,11 +482,25 @@ function hideChartLoading(){
 }
 
 function renderPending(){
-  // FIX (UI-P0-2, 2026-07-21): all DOM lookups via null-safe helpers.
-  // FIX (UI-P1-2, 2026-07-21): also reset ALL microstructure fields
-  // (buyer/seller bars, pressure, reaction, fight, hold, phases, ticks,
-  // net, round level) — previously these kept stale values from the
-  // previous pair until the first tick arrived (~1-2s).
+  // FIX (PENDING-FIX-2026-07-22): if we have a lastPrediction that's NEUTRAL,
+  // show it as NEUTRAL instead of PENDING. The user complaint 'সবসময় পেন্ডিং
+  // দেখায়' was because NEUTRAL predictions (from WEAK→NEUTRAL conversion)
+  // were being overwritten with PENDING on every EOC. Now: if lastPrediction
+  // exists and is NEUTRAL, keep showing it. Only show PENDING if there's
+  // truly no prediction yet (fresh page load).
+  if(lastPrediction && lastPrediction.signal === 'NEUTRAL'){
+    renderSignal(lastPrediction);
+    return;
+  }
+  // FIX (PENDING-FIX-2026-07-22): if we have ANY lastPrediction, keep showing
+  // it instead of flashing to PENDING. The prediction is still valid — it's
+  // just being re-evaluated for the next candle. PENDING should only show
+  // on the very first load before any prediction arrives.
+  if(lastPrediction){
+    renderSignal(lastPrediction);
+    return;
+  }
+  // Truly no prediction yet — show PENDING.
   _setClass('signal-box', 'pending signal-pop');
   _setText('signal-label', '⏳ PENDING');
   _setText('sig-score', '—');
