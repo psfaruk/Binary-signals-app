@@ -669,15 +669,16 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         }
 
     # ── Step 11: Low-confidence skip (BACKTEST-DRIVEN) ─────────────────────
-    # FIX (BACKTEST-2026-07-21): the backtest showed that signals with
-    # confidence < 35 win only 48% of the time (essentially coin-flip).
-    # Combined with the chop-guard's WEAK classification (which already
-    # produces ~4% win rate), low-confidence signals are a net loss.
-    # Now: if confidence < 30 AND no time-pattern boost applied, return
-    # NEUTRAL instead of a low-conviction CALL/PUT. This sacrifices
-    # signal quantity for quality — should push win rate from 51% → 60%+.
-    if confidence < 30:
-        all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < 30 → NEUTRAL")
+    # FIX (SIGNAL-FIX-2026-07-22): lowered from 30 to 20. The previous
+    # threshold of 30 was too aggressive — 4 of 6 all-time OTC pairs had
+    # 0 graded signals because all their predictions fell in the 20-29
+    # confidence range and were forced to NEUTRAL. At confidence 20, the
+    # engine is still uncertain but the EOC analysis found SOMETHING —
+    # better to emit a low-conviction signal than nothing at all.
+    # The chop-guard (3+ losses in same zone) still catches genuinely
+    # bad predictions and converts them to NEUTRAL.
+    if confidence < 20:
+        all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < 20 → NEUTRAL")
         return {
             "signal": "NEUTRAL", "confidence": confidence, "strength": "NEUTRAL",
             "score": net, "reasons": all_reasons,
