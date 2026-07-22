@@ -622,6 +622,63 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 all_reasons.append(_reg_note)
         # Tag-based adjustment (uses prediction's own tags, which we don't
         # have yet — skip for now, will be added in a follow-up).
+
+        # ── Step 10b: Algorithm-aware prediction (ALGO-FIX-2026-07-22) ──
+        # The algorithm_monitor tracks which candle-generation algorithm
+        # Quotex is currently using per pair:
+        #   - 'trending'    : high autocorrelation, large bodies → boost
+        #                     continuation signals, dampen reversal
+        #   - 'reversing'   : low autocorrelation, small bodies → boost
+        #                     reversal signals, dampen continuation
+        #   - 'random_walk' : mid autocorrelation → no adjustment (50/50)
+        # This lets the engine adapt its strategy per-pair in real-time
+        # based on what Quotex is actually doing.
+        try:
+            from core.algorithm_monitor import get_current_state
+            algo_state = get_current_state(asset)
+            algo_guess = algo_state.get("summary", {}).get("algorithm_guess", "unknown")
+            algo_samples = algo_state.get("samples", 0)
+            if algo_samples >= 15 and algo_guess != "unknown":
+                if algo_guess == "trending" and signal != "NEUTRAL":
+                    # Trending algorithm → continuation is more likely.
+                    # Boost continuation signals by +5, dampen reversal by -3.
+                    is_continuation = any(
+                        r for r in all_results
+                        if r.direction == signal and r.signal_type == "CONTINUATION"
+                    )
+                    if is_continuation:
+                        confidence = min(100, confidence + 5)
+                        all_reasons.append(
+                            f"_ALGO_AWARE: trending algo detected (n={algo_samples}) "
+                            f"→ continuation +5")
+                    else:
+                        confidence = max(0, confidence - 3)
+                        all_reasons.append(
+                            f"_ALGO_AWARE: trending algo detected (n={algo_samples}) "
+                            f"→ reversal -3")
+                elif algo_guess == "reversing" and signal != "NEUTRAL":
+                    # Reversing algorithm → reversal is more likely.
+                    # Boost reversal signals by +5, dampen continuation by -3.
+                    is_reversal = any(
+                        r for r in all_results
+                        if r.direction == signal and r.signal_type == "REVERSAL"
+                    )
+                    if is_reversal:
+                        confidence = min(100, confidence + 5)
+                        all_reasons.append(
+                            f"_ALGO_AWARE: reversing algo detected (n={algo_samples}) "
+                            f"→ reversal +5")
+                    else:
+                        confidence = max(0, confidence - 3)
+                        all_reasons.append(
+                            f"_ALGO_AWARE: reversing algo detected (n={algo_samples}) "
+                            f"→ continuation -3")
+                # random_walk: no adjustment (50/50 — engine's default is fine)
+        except ImportError:
+            pass  # algorithm_monitor not available (test context)
+        except Exception:
+            pass  # never break prediction pipeline
+
     except ImportError:
         pass  # core.time_patterns not available (test context)
     except Exception as _e:
