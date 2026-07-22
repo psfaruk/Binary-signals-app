@@ -707,14 +707,19 @@ class QuotexFeed:
                 f"{_losses}x running → NEUTRAL (skip). "
                 f"Backtest: WEAK signals won 4.2% — skipping is +EV.")
 
-        # FIX (PENDING-FIX-2026-07-22): WEAK signals from any source (chop-guard,
-        # FLIP_DEMOTE, RUNCONF) → NEUTRAL. Backtest: WEAK wins ~4%.
+        # FIX (SIGNAL-FIX-2026-07-22): only convert very low confidence WEAK
+        # to NEUTRAL. RUNCONF-demoted WEAK with confidence >= 15 is tradeable.
         if result.get("signal") in ("CALL", "PUT") and result.get("strength") == "WEAK":
-            result["signal"] = "NEUTRAL"
-            result["strength"] = "NEUTRAL"
-            result["confidence"] = 0
-            result.setdefault("reasons", []).append(
-                "WEAK→NEUTRAL: backtest showed WEAK signals win ~4%. Skipping.")
+            _weak_conf = result.get("confidence", 0)
+            if _weak_conf < 15:
+                result["signal"] = "NEUTRAL"
+                result["strength"] = "NEUTRAL"
+                result["confidence"] = 0
+                result.setdefault("reasons", []).append(
+                    f"WEAK→NEUTRAL: confidence {_weak_conf} < 15 — too uncertain.")
+            else:
+                result.setdefault("reasons", []).append(
+                    f"WEAK (tradeable): confidence {_weak_conf} — demoted but still valid.")
 
         if result["signal"] == "NEUTRAL":
             return {**result, "candle": None, "payout": stream.payout}

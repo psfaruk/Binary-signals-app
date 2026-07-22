@@ -1718,19 +1718,27 @@ class QuotexFeed:
             # downstream code sees NEUTRAL.
             result["signal"] = "NEUTRAL"
 
-        # FIX (PENDING-FIX-2026-07-22): WEAK signals (whether from chop-guard,
-        # FLIP_DEMOTE, or RUNCONF demotion) consistently win only ~4% of the
-        # time. They should NEVER be broadcast as CALL/PUT — convert to
-        # NEUTRAL so the frontend shows NEUTRAL (not PENDING) and the signal
-        # is skipped. This is the fix for 'সবসময় পেন্ডিং দেখায় কেনো' — WEAK
-        # signals were being broadcast, the frontend showed them briefly,
-        # then they flipped to NEUTRAL on the next tick, appearing as PENDING.
+        # FIX (SIGNAL-FIX-2026-07-22): previously ALL WEAK signals were
+        # converted to NEUTRAL — too aggressive. 4 of 6 all-time OTC pairs
+        # had 0 graded signals because RUNCONF-demoted WEAK (MEDIUM→WEAK
+        # from opposing ticks) was also being killed.
+        # Now: only convert to NEUTRAL if confidence is VERY low (<15).
+        # RUNCONF-demoted WEAK signals that still have confidence 15-50
+        # are tradeable (they started as MEDIUM, just got demoted by
+        # live opposing ticks — the original EOC analysis was still valid).
         if result.get("signal") in ("CALL", "PUT") and result.get("strength") == "WEAK":
-            result["signal"] = "NEUTRAL"
-            result["strength"] = "NEUTRAL"
-            result["confidence"] = 0
-            result.setdefault("reasons", []).append(
-                "WEAK→NEUTRAL: backtest showed WEAK signals win ~4%. Skipping.")
+            _weak_conf = result.get("confidence", 0)
+            if _weak_conf < 15:
+                result["signal"] = "NEUTRAL"
+                result["strength"] = "NEUTRAL"
+                result["confidence"] = 0
+                result.setdefault("reasons", []).append(
+                    f"WEAK→NEUTRAL: confidence {_weak_conf} < 15 — too uncertain.")
+            else:
+                # Keep as WEAK but flag it — still tradeable, just low conviction.
+                result.setdefault("reasons", []).append(
+                    f"WEAK (tradeable): confidence {_weak_conf} — RUNCONF demoted from MEDIUM, "
+                    f"original EOC analysis still valid.")
 
         # Neutral signals should remain neutral; do not force a fake CALL/PUT
         # just to keep a ghost candle on screen.

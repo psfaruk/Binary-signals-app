@@ -622,6 +622,63 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 all_reasons.append(_reg_note)
         # Tag-based adjustment (uses prediction's own tags, which we don't
         # have yet — skip for now, will be added in a follow-up).
+
+        # ── Step 10b: Algorithm-aware prediction (ALGO-FIX-2026-07-22) ──
+        # The algorithm_monitor tracks which candle-generation algorithm
+        # Quotex is currently using per pair:
+        #   - 'trending'    : high autocorrelation, large bodies → boost
+        #                     continuation signals, dampen reversal
+        #   - 'reversing'   : low autocorrelation, small bodies → boost
+        #                     reversal signals, dampen continuation
+        #   - 'random_walk' : mid autocorrelation → no adjustment (50/50)
+        # This lets the engine adapt its strategy per-pair in real-time
+        # based on what Quotex is actually doing.
+        try:
+            from core.algorithm_monitor import get_current_state
+            algo_state = get_current_state(asset)
+            algo_guess = algo_state.get("summary", {}).get("algorithm_guess", "unknown")
+            algo_samples = algo_state.get("samples", 0)
+            if algo_samples >= 15 and algo_guess != "unknown":
+                if algo_guess == "trending" and signal != "NEUTRAL":
+                    # Trending algorithm → continuation is more likely.
+                    # Boost continuation signals by +5, dampen reversal by -3.
+                    is_continuation = any(
+                        r for r in all_results
+                        if r.direction == signal and r.signal_type == "CONTINUATION"
+                    )
+                    if is_continuation:
+                        confidence = min(100, confidence + 5)
+                        all_reasons.append(
+                            f"_ALGO_AWARE: trending algo detected (n={algo_samples}) "
+                            f"→ continuation +5")
+                    else:
+                        confidence = max(0, confidence - 3)
+                        all_reasons.append(
+                            f"_ALGO_AWARE: trending algo detected (n={algo_samples}) "
+                            f"→ reversal -3")
+                elif algo_guess == "reversing" and signal != "NEUTRAL":
+                    # Reversing algorithm → reversal is more likely.
+                    # Boost reversal signals by +5, dampen continuation by -3.
+                    is_reversal = any(
+                        r for r in all_results
+                        if r.direction == signal and r.signal_type == "REVERSAL"
+                    )
+                    if is_reversal:
+                        confidence = min(100, confidence + 5)
+                        all_reasons.append(
+                            f"_ALGO_AWARE: reversing algo detected (n={algo_samples}) "
+                            f"→ reversal +5")
+                    else:
+                        confidence = max(0, confidence - 3)
+                        all_reasons.append(
+                            f"_ALGO_AWARE: reversing algo detected (n={algo_samples}) "
+                            f"→ continuation -3")
+                # random_walk: no adjustment (50/50 — engine's default is fine)
+        except ImportError:
+            pass  # algorithm_monitor not available (test context)
+        except Exception:
+            pass  # never break prediction pipeline
+
     except ImportError:
         pass  # core.time_patterns not available (test context)
     except Exception as _e:
@@ -669,15 +726,16 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         }
 
     # ── Step 11: Low-confidence skip (BACKTEST-DRIVEN) ─────────────────────
-    # FIX (BACKTEST-2026-07-21): the backtest showed that signals with
-    # confidence < 35 win only 48% of the time (essentially coin-flip).
-    # Combined with the chop-guard's WEAK classification (which already
-    # produces ~4% win rate), low-confidence signals are a net loss.
-    # Now: if confidence < 30 AND no time-pattern boost applied, return
-    # NEUTRAL instead of a low-conviction CALL/PUT. This sacrifices
-    # signal quantity for quality — should push win rate from 51% → 60%+.
-    if confidence < 30:
-        all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < 30 → NEUTRAL")
+    # FIX (SIGNAL-FIX-2026-07-22): lowered from 30 to 20. The previous
+    # threshold of 30 was too aggressive — 4 of 6 all-time OTC pairs had
+    # 0 graded signals because all their predictions fell in the 20-29
+    # confidence range and were forced to NEUTRAL. At confidence 20, the
+    # engine is still uncertain but the EOC analysis found SOMETHING —
+    # better to emit a low-conviction signal than nothing at all.
+    # The chop-guard (3+ losses in same zone) still catches genuinely
+    # bad predictions and converts them to NEUTRAL.
+    if confidence < 20:
+        all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < 20 → NEUTRAL")
         return {
             "signal": "NEUTRAL", "confidence": confidence, "strength": "NEUTRAL",
             "score": net, "reasons": all_reasons,
