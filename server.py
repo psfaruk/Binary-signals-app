@@ -188,25 +188,24 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 static_dir = Path(__file__).parent / "static"
 
-# FIX (DATA-FLOW-2026-07-22): serve static files with cache-busting headers.
-# Previously StaticFiles used default caching which has NO Cache-Control header
-# — browsers then cache aggressively (especially mobile Chrome's "back-forward
-# cache" holds the old JS for hours). User reported "alltime_otc আসে না" even
-# though the file was correctly deployed, because their browser was serving
-# the OLD common.js (without _nextCategory / alltime_otc routing) from cache.
-#
-# Solution: short-lived cache (60s) so browsers revalidate frequently, but
-# still benefit from cache during a session. Combined with ETag (which
-# StaticFiles already sets), conditional requests get 304 Not Modified —
-# cheap for the server, fresh for the user.
+# FIX (P0-ISSUE-013, 2026-07-22): serve static files with no-store (stronger
+# than no-cache). Safari's Back-Forward Cache (bfcache) and Chrome's disk
+# cache can serve stale JS even with `no-cache, must-revalidate` — `no-store`
+# forbids storing entirely. Combined with ETag revalidation, this guarantees
+# the browser ALWAYS fetches the latest version from the server.
+# This was the root cause of "বাকি গুল সুইচ করা যায় না" — old common.js
+# (without _nextCategory) was served from bfcache, so the switch button
+# had no click handler.
 from starlette.staticfiles import StaticFiles as _StarletteStaticFiles
 class _NoCacheStaticFiles(_StarletteStaticFiles):
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
-        # Force revalidation on every load — browser MUST check ETag with
-        # the server before using its cached copy. This is the only way to
-        # guarantee users see new code within ~60 seconds of a deploy.
-        resp.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+        # no-store: browser MUST NOT cache. Every load fetches from server.
+        # no-cache: redundant with no-store but kept for HTTP/1.0 compat.
+        # must-revalidate: redundant but explicit.
+        resp.headers["Cache-Control"] = "no-store, no-cache, max-age=0, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"  # HTTP/1.0 legacy
+        resp.headers["Expires"] = "0"        # HTTP/1.0 legacy
         return resp
 
 app.mount("/static", _NoCacheStaticFiles(directory=str(static_dir)), name="static")

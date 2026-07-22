@@ -1554,12 +1554,28 @@ function wireEvents(){
       // Sanity check: the selected asset must belong to the current page's
       // category. (Server enforces this too — better to bail out client-side
       // than hit a category/asset mismatch error.)
-      const newCat = currentAsset.endsWith('_otc') ? 'otc' : 'real';
-      if(newCat !== currentCategory){
-        // Should not happen (dropdown is filtered), but if it does, redirect.
-        setCategory(newCat);
-        return;
+      // FIX (P0-ISSUE-002, 2026-07-22): previously this computed newCat as
+      // 'otc' for ANY asset ending in '_otc' — including alltime_otc pairs.
+      // On the All-Time OTC page, EVERY pair ends with '_otc', so newCat
+      // was always 'otc' !== 'alltime_otc' → user was redirected to
+      // /static/otc.html before the subscribe could fire. "বাকি গুল সুইচ
+      // করা যায় না" was this redirect loop. Now: only redirect if the
+      // asset's category TRULY mismatches (e.g. user somehow selected a
+      // real pair on the OTC page). alltime_otc pairs stay on their page.
+      const isOtcAsset = currentAsset.endsWith('_otc');
+      let expectedCat;
+      if(currentCategory === 'real')           expectedCat = isOtcAsset ? 'otc' : 'real';
+      else if(currentCategory === 'alltime_otc') expectedCat = 'alltime_otc'; // stay
+      else                                    expectedCat = isOtcAsset ? 'otc' : 'real';
+      // Only redirect if there's a genuine mismatch (real pair on OTC page,
+      // or non-OTC pair on OTC page). alltime_otc page never redirects.
+      if(currentCategory === 'real' && isOtcAsset){
+        setCategory('otc'); return;
       }
+      if(currentCategory === 'otc' && !isOtcAsset){
+        setCategory('real'); return;
+      }
+      // alltime_otc page: never redirect (all pairs there are intentional).
       signalHistory = []; totalCorrect = 0; totalSignals = 0;
       renderHistory(); renderAccuracy();
       candleData = []; tapePrices = []; tapeDir = [];
@@ -1742,7 +1758,11 @@ function safeInit(){
    Resets all module state (so the IIFE can be re-entered safely), wires up
    DOM events, starts the chart + WebSocket. */
 function initApp(category){
-  if(category !== 'real' && category !== 'otc'){
+  // FIX (P0-ISSUE-001, 2026-07-22): was `category !== 'real' && category !== 'otc'`
+  // — rejected 'alltime_otc', so the All-Time OTC page's initApp() returned
+  // immediately without setting up WS / chart / pairs. THE root cause of
+  // "All-time OTC দেখায় কিন্তু ডেটা আসে না". Now accepts all 3 categories.
+  if(category !== 'real' && category !== 'otc' && category !== 'alltime_otc'){
     console.error('initApp: invalid category', category);
     return;
   }

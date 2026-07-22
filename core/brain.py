@@ -314,6 +314,23 @@ def record_prediction(prediction: dict, asset: str, period: int,
         # win-rate stats, producing wrong weight recommendations. The
         # brain_predictions table needs a UNIQUE(asset, period, ctime) index
         # for this to work — see init_brain().
+        #
+        # FIX (P1-ISSUE-052, 2026-07-22): INSERT OR REPLACE deletes the old
+        # row (including its id) before inserting a new one. This orphans
+        # brain_module_votes rows that referenced the old prediction_id.
+        # Over time, brain_module_votes accumulates orphaned rows that
+        # distort the analysis queries. Now: explicitly delete old votes
+        # for the same (asset, period, ctime) BEFORE the REPLACE, so the
+        # new prediction_id gets fresh votes.
+        try:
+            old_pred = cur.execute(
+                "SELECT id FROM brain_predictions WHERE asset=? AND period=? AND ctime=?",
+                (asset, period, ctime)).fetchone()
+            if old_pred:
+                cur.execute("DELETE FROM brain_module_votes WHERE prediction_id=?",
+                            (old_pred["id"],))
+        except Exception:
+            pass  # table may not exist on first run
         cur.execute(f"INSERT OR REPLACE INTO brain_predictions ({columns}) VALUES ({placeholders})",
                     list(pred_data.values()))
         pred_id = cur.lastrowid

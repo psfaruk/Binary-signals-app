@@ -86,7 +86,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             f"{asset!r} implies category={detected!r}. Pass a consistent "
             f"pair, or omit category to auto-detect.")
 
-    if category == "otc":
+    if category == "otc" or category == "alltime_otc":
+        # FIX (P1-ISSUE-004, 2026-07-22): alltime_otc routes to the OTC engine
+        # (mean-reversion tuned). The 'alltime_otc' category is a presentation-
+        # layer flag for the 6 exotic pairs; the engine logic is identical to
+        # regular OTC. Without this, passing category='alltime_otc' would hit
+        # the `else: raise ValueError` branch and crash the prediction pipeline.
         result = _otc_engine.predict(
             candles, ticks, micro, asset=asset,
             htf_trend=htf_trend, period=period,

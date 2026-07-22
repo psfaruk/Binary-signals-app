@@ -488,7 +488,15 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
 
     # BRAIN-LEARNED (2026-07-20): live data showed TREND_UP regime has 44%
     # accuracy. Apply confidence penalty in TREND_UP.
-    if regime.get("regime") == "TREND_UP":
+    # FIX (P1-ISSUE-028, 2026-07-22): the blanket penalty punished BOTH
+    # CALL (continuation — should be confident) AND PUT (counter-trend —
+    # should be dampened). Now only dampen counter-trend signals. A CALL
+    # in TREND_UP is the engine correctly following the trend — penalizing
+    # it for being right is wrong.
+    if regime.get("regime") == "TREND_UP" and signal == "PUT":
+        confidence = max(0, confidence - 8)
+    elif regime.get("regime") == "TREND_DOWN" and signal == "CALL":
+        # Symmetric: dampen counter-trend CALLs in TREND_DOWN.
         confidence = max(0, confidence - 8)
 
     # BRAIN-LEARNED (2026-07-20): confidence calibration from 7623 live signals
@@ -578,7 +586,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # Also re-clamp the regime-specific dampener that was applied above —
     # if the boost raised confidence, the TREND_UP -8 may need to be
     # re-applied to keep the dampening effective.
-    if regime.get("regime") == "TREND_UP":
+    # FIX (P1-ISSUE-028, 2026-07-22): only dampen COUNTER-TREND signals
+    # (matching the first application above). Continuation signals in
+    # TREND_UP/TREND_DOWN should NOT be penalized.
+    if regime.get("regime") == "TREND_UP" and signal == "PUT":
+        confidence = max(0, confidence - 8)
+    elif regime.get("regime") == "TREND_DOWN" and signal == "CALL":
         confidence = max(0, confidence - 8)
 
     # ── Step 10: Time/session/regime pattern adjustment (BACKTEST-DRIVEN) ──
