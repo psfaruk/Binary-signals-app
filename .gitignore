@@ -11,3 +11,6 @@ qx_cache*/
 .tmp/
 upload/
 settings/
+signals.db-shm
+signals.db-wal
+signals.db
