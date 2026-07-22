@@ -1718,6 +1718,20 @@ class QuotexFeed:
             # downstream code sees NEUTRAL.
             result["signal"] = "NEUTRAL"
 
+        # FIX (PENDING-FIX-2026-07-22): WEAK signals (whether from chop-guard,
+        # FLIP_DEMOTE, or RUNCONF demotion) consistently win only ~4% of the
+        # time. They should NEVER be broadcast as CALL/PUT — convert to
+        # NEUTRAL so the frontend shows NEUTRAL (not PENDING) and the signal
+        # is skipped. This is the fix for 'সবসময় পেন্ডিং দেখায় কেনো' — WEAK
+        # signals were being broadcast, the frontend showed them briefly,
+        # then they flipped to NEUTRAL on the next tick, appearing as PENDING.
+        if result.get("signal") in ("CALL", "PUT") and result.get("strength") == "WEAK":
+            result["signal"] = "NEUTRAL"
+            result["strength"] = "NEUTRAL"
+            result["confidence"] = 0
+            result.setdefault("reasons", []).append(
+                "WEAK→NEUTRAL: backtest showed WEAK signals win ~4%. Skipping.")
+
         # Neutral signals should remain neutral; do not force a fake CALL/PUT
         # just to keep a ghost candle on screen.
         if result["signal"] == "NEUTRAL":
