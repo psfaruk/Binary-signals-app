@@ -413,6 +413,17 @@ def classify_market_regime(candles, lookback=30):
     lh_ll = 0
     prev_swing_high = None
     prev_swing_low = None
+    # FIX (AUDIT-DEEP-A4, 2026-07-23): clarified behavior — the first
+    # detected swing high/low is set as the ANCHOR (prev_swing_high/low),
+    # and no comparison happens for it. This is intentional: a comparison
+    # requires TWO swings. With only 1 swing we have no trend info; with
+    # 2 swings we get exactly 1 comparison (which is enough to detect a
+    # single HH/LH/HL/LL). The lookback of 30 candles typically yields
+    # 3-5 swings, giving 2-4 comparisons — enough for trend detection.
+    # The previous comment was misleading about "only 2 swings produces
+    # less meaningful classification" — 2 swings IS enough for a single
+    # structural comparison; the engine just gives lower-confidence
+    # results when sample count is small (which is correct).
     for i in range(2, len(recent) - 2):
         c = recent[i]
         is_swing_high = (c["high"] >= recent[i - 1]["high"] and c["high"] >= recent[i - 2]["high"]
@@ -498,6 +509,19 @@ def find_key_levels(candles, lookback=50):
     # NOTE: BUG-N fix attempted to keep "most extreme" levels but backtest
     # showed it hurt Real engine accuracy (extreme levels are too far from
     # current price to be meaningful for 1-candle predictions). Reverted.
+    #
+    # FIX (AUDIT-DEEP-A10, 2026-07-23): the return order is
+    # `resistances + supports` — all resistances first (in chronological
+    # order), then all supports (in chronological order). This was
+    # misleading because callers iterating `levels[-4:]` got only the
+    # most recent supports, missing resistances entirely. The key_level
+    # S/R flip signal (BUG-01 fix) now sorts levels by `idx` before
+    # iterating, so the misleading order is harmless in practice. But
+    # for documentation clarity, we now add a comment so future maintainers
+    # understand the return value's structure: list of length ≤ 16,
+    # ordered as [R0, R1, ..., R7, S0, S1, ..., S7] where Ri is the i-th
+    # most recent resistance and Si is the i-th most recent support.
+    # Callers that need time-ordered iteration MUST sort by `idx`.
     resistances = [l for l in levels if l["type"] == "resistance"][-8:]
     supports = [l for l in levels if l["type"] == "support"][-8:]
     return resistances + supports

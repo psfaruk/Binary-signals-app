@@ -678,14 +678,30 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
 
             # Apply continuation/reversal multipliers
             if signal != "NEUTRAL" and (_cont_mult != 1.0 or _rev_mult != 1.0):
-                # Determine if this signal is continuation or reversal
+                # Determine if this signal is continuation or reversal.
+                #
+                # FIX (AUDIT-DEEP-A1, 2026-07-23): the previous code used
+                # `all_results` (raw module outputs, including signals that
+                # were later suppressed to effective=0 by regime/pair/HTF
+                # multipliers). A suppressed CONTINUATION signal would
+                # still set is_continuation=True, which then triggered
+                # the algorithm-strategy continuation multiplier — applying
+                # ×1.3 (or whatever _cont_mult) to a signal that was
+                # actually dampened out by the engine. Conceptually wrong:
+                # the algorithm strategy should only see signals that
+                # actually contributed to the final prediction.
+                # Now we use `adjusted` (the post-suppression list) so
+                # only signals that actually voted with non-zero effective
+                # score count toward the continuation/reversal decision.
                 is_continuation = any(
-                    r for r in all_results
+                    r for r, e in adjusted
                     if r.direction == signal and r.signal_type == "CONTINUATION"
+                    and e > 0  # only signals that survived suppression
                 )
                 is_reversal = any(
-                    r for r in all_results
+                    r for r, e in adjusted
                     if r.direction == signal and r.signal_type == "REVERSAL"
+                    and e > 0  # only signals that survived suppression
                 )
 
                 if is_continuation and _cont_mult != 1.0:

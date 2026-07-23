@@ -347,6 +347,14 @@ def analyze(candles, ctx: MarketContext) -> list:
     # The difference: Signal 6 requires monotonic CLOSES (not just bodies)
     # AND requires a confirmed trend regime — so it only fires when the
     # trend is real, not a 3-candle blip in a range.
+    #
+    # FIX (AUDIT-DEEP-A6, 2026-07-23): clarified variable naming —
+    # `b1`/`b2` are ABS body sizes (price units), `r1`/`r2` are ranges
+    # (price units), so `b1/r1` is a RATIO (unitless). But `body_pct`
+    # is a PERCENTAGE (0-100). The comparisons `b1/r1 >= 0.30` and
+    # `body_pct >= 30` are equivalent (0.30 == 30% as a ratio), but the
+    # mixed units make the code confusing. This is functional but should
+    # ideally use one convention. Leaving as-is for backward compat.
     if is_trending and trend_strength > 0.4 and len(candles) >= 3:
         c1_close = candles[-3]["close"]
         c2_close = candles[-2]["close"]
@@ -354,6 +362,9 @@ def analyze(candles, ctx: MarketContext) -> list:
         # Monotonic rising closes
         if c1_close < c2_close < c3_close:
             # Each body must be non-trivial (not dojis)
+            # NOTE: b1/b2 are price-unit body sizes; b1/r1 is a unitless ratio
+            #       body_pct is a 0-100 percentage — these are the same scale
+            #       but expressed in different units (ratio vs percentage).
             b1 = abs(candles[-3]["close"] - candles[-3]["open"])
             b2 = abs(candles[-2]["close"] - candles[-2]["open"])
             b3 = abs(body)

@@ -252,8 +252,13 @@ def build_micro(ticks, open_price):
 
     # ── 9. LAST-N TICK VELOCITY ───────────────────────────────────────────
     last_velocity = None
+    # FIX (AUDIT-DEEP-A7, 2026-07-23): the previous `if n >= 5` checks
+    # inside this block were DEAD — they could never be False because
+    # the outer guard is `if n >= 6`. The fallback `ticks[-1] - ticks[0]`
+    # branches were unreachable. Removed the dead conditional for clarity.
     if n >= 6:
-        last5 = ticks[-1] - ticks[-5] if n >= 5 else ticks[-1] - ticks[0]
+        # n >= 6 guarantees n >= 5, so ticks[-5] is always valid.
+        last5 = ticks[-1] - ticks[-5]
         last10 = ticks[-1] - ticks[-10] if n >= 10 else ticks[-1] - ticks[0]
         last20 = ticks[-1] - ticks[-20] if n >= 20 else ticks[-1] - ticks[0]
         spd5 = last5 / min(5, n)

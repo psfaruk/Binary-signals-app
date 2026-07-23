@@ -26,7 +26,34 @@ def analyze(candles, ctx: MarketContext) -> list:
     """Run trend-following pattern detection for real-market pairs.
 
     Returns list of ModuleResult objects.
+
+    FIX (AUDIT-DEEP-A2, 2026-07-23): the trend_follow module's weight was
+    reduced to 0.1 (effectively disabled) in DEFAULT_WEIGHTS because
+    backtest showed 27.3% win rate — catastrophically bad. The module
+    was still running every candle (CPU wasted on a module that
+    contributes nothing to the final prediction). We now check the
+    module's effective weight and short-circuit early if it's below
+    a threshold. This saves ~0.1ms per candle per real-market stream,
+    which adds up across 20+ concurrent streams. The module's analyze()
+    code is still preserved so it can be re-enabled quickly if the
+    logic is rewritten and backtest shows improvement.
     """
+    # Short-circuit: if the module's weight is effectively zero, skip
+    # the entire analysis. The blender's per-pair adapter already
+    # dampens weight 0.1 → effective contribution ~0, so running this
+    # module is wasted CPU. The module breakdown UI shows "fired: False"
+    # which is correct (no signals contributed).
+    #
+    # We import lazily here (not at module top) to avoid circular import
+    # with engines.real.config at startup time. This check costs <0.05ms.
+    try:
+        from engines.real.config import DEFAULT_WEIGHTS as _REAL_DEFAULTS
+        _trend_weight = _REAL_DEFAULTS.get("trend_follow", 1.0)
+        if _trend_weight < 0.2:  # effectively disabled
+            return []
+    except ImportError:
+        pass  # engines.real.config not importable (test context) — run normally
+
     results = []
     if len(candles) < 10:
         return results

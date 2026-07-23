@@ -1829,14 +1829,25 @@ class QuotexFeed:
         # the settlement candle. So the grade logic itself (close>open ⇒ UP)
         # is correct; the period arg is used only for sanity-logging if the
         # caller wants to mix periods.
-        if not pred or pred["signal"] not in ("CALL", "PUT"):
+        #
+        # FIX (AUDIT-DEEP-A9, 2026-07-23): the previous `if not pred or
+        # pred["signal"] not in ("CALL", "PUT")` worked because `not pred`
+        # short-circuited the `or` for None/empty dict. But the access
+        # `pred["signal"]` would crash on an empty dict if `not pred`
+        # somehow returned False (which it can't, since empty dict is
+        # falsy). Still, the code is brittle — now use pred.get("signal")
+        # for defensive None/missing-key handling.
+        if not pred:
+            return None
+        pred_signal = pred.get("signal")
+        if pred_signal not in ("CALL", "PUT"):
             return None
         # Zero-move candle = broker refund (draw), not a win or a loss.
         # Grading close>=open as UP silently counted draws as CALL wins.
         if just_closed["close"] == just_closed["open"]:
             return "draw"
         actual_up = just_closed["close"] > just_closed["open"]
-        pred_up   = pred["signal"] == "CALL"
+        pred_up   = pred_signal == "CALL"
         return "correct" if actual_up == pred_up else "wrong"
 
     def _grade_and_log(self, asset: str, period: int, closed: dict,

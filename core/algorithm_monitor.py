@@ -283,10 +283,20 @@ def _guess_algorithm(autocorr: float, avg_body: float, avg_ticks: float) -> str:
       - 'trending'   : high autocorr (>0.6), large bodies (>50%), clear swings
       - 'reversing'  : low autocorr (<0.4), small bodies (<30%), choppy
       - 'random_walk': mid autocorr (~0.5), mid bodies, no clear pattern
+
+    FIX (AUDIT-DEEP-A8, 2026-07-23): thresholds were hardcoded. Now
+    environment-configurable so operators can tune for different pairs
+    or market regimes without code changes. Defaults are unchanged.
     """
-    if autocorr > 0.6 and avg_body > 45:
+    # Env-configurable thresholds (evaluated at call time, not import time,
+    # so changes take effect on the next prediction without restart).
+    _trend_autocorr = float(os.environ.get("ALGO_TREND_AUTOCORR", "0.6"))
+    _trend_body = float(os.environ.get("ALGO_TREND_BODY", "45"))
+    _reverse_autocorr = float(os.environ.get("ALGO_REVERSE_AUTOCORR", "0.4"))
+    _reverse_body = float(os.environ.get("ALGO_REVERSE_BODY", "35"))
+    if autocorr > _trend_autocorr and avg_body > _trend_body:
         return "trending"
-    if autocorr < 0.4 and avg_body < 35:
+    if autocorr < _reverse_autocorr and avg_body < _reverse_body:
         return "reversing"
     return "random_walk"
 

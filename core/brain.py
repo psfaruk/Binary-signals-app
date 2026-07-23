@@ -251,8 +251,23 @@ def record_prediction(prediction: dict, asset: str, period: int,
         else: session = "LATE_NY"
 
         # Compute net margin
-        score = prediction.get("score", 0)
-        net_margin = abs(score) / 10.0 if score else 0  # rough estimate
+        #
+        # FIX (AUDIT-DEEP-A3, 2026-07-23): the previous `if score else 0`
+        # is a truthy check — for `score=0` (NEUTRAL predictions or a
+        # perfect tie), Python treats 0 as falsy and the else branch
+        # returns 0 anyway. The bug was SEMANTIC not functional: the
+        # expression `abs(score) / 10.0` already produces 0.0 when
+        # score=0, so the if/else is redundant. Worse, `score=None`
+        # (defensive: prediction.get("score", 0) returns 0, but if a
+        # caller passed a dict with explicit None) would crash on
+        # abs(None). Now explicit `is None` check handles None cleanly.
+        score = prediction.get("score")
+        if score is None:
+            score = 0
+        try:
+            net_margin = abs(score) / 10.0
+        except (TypeError, ValueError):
+            net_margin = 0
 
         # Insert brain_predictions — using dict-based insert to avoid column mismatch
         pred_data = {

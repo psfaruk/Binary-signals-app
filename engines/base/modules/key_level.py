@@ -138,7 +138,20 @@ def analyze(candles, ctx: MarketContext) -> list:
             low_idx = max(range(len(window)), key=lambda i: window[i]["low"])
 
             fib_levels = {}
-            if high_idx > low_idx:
+            # FIX (AUDIT-DEEP-A5, 2026-07-23): when high_idx == low_idx
+            # (extremely rare — happens only when one candle is BOTH
+            # the highest-high and lowest-low, which means range > 0
+            # but the most-recent occurrence of the high is the same
+            # candle as the most-recent occurrence of the low), the
+            # old code took the else branch (downtrend), which is
+            # arbitrary. Now we explicitly skip Fibonacci for this
+            # degenerate case — the swing structure is ambiguous and
+            # a Fibonacci signal would be misleading.
+            if high_idx == low_idx:
+                # Degenerate: same candle is both swing high and swing low.
+                # Ambiguous trend direction — skip Fibonacci signal.
+                fib_levels = {}
+            elif high_idx > low_idx:
                 # Uptrend: retracement from low to high
                 for level, pct in [("38.2", 0.382), ("50", 0.5), ("61.8", 0.618)]:
                     fib_levels[level] = swing_high - swing_range * pct
