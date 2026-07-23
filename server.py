@@ -94,6 +94,15 @@ async def broadcast(msg: dict):
     exists but has no interested_cids, we skip the broadcast for that
     (asset, period); if no stream exists at all, we also skip — the
     viewers are clearly not watching this asset anymore.
+
+    FIX (CANDLE-STUCK-FIX, 2026-07-23): when the real feed has fallen
+    back to sim_delegate mode, the stream's interested_cids are stored
+    in sim_delegate._streams, NOT feed._streams. The previous code only
+    checked feed._streams, so all sim_feed broadcasts were dropped
+    (target_cids=[] → skip). This was THE cause of 'signals come but
+    candle stuck' — the sim feed was producing ticks but they never
+    reached the browser. Now we check BOTH feed._streams AND
+    sim_delegate._streams.
     """
     if not clients:
         return
@@ -115,6 +124,15 @@ async def broadcast(msg: dict):
                 if stream and stream.interested_cids:
                     target_cids = list(stream.interested_cids)
                 # else: stream gone or no viewers → skip (was: send to all)
+
+            # FIX (CANDLE-STUCK-FIX): if not found in real feed, check
+            # sim_delegate. The sim feed's streams are stored separately.
+            if not target_cids:
+                sim = getattr(feed, '_sim_delegate', None)
+                if sim is not None and hasattr(sim, '_streams'):
+                    sim_stream = sim._streams.get(stream_key)
+                    if sim_stream and sim_stream.interested_cids:
+                        target_cids = list(sim_stream.interested_cids)
         except Exception:
             # On unexpected error, fall back to broadcast-all to avoid
             # silently dropping important messages (status/pairs).
