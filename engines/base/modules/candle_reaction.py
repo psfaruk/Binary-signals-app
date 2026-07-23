@@ -157,7 +157,25 @@ def analyze(candles, ctx: MarketContext) -> list:
     if len(candles) >= 10:
         recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
                          for i in range(-min(20, len(candles)), 0)]
-        median_body = sorted(recent_bodies)[len(recent_bodies) // 2]
+        # FIX (AUDIT-DEEP #06, 2026-07-23): the previous median calculation
+        # took only `sorted(recent_bodies)[len(recent_bodies) // 2]`, which
+        # for an EVEN-length list returns the UPPER middle element (e.g. for
+        # 20 elements, index 10 = the 11th smallest). The correct median of
+        # an even-length list is the AVERAGE of the two middle elements
+        # (indices 9 and 10 for n=20). The previous off-by-one median was
+        # ~5% higher than the true median for typical body distributions,
+        # making the "big body" threshold too strict (fewer signals fired).
+        # Now we compute the true median as the average of the two middle
+        # elements when n is even.
+        sorted_bodies = sorted(recent_bodies)
+        n_bodies = len(sorted_bodies)
+        if n_bodies % 2 == 1:
+            median_body = sorted_bodies[n_bodies // 2]
+        else:
+            # Even: average of the two middle elements.
+            lo_mid = sorted_bodies[(n_bodies // 2) - 1]
+            hi_mid = sorted_bodies[n_bodies // 2]
+            median_body = (lo_mid + hi_mid) / 2.0
         if median_body > 0 and abs(body) > median_body * body_mult and abs(body) > 0:
             # FIX (Bug #19, 2026-07-17): Z-score boost threshold is now
             # volatility-scaled (was static Z > 2.0). Matches the same
@@ -177,16 +195,25 @@ def analyze(candles, ctx: MarketContext) -> list:
             else:
                 base_score, base_conf = 3, 64
             score = base_score + z_boost
+            # FIX (AUDIT-DEEP #12, 2026-07-23): the reason text previously
+            # showed `{body_mult}x median` — that's the THRESHOLD multiplier
+            # (e.g. "1.5x median"), not the ACTUAL ratio of the current body
+            # to the median. The actual ratio is `abs(body) / median_body`,
+            # which is what determines whether the signal fired. Showing the
+            # threshold was misleading — it suggested the candle WAS exactly
+            # 1.5x median when in reality it could be 2.1x or 3.0x. Now we
+            # show the actual ratio for accurate postmortem analysis.
+            actual_ratio = abs(body) / median_body if median_body > 0 else 0
             if body > 0:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="PUT", score=score, confidence=base_conf,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                    reasons=[f"Big UP body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {body_mult}x median, trend_str={trend_strength:.2f}) → PUT reversal"]))
+                    reasons=[f"Big UP body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {actual_ratio:.1f}x median [thresh {body_mult}x], trend_str={trend_strength:.2f}) → PUT reversal"]))
             elif body < 0:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="CALL", score=score, confidence=base_conf,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                    reasons=[f"Big DOWN body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {body_mult}x median, trend_str={trend_strength:.2f}) → CALL reversal"]))
+                    reasons=[f"Big DOWN body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {actual_ratio:.1f}x median [thresh {body_mult}x], trend_str={trend_strength:.2f}) → CALL reversal"]))
             # body == 0 (doji): skip — body_pct would be 0, which fails
             # the > median_body * body_mult threshold anyway, but be safe.
 

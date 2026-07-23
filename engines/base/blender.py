@@ -559,10 +559,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             acc_val, acc_n = recent_accuracy
             if acc_n >= 8 and acc_val is not None:
                 if acc_val < 0.45:
-                    confidence = int(confidence * 0.85)
+                    # FIX (AUDIT-DEEP #08, 2026-07-23): use round() not int()
+                    confidence = round(confidence * 0.85)
                     accuracy_note = f"_ACCURACY_CORRECT: recent {acc_val:.0%} ({acc_n} samples) → confidence ×0.85"
                 elif acc_val > 0.60:
-                    confidence = min(100, int(confidence * 1.05))
+                    confidence = min(100, round(confidence * 1.05))
                     accuracy_note = f"_ACCURACY_CORRECT: recent {acc_val:.0%} ({acc_n} samples) → confidence ×1.05"
         except (TypeError, ValueError):
             pass
@@ -604,6 +605,20 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # The adjustment is a multiplicative factor in [0.5, 1.5] applied to
     # confidence, then re-clamped to the calibration caps.
     # Skip in test contexts where core.time_patterns isn't available.
+    #
+    # FIX (AUDIT-DEEP #03, 2026-07-23): initialize the strategy variables
+    # BEFORE the try blocks so the final return statement doesn't rely on
+    # the fragile `'_algo_strategy_name' in dir()` idiom. The previous code
+    # set `_algo_strategy_name` only inside a try block that could be
+    # skipped (ImportError on core.time_patterns or core.algorithm_strategy).
+    # When skipped, `dir()` inside the function returns local names that
+    # DON'T include `_algo_strategy_name`, and the return statement falls
+    # back to "default". This worked in practice but is brittle — if any
+    # intermediate line raised an exception after the variable was set but
+    # before the return, the fallback might mask a real strategy. Now the
+    # variables are initialized up-front and unconditionally available.
+    _algo_strategy_name = "default"
+    _algo_strategy_reason = ""
     try:
         from core.time_patterns import (
             get_time_adjustment, get_regime_adjustment, get_tag_adjustment)
@@ -611,13 +626,21 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         _ctime = candles[-1].get("time") if candles else 0
         _time_mult, _time_note = get_time_adjustment(asset, _ctime or 0)
         if _time_mult != 1.0:
-            confidence = int(confidence * _time_mult)
+            # FIX (AUDIT-DEEP #08, 2026-07-23): use round() instead of int()
+            # so a confidence of 63 * 1.06 = 66.78 → 67 (not 66). The previous
+            # int() truncation lost ~0.5% per multiplier and compounded across
+            # the 4-5 successive multipliers applied here (time, regime,
+            # strategy confidence, continuation/reversal) — a 5-step cascade
+            # could lose up to 2.5 percentage points of confidence to
+            # truncation alone. round() gives the mathematically correct
+            # integer confidence.
+            confidence = round(confidence * _time_mult)
             if _time_note:
                 all_reasons.append(_time_note)
         _regime_name = regime.get("regime")
         _reg_mult, _reg_note = get_regime_adjustment(asset, _regime_name)
         if _reg_mult != 1.0:
-            confidence = int(confidence * _reg_mult)
+            confidence = round(confidence * _reg_mult)  # FIX: was int()
             if _reg_note:
                 all_reasons.append(_reg_note)
         # Tag-based adjustment (uses prediction's own tags, which we don't
@@ -648,7 +671,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
 
             # Apply confidence multiplier (overall scaling)
             if _conf_mult != 1.0 and signal != "NEUTRAL":
-                confidence = int(confidence * _conf_mult)
+                confidence = round(confidence * _conf_mult)  # FIX: was int()
                 all_reasons.append(
                     f"_ALGO_STRATEGY: {_algo_icon} {_algo_strategy_name} "
                     f"→ confidence ×{_conf_mult:.2f}")
@@ -666,12 +689,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 )
 
                 if is_continuation and _cont_mult != 1.0:
-                    confidence = int(confidence * _cont_mult)
+                    confidence = round(confidence * _cont_mult)  # FIX: was int()
                     all_reasons.append(
                         f"_ALGO_STRATEGY: continuation ×{_cont_mult:.2f} "
                         f"({strat['algorithm']})")
                 elif is_reversal and _rev_mult != 1.0:
-                    confidence = int(confidence * _rev_mult)
+                    confidence = round(confidence * _rev_mult)  # FIX: was int()
                     all_reasons.append(
                         f"_ALGO_STRATEGY: reversal ×{_rev_mult:.2f} "
                         f"({strat['algorithm']})")
@@ -789,8 +812,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         "asset": asset,
         "profile": pair_profile,
         "htf_trend": htf_trend,
-        "strategy": _algo_strategy_name if '_algo_strategy_name' in dir() else "default",
-        "strategy_reason": _algo_strategy_reason if '_algo_strategy_reason' in dir() else "",
+        # FIX (AUDIT-DEEP #03, 2026-07-23): variables are now unconditionally
+        # initialized at the top of Step 10, so we can reference them directly
+        # without the fragile `'_algo_strategy_name' in dir()` idiom.
+        "strategy": _algo_strategy_name,
+        "strategy_reason": _algo_strategy_reason,
     }
 
 

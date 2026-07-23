@@ -78,13 +78,26 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     if category is None:
         category = detected
     elif category != detected:
-        # Hard mismatch — refuse to route. This was previously silent,
-        # allowing an OTC pair to be analyzed by the Real engine (or
-        # vice versa), defeating the whole point of having two engines.
-        raise ValueError(
-            f"category/asset mismatch: category={category!r} but asset "
-            f"{asset!r} implies category={detected!r}. Pass a consistent "
-            f"pair, or omit category to auto-detect.")
+        # FIX (AUDIT-DEEP #05, 2026-07-23): the previous hard-mismatch check
+        # rejected `category="alltime_otc"` even when the asset ended with
+        # "_otc" (which is the correct pairing). `category_of()` returns
+        # "otc" or "real" — never "alltime_otc" — so passing
+        # `category="alltime_otc"` always triggered the ValueError.
+        # `alltime_otc` is a presentation-layer flag (the 6 exotic pairs
+        # get a dedicated UI tab) but the engine logic is identical to
+        # regular OTC, so it should be accepted and routed to the OTC
+        # engine. Now we treat `alltime_otc` as equivalent to `otc` for
+        # the asset-suffix consistency check.
+        if category == "alltime_otc" and detected == "otc":
+            category = "otc"  # normalize for downstream routing
+        else:
+            # Hard mismatch — refuse to route. This was previously silent,
+            # allowing an OTC pair to be analyzed by the Real engine (or
+            # vice versa), defeating the whole point of having two engines.
+            raise ValueError(
+                f"category/asset mismatch: category={category!r} but asset "
+                f"{asset!r} implies category={detected!r}. Pass a consistent "
+                f"pair, or omit category to auto-detect.")
 
     if category == "otc" or category == "alltime_otc":
         # FIX (P1-ISSUE-004, 2026-07-22): alltime_otc routes to the OTC engine

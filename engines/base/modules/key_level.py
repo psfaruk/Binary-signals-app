@@ -175,10 +175,24 @@ def analyze(candles, ctx: MarketContext) -> list:
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 6: Support/Resistance Flip (NEW — classic)
     # Broken resistance becomes support (and vice versa)
+    #
+    # FIX (AUDIT-DEEP #01, 2026-07-23): `ctx.key_levels` returns
+    # `resistances[-8:] + supports[-8:]` (resistances first, supports second).
+    # The previous code `for level in levels[-4:]` iterated only the LAST 4
+    # entries — which are the 4 most recent SUPPORTS. Resistance levels were
+    # NEVER checked for S/R flip, so the signal only fired on broken support
+    # → resistance (PUT direction), never on broken resistance → support
+    # (CALL direction). This biased the signal toward PUT votes.
+    # Now we sort ALL levels by their `idx` (candle index) and take the 4
+    # most recent of EITHER type, so both flip directions are checked.
     # ═══════════════════════════════════════════════════════════════════════
     if len(candles) >= 10 and atr > 0:
         levels = ctx.key_levels
-        for level in levels[-4:]:  # check last 4 levels
+        # Sort by candle index descending, take the 4 most recent levels
+        # of either type (resistance or support).
+        recent_levels = sorted(levels, key=lambda lv: lv.get("idx", 0),
+                               reverse=True)[:4]
+        for level in recent_levels:
             lvl_price = level["price"]
             lvl_type = level["type"]
             # Check if price recently broke through this level

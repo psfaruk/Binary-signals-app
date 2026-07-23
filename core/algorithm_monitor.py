@@ -74,6 +74,34 @@ def init_algorithm_monitor():
                           ON algorithm_changes(asset, ts DESC)""")
             cur.execute("""CREATE INDEX IF NOT EXISTS ix_ac_ts
                           ON algorithm_changes(ts DESC)""")
+            # FIX (AUDIT-DEEP #13, 2026-07-23): deduplication guard. The
+            # previous schema had no UNIQUE constraint, so a watchdog restart
+            # or a retry of record_candle could insert duplicate rows for
+            # the same (asset, ts, change_type) tuple. Over time this inflated
+            # the change count shown in /api/algorithm-changes. We use a
+            # UNIQUE INDEX on (asset, ts, change_type) so duplicate inserts
+            # are silently rejected (INSERT, not INSERT OR REPLACE — older
+            # rows keep their original notes/confidence). First dedupe any
+            # existing duplicates so the index creation succeeds.
+            try:
+                cur.execute("""
+                    DELETE FROM algorithm_changes WHERE id IN (
+                        SELECT a1.id FROM algorithm_changes a1
+                        WHERE EXISTS (
+                            SELECT 1 FROM algorithm_changes a2
+                            WHERE a2.asset = a1.asset
+                              AND a2.ts = a1.ts
+                              AND a2.change_type = a1.change_type
+                              AND a2.id > a1.id
+                        )
+                    )
+                """)
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_ac_asset_ts_type
+                    ON algorithm_changes(asset, ts, change_type)
+                """)
+            except Exception as _e:
+                print(f"[algo_monitor] could not create UNIQUE index: {_e}")
             # ── per-pair rolling stats cache ────────────────────────────────
             # Stores the last N candles' summary stats so we can detect
             # regime shifts without re-querying signal_log every time.
@@ -267,12 +295,22 @@ def _log_change(asset: str, change_type: str,
                 old_payout: float, new_payout: float,
                 old_summary: dict, new_summary: dict,
                 confidence: float, notes: str):
-    """Insert a row into algorithm_changes."""
+    """Insert a row into algorithm_changes.
+
+    FIX (AUDIT-DEEP #13, 2026-07-23): use INSERT OR IGNORE so the UNIQUE
+    constraint on (asset, ts, change_type) doesn't crash the insert when a
+    duplicate (e.g. from a watchdog restart) is attempted. The original
+    row is preserved (its notes/confidence stay intact). Previously a
+    duplicate insert would raise sqlite3.IntegrityError, which was caught
+    by the broad `except Exception` below and logged — non-fatal but
+    noisy, and the duplicate was silently dropped anyway. Now it's silent
+    by design.
+    """
     conn = _conn()
     try:
         with _lock:
             cur = conn.cursor()
-            cur.execute("""INSERT INTO algorithm_changes
+            cur.execute("""INSERT OR IGNORE INTO algorithm_changes
                 (ts, asset, change_type, old_payout, new_payout,
                  old_regime_summary, new_regime_summary, confidence, notes)
                 VALUES (?,?,?,?,?,?,?,?,?)""",

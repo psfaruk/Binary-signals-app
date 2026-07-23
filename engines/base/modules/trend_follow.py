@@ -274,11 +274,25 @@ def analyze(candles, ctx: MarketContext) -> list:
     # NOTE: threshold raised from consec>=4 to >=5 and shrink from 0.70 to 0.60
     # after backtest showed the looser threshold hurt Real engine overall
     # accuracy (too many false reversal signals).
+    #
+    # FIX (AUDIT-DEEP #11, 2026-07-23): `avg_body` previously included the
+    # current (small) body, which drags down the average and makes the
+    # "shrinking" test less sensitive. A truly shrinking candle would be
+    # compared against the PRIOR streak bodies (excluding current), so a
+    # 60% shrinkage test against the prior average is a stricter, more
+    # accurate exhaustion signal. The fix excludes the current candle from
+    # the average computation.
     if consec >= 5 and len(candles) >= 6:
         lookback = min(consec, len(candles))
-        streak_bodies = [abs(candles[i]["close"] - candles[i]["open"])
-                         for i in range(-lookback, 0)]
-        avg_body = sum(streak_bodies) / len(streak_bodies) if streak_bodies else 0
+        # FIX: prior streak bodies = all streak candles EXCEPT the current
+        # one (the last in the range). The current body is what we compare
+        # against the prior average to detect shrinking.
+        prior_streak_bodies = [
+            abs(candles[i]["close"] - candles[i]["open"])
+            for i in range(-lookback, -1)  # exclude current (index -1)
+        ]
+        avg_body = (sum(prior_streak_bodies) / len(prior_streak_bodies)
+                    if prior_streak_bodies else 0)
         last_body_signed = last["close"] - last["open"]
         last_body_abs = abs(last_body_signed)
         # Shrinking body = trend losing momentum
@@ -301,6 +315,14 @@ def analyze(candles, ctx: MarketContext) -> list:
     # In an uptrend, wait for a 2-3 candle pullback, then enter CALL
     # when price resumes up. Mirror for downtrend.
     # This is the "buy the dip" / "sell the rally" strategy.
+    #
+    # FIX (AUDIT-DEEP #02, 2026-07-23): the previous "still above prior low"
+    # check used `c2["close"] > candles[-3]["close"]` — that's "current close
+    # > close 3 candles ago", NOT "current close > prior low". The pullback
+    # should confirm the trend is intact by checking price is still above the
+    # recent swing low (not just above an arbitrary older close). Same bug
+    # for the downtrend mirror. Now uses min/max of recent lows/highs so the
+    # check actually verifies trend structure is preserved.
     # ═══════════════════════════════════════════════════════════════════════
     if is_trending and trend_strength > 0.4 and len(candles) >= 5:
         # Check for pullback: last 2 candles against trend
@@ -308,8 +330,13 @@ def analyze(candles, ctx: MarketContext) -> list:
             # Look for 2 consecutive down candles (pullback)
             c1 = candles[-2]
             c2 = candles[-1]
+            # FIX: prior swing low = min of the lows of the 3 candles BEFORE
+            # the pullback started (candles[-4] and candles[-3]). Using min
+            # of highs would be wrong; using min of lows gives the actual
+            # recent swing low that the pullback must hold above.
+            prior_swing_low = min(candles[-3]["low"], candles[-4]["low"])
             if (c1["close"] < c1["open"] and c2["close"] < c2["open"]
-                    and c2["close"] > candles[-3]["close"]  # still above prior low
+                    and c2["close"] > prior_swing_low  # FIX: was candles[-3]["close"]
                     and c2["close"] > ema9):  # still above EMA9
                 # Pullback in uptrend → CALL
                 results.append(ModuleResult(
@@ -320,8 +347,11 @@ def analyze(candles, ctx: MarketContext) -> list:
             # Look for 2 consecutive up candles (rally)
             c1 = candles[-2]
             c2 = candles[-1]
+            # FIX: prior swing high = max of recent highs. The pullback
+            # (rally) must stay below this for the downtrend to be intact.
+            prior_swing_high = max(candles[-3]["high"], candles[-4]["high"])
             if (c1["close"] > c1["open"] and c2["close"] > c2["open"]
-                    and c2["close"] < candles[-3]["close"]  # still below prior high
+                    and c2["close"] < prior_swing_high  # FIX: was candles[-3]["close"]
                     and c2["close"] < ema9):  # still below EMA9
                 # Rally in downtrend → PUT
                 results.append(ModuleResult(

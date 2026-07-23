@@ -260,14 +260,29 @@ def apply_tuned_weights_to_engines():
 
         if changed_otc or changed_real:
             print(f"[auto_tune] weights updated — OTC: {tuned_otc}, Real: {tuned_real}")
-            # Also invalidate the per_pair adapter cache so new weights take effect
+            # Also invalidate the per_pair adapter cache so new weights take effect.
+            #
+            # FIX (AUDIT-DEEP #09, 2026-07-23): the previous code called
+            # `_otc_adapter.invalidate_cache_all()` and
+            # `_real_adapter.invalidate_cache_all()` — but `PairWeightAdapter`
+            # only defines `invalidate_cache(asset=None, period=None)`, NOT
+            # `invalidate_cache_all()`. This raised AttributeError, which was
+            # swallowed by the surrounding `except Exception: pass`. The
+            # result: DEFAULT_WEIGHTS was updated in-place (line 252/258) but
+            # the per_pair adapter's `_adapt_cache` was NEVER cleared. The
+            # cache has a 60-second TTL (`_ADAPT_CACHE_TTL = 60`), so old
+            # weights persisted for up to 1 minute after auto-tune ran —
+            # during which predictions still used the STALE (pre-tune) weights.
+            # Now we call `invalidate_cache()` with no args, which clears the
+            # entire cache (the method already handles `asset=None` as
+            # "clear all" — see per_pair.py line 141-142).
             try:
                 from engines.otc.config import weight_adapter as _otc_adapter
                 from engines.real.config import weight_adapter as _real_adapter
-                _otc_adapter.invalidate_cache_all()
-                _real_adapter.invalidate_cache_all()
-            except Exception:
-                pass
+                _otc_adapter.invalidate_cache()  # FIX: was invalidate_cache_all()
+                _real_adapter.invalidate_cache()  # FIX: was invalidate_cache_all()
+            except Exception as _cache_err:
+                print(f"[auto_tune] cache invalidation failed: {_cache_err}")
 
         return {"otc": tuned_otc, "real": tuned_real}
     except Exception as e:

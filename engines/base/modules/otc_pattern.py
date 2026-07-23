@@ -128,45 +128,22 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f}) → CALL reversal boost"]))
 
     # ── REVERSAL SIGNAL 3: Z-score extreme reversal ──────────────────────
-    # FIX (live data, 2026-07-20): real Quotex data showed 0% win rate!
-    # DISABLED entirely — z-score extremes in OTC are broker momentum
-    # spikes, not exhaustion. The broker pushes price further, not reverses.
-    vol_pct = ctx.vol_pct
-    z_threshold = 999  # effectively disabled — no z-score will exceed this
-
-    # FIX (OTC issue 1, 2026-07-19): z-score extreme fires REVERSAL on a
-    # big body — but a big body IN THE DIRECTION OF A STRONG TREND is a
-    # momentum candle (continuation), not exhaustion. Soft-gate: when the
-    # body aligns with a strong trend (str > 0.7), suppress this signal;
-    # moderate trend (str 0.5–0.7) gets a dampened version.
-    if stats["z_body"] > z_threshold:
-        last = candles[-1]
-        body = last["close"] - last["open"]
-        body_aligns_with_trend = (
-            is_trending
-            and ((trend_regime == "TREND_UP" and body > 0)
-                 or (trend_regime == "TREND_DOWN" and body < 0))
-        )
-        # Decide gating level. Default: full strength reversal.
-        if body_aligns_with_trend and trend_strength > 0.7:
-            # Strong-trend momentum candle — don't bet against it.
-            fire_z, z_score, z_conf = False, 0, 0
-        elif body_aligns_with_trend and trend_strength > 0.5:
-            fire_z, z_score, z_conf = True, 1, 54
-        else:
-            fire_z, z_score, z_conf = True, 1, 58
-
-        if fire_z:
-            if body > 0:
-                results.append(ModuleResult(
-                    module_name="otc_pattern", direction="PUT", score=z_score, confidence=z_conf,
-                    signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
-                    reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f} > {z_threshold}, vol={vol_pct:.1f}x, trend_str={trend_strength:.2f}) → PUT reversal"]))
-            elif body < 0:
-                results.append(ModuleResult(
-                    module_name="otc_pattern", direction="CALL", score=z_score, confidence=z_conf,
-                    signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
-                    reasons=[f"Z-score extreme body (Z={stats['z_body']:.1f} > {z_threshold}, vol={vol_pct:.1f}x, trend_str={trend_strength:.2f}) → CALL reversal"]))
+    # DISABLED (live data, 2026-07-20): real Quotex data showed 0% win rate!
+    # Z-score extremes in OTC are broker momentum spikes, not exhaustion.
+    # The broker pushes price further, not reverses.
+    #
+    # FIX (AUDIT-DEEP #10, 2026-07-23): the previous code kept the entire
+    # 35-line signal block in place but set an impossibly-high threshold
+    # (z > 999) to make it unreachable. This is dead code — it can never
+    # fire, but it adds ~35 lines of confusing logic that future
+    # maintainers might "fix" by lowering the threshold back to a
+    # meaningful value, re-introducing the 0% win rate signal. Now the
+    # entire block is REMOVED, with a clear comment explaining why. If
+    # live data ever shows z-score extremes have predictive value again,
+    # re-add this signal with proper backtesting.
+    #
+    # (Original signal logic removed — see git history for the
+    # implementation if needed for future backtesting.)
 
     # ── REVERSAL SIGNAL 4: Close percentile extreme ──────────────────────
     # FIX (OTC issue 1, 2026-07-19): same gating as Signal 3 — a close at

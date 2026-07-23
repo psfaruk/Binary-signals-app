@@ -218,25 +218,49 @@ def determine_strategy(asset: str) -> dict:
     cached_until = cached.get("until", 0)
     cached_candles = cached.get("cooldown_candles", 0)
 
-    # If we're in a cooldown period, decrement and continue
+    # If we're in a cooldown period, derive remaining candles from TIME
+    # rather than decrementing a counter per call.
+    #
+    # FIX (AUDIT-DEEP #04, 2026-07-23): the previous code decremented
+    # `cached_candles` by 1 on EVERY call to determine_strategy(). The
+    # blender calls this function ~5-6 times per candle (once at EOC +
+    # ~5 LIVE re-evals every ~2s in the last 10s). So a 5-candle cooldown
+    # ended in ~1 candle — making the cooldown 5x shorter than intended.
+    # The `until` timestamp was correct (5 minutes), but the
+    # `cached_candles > 0` check returned False after just 5 CALLS, so
+    # the time-based `until` gate was bypassed. Now we compute remaining
+    # candles directly from the time delta, so the cooldown lasts the
+    # full intended duration regardless of call frequency.
     if cached_candles > 0 and time.time() < cached_until:
-        cached_candles -= 1
-        strategy_key = cached.get("strategy", "neutral")
-        _ASSET_STRATEGY[asset] = {
-            "strategy": strategy_key,
-            "until": cached_until,
-            "cooldown_candles": cached_candles,
-        }
-        strat = STRATEGIES.get(strategy_key, STRATEGIES["neutral"])
-        return {
-            "strategy": strategy_key,
-            "name": strat["name"],
-            "icon": strat["icon"],
-            "reason": f"cooldown ({cached_candles} candles left) — {cached.get('reason','')}",
-            "multipliers": strat,
-            "algorithm": algo,
-            "payout": payout,
-        }
+        # Compute remaining candles from the remaining time.
+        # Each candle is 60s (the default period). This matches the
+        # original `_COOLDOWN_DURATION * 60` and `_RESET_DURATION * 60`
+        # expiry math used when the cooldown was set.
+        remaining_sec = max(0, cached_until - time.time())
+        remaining_candles = max(0, int(round(remaining_sec / 60.0)))
+        if remaining_candles <= 0:
+            # Cooldown expired — fall through to normal determination.
+            pass
+        else:
+            strategy_key = cached.get("strategy", "neutral")
+            # Re-write the cache with the updated remaining count so the
+            # next call sees a consistent state.
+            _ASSET_STRATEGY[asset] = {
+                "strategy": strategy_key,
+                "until": cached_until,
+                "cooldown_candles": remaining_candles,
+                "reason": cached.get("reason", ""),
+            }
+            strat = STRATEGIES.get(strategy_key, STRATEGIES["neutral"])
+            return {
+                "strategy": strategy_key,
+                "name": strat["name"],
+                "icon": strat["icon"],
+                "reason": f"cooldown ({remaining_candles} candles left) — {cached.get('reason','')}",
+                "multipliers": strat,
+                "algorithm": algo,
+                "payout": payout,
+            }
 
     # ── Step 1: Check for recent payout change → CAUTIOUS ──────────────
     if recent and recent["type"] in ("payout_spike", "payout_drop"):
