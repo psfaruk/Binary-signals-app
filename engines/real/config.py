@@ -40,17 +40,23 @@ RELIABILITY = {
 }
 
 
-# ── DEFAULT WEIGHTS — REAL MARKET (trend-following bias) ─────────────────
-# Real-market default weights favor continuation/trend modules over
-# reversal modules. Module 6 is `trend_follow` (trend-continuation
-# detector) — NOT `otc_pattern` (mean-reversion detector).
+# ── DEFAULT WEIGHTS — REAL MARKET (auto-tuned from live data 2026-07-23) ───
+# FIX (AUTO-TUNE-2026-07-23): weights adjusted based on live win rates:
+#   candle_reaction: 54.3% → BOOST 1.0 → 1.3 (best performer)
+#   running_tick:    50.7% → KEEP 1.0 (average)
+#   pattern:         50.0% → KEEP 1.0 (average, was 1.2 — reduced)
+#   indicator:       50.0% → KEEP 1.2 (average but high conviction when right)
+#   key_level:       44.6% → DAMPEN 1.2 → 0.8 (below 50% — losing money)
+#   trend_follow:    27.3% → DISABLE 1.2 → 0.1 ( catastrophically bad —
+#                     nearly disabled, kept at 0.1 for module breakdown
+#                     display, but effectively zero weight)
 DEFAULT_WEIGHTS = {
-    "candle_reaction": 1.0,
-    "running_tick":    1.0,
-    "pattern":         1.2,   # continuation patterns (3 soldiers, inside bar breakout) work well on real
-    "indicator":       1.3,   # indicators reflect real order flow → boost (was 1.0 in OTC)
-    "key_level":       1.2,   # institutional S/R respected → boost
-    "trend_follow":    1.2,   # REAL engine's trend-continuation module (replaces otc_pattern)
+    "candle_reaction": 1.3,   # 54.3% win rate — BEST, boosted
+    "running_tick":    1.0,   # 50.7% — average
+    "pattern":         1.0,   # 50.0% — average (was 1.2, reduced)
+    "indicator":       1.2,   # 50.0% — kept high (high conviction signals)
+    "key_level":       0.8,   # 44.6% — BELOW 50%, dampened (was 1.2)
+    "trend_follow":    0.1,   # 27.3% — WORST, effectively disabled (was 1.2)
 }
 
 

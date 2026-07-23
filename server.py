@@ -488,6 +488,21 @@ async def get_current_strategy(asset: str = None):
     return get_asset_strategy_summary(asset)
 
 
+@app.get("/api/auto-tune")
+async def auto_tune_report():
+    """Show current module win rates and auto-tuned weights."""
+    from core.auto_tune import get_tuning_report
+    return get_tuning_report()
+
+
+@app.post("/api/auto-tune/apply")
+async def auto_tune_apply():
+    """Manually trigger auto-tune weight recalculation."""
+    from core.auto_tune import apply_tuned_weights_to_engines
+    result = await asyncio.to_thread(apply_tuned_weights_to_engines)
+    return {"status": "applied", "weights": result}
+
+
 @app.get("/api/algorithm-changes")
 async def algorithm_changes(hours: int = 24, limit: int = 100):
     """Recent algorithm changes across all pairs (default: last 24h)."""

@@ -2446,14 +2446,19 @@ class QuotexFeed:
                     from core.brain import analyze_and_learn
                     await asyncio.to_thread(analyze_and_learn)
                     # BACKTEST-2026-07-21: also refresh time/session patterns.
-                    # This re-reads signal_log and updates the
-                    # time_session_patterns table so the blender's
-                    # adjustments reflect the latest 50 graded signals.
                     try:
                         from core.time_patterns import recompute_from_signal_log
                         await asyncio.to_thread(recompute_from_signal_log, 3)
                     except Exception as _pe:
                         print(f"[feed] pattern refresh skipped: {_pe}")
+                    # FIX (AUTO-TUNE-2026-07-23): auto-tune module weights
+                    # based on live win rates. Every 50 graded signals,
+                    # recompute weights and apply to engine configs.
+                    try:
+                        from core.auto_tune import apply_tuned_weights_to_engines
+                        await asyncio.to_thread(apply_tuned_weights_to_engines)
+                    except Exception as _te:
+                        print(f"[feed] auto-tune skipped: {_te}")
             except Exception:
                 pass
 

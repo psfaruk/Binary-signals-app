@@ -37,14 +37,21 @@ RELIABILITY = {
 }
 
 
-# ── DEFAULT WEIGHTS (all modules equal, OTC gets slight bonus) ───────────
+# ── DEFAULT WEIGHTS (auto-tuned from live data 2026-07-23) ─────────────────
+# FIX (AUTO-TUNE-2026-07-23): weights adjusted based on live win rates:
+#   candle_reaction: 54.3% → BOOST 1.0 → 1.3 (best performer across all pairs)
+#   running_tick:    50.7% → KEEP 1.0 (average)
+#   pattern:         50.0% → KEEP 1.0 (average)
+#   indicator:       50.0% → KEEP 1.0 (average)
+#   key_level:       44.6% → DAMPEN 1.0 → 0.7 (below 50% — losing money)
+#   otc_pattern:     48.4% → DAMPEN 1.2 → 0.9 (slightly below 50%, was overvalued)
 DEFAULT_WEIGHTS = {
-    "candle_reaction": 1.0,
-    "running_tick":    1.0,
-    "pattern":         1.0,
-    "indicator":       1.0,
-    "key_level":       1.0,
-    "otc_pattern":     1.2,   # OTC-specific gets bonus (most relevant for OTC markets)
+    "candle_reaction": 1.3,   # 54.3% win rate — BEST, boosted
+    "running_tick":    1.0,   # 50.7% — average
+    "pattern":         1.0,   # 50.0% — average
+    "indicator":       1.0,   # 50.0% — average
+    "key_level":       0.7,   # 44.6% — BELOW 50%, dampened (was 1.0)
+    "otc_pattern":     0.9,   # 48.4% — slightly below 50%, dampened (was 1.2)
 }
 
 
