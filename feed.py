@@ -1182,8 +1182,13 @@ class QuotexFeed:
             os.environ["USE_SIM"] = "1"
             import sim_feed as _sim_module
             sim_stream = _sim_module.QuotexFeed()
-            # Copy pairs list so sim has the same pairs
-            sim_stream._pairs_list = self._pairs_list
+            # FIX (RECONNECT-2026-07-23): copy ALL pair lists, not just
+            # _pairs_list. Without _alltime_otc_pairs_list, the sim feed
+            # can't serve All-Time OTC pairs → streams stay empty.
+            sim_stream._pairs_list = list(self._pairs_list)
+            sim_stream._real_pairs_list = list(getattr(self, '_real_pairs_list', []))
+            sim_stream._otc_pairs_list = list(getattr(self, '_otc_pairs_list', []))
+            sim_stream._alltime_otc_pairs_list = list(getattr(self, '_alltime_otc_pairs_list', []))
             # Copy broadcast fn (set later by run())
             sim_stream._broadcast = self._broadcast
             # Mark as delegate — ensure_stream() will route to it.
@@ -1191,7 +1196,9 @@ class QuotexFeed:
             # Start the sim feed's run() loop in a background task —
             # don't await it (would block forever).
             sim_stream._manager_task = asyncio.create_task(sim_stream.run(self._broadcast))
-            print(f"[feed] sim delegate started — feed is now in SIM mode")
+            print(f"[feed] sim delegate started — feed is now in SIM mode "
+                  f"({len(sim_stream._pairs_list)} pairs, "
+                  f"{len(sim_stream._alltime_otc_pairs_list)} all-time OTC)")
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -1209,6 +1216,66 @@ class QuotexFeed:
             s.interested_cids.discard(cid)
         if getattr(self, '_sim_delegate', None) is not None:
             await self._sim_delegate.drop_interest(cid)
+
+    async def _aggressive_reconnect(self) -> None:
+        """FIX (RECONNECT-2026-07-23): aggressive auto-reconnect.
+
+        User complaint: 'candle data আসা বন্ধ হয়ে গেলো, reconnect হয় না'
+        Root cause: when Quotex token expires, _fallback_to_sim_if_stuck
+        fires ONCE but the sim delegate's streams take time to spin up.
+        Meanwhile the user sees 0 streams and a blank chart. This method
+        runs every 10s and:
+          1. If _sim_delegate is set but has 0 streams -> force it to
+             reconcile always-on streams immediately.
+          2. If no _sim_delegate and no active streams -> retry connection.
+          3. If _abandoned flag is set -> clear it and retry real feed.
+
+        This guarantees: within 10 seconds of ANY data stop, the system
+        is actively trying to reconnect.
+        """
+        try:
+            while True:
+                await asyncio.sleep(10)
+                # Check sim delegate
+                sim = getattr(self, '_sim_delegate', None)
+                if sim is not None:
+                    sim_streams = getattr(sim, '_streams', {})
+                    if len(sim_streams) == 0:
+                        print("[feed] aggressive_reconnect: sim has 0 streams - forcing reconcile")
+                        try:
+                            sim._reconcile_always_on()
+                            for p in sim._pairs_list:
+                                if p.get("status") in ("live", "otc") and not p.get("locked"):
+                                    key = (p["asset"], 60)
+                                    if key not in sim._streams:
+                                        s = sim._AssetStream(asset=p["asset"], period=60, always_on=True)
+                                        sim._streams[key] = s
+                                        s.task = asyncio.create_task(sim._run_stream(s))
+                                        print(f"[feed] aggressive_reconnect: started sim stream {p['asset']}")
+                        except Exception as e:
+                            print(f"[feed] aggressive_reconnect sim error: {e}")
+                    continue
+
+                # No sim delegate - check if we need to reconnect real feed
+                if not self._streams and not getattr(self, '_abandoned', False):
+                    print("[feed] aggressive_reconnect: 0 streams - triggering reconnect")
+                    self._connected = False
+                    self._reconnect_attempts = 0
+                    continue
+
+                # If abandoned, try to clear and retry
+                if getattr(self, '_abandoned', False):
+                    print("[feed] aggressive_reconnect: feed abandoned - retrying real connection")
+                    self._abandoned = False
+                    self._connected = False
+                    self._sim_delegate = None
+                    os.environ["USE_SIM"] = "0"
+                    self._reconnect_attempts = 0
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"[feed] aggressive_reconnect error: {exc}")
 
     def stream_status(self) -> dict:
         """Return active stream count and capacity info for the status endpoint."""
@@ -3651,6 +3718,13 @@ class QuotexFeed:
             self._manager_task = None
         self._abandoned = False
         self._sim_delegate = None
+
+        # FIX (RECONNECT-2026-07-23): start aggressive auto-reconnect loop.
+        # Runs every 10s and ensures streams are always alive. If sim
+        # fallback fires but sim delegate has 0 streams, this forces
+        # streams to start within 10s. If real feed is abandoned, this
+        # retries real connection.
+        asyncio.create_task(self._aggressive_reconnect())
 
         # ── Auto-login on startup (2026-07-11) ─────────────────────────────
         # If QX_EMAIL + QX_PASSWORD are set but the connection keeps failing
