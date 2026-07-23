@@ -588,6 +588,16 @@ function renderSignal(pred){
   _setClass('sig-strength', 'value ' + strCls);
   _setText('sig-strength', str || '—');
 
+  // FIX (UI-SIGNAL-ENHANCE, 2026-07-23): prominent strength badge on
+  // the signal box itself. Color-coded by tier (strong=green glow,
+  // medium=blue, neutral=grey). Updated on every tick so it stays in
+  // sync with the strength field above.
+  const badgeCls = str === 'STRONG' ? 'strength-badge strong'
+                 : str === 'MEDIUM' ? 'strength-badge medium'
+                 : 'strength-badge neutral';
+  _setClass('signal-strength-badge', badgeCls);
+  _setText('signal-strength-badge', str || 'NEUTRAL');
+
   const conf = pred.confidence || 0;
   _setText('sig-conf-val', Math.round(conf) + '%');
   _setStyle('sig-conf-bar', 'width', conf + '%');
@@ -1816,24 +1826,55 @@ function clearStale(){
 function updateCandleCountdown(){
   if(!countdownEl) return;
   if(!runningCandleOpenTime || !currentPeriod){
-    countdownEl.textContent = '--:--';
+    countdownEl.textContent = '⏱ --:--';
     countdownEl.className = 'idle';
+    updateNextSignalTimer(0, true);  // also reset next-signal timer
     return;
   }
   const closeAt = (runningCandleOpenTime + currentPeriod) * 1000;
   const remainingMs = closeAt - Date.now();
   if(remainingMs <= 0){
-    countdownEl.textContent = '00:00';
+    countdownEl.textContent = '⏱ 00:00';
     countdownEl.className = 'critical';
+    updateNextSignalTimer(0, false);
     return;
   }
   const totalSec = Math.ceil(remainingMs / 1000);
   const mm = Math.floor(totalSec / 60);
   const ss = totalSec % 60;
-  countdownEl.textContent = String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
+  countdownEl.textContent = '⏱ ' + String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
   if(totalSec <= 5)       countdownEl.className = 'critical';
   else if(totalSec <= 10) countdownEl.className = 'warn';
   else                    countdownEl.className = '';
+
+  // FIX (UI-SIGNAL-ENHANCE, 2026-07-23): update the next-signal timer
+  // in the signal panel at the same time. The "next signal" arrives at
+  // the next candle close, which is the same time as the countdown ends.
+  // We show it as "next: MM:SS" in the signal box so the user knows
+  // when a new prediction will be produced.
+  updateNextSignalTimer(totalSec, false);
+}
+
+/* ─── NEXT SIGNAL TIMER ─────────────────────────────────────────────────── */
+/* FIX (UI-SIGNAL-ENHANCE, 2026-07-23): a dedicated "next signal" timer
+   shown directly inside the signal box. Tells the user when the next
+   prediction will arrive (at the next candle close). */
+function updateNextSignalTimer(totalSec, idle){
+  const el = $('next-signal-timer');
+  if(!el) return;
+  if(idle || totalSec <= 0){
+    el.textContent = '⏭ next: --:--';
+    el.className = 'next-signal-timer';
+    return;
+  }
+  const mm = Math.floor(totalSec / 60);
+  const ss = totalSec % 60;
+  const formatted = String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
+  el.textContent = '⏭ next: ' + formatted;
+  // Pulse in the critical zone (last 5s before new signal)
+  el.className = (totalSec <= 5)
+    ? 'next-signal-timer critical'
+    : 'next-signal-timer';
 }
 
 /* ─── EVENT WIRING ───────────────────────────────────────────────────────── */

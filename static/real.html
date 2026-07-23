@@ -31,6 +31,9 @@
         <span class="live-price-arrow flat" id="live-price-arrow" aria-hidden="true">▲</span>
       </div>
       <span class="payout" id="payout-label">—</span>
+      <!-- FIX (UI-TIMER-MOVE, 2026-07-23): candle countdown moved OUT of
+           the chart and INTO the header for clearer visibility. -->
+      <div id="candle-countdown" class="idle" title="Time to candle close">⏱ --:--</div>
       <div class="conn-group">
         <span id="conn-dot" class="disconnected"></span>
         <span id="conn-label">—</span>
@@ -58,7 +61,8 @@
       <div id="tab-chart" class="tab-pane active" role="tabpanel">
         <section id="chart-wrap">
           <div id="chart-container"></div>
-          <div id="candle-countdown" class="idle">--:--</div>
+          <!-- FIX (UI-TIMER-MOVE, 2026-07-23): countdown removed from chart,
+               now lives in the header. -->
           <div id="stale-overlay"><span id="stale-msg">⚠ STALE</span></div>
           <div id="chart-loading-overlay" class="show">
             <div id="chart-loading-spinner"></div>
@@ -107,6 +111,12 @@
       <div class="panel-section panel-signal">
         <div id="signal-box" class="neutral">
           <div id="signal-label">—</div>
+          <!-- FIX (UI-SIGNAL-ENHANCE, 2026-07-23): prominent strength
+               badge + next signal timer shown directly on the signal box. -->
+          <div id="signal-strength-badge" class="strength-badge">—</div>
+          <div id="next-signal-timer" class="next-signal-timer" title="Time to next signal">
+            ⏭ next: --:--
+          </div>
         </div>
         <div class="signal-meta">
           <div class="signal-row"><span>Score</span><span id="sig-score">—</span></div>

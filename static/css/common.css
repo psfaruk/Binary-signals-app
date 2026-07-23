@@ -667,6 +667,50 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 #signal-box.neutral #signal-label{color:var(--text-dim)}
 #signal-box.pending #signal-label{color:var(--info)}
 
+/* FIX (UI-SIGNAL-ENHANCE, 2026-07-23): prominent strength badge shown
+   directly on the signal box so the user sees STRONG/MEDIUM/NEUTRAL at
+   a glance without scanning the meta rows. Color-coded by tier. */
+#signal-strength-badge{
+  display:inline-block;
+  margin-top:6px;
+  padding:3px 12px;
+  border-radius:4px;
+  font-size:11px;font-weight:700;letter-spacing:.6px;
+  background:rgba(139,148,158,.18);
+  color:var(--text-dim);
+  text-transform:uppercase;
+}
+#signal-strength-badge.strong{
+  background:rgba(0,200,83,.22);
+  color:var(--green);
+  box-shadow:0 0 8px rgba(0,200,83,.25);
+}
+#signal-strength-badge.medium{
+  background:rgba(33,150,243,.22);
+  color:var(--info);
+}
+#signal-strength-badge.neutral{
+  background:rgba(139,148,158,.18);
+  color:var(--text-dim);
+}
+
+/* Next-signal timer — counts down to the next candle close (when a
+   new signal will be produced). Uses the same time math as the
+   header countdown but framed as "when will the next signal arrive". */
+#next-signal-timer{
+  display:block;
+  margin-top:6px;
+  font-size:11px;
+  color:var(--text-dim);
+  font-variant-numeric:tabular-nums;
+  letter-spacing:.3px;
+}
+#next-signal-timer.critical{
+  color:var(--red);
+  font-weight:700;
+  animation:pulse-pending 1s infinite;
+}
+
 .signal-row{
   display:flex;justify-content:space-between;align-items:center;
   padding:3px 0;font-size:12px;
@@ -1004,14 +1048,18 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
    CHART OVERLAYS — countdown timer, loading spinner, stale warning
    ============================================================================ */
 #candle-countdown{
-  position:absolute;top:10px;right:78px;z-index:5;
-  pointer-events:none;
+  /* FIX (UI-TIMER-MOVE, 2026-07-23): countdown is now in the header
+     (not absolute-positioned over the chart). It uses flexbox layout
+     to fit between the payout label and the connection status group. */
+  position:static;
   font-family:var(--sans);font-size:13px;font-weight:700;letter-spacing:.5px;
   color:#fff;background:rgba(33,150,243,.85);
   padding:4px 10px;border-radius:6px;
   box-shadow:0 2px 8px rgba(0,0,0,.4);
   font-variant-numeric:tabular-nums;
   transition:background .25s, color .25s;
+  margin:0 6px;
+  white-space:nowrap;
 }
 #candle-countdown.warn{background:rgba(255,152,0,.9);color:#000}
 #candle-countdown.critical{

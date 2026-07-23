@@ -456,7 +456,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # from ever showing as 90-100%.
     net_margin = (abs(net) / total) if total > 0 else 0
     edge_factor = 0.5 + 0.5 * net_margin  # ∈ [0.5, 1.0]
-    confidence = int(math.sqrt(vote_ratio * weight_ratio * edge_factor) * 100)
+    # FIX (DEEP-ANALYSIS, 2026-07-23): use round() instead of int() for
+    # the initial confidence computation too. int(math.sqrt(...) * 100)
+    # truncates — e.g. sqrt(0.5*1.0*0.7) = 0.5916 → 59.16 → int() = 59,
+    # but round() = 59 (same in this case, but for 0.5918 → 59.18 → int 59,
+    # round 59). The difference is small but consistent with the round()
+    # fixes applied to all the multipliers downstream.
+    confidence = round(math.sqrt(vote_ratio * weight_ratio * edge_factor) * 100)
 
     # HTF alignment bonus.
     if htf_trend == "UPTREND" and signal == "CALL":

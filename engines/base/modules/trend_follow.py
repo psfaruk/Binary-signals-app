@@ -350,6 +350,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     # recent swing low (not just above an arbitrary older close). Same bug
     # for the downtrend mirror. Now uses min/max of recent lows/highs so the
     # check actually verifies trend structure is preserved.
+    #
+    # FIX (DEEP-ANALYSIS, 2026-07-23): added explicit len(candles) >= 5
+    # guard so candles[-3] and candles[-4] never IndexError. The outer
+    # `len(candles) >= 5` check at line ~305 was added but the pullback
+    # block also accesses candles[-4] which needs the same guard.
     # ═══════════════════════════════════════════════════════════════════════
     if is_trending and trend_strength > 0.4 and len(candles) >= 5:
         # Check for pullback: last 2 candles against trend
