@@ -120,7 +120,16 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     all_results += mod_pattern.analyze(candles, ctx)
     all_results += mod_indicator.analyze(candles, ctx)
     all_results += mod_keylevel.analyze(candles, ctx)
-    all_results += module_6_fn(candles, ctx)
+    # FIX (OTC-DEEP Phase 1, 2026-07-23): pass `asset` to the 6th module
+    # so it can query the algorithm_monitor's current state for this
+    # asset and gate signals based on the live algorithm guess.
+    # The module_6_fn wrapper accepts (candles, ctx, asset=None) — if the
+    # underlying analyze() doesn't accept asset, the wrapper ignores it.
+    try:
+        all_results += module_6_fn(candles, ctx, asset)
+    except TypeError:
+        # Module's analyze() doesn't accept asset — fall back to 2-arg call.
+        all_results += module_6_fn(candles, ctx)
 
     if not all_results:
         return _neutral("NO_SIGNAL", ctx.regime, asset, weight_adapter,

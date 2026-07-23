@@ -1278,17 +1278,32 @@ class QuotexFeed:
             print(f"[feed] aggressive_reconnect error: {exc}")
 
     def stream_status(self) -> dict:
-        """Return active stream count and capacity info for the status endpoint."""
+        """Return active stream count and capacity info for the status endpoint.
+
+        FIX (CANDLE-STUCK-FIX, 2026-07-23): if sim_delegate is active,
+        merge its streams into the response so /api/status and /api/debug
+        correctly show all live streams. Previously when the real feed
+        fell back to sim, /api/debug showed streams: {} because it was
+        reading self._streams (real feed's empty dict) instead of
+        sim_delegate._streams.
+        """
         now = time.time()
+        # Start with our own streams
+        all_streams = list(self._streams.values())
+        # If sim delegate is active, merge its streams too
+        sim = getattr(self, '_sim_delegate', None)
+        if sim is not None:
+            all_streams.extend(sim._streams.values())
         return {
             "active": [{"asset": s.asset, "period": s.period,
                         "viewers": len(s.interested_cids),
                         "age_sec": round(now - s.created_at)}
-                       for s in self._streams.values()],
-            "count": len(self._streams),
+                       for s in all_streams],
+            "count": len(all_streams),
             "max":   self._max_streams,
             "cooldown_until":  self._cooldown_until if self._cooldown_until > now else None,
             "cooldown_reason": self._cooldown_reason if self._cooldown_until > now else None,
+            "sim_mode": sim is not None,  # NEW: expose sim fallback state
         }
 
     async def shutdown(self) -> None:

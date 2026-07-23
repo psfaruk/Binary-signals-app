@@ -525,9 +525,12 @@ weight_adapter = PairWeightAdapter(
 )
 
 # Module 6 for OTC: otc_pattern (mean-reversion detector)
-# Wraps the analyze function so it matches the (candles, ctx) signature.
-def _module_6(candles, ctx):
-    return _otc_pattern_analyze(candles, ctx)
+# FIX (OTC-DEEP Phase 1, 2026-07-23): wrapper now accepts and forwards
+# the `asset` argument so otc_pattern.analyze can query the
+# algorithm_monitor's state for this asset and gate signals based on
+# the live algorithm guess (trending/reversing/random_walk).
+def _module_6(candles, ctx, asset=""):
+    return _otc_pattern_analyze(candles, ctx, asset=asset)
 
 
 # ── Build the OTC engine's BlenderConfig ─────────────────────────────────

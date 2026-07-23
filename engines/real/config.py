@@ -420,7 +420,11 @@ weight_adapter = PairWeightAdapter(
 )
 
 # Module 6 for Real: trend_follow (momentum continuation detector)
-def _module_6(candles, ctx):
+# FIX (OTC-DEEP Phase 1, 2026-07-23): wrapper accepts optional `asset`
+# arg for signature compat with the blender's new 3-arg call. trend_follow
+# doesn't use it currently but the wrapper must accept it so the
+# TypeError fallback in blender.py doesn't trigger.
+def _module_6(candles, ctx, asset=""):
     return _trend_follow_analyze(candles, ctx)
 
 

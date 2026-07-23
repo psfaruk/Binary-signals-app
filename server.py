@@ -354,16 +354,41 @@ async def debug_info():
         },
     }
     # Stream details
-    if hasattr(feed, '_streams'):
-        for key, s in feed._streams.items():
-            debug["streams"][f"{key[0]}@{key[1]}s"] = {
-                "candles_count": len(s.candles) if hasattr(s, 'candles') else 0,
-                "ticks_count": len(s.ticks) if hasattr(s, 'ticks') else 0,
-                "last_real_tick_wall": getattr(s, 'last_real_tick_wall', 0),
-                "always_on": getattr(s, 'always_on', False),
-                "interested_cids": list(getattr(s, 'interested_cids', set())),
-                "sub_started": getattr(s, 'sub_started', False),
-            }
+    # FIX (CANDLE-STUCK-FIX, 2026-07-23): merge streams from BOTH the real
+    # feed AND the sim delegate (if active). Previously when the real feed
+    # fell back to sim mode, /api/debug showed streams: {} because it only
+    # read feed._streams (real feed's empty dict). This made it impossible
+    # to diagnose why candles weren't updating — the user saw 0 streams
+    # even though the sim delegate had active streams producing ticks.
+    def _collect_streams(feed_obj):
+        out = {}
+        if hasattr(feed_obj, '_streams'):
+            for key, s in feed_obj._streams.items():
+                out[f"{key[0]}@{key[1]}s"] = {
+                    "candles_count": len(s.candles) if hasattr(s, 'candles') else 0,
+                    "ticks_count": len(s.ticks) if hasattr(s, 'ticks') else 0,
+                    "last_real_tick_wall": getattr(s, 'last_real_tick_wall', 0),
+                    "always_on": getattr(s, 'always_on', False),
+                    "interested_cids": list(getattr(s, 'interested_cids', set())),
+                    "sub_started": getattr(s, 'sub_started', False),
+                    "source": "real_feed",
+                }
+        return out
+
+    debug["streams"] = _collect_streams(feed)
+    # If sim delegate is active, also collect its streams
+    sim = getattr(feed, '_sim_delegate', None)
+    if sim is not None:
+        sim_streams = _collect_streams(sim)
+        for k, v in sim_streams.items():
+            v["source"] = "sim_feed"
+            # Don't overwrite real feed streams with same key
+            if k not in debug["streams"]:
+                debug["streams"][k] = v
+        debug["sim_mode"] = True
+        debug["sim_pairs_count"] = len(getattr(sim, '_pairs_list', []))
+    else:
+        debug["sim_mode"] = False
     # Recent errors (if tracked)
     if hasattr(feed, '_last_error'):
         debug["last_error"] = feed._last_error

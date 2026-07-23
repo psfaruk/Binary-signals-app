@@ -34,10 +34,48 @@ since they're tuned for the actual market behavior)
 from engines.base.types import ModuleResult, MarketContext
 
 
-def analyze(candles, ctx: MarketContext) -> list:
+# ─── Algorithm-aware gating helper ──────────────────────────────────────
+# FIX (OTC-DEEP-REPORT Phase 1, 2026-07-23): integrate algorithm_monitor
+# state directly into the module's signal-firing logic. The previous
+# design relied on the blender's downstream strategy multipliers, which
+# added a 5+ candle lag between algo change and strategy adjustment.
+# Now we query the algorithm_monitor's CURRENT guess directly and use
+# it to gate which signals fire. This is PROACTIVE — by the time the
+# blender's strategy cooldown kicks in, the module has already adapted.
+#
+# Returns one of: "trending" | "reversing" | "neutral" | "unknown"
+# "unknown" when there's not enough data — caller should default to
+# conservative behavior (don't enable risky signals).
+def _get_algo_gate(asset: str) -> str:
+    """Query algorithm_monitor for the current algorithm guess.
+
+    Looks up the in-memory rolling window for this asset and returns
+    the algorithm_guess: 'trending', 'reversing', 'random_walk', or
+    'unknown' (insufficient samples).
+    """
+    try:
+        from core.algorithm_monitor import _WINDOWS, _LAST_ALGO_GUESS
+        window = _WINDOWS.get(asset)
+        if not window or len(window) < 15:
+            return "unknown"
+        return _LAST_ALGO_GUESS.get(asset, "unknown")
+    except Exception:
+        return "unknown"
+
+
+def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     """Run OTC-specific pattern detection.
 
     Returns list of ModuleResult objects.
+
+    FIX (OTC-DEEP-REPORT Phase 1, 2026-07-23): now accepts an `asset`
+    parameter so we can query the algorithm_monitor's state directly
+    and gate signals based on the CURRENT algorithm (trending/reversing/
+    random_walk/unknown). The blender passes `asset` via the standard
+    module call signature `(candles, ctx)` — we accept it as a keyword
+    arg with default empty string for backward compat. When asset is
+    empty (test context), we skip algorithm gating and use the old
+    trend_strength-based gating only.
     """
     results = []
     if len(candles) < 10:
@@ -48,6 +86,20 @@ def analyze(candles, ctx: MarketContext) -> list:
     is_trending = regime.get("is_trending", False)
     trend_regime = regime.get("regime", "RANGE")
     trend_strength = regime.get("trend_strength", 0.0)
+
+    # ── Algorithm-aware gating ──────────────────────────────────────────
+    # Phase 1: query the algorithm_monitor's current guess for this asset.
+    # When the algorithm is 'trending', we DAMPEN mean-reversion signals
+    # (the broker's trending algo continues moves, doesn't reverse them).
+    # When 'reversing', we can RE-ENABLE the previously disabled Signal 3
+    # (Z-score extreme) because in a reversing algo, Z-score extremes DO
+    # indicate exhaustion. When 'unknown' (insufficient data), we use
+    # the old trend_strength-based gating as fallback.
+    algo_gate = _get_algo_gate(asset) if asset else "unknown"
+    algo_is_trending = (algo_gate == "trending")
+    algo_is_reversing = (algo_gate == "reversing")
+    # If algo unknown, fall back to regime-based trend detection.
+    effective_trending = algo_is_trending or (algo_gate == "unknown" and is_trending and trend_strength > 0.5)
 
     # ── REVERSAL SIGNAL 1: Mean-reversion bias ───────────────────────────
     # OTC markets mean-revert: 3+ same-direction candles → reversal likely.
@@ -68,7 +120,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     # real directional pressure.
     consec = stats["current_streak"]
     streak_dir = stats["streak_direction"]
-    mean_rev_gated = (is_trending and trend_strength > 0.5)
+    # FIX (OTC-DEEP Phase 1): use effective_trending which considers BOTH
+    # the algorithm_monitor's guess AND the regime-based trend_strength.
+    # When algo is 'trending', we gate mean-reversion even if regime is
+    # RANGE (the algo is the higher-authority signal).
+    mean_rev_gated = effective_trending
     # ATR-normalized streak filter: average body of the streak must be
     # at least 0.3 ATR (lowered from 0.4 — backtest showed 0.4 was too
     # strict and filtered out genuine OTC mean-reversion setups).
@@ -128,23 +184,32 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f}) → CALL reversal boost"]))
 
     # ── REVERSAL SIGNAL 3: Z-score extreme reversal ──────────────────────
-    # DISABLED (live data, 2026-07-20): real Quotex data showed 0% win rate!
-    # Z-score extremes in OTC are broker momentum spikes, not exhaustion.
-    # The broker pushes price further, not reverses.
+    # Originally disabled (live data, 2026-07-20) because real Quotex data
+    # showed 0% win rate. Z-score extremes in OTC are broker momentum
+    # spikes, not exhaustion — the broker pushes price further.
     #
-    # FIX (AUDIT-DEEP #10, 2026-07-23): the previous code kept the entire
-    # 35-line signal block in place but set an impossibly-high threshold
-    # (z > 999) to make it unreachable. This is dead code — it can never
-    # fire, but it adds ~35 lines of confusing logic that future
-    # maintainers might "fix" by lowering the threshold back to a
-    # meaningful value, re-introducing the 0% win rate signal. Now the
-    # entire block is REMOVED, with a clear comment explaining why. If
-    # live data ever shows z-score extremes have predictive value again,
-    # re-add this signal with proper backtesting.
-    #
-    # (Original signal logic removed — see git history for the
-    # implementation if needed for future backtesting.)
-
+    # FIX (OTC-DEEP-REPORT Phase 2, 2026-07-23): RE-ENABLED with algorithm
+    # gating. The 0% win rate was because the signal fired on BOTH trending
+    # and reversing regimes without discrimination. During a TRENDING
+    # algorithm, Z-score spikes = momentum continuation (NOT reversal).
+    # During a REVERSING algorithm, Z-score spikes DO indicate exhaustion.
+    # Now we fire ONLY when algo_is_reversing is True. This recovers a
+    # valuable signal without re-introducing the 0% win rate problem.
+    if algo_is_reversing and stats["z_body"] > 2.5:
+        last = candles[-1]
+        body = last["close"] - last["open"]
+        # In a reversing algorithm, an extreme Z-score = exhaustion spike.
+        # Bet the OPPOSITE direction of the body (mean reversion).
+        if body > 0:
+            results.append(ModuleResult(
+                module_name="otc_pattern", direction="PUT", score=3, confidence=65,
+                signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
+                reasons=[f"Z-score extreme (Z={stats['z_body']:.1f}) in REVERSING algo → PUT reversal (exhaustion spike)"]))
+        elif body < 0:
+            results.append(ModuleResult(
+                module_name="otc_pattern", direction="CALL", score=3, confidence=65,
+                signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
+                reasons=[f"Z-score extreme (Z={stats['z_body']:.1f}) in REVERSING algo → CALL reversal (exhaustion spike)"]))
     # ── REVERSAL SIGNAL 4: Close percentile extreme ──────────────────────
     # FIX (OTC issue 1, 2026-07-19): same gating as Signal 3 — a close at
     # the 95th percentile during a strong uptrend is trend continuation,
