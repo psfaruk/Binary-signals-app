@@ -1800,27 +1800,26 @@ class QuotexFeed:
             # downstream code sees NEUTRAL.
             result["signal"] = "NEUTRAL"
 
-        # FIX (SIGNAL-FIX-2026-07-22): previously ALL WEAK signals were
-        # converted to NEUTRAL — too aggressive. 4 of 6 all-time OTC pairs
-        # had 0 graded signals because RUNCONF-demoted WEAK (MEDIUM→WEAK
-        # from opposing ticks) was also being killed.
-        # Now: only convert to NEUTRAL if confidence is VERY low (<15).
-        # RUNCONF-demoted WEAK signals that still have confidence 15-50
-        # are tradeable (they started as MEDIUM, just got demoted by
-        # live opposing ticks — the original EOC analysis was still valid).
+        # FIX (WEAK-NEUTRAL-FIX-A, 2026-07-23): user backtest observation
+        # showed WEAK signals are systematically wrong — historical data
+        # confirms 4.2% win rate (17 correct / 408 wrong). The previous
+        # code kept WEAK signals with confidence >= 15 tradeable, which
+        # lost ~96% of the time.
+        # Option A: ALL WEAK signals → NEUTRAL immediately at EOC. The
+        # signal direction is locked (no CALL↔PT flip), but the signal
+        # itself is suppressed so it's not graded as a wrong trade.
+        # Combined with Option B (LIVE WEAK→NEUTRAL in stream loop),
+        # this gives the user an immediate visual signal that the
+        # prediction is uncertain, and prevents the trade from being
+        # logged as a loss.
         if result.get("signal") in ("CALL", "PUT") and result.get("strength") == "WEAK":
             _weak_conf = result.get("confidence", 0)
-            if _weak_conf < 15:
-                result["signal"] = "NEUTRAL"
-                result["strength"] = "NEUTRAL"
-                result["confidence"] = 0
-                result.setdefault("reasons", []).append(
-                    f"WEAK→NEUTRAL: confidence {_weak_conf} < 15 — too uncertain.")
-            else:
-                # Keep as WEAK but flag it — still tradeable, just low conviction.
-                result.setdefault("reasons", []).append(
-                    f"WEAK (tradeable): confidence {_weak_conf} — RUNCONF demoted from MEDIUM, "
-                    f"original EOC analysis still valid.")
+            result["signal"] = "NEUTRAL"
+            result["strength"] = "NEUTRAL"
+            result["confidence"] = 0
+            result.setdefault("reasons", []).append(
+                f"WEAK→NEUTRAL (Option A): backtest showed 4.2% win rate "
+                f"(confidence was {_weak_conf}) — skip is +EV.")
 
         # Neutral signals should remain neutral; do not force a fake CALL/PUT
         # just to keep a ghost candle on screen.
@@ -3152,15 +3151,43 @@ class QuotexFeed:
                     # ── Strength gate — strength-only, NO direction change ──
                     # Can upgrade/downgrade strength based on running candle
                     # confirmation, but NEVER changes CALL↔PUT.
+                    #
+                    # FIX (WEAK-NEUTRAL-FIX-B, 2026-07-23): user backtest
+                    # observation: WEAK signals are systematically wrong
+                    # (4.2% win rate). The previous code kept WEAK signals
+                    # tradeable during the running candle — the user would
+                    # see a CALL/PUT signal that lost 96% of the time.
+                    # Option B: when the strength gate demotes a signal to
+                    # WEAK mid-candle, immediately convert it to NEUTRAL and
+                    # broadcast the change to the browser. This gives the
+                    # user instant visual feedback ("signal cancelled")
+                    # instead of waiting for EOC. The signal is NOT graded
+                    # as a wrong trade — NEUTRAL predictions are skipped
+                    # in _grade_and_log.
                     if (ENABLE_STRENGTH_GATE and stream.prediction
                             and stream.prediction.get("signal") in ("CALL", "PUT")):
                         gated = self._apply_strength_gate(stream, stream.prediction)
                         if gated is not stream.prediction:
+                            # Option B: if the strength gate demoted to WEAK,
+                            # immediately promote to NEUTRAL. The original
+                            # direction is preserved in the reasons for audit.
+                            if gated.get("strength") == "WEAK":
+                                orig_signal = gated.get("signal", "NEUTRAL")
+                                orig_conf = gated.get("confidence", 0)
+                                gated["signal"] = "NEUTRAL"
+                                gated["strength"] = "NEUTRAL"
+                                gated["confidence"] = 0
+                                gated.setdefault("reasons", []).append(
+                                    f"LIVE WEAK→NEUTRAL (Option B): running ticks "
+                                    f"opposed original {orig_signal} (conf was "
+                                    f"{orig_conf}) — skip is +EV.")
+                                # Force a rebroadcast so the browser sees
+                                # the NEUTRAL signal immediately, instead of
+                                # waiting for the next natural tick broadcast.
+                                pred_changed = True
                             stream.prediction = gated
-                            # Don't set pred_changed — strength-only updates
-                            # don't trigger a rebroadcast. The signal panel
-                            # shows the updated strength on the next tick that
-                            # naturally broadcasts.
+                            # Don't set pred_changed for non-WEAK strength-only
+                            # updates — they don't need a rebroadcast.
 
                     # Skip broadcast if open price is still 0 (no valid tick yet)
                     # — prevents LightweightCharts "Value is null" on the client
