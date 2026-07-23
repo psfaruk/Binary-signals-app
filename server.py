@@ -474,6 +474,20 @@ async def patterns_refresh():
 
 # ── Algorithm-change endpoints (DATA-FLOW-2026-07-22) ──────────────────────
 
+@app.get("/api/strategies")
+async def get_strategies():
+    """List all available trading strategies."""
+    from core.algorithm_strategy import get_all_strategies
+    return {"strategies": get_all_strategies()}
+
+
+@app.get("/api/current-strategy")
+async def get_current_strategy(asset: str = None):
+    """Get the current trading strategy for one or all assets."""
+    from core.algorithm_strategy import get_asset_strategy_summary
+    return get_asset_strategy_summary(asset)
+
+
 @app.get("/api/algorithm-changes")
 async def algorithm_changes(hours: int = 24, limit: int = 100):
     """Recent algorithm changes across all pairs (default: last 24h)."""

@@ -605,6 +605,21 @@ function renderSignal(pred){
     : String(reg || '—');
   _setText('sig-regime', regStr);
 
+  // FIX (DEEP-IMPL-2026-07-23): display algorithm strategy in signal panel
+  const stratName = pred.strategy || '';
+  const stratReason = pred.strategy_reason || '';
+  const stratEl = $('sig-strategy');
+  if(stratEl){
+    if(stratName && stratName !== 'default'){
+      stratEl.textContent = stratName;
+      stratEl.title = stratReason;
+      stratEl.style.display = 'block';
+    } else {
+      stratEl.textContent = '—';
+      stratEl.style.display = 'none';
+    }
+  }
+
   // Market State panel — only 3 live fields.
   const trendVal = reg.regime || '—';
   const zoneVal = reg.is_volatile ? 'VOLATILE'

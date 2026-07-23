@@ -623,61 +623,91 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # Tag-based adjustment (uses prediction's own tags, which we don't
         # have yet — skip for now, will be added in a follow-up).
 
-        # ── Step 10b: Algorithm-aware prediction (ALGO-FIX-2026-07-22) ──
-        # The algorithm_monitor tracks which candle-generation algorithm
-        # Quotex is currently using per pair:
-        #   - 'trending'    : high autocorrelation, large bodies → boost
-        #                     continuation signals, dampen reversal
-        #   - 'reversing'   : low autocorrelation, small bodies → boost
-        #                     reversal signals, dampen continuation
-        #   - 'random_walk' : mid autocorrelation → no adjustment (50/50)
-        # This lets the engine adapt its strategy per-pair in real-time
-        # based on what Quotex is actually doing.
+        # ── Step 10b: Algorithm-aware prediction (DEEP IMPL 2026-07-23) ──
+        # DEEP IMPLEMENTATION: uses the new core/algorithm_strategy.py module
+        # which determines the optimal trading strategy based on Quotex's
+        # detected algorithm state. Supports 6 strategies:
+        #   - trend_following (trending algo → boost continuation ×1.3)
+        #   - mean_reversion (reversing algo → boost reversal ×1.3)
+        #   - neutral (random_walk → reduce confidence ×0.8)
+        #   - cautious (payout just changed → reduce confidence ×0.7)
+        #   - reset (tick density shifted → reduce confidence ×0.85)
+        #   - unknown (not enough data → default conservative)
+        _algo_strategy_name = "default"
+        _algo_strategy_reason = ""
         try:
-            from core.algorithm_monitor import get_current_state
-            algo_state = get_current_state(asset)
-            algo_guess = algo_state.get("summary", {}).get("algorithm_guess", "unknown")
-            algo_samples = algo_state.get("samples", 0)
-            if algo_samples >= 15 and algo_guess != "unknown":
-                if algo_guess == "trending" and signal != "NEUTRAL":
-                    # Trending algorithm → continuation is more likely.
-                    # Boost continuation signals by +5, dampen reversal by -3.
-                    is_continuation = any(
-                        r for r in all_results
-                        if r.direction == signal and r.signal_type == "CONTINUATION"
-                    )
-                    if is_continuation:
-                        confidence = min(100, confidence + 5)
-                        all_reasons.append(
-                            f"_ALGO_AWARE: trending algo detected (n={algo_samples}) "
-                            f"→ continuation +5")
-                    else:
-                        confidence = max(0, confidence - 3)
-                        all_reasons.append(
-                            f"_ALGO_AWARE: trending algo detected (n={algo_samples}) "
-                            f"→ reversal -3")
-                elif algo_guess == "reversing" and signal != "NEUTRAL":
-                    # Reversing algorithm → reversal is more likely.
-                    # Boost reversal signals by +5, dampen continuation by -3.
-                    is_reversal = any(
-                        r for r in all_results
-                        if r.direction == signal and r.signal_type == "REVERSAL"
-                    )
-                    if is_reversal:
-                        confidence = min(100, confidence + 5)
-                        all_reasons.append(
-                            f"_ALGO_AWARE: reversing algo detected (n={algo_samples}) "
-                            f"→ reversal +5")
-                    else:
-                        confidence = max(0, confidence - 3)
-                        all_reasons.append(
-                            f"_ALGO_AWARE: reversing algo detected (n={algo_samples}) "
-                            f"→ continuation -3")
-                # random_walk: no adjustment (50/50 — engine's default is fine)
+            from core.algorithm_strategy import get_strategy_for_blender
+            strat = get_strategy_for_blender(asset)
+            _algo_strategy_name = strat["strategy_name"]
+            _algo_strategy_reason = strat["strategy_reason"]
+            _cont_mult = strat["continuation_mult"]
+            _rev_mult = strat["reversal_mult"]
+            _conf_mult = strat["confidence_mult"]
+            _min_conf = strat["min_confidence"]
+            _algo_icon = strat.get("strategy_icon", "")
+
+            # Apply confidence multiplier (overall scaling)
+            if _conf_mult != 1.0 and signal != "NEUTRAL":
+                confidence = int(confidence * _conf_mult)
+                all_reasons.append(
+                    f"_ALGO_STRATEGY: {_algo_icon} {_algo_strategy_name} "
+                    f"→ confidence ×{_conf_mult:.2f}")
+
+            # Apply continuation/reversal multipliers
+            if signal != "NEUTRAL" and (_cont_mult != 1.0 or _rev_mult != 1.0):
+                # Determine if this signal is continuation or reversal
+                is_continuation = any(
+                    r for r in all_results
+                    if r.direction == signal and r.signal_type == "CONTINUATION"
+                )
+                is_reversal = any(
+                    r for r in all_results
+                    if r.direction == signal and r.signal_type == "REVERSAL"
+                )
+
+                if is_continuation and _cont_mult != 1.0:
+                    confidence = int(confidence * _cont_mult)
+                    all_reasons.append(
+                        f"_ALGO_STRATEGY: continuation ×{_cont_mult:.2f} "
+                        f"({strat['algorithm']})")
+                elif is_reversal and _rev_mult != 1.0:
+                    confidence = int(confidence * _rev_mult)
+                    all_reasons.append(
+                        f"_ALGO_STRATEGY: reversal ×{_rev_mult:.2f} "
+                        f"({strat['algorithm']})")
+
+            # Apply strategy-specific min_confidence override
+            # (e.g., cautious requires 30+, neutral requires 25+)
+            # This replaces the hardcoded LOW_CONF_SKIP threshold.
+            if signal != "NEUTRAL" and confidence < _min_conf:
+                all_reasons.append(
+                    f"_ALGO_STRATEGY: confidence {confidence} < {_min_conf} "
+                    f"({_algo_strategy_name}) → NEUTRAL")
+                return {
+                    "signal": "NEUTRAL", "confidence": confidence,
+                    "strength": "NEUTRAL", "score": net,
+                    "reasons": all_reasons,
+                    "regime": regime, "agree": agree,
+                    "total": total_groups,
+                    "signals_fired": total_groups,
+                    "modules": _module_breakdown(adjusted, all_results, module_names),
+                    "asset": asset, "profile": pair_profile,
+                    "htf_trend": htf_trend,
+                    "strategy": _algo_strategy_name,
+                    "strategy_reason": _algo_strategy_reason,
+                }
+
+            # Store strategy in result for logging
+            all_reasons.append(
+                f"_ALGO_STRATEGY: {_algo_icon} {_algo_strategy_name} — {_algo_strategy_reason}")
+
         except ImportError:
-            pass  # algorithm_monitor not available (test context)
-        except Exception:
-            pass  # never break prediction pipeline
+            pass  # algorithm_strategy not available (test context)
+        except Exception as _algo_err:
+            try:
+                all_reasons.append(f"_ALGO_STRATEGY_ERROR: {_algo_err}")
+            except Exception:
+                pass  # never break prediction pipeline
 
     except ImportError:
         pass  # core.time_patterns not available (test context)
@@ -759,6 +789,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         "asset": asset,
         "profile": pair_profile,
         "htf_trend": htf_trend,
+        "strategy": _algo_strategy_name if '_algo_strategy_name' in dir() else "default",
+        "strategy_reason": _algo_strategy_reason if '_algo_strategy_reason' in dir() else "",
     }
 
 
