@@ -1,34 +1,10 @@
-/* ============================================================================
-   otc.css — OTC Market page overrides.
-   Yellow accent (#ffc107). "OTC MARKET" branding.
-   OTC market runs 24/7 — always-live status indicator.
-   ============================================================================ */
-
+/* otc.css — OTC Market page. Yellow accent. */
 :root{
   --accent:#ffc107;
   --accent-bg:rgba(255,193,7,.12);
   --accent-border:rgba(255,193,7,.4);
 }
-
-/* Brand title — OTC */
-.brand-title .brand-name{color:var(--yellow)}
+.brand-name{color:var(--yellow)}
 .brand-dot{background:var(--yellow);box-shadow:0 0 8px var(--yellow)}
-
-/* Switch button: yellow tinted (it points TO Real, but lives on OTC page) */
-#market-switch-btn{
-  background:var(--accent-bg);
-  color:var(--accent);
-  border-color:var(--accent-border);
-}
-
-/* Active engine badge default — yellow */
-.engine-label{
-  background:rgba(255,193,7,.15);
-  color:var(--yellow);
-}
-
-/* 24/7 status indicator — always live */
-#market-status-indicator.always{
-  color:var(--yellow);background:var(--accent-bg);
-  border:1px solid var(--accent-border);
-}
+#market-switch-btn{background:var(--accent-bg);color:var(--accent);border-color:var(--accent-border)}
+.engine-label{background:rgba(255,193,7,.15);color:var(--yellow)}

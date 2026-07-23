@@ -7,321 +7,176 @@
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
-  <meta name="description" content="Real Market Binary Options Signals — live candle chart, 6-module prediction engine, signal history.">
   <title>Real Market — Binary Signal Terminal</title>
   <link rel="stylesheet" href="/static/css/common.css">
   <link rel="stylesheet" href="/static/css/real.css">
 </head>
 <body>
-<!-- FIX (UI-P3-2, 2026-07-21): skip-link for keyboard a11y. -->
-<a href="#main" class="skip-link">Skip to chart</a>
+<a href="#main" class="skip-link">Skip to content</a>
 <div id="app">
 
-  <!-- ════════════════════════════════════════════════════════════════════
-       HEADER / TOPBAR
-       Row 1: brand + pair selector + live price + payout + connection + switch
-       Row 2: market status banner + mini stats
-       ════════════════════════════════════════════════════════════════════ -->
+  <!-- ══ HEADER: single row, compact ══ -->
   <header id="topbar">
-
-    <!-- Row 1 -->
     <div id="topbar-row1">
-
-      <!-- Brand block: green dot + "REAL MARKET" title -->
       <div class="brand" aria-label="Real Market">
         <span class="brand-dot" aria-hidden="true"></span>
-        <div class="brand-title">
-          <span class="brand-name">REAL MARKET</span>
-          <span class="brand-sub">Real forex engine</span>
-        </div>
+        <span class="brand-name">REAL</span>
       </div>
-
-      <!-- Pair selector -->
       <div class="pair-wrap">
-        <select id="pair-select" aria-label="Select trading pair">
-          <option value="">Loading...</option>
-        </select>
+        <select id="pair-select" aria-label="Select trading pair"><option value="">Loading...</option></select>
         <span class="pair-arrow" aria-hidden="true">▼</span>
       </div>
-
-      <!-- Live price ticker -->
-      <div class="live-price-wrap" aria-live="polite">
-        <span class="live-price-label">PRICE</span>
+      <div class="live-price-wrap">
         <span class="live-price-val flat" id="live-price">—</span>
         <span class="live-price-arrow flat" id="live-price-arrow" aria-hidden="true">▲</span>
       </div>
-
-      <!-- Payout -->
-      <span class="payout" id="payout-label" aria-label="Payout percent">—</span>
-
-      <!-- Connection status -->
+      <span class="payout" id="payout-label">—</span>
       <div class="conn-group">
-        <span id="conn-dot" class="disconnected" role="status" aria-live="polite"></span>
-        <span id="conn-label" role="status" aria-live="polite">Disconnected</span>
+        <span id="conn-dot" class="disconnected"></span>
+        <span id="conn-label">—</span>
       </div>
-
-      <span class="pairs-count-badge" id="pairs-count" aria-label="Available pair count">Pairs: —</span>
-
-      <!-- Tick rate (hidden on small screens via CSS) -->
-      <span class="tick-rate-badge" id="tick-rate-badge" title="Ticks per second for the active stream">
-        <span class="tick-dot" aria-hidden="true"></span>
-        <span id="tick-rate-val">0</span>/s
-      </span>
-
       <span class="spacer"></span>
-
-      <!-- Sound toggle -->
-      <button id="sound-btn" type="button" title="Toggle sound alerts"
-              aria-pressed="false" aria-label="Toggle sound alerts">🔇</button>
-
-      <!-- ══ MARKET SWITCH BUTTON — clicking it navigates to otc.html ══ -->
-      <button id="market-switch-btn" type="button" aria-label="Switch to OTC Market"
-              title="Switch to OTC Market (24/7)">
-        <span class="switch-icon" aria-hidden="true">⇄</span>
-        <span class="switch-text">Switch to OTC</span>
+      <button id="sound-btn" type="button" aria-pressed="false" aria-label="Sound">🔇</button>
+      <button id="market-switch-btn" type="button" aria-label="Switch market">
+        <span class="switch-icon">⇄</span><span class="switch-text">Real</span>
       </button>
-
     </div>
-
-    <!-- Row 2: status banner + mini stats -->
-    <div id="topbar-row2">
-
-      <!-- Market status indicator (LIVE / CLOSED) — updated by JS -->
-      <span id="market-status-indicator" class="market-status live"
-            role="status" aria-live="polite">
-        <span class="status-dot" aria-hidden="true"></span>REAL MARKET — LIVE
-      </span>
-
-      <!-- FIX (UI-P1-1, 2026-07-21): removed "Next Candle" mini-stat.
-           The chart already has a floating countdown badge
-           (#candle-countdown) that shows the same value with color
-           states (idle/warn/critical). Two timers showing the same
-           value was confusing users. -->
-      <div class="topbar-stats">
-        <div class="stat-mini">
-          <span class="stat-mini-label">Active</span>
-          <span class="stat-mini-val" id="stat-active-cat">REAL</span>
-        </div>
-        <div class="stat-mini">
-          <span class="stat-mini-label">Win Rate</span>
-          <span class="stat-mini-val" id="stat-winrate">—</span>
-        </div>
-        <div class="stat-mini">
-          <span class="stat-mini-label">Signals</span>
-          <span class="stat-mini-val" id="stat-signals">0</span>
-        </div>
-      </div>
-
-    </div>
-
   </header>
 
-  <!-- ════════════════════════════════════════════════════════════════════
-       TAB BAR — switch between Live Chart / Signal History / Accuracy
-       ════════════════════════════════════════════════════════════════════ -->
-  <nav id="tab-bar" role="tablist" aria-label="View tabs">
-    <button type="button" class="tab-btn active" data-tab="chart" role="tab" aria-selected="true" aria-controls="tab-chart">📈 <span class="tab-btn-text">Live Chart</span></button>
-    <button type="button" class="tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history">📜 <span class="tab-btn-text">Signal History</span></button>
-    <button type="button" class="tab-btn" data-tab="accuracy" role="tab" aria-selected="false" aria-controls="tab-accuracy">📊 <span class="tab-btn-text">Accuracy Stats</span></button>
+  <!-- ══ TAB BAR ══ -->
+  <nav id="tab-bar" role="tablist">
+    <button class="tab-btn active" data-tab="chart" role="tab" aria-selected="true">📈 Chart</button>
+    <button class="tab-btn" data-tab="history" role="tab" aria-selected="false">📜 History</button>
+    <button class="tab-btn" data-tab="accuracy" role="tab" aria-selected="false">📊 Stats</button>
   </nav>
 
-  <!-- ════════════════════════════════════════════════════════════════════
-       MAIN AREA — tab content (left) + side panel (right)
-       The side panel is ALWAYS visible regardless of active tab.
-       ════════════════════════════════════════════════════════════════════ -->
+  <!-- ══ MAIN: tab content + side panel ══ -->
   <main id="main">
     <div id="tab-content-wrap">
 
-      <!-- TAB: Live Chart (default) -->
-      <div id="tab-chart" class="tab-pane active" role="tabpanel" aria-label="Live chart">
-        <section id="chart-wrap" aria-label="Live candle chart">
+      <!-- TAB: Chart -->
+      <div id="tab-chart" class="tab-pane active" role="tabpanel">
+        <section id="chart-wrap">
           <div id="chart-container"></div>
           <div id="candle-countdown" class="idle">--:--</div>
-          <div id="stale-overlay"><span id="stale-msg">⚠ FEED STALE</span></div>
+          <div id="stale-overlay"><span id="stale-msg">⚠ STALE</span></div>
           <div id="chart-loading-overlay" class="show">
             <div id="chart-loading-spinner"></div>
-            <span id="chart-loading-text">Loading chart data…</span>
+            <span id="chart-loading-text">Loading…</span>
           </div>
         </section>
       </div>
 
-      <!-- TAB: Signal History — last 1 hour, dropdown to switch pair -->
-      <div id="tab-history" class="tab-pane" role="tabpanel" aria-label="Signal history">
+      <!-- TAB: History -->
+      <div id="tab-history" class="tab-pane" role="tabpanel">
         <div class="tab-history-header">
-          <label class="tab-history-label" for="history-pair-select">Pair</label>
-          <select id="history-pair-select" aria-label="Select pair for history view"></select>
-          <span class="hint">Last 1 hour · click row for detail</span>
+          <select id="history-pair-select" aria-label="Select pair"></select>
+          <span class="hint">Last 1 hour · click for detail</span>
         </div>
         <div id="history-list"></div>
       </div>
 
-      <!-- TAB: Accuracy Stats — win rate, per-strength, per-regime -->
-      <div id="tab-accuracy" class="tab-pane" role="tabpanel" aria-label="Accuracy stats">
+      <!-- TAB: Accuracy -->
+      <div id="tab-accuracy" class="tab-pane" role="tabpanel">
         <div class="accuracy-hero">
-          <div class="accuracy-hero-label">Overall Win Rate</div>
           <div class="accuracy-hero-pct" id="acc-hero-pct">—</div>
-          <div class="accuracy-hero-detail" id="acc-hero-detail">No signals yet</div>
+          <div class="accuracy-hero-detail" id="acc-hero-detail">No data</div>
         </div>
         <div class="accuracy-stats-grid">
-          <div class="accuracy-stat">
-            <div class="stat-label">Total</div>
-            <div class="stat-value" id="acc-total">0</div>
-          </div>
-          <div class="accuracy-stat correct">
-            <div class="stat-label">Wins</div>
-            <div class="stat-value" id="acc-wins">0</div>
-          </div>
-          <div class="accuracy-stat wrong">
-            <div class="stat-label">Losses</div>
-            <div class="stat-value" id="acc-losses">0</div>
-          </div>
-          <div class="accuracy-stat draw">
-            <div class="stat-label">Draws</div>
-            <div class="stat-value" id="acc-draws">0</div>
-          </div>
+          <div class="accuracy-stat"><div class="stat-label">Total</div><div class="stat-value" id="acc-total">0</div></div>
+          <div class="accuracy-stat correct"><div class="stat-label">Wins</div><div class="stat-value" id="acc-wins">0</div></div>
+          <div class="accuracy-stat wrong"><div class="stat-label">Loss</div><div class="stat-value" id="acc-losses">0</div></div>
+          <div class="accuracy-stat draw"><div class="stat-label">Draw</div><div class="stat-value" id="acc-draws">0</div></div>
         </div>
         <div class="accuracy-section">
-          <div class="accuracy-section-title">Per-Strength Win Rate</div>
-          <div id="acc-strength-breakdown"><div class="accuracy-empty">No data yet</div></div>
+          <div class="accuracy-section-title">By Strength</div>
+          <div id="acc-strength-breakdown"><div class="accuracy-empty">No data</div></div>
         </div>
         <div class="accuracy-section">
-          <div class="accuracy-section-title">Per-Regime Win Rate</div>
-          <div id="acc-regime-breakdown"><div class="accuracy-empty">No data yet</div></div>
+          <div class="accuracy-section-title">By Regime</div>
+          <div id="acc-regime-breakdown"><div class="accuracy-empty">No data</div></div>
         </div>
       </div>
 
     </div>
 
-    <!-- Side panel — ALWAYS visible regardless of active tab -->
-    <aside id="panel" aria-label="Signal and analysis panel">
+    <!-- ══ SIDE PANEL: Signal → Market → Micro (always visible) ══ -->
+    <aside id="panel">
 
-      <!-- Signal box -->
-      <div class="panel-section">
-        <div class="section-title section-title--primary">Signal</div>
+      <!-- 1. SIGNAL — the answer -->
+      <div class="panel-section panel-signal">
         <div id="signal-box" class="neutral">
           <div id="signal-label">—</div>
         </div>
         <div class="signal-meta">
-          <div class="signal-row"><span class="label">Score</span><span class="value" id="sig-score">—</span></div>
-          <div class="signal-row"><span class="label">Strength</span><span class="value" id="sig-strength">—</span></div>
-          <div class="signal-row"><span class="label">Confidence</span><span class="value" id="sig-conf-val">—</span></div>
+          <div class="signal-row"><span>Score</span><span id="sig-score">—</span></div>
+          <div class="signal-row"><span>Strength</span><span id="sig-strength">—</span></div>
+          <div class="signal-row"><span>Confidence</span><span id="sig-conf-val">—</span></div>
           <div class="conf-bar-wrap"><div class="conf-bar" id="sig-conf-bar" style="width:0%"></div></div>
-          <div class="signal-row"><span class="label">Agree</span><span class="value" id="sig-agree">—</span></div>
-          <div class="signal-row"><span class="label">Regime</span><span class="value" id="sig-regime">—</span></div>
+          <div class="signal-row"><span>Agree</span><span id="sig-agree">—</span></div>
+          <div class="signal-row"><span>Regime</span><span id="sig-regime">—</span></div>
+        </div>
+        <!-- 6-Module Engine — collapsible inside Signal section -->
+        <div class="engine-block">
+          <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
+            <span class="section-title section-title--inline">6-Module Engine</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="engine-active-row"><span>Engine:</span><span id="engine-label" class="engine-label">—</span></div>
+          <div id="theories-list"></div>
         </div>
       </div>
 
-      <!-- FIX (UI-P1-3, 2026-07-21): 6-Module Engine promoted to its
-           own section ABOVE Market State. Users look at Signal first
-           (the answer), then WHY (modules), then CONTEXT (market state),
-           then LIVE CONFIRMATION (microstructure). -->
+      <!-- 2. MARKET STATE — context -->
       <div class="panel-section">
-        <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
-          <span class="section-title section-title--inline">6-Module Engine</span>
-          <span class="arrow" aria-hidden="true">▶</span>
-        </button>
-        <div class="engine-active-row">
-          <span>Active Engine:</span>
-          <span id="engine-label" class="engine-label">—</span>
-        </div>
-        <div id="theories-list"></div>
-      </div>
-
-      <!-- Market State (3 fields only) -->
-      <div class="panel-section" id="market-state-section">
         <div class="section-title">Market State</div>
         <div class="micro-grid">
-          <div class="micro-item">
-            <span class="micro-label">Trend</span>
-            <span class="micro-value" id="ms-trend">—</span>
-          </div>
-          <div class="micro-item">
-            <span class="micro-label">Zone</span>
-            <span class="micro-value" id="ms-zone">—</span>
-          </div>
-          <div class="micro-item micro-item--full">
-            <span class="micro-label">Volatility</span>
-            <span class="micro-value" id="ms-volatility">—</span>
-          </div>
+          <div class="micro-item"><span class="micro-label">Trend</span><span class="micro-value" id="ms-trend">—</span></div>
+          <div class="micro-item"><span class="micro-label">Zone</span><span class="micro-value" id="ms-zone">—</span></div>
+          <div class="micro-item micro-item--full"><span class="micro-label">Volatility</span><span class="micro-value" id="ms-volatility">—</span></div>
         </div>
       </div>
 
-      <!-- Microstructure (FIX P0-5: removed inline style; using class) -->
-      <div class="panel-section panel-section--scroll panel-section--micro collapsed">
-        <div class="section-title">Running Candle Microstructure</div>
-
+      <!-- 3. MICROSTRUCTURE — live confirmation (collapsible) -->
+      <div class="panel-section panel-section--micro collapsed">
+        <div class="section-title">Microstructure</div>
         <div class="micro-grid">
-          <!-- Buyer/Seller bar -->
           <div class="bs-bar-wrap">
-            <div class="bs-bar-labels">
-              <span>BUYER</span><span>SELLER</span>
-            </div>
+            <div class="bs-bar-labels"><span>BUY</span><span>SELL</span></div>
             <div class="bs-bars">
               <div class="bs-buy" id="bs-buy" style="width:50%">50%</div>
               <div class="bs-sell" id="bs-sell" style="width:50%">50%</div>
             </div>
           </div>
-
-          <div class="micro-item">
-            <span class="micro-label">Pressure</span>
-            <span class="pressure-badge buyer" id="ms-pressure">BUYER</span>
-          </div>
-          <div class="micro-item">
-            <span class="micro-label">Reaction</span>
-            <span class="react-badge none" id="ms-reaction">—</span>
-          </div>
-          <div class="micro-item">
-            <span class="micro-label">Fight</span>
-            <span class="micro-value" id="ms-fight">—</span>
-          </div>
-          <div class="micro-item">
-            <span class="micro-label">Hold Level</span>
-            <span class="micro-value" id="ms-hold">—</span>
-          </div>
-
+          <div class="micro-item"><span class="micro-label">Pressure</span><span class="pressure-badge buyer" id="ms-pressure">—</span></div>
+          <div class="micro-item"><span class="micro-label">Reaction</span><span class="react-badge none" id="ms-reaction">—</span></div>
+          <div class="micro-item"><span class="micro-label">Fight</span><span class="micro-value" id="ms-fight">—</span></div>
+          <div class="micro-item"><span class="micro-label">Hold</span><span class="micro-value" id="ms-hold">—</span></div>
           <div class="phase-box">
-            <div class="phase-card"><div class="phase-name">Early</div><div class="phase-dir flat" id="ph-early">—</div></div>
-            <div class="phase-card"><div class="phase-name">Mid</div><div class="phase-dir flat" id="ph-mid">—</div></div>
-            <div class="phase-card"><div class="phase-name">Late</div><div class="phase-dir flat" id="ph-late">—</div></div>
+            <div class="phase-card"><div class="phase-name">E</div><div class="phase-dir flat" id="ph-early">—</div></div>
+            <div class="phase-card"><div class="phase-name">M</div><div class="phase-dir flat" id="ph-mid">—</div></div>
+            <div class="phase-card"><div class="phase-name">L</div><div class="phase-dir flat" id="ph-late">—</div></div>
           </div>
-
-          <div class="micro-item">
-            <span class="micro-label">Last React</span>
-            <span class="react-badge none" id="ms-last-react">—</span>
-          </div>
-          <div class="micro-item">
-            <span class="micro-label">Running Conf</span>
-            <span class="running-conf none" id="ms-running-conf">—</span>
-          </div>
-          <div class="micro-item">
-            <span class="micro-label">Ticks</span>
-            <span class="micro-value" id="ms-ticks">0</span>
-          </div>
-          <div class="micro-item">
-            <span class="micro-label">Net</span>
-            <span class="micro-value" id="ms-net">—</span>
-          </div>
-          <div class="micro-item micro-item--full">
-            <span class="micro-label">Round Level</span>
-            <span class="micro-value" id="ms-round">—</span>
-          </div>
+          <div class="micro-item"><span class="micro-label">Last React</span><span class="react-badge none" id="ms-last-react">—</span></div>
+          <div class="micro-item"><span class="micro-label">Run Conf</span><span class="running-conf none" id="ms-running-conf">—</span></div>
+          <div class="micro-item"><span class="micro-label">Ticks</span><span class="micro-value" id="ms-ticks">0</span></div>
+          <div class="micro-item"><span class="micro-label">Net</span><span class="micro-value" id="ms-net">—</span></div>
+          <div class="micro-item micro-item--full"><span class="micro-label">Round</span><span class="micro-value" id="ms-round">—</span></div>
         </div>
       </div>
 
     </aside>
   </main>
-
 </div>
 
 <!-- Signal detail modal -->
 <div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title">
   <div id="signal-detail-modal">
-    <h3><span id="detail-title">Signal Detail</span><button type="button" class="detail-close" id="detail-close" aria-label="Close" style="min-height:44px;min-width:44px;padding:8px 12px;font-size:22px;background:transparent;border:none;color:var(--text-dim);cursor:pointer;border-radius:4px">×</button></h3>
+    <h3><span id="detail-title">Signal Detail</span><button type="button" class="detail-close" id="detail-close" aria-label="Close">×</button></h3>
     <div id="detail-body"></div>
   </div>
 </div>
 
-<!-- Scripts: vendored chart library first, then shared logic, then page bootstrap -->
 <script defer src="/static/lightweight-charts.js"></script>
 <script defer src="/static/js/common.js"></script>
 <script defer src="/static/js/real.js"></script>
