@@ -1812,14 +1812,22 @@ class QuotexFeed:
         # this gives the user an immediate visual signal that the
         # prediction is uncertain, and prevents the trade from being
         # logged as a loss.
+        #
+        # FIX (LOSS-HISTORY-FIX, 2026-07-23): preserve the original
+        # direction in the reason text so _grade_and_log can recover it
+        # and grade the signal as a wrong trade. This ensures loss
+        # signals appear in the history DB (otherwise the win rate
+        # looks artificially high because WEAK losses are invisible).
         if result.get("signal") in ("CALL", "PUT") and result.get("strength") == "WEAK":
             _weak_conf = result.get("confidence", 0)
+            _orig_signal = result.get("signal")
             result["signal"] = "NEUTRAL"
             result["strength"] = "NEUTRAL"
             result["confidence"] = 0
             result.setdefault("reasons", []).append(
                 f"WEAK→NEUTRAL (Option A): backtest showed 4.2% win rate "
-                f"(confidence was {_weak_conf}) — skip is +EV.")
+                f"(confidence was {_weak_conf}) — skip is +EV. "
+                f"opposed original {_orig_signal}")
 
         # Neutral signals should remain neutral; do not force a fake CALL/PUT
         # just to keep a ghost candle on screen.
@@ -1874,12 +1882,61 @@ class QuotexFeed:
         `closed` as its last element (ATR history reads candles[-11:-1]).
         Returns the accuracy string (correct/wrong/draw) or None.
 
-        NEUTRAL predictions get no signal_log row (NEUTRAL is not a
-        direction and must never be graded).
+        FIX (LOSS-HISTORY-FIX, 2026-07-23): user reported that loss (wrong)
+        signals are NOT saved to history. Root cause: Option A+B (WEAK→NEUTRAL)
+        converts wrong signals to NEUTRAL before grading, and NEUTRAL
+        predictions are skipped (line 1857: `if pred_signal not in
+        ("CALL", "PUT"): return None`). This means every WEAK signal that
+        would have been graded "wrong" is now skipped entirely — the loss
+        is invisible in the history DB, making the win rate look higher
+        than it actually is.
+
+        FIX: if the prediction's reasons contain "Option A" or "Option B",
+        it means the ORIGINAL signal was CALL/PUT but got converted to
+        NEUTRAL. We recover the original direction from the reason text
+        and grade it as a wrong trade (so it shows up in history as a loss,
+        which is what actually happened). This preserves the user's
+        ability to see the true win rate.
+
+        If no Option A/B marker is found, the NEUTRAL was genuine (no
+        original direction) — skip grading as before.
         """
         accuracy = self._accuracy(closed, prediction, period=period)
         if not prediction:
             return accuracy
+
+        # FIX (LOSS-HISTORY-FIX): recover original direction from WEAK→NEUTRAL
+        # conversions so loss signals are properly graded and saved.
+        pred_signal = prediction.get("signal")
+        if pred_signal == "NEUTRAL":
+            # Check if this NEUTRAL was a WEAK→NEUTRAL conversion
+            reasons = prediction.get("reasons", [])
+            reasons_text = " ".join(str(r) for r in reasons)
+            # Look for the original direction in the reason text
+            # Format: "LIVE WEAK→NEUTRAL (Option B): running ticks opposed original CALL"
+            # or: "WEAK→NEUTRAL (Option A): backtest showed 4.2% win rate (confidence was X)"
+            import re as _re
+            # Option B includes the original direction explicitly
+            m = _re.search(r'opposed original (CALL|PUT)', reasons_text)
+            if m:
+                # Recover the original direction and grade it
+                orig_signal = m.group(1)
+                # Re-grade using the recovered direction
+                if closed["close"] == closed["open"]:
+                    accuracy = "draw"
+                else:
+                    actual_up = closed["close"] > closed["open"]
+                    pred_up = orig_signal == "CALL"
+                    accuracy = "correct" if actual_up == pred_up else "wrong"
+                # Update the prediction dict so the log shows the original
+                # direction (with a note that it was a WEAK→NEUTRAL conversion)
+                prediction = dict(prediction)
+                prediction["signal"] = orig_signal
+                prediction["_was_weak_neutral"] = True
+            else:
+                # Genuine NEUTRAL — no original direction to recover.
+                # Skip grading as before.
+                return accuracy
 
         # Log the resolved prediction with a full WHY report.
         try:
@@ -2512,6 +2569,12 @@ class QuotexFeed:
                                       "losses": 1 if accuracy == "wrong" else 0}
 
         stream.prediction = await self._run_eoc(stream, actual_open=first_tick)
+        # FIX (LOSS-HISTORY-FIX, 2026-07-23): lock the direction at EOC.
+        # Once the EOC prediction sets CALL or PUT, that direction is
+        # locked for the entire candle — LIVE re-eval can update
+        # confidence/strength but NEVER flip CALL↔PUT.
+        if stream.prediction and stream.prediction.get("signal") in ("CALL", "PUT"):
+            stream._locked_direction = stream.prediction["signal"]
 
         # ── Signal delay (2026-07-10) ──────────────────────────────────────
         # Set the gate so the prediction is NOT broadcast until
@@ -2553,6 +2616,11 @@ class QuotexFeed:
         self._track_tick(stream, first_tick)   # keep tracked high/low fresh
         # Invalidate caches — new candle, fresh compute needed.
         self._reset_micro_cache(stream)
+        # FIX (LOSS-HISTORY-FIX, 2026-07-23): reset the locked direction
+        # for the new candle. Each candle gets ONE direction lock — once
+        # set (via EOC prediction or LIVE re-eval), it can't flip to the
+        # opposite direction on the same candle.
+        stream._locked_direction = None
 
         return accuracy
 
@@ -3139,11 +3207,36 @@ class QuotexFeed:
                                         # else: different direction → IGNORE.
                                         # The original EOC signal stays.
                                     elif locked_dir == "NEUTRAL" and fresh_dir in ("CALL", "PUT"):
+                                        # FIX (LOSS-HISTORY-FIX, 2026-07-23):
                                         # Original was NEUTRAL but live data
                                         # now shows a clear direction → allow
                                         # upgrade to CALL/PUT (one-time only).
-                                        stream.prediction = fresh
-                                        pred_changed = True
+                                        # BUT: if a direction was previously
+                                        # locked this candle (via Option B
+                                        # WEAK→NEUTRAL conversion), do NOT
+                                        # allow upgrade to a DIFFERENT direction.
+                                        # This prevents the "CALL then PUT"
+                                        # flip the user reported.
+                                        prev_locked = getattr(stream, '_locked_direction', None)
+                                        if prev_locked and fresh_dir != prev_locked:
+                                            # Block the flip — keep the
+                                            # original locked direction as
+                                            # NEUTRAL (don't upgrade to a
+                                            # conflicting direction).
+                                            pass
+                                        elif prev_locked and fresh_dir == prev_locked:
+                                            # Same direction as the original
+                                            # locked direction — allow upgrade
+                                            # back (the original signal is
+                                            # being restored).
+                                            stream.prediction = fresh
+                                            pred_changed = True
+                                        else:
+                                            # No previous lock — first time
+                                            # establishing a direction. Allow.
+                                            stream.prediction = fresh
+                                            stream._locked_direction = fresh_dir
+                                            pred_changed = True
                             except Exception as exc:
                                 print(f"[feed] LIVE re-eval error "
                                       f"({stream.asset}@{stream.period}s): {exc}")
@@ -3152,18 +3245,19 @@ class QuotexFeed:
                     # Can upgrade/downgrade strength based on running candle
                     # confirmation, but NEVER changes CALL↔PUT.
                     #
-                    # FIX (WEAK-NEUTRAL-FIX-B, 2026-07-23): user backtest
-                    # observation: WEAK signals are systematically wrong
-                    # (4.2% win rate). The previous code kept WEAK signals
-                    # tradeable during the running candle — the user would
-                    # see a CALL/PUT signal that lost 96% of the time.
-                    # Option B: when the strength gate demotes a signal to
-                    # WEAK mid-candle, immediately convert it to NEUTRAL and
-                    # broadcast the change to the browser. This gives the
-                    # user instant visual feedback ("signal cancelled")
-                    # instead of waiting for EOC. The signal is NOT graded
-                    # as a wrong trade — NEUTRAL predictions are skipped
-                    # in _grade_and_log.
+                    # FIX (LOSS-HISTORY-FIX, 2026-07-23): user reported that
+                    # the same candle shows CALL then PUT (signal flips).
+                    # Root cause: Option B converts WEAK→NEUTRAL, then the
+                    # LIVE re-eval at line 3141-3146 sees locked_dir=NEUTRAL
+                    # and upgrades to a fresh CALL/PUT — a DIFFERENT direction
+                    # than the original. This causes the visible flip.
+                    #
+                    # FIX: track the ORIGINAL locked direction in
+                    # stream._locked_direction. Once set (at candle open +
+                    # 3s), it can NEVER change — even if the prediction
+                    # becomes NEUTRAL via Option A+B. The LIVE re-eval
+                    # upgrade path (line 3141) is now blocked if a direction
+                    # was ever locked this candle.
                     if (ENABLE_STRENGTH_GATE and stream.prediction
                             and stream.prediction.get("signal") in ("CALL", "PUT")):
                         gated = self._apply_strength_gate(stream, stream.prediction)
@@ -3174,6 +3268,11 @@ class QuotexFeed:
                             if gated.get("strength") == "WEAK":
                                 orig_signal = gated.get("signal", "NEUTRAL")
                                 orig_conf = gated.get("confidence", 0)
+                                # FIX (LOSS-HISTORY-FIX): record the original
+                                # direction as locked so LIVE re-eval can't
+                                # flip to a different direction later.
+                                if not getattr(stream, '_locked_direction', None):
+                                    stream._locked_direction = orig_signal
                                 gated["signal"] = "NEUTRAL"
                                 gated["strength"] = "NEUTRAL"
                                 gated["confidence"] = 0

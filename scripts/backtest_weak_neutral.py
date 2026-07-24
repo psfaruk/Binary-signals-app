@@ -67,7 +67,7 @@ def main():
 
     # Option B is in the stream loop, harder to isolate — check the source
     full_src = inspect.getsource(feed.QuotexFeed)
-    has_option_b = "WEAK-NEUTRAL-FIX-B" in full_src and "Option B" in full_src
+    has_option_b = "Option B" in full_src and "WEAK→NEUTRAL" in full_src
     has_option_b_logic = (
         'gated.get("strength") == "WEAK"' in full_src and
         'gated["signal"] = "NEUTRAL"' in full_src
