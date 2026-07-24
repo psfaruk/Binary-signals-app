@@ -276,6 +276,108 @@ async def index():
                         headers={"Cache-Control": "no-cache"})
 
 
+# ── Token update endpoint (2026-07-23) ──────────────────────────────────────
+# FIX (TOKEN-AUTO-UPDATE): user reported app falling back to sim mode when
+# Quotex token expires. The auto-relogin via email/password is blocked by
+# Cloudflare on Railway datacenter IPs. This endpoint lets the user update
+# the token at RUNTIME — no Railway dashboard access needed, no restart.
+# The user just opens a URL in their browser with the new token.
+#
+# Usage:
+#   GET  /api/set-token?token=XXXX  (simple, from browser address bar)
+#   POST /api/set-token             (with JSON body {"token": "XXXX"})
+#
+# Security: this endpoint is UNPROTECTED — anyone with the URL can set
+# the token. For a personal app this is acceptable. For production with
+# multiple users, add an auth header check.
+@app.get("/api/set-token")
+async def set_token_get(token: str):
+    """Set Quotex token at runtime — no restart needed.
+
+    Usage: open in browser:
+    https://binary-signals-app-production.up.railway.app/api/set-token?token=YOUR_TOKEN
+    """
+    return await _apply_token(token)
+
+
+@app.post("/api/set-token")
+async def set_token_post(request):
+    """Set Quotex token via POST (for programmatic updates).
+
+    Body: {"token": "YOUR_TOKEN"}
+    """
+    try:
+        body = await request.json()
+        token = body.get("token", "").strip()
+    except Exception:
+        return {"ok": False, "error": "invalid JSON body"}
+    return await _apply_token(token)
+
+
+async def _apply_token(token: str):
+    """Apply a new Quotex token at runtime.
+
+    Sets the token in os.environ, clears sim_delegate fallback,
+    and forces an immediate reconnect on the next feed loop tick.
+    """
+    if not token or len(token) < 10:
+        return {"ok": False, "error": "token too short (min 10 chars)"}
+
+    import os as _os
+    import time as _time
+
+    # Set the token in the environment so _connect() picks it up
+    _os.environ["QX_TOKEN"] = token
+    _os.environ["USE_SIM"] = "0"
+
+    # Clear the sim delegate if it was set (from a previous fallback)
+    # so the real feed's run() loop resumes instead of routing to sim
+    if hasattr(feed, '_sim_delegate') and feed._sim_delegate is not None:
+        try:
+            # Gracefully shut down the sim delegate's streams
+            sim = feed._sim_delegate
+            feed._sim_delegate = None
+            for s in list(sim._streams.values()):
+                if s.task:
+                    s._evicting = True
+                    s.task.cancel()
+            sim._streams.clear()
+            print("[server] sim delegate cleared — switching back to real feed")
+        except Exception as e:
+            print(f"[server] sim delegate cleanup error: {e}")
+
+    # Reset the real feed's connection state so it retries immediately
+    feed._connected = False
+    feed._abandoned = False
+    feed._reconnect_attempts = 0
+    feed._last_error = None
+    feed._last_error_time = 0
+
+    # Clear any stale idle_since timestamps on existing streams
+    for s in getattr(feed, '_streams', {}).values():
+        s.idle_since = None
+
+    # Save token to session.json so it persists across restarts
+    try:
+        from quotex_ws import QuotexWSClient
+        QuotexWSClient.save_session_json(token)
+        print(f"[server] token saved to session.json ({token[:8]}...)")
+    except Exception as e:
+        print(f"[server] session.json save error: {e}")
+
+    token_preview = token[:8] + "..." + token[-4:] if len(token) > 12 else token
+    print(f"[server] ✅ token updated at runtime: {token_preview}")
+    print(f"[server]    real feed will reconnect within 5s...")
+
+    return {
+        "ok": True,
+        "message": f"Token set ({token_preview}). Real feed reconnecting...",
+        "timestamp": _time.time(),
+        "sim_mode_cleared": True,
+        "next_step": "Wait 5-10 seconds, then check /api/debug to confirm sim_mode=False",
+    }
+
+
 @app.get("/api/pairs")
 async def get_pairs():
     """Return both Real Market and OTC Market pair lists.
