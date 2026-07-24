@@ -72,9 +72,13 @@ PAIR_CONFIGS = {
             "pattern":         1.2,   # engulfing/harami work well
             "indicator":       0.5,   # RSI/MACD unreliable (broker noise)
             "key_level":       1.1,
-            "otc_pattern":     1.5,   # OTC mean-rev bias is strong
+            # FIX (WIN-RATE-BOOST #3, 2026-07-23): brain insights showed
+            # otc_pattern has 64% win rate on USDPKR_otc — BOOST from 1.5 to 1.8.
+            # This pair has strong mean-reversion behavior that the otc_pattern
+            # module captures well.
+            "otc_pattern":     1.8,   # BOOSTED — 64% win rate confirmed by brain
         },
-        "description": "Exotic OTC — strong mean reversion, weak trends",
+        "description": "Exotic OTC — strong mean reversion, otc_pattern 64% win rate",
     },
     "USDBDT_otc": {
         "profile": "mean_reverting",
@@ -124,17 +128,26 @@ PAIR_CONFIGS = {
         },
         "description": "Exotic OTC — mean reverting",
     },
+    # FIX (WIN-RATE-BOOST #1, 2026-07-23): USDMXN_otc had 0% win rate
+    # (5 signals, all wrong). The pair's profile was "trending" but live
+    # data shows random_walk algo with 37% body size — too noisy for the
+    # current weights. Changed to "volatile" profile with dampened weights
+    # and added a max_confidence cap of 40 — signals from this pair should
+    # only fire when there's strong confluence, and even then confidence
+    # stays low. This effectively makes the pair emit NEUTRAL most of the
+    # time (since 40 < the calibration cap threshold), skipping bad trades.
     "USDMXN_otc": {
-        "profile": "trending",
+        "profile": "volatile",
         "weights": {
             "candle_reaction": 1.0,
-            "running_tick":    1.0,
-            "pattern":         1.2,
-            "indicator":       1.1,
-            "key_level":       1.0,
-            "otc_pattern":     1.1,
+            "running_tick":    1.1,   # boost — tick data more reliable on MXN
+            "pattern":         0.8,   # dampen — patterns fail on MXN noise
+            "indicator":       0.5,   # heavy dampen — RSI/MACD unreliable
+            "key_level":       0.9,   # slight dampen
+            "otc_pattern":     0.7,   # dampen mean-reversion
         },
-        "description": "MXN — momentum works, continuation biased",
+        "max_confidence": 40,  # cap confidence at 40% — very low trust
+        "description": "MXN — volatile, 0% historical win rate, capped at 40%",
     },
     "BRLUSD_otc": {
         "profile": "volatile",
@@ -513,6 +526,24 @@ PAIR_CONFIGS = {
             "otc_pattern":     1.5,
         },
         "description": "INR/USD — exotic, strong mean reversion",
+    },
+    # FIX (WIN-RATE-BOOST #3, 2026-07-23): brain insights showed otc_pattern
+    # has only 39% win rate on USDIDR_otc — DAMPEN from default 0.9 to 0.4.
+    # This pair's mean-reversion behavior is weak — the otc_pattern module's
+    # signals are mostly noise here. Heavy dampen + max_confidence cap of 50
+    # ensures this pair doesn't generate wrong trades from otc_pattern noise.
+    "USDIDR_otc": {
+        "profile": "mean_reverting",
+        "weights": {
+            "candle_reaction": 1.3,
+            "running_tick":    1.0,   # boost — tick data more reliable than patterns
+            "pattern":         1.0,
+            "indicator":       0.5,   # dampen — broker noise
+            "key_level":       1.0,
+            "otc_pattern":     0.4,   # DAMPENED — 39% win rate confirmed by brain
+        },
+        "max_confidence": 50,   # cap — this pair is unreliable
+        "description": "USD/IDR — otc_pattern 39% win rate, dampened + capped at 50",
     },
 }
 

@@ -508,11 +508,29 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # should be dampened). Now only dampen counter-trend signals. A CALL
     # in TREND_UP is the engine correctly following the trend — penalizing
     # it for being right is wrong.
-    if regime.get("regime") == "TREND_UP" and signal == "PUT":
-        confidence = max(0, confidence - 8)
-    elif regime.get("regime") == "TREND_DOWN" and signal == "CALL":
-        # Symmetric: dampen counter-trend CALLs in TREND_DOWN.
-        confidence = max(0, confidence - 8)
+    #
+    # FIX (WIN-RATE-BOOST #2, 2026-07-23): brain insights showed TREND_UP
+    # regime has only 35% win rate — the WORST regime for OTC. The previous
+    # -8 penalty was not enough. Now we apply a heavier -15 penalty AND
+    # cap confidence at 45 for ALL signals in TREND_UP (both CALL and PUT).
+    # This makes TREND_UP signals effectively NEUTRAL most of the time
+    # (since the low_conf_skip at line ~840 converts <20 to NEUTRAL, and
+    # 45 is close to that threshold). The OTC broker reverses trends, so
+    # TREND_UP is the hardest regime to predict — skipping is +EV.
+    if regime.get("regime") == "TREND_UP":
+        confidence = max(0, confidence - 15)
+        if confidence > 45:
+            confidence = min(confidence, 45)
+            all_reasons.append(
+                "_TREND_UP_PENALTY: 35% historical win rate → cap at 45")
+    elif regime.get("regime") == "TREND_DOWN":
+        # Symmetric: TREND_DOWN also dampened (though brain didn't flag it
+        # as severely, we apply the same penalty for consistency).
+        confidence = max(0, confidence - 15)
+        if confidence > 45:
+            confidence = min(confidence, 45)
+            all_reasons.append(
+                "_TREND_DOWN_PENALTY: cap at 45 (symmetric to TREND_UP)")
 
     # BRAIN-LEARNED (2026-07-20): confidence calibration from 7623 live signals
     # 100% bin: 44% actual → cap at 50
@@ -599,16 +617,20 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     if confidence > 75:
         if not (total_groups >= 3 and net_margin >= 0.6):
             confidence = min(confidence, 75)
-    # Also re-clamp the regime-specific dampener that was applied above —
-    # if the boost raised confidence, the TREND_UP -8 may need to be
-    # re-applied to keep the dampening effective.
-    # FIX (P1-ISSUE-028, 2026-07-22): only dampen COUNTER-TREND signals
-    # (matching the first application above). Continuation signals in
-    # TREND_UP/TREND_DOWN should NOT be penalized.
-    if regime.get("regime") == "TREND_UP" and signal == "PUT":
-        confidence = max(0, confidence - 8)
-    elif regime.get("regime") == "TREND_DOWN" and signal == "CALL":
-        confidence = max(0, confidence - 8)
+    # FIX (WIN-RATE-BOOST #2, 2026-07-23): re-apply the TREND_UP/DOWN cap
+    # after the accuracy boost + calibration caps. The previous code only
+    # re-applied a -8 penalty for counter-trend signals. Now we re-apply
+    # the full -15 penalty + 45 cap for ALL signals in TREND_UP/DOWN,
+    # matching the first application above. This ensures the penalty
+    # survives the boost/cap cascade.
+    if regime.get("regime") == "TREND_UP":
+        confidence = max(0, confidence - 15)
+        if confidence > 45:
+            confidence = min(confidence, 45)
+    elif regime.get("regime") == "TREND_DOWN":
+        confidence = max(0, confidence - 15)
+        if confidence > 45:
+            confidence = min(confidence, 45)
 
     # ── Step 10: Time/session/regime pattern adjustment (BACKTEST-DRIVEN) ──
     # FIX (BACKTEST-2026-07-21): apply per-pair time-of-day, session, dow,
@@ -733,6 +755,26 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # Apply strategy-specific min_confidence override
             # (e.g., cautious requires 30+, neutral requires 25+)
             # This replaces the hardcoded LOW_CONF_SKIP threshold.
+            #
+            # FIX (WIN-RATE-BOOST #4, 2026-07-23): when algorithm is
+            # random_walk (coin flip territory), cap confidence at 50%.
+            # Live data shows 29/30 OTC candles are random_walk — during
+            # these periods the engine has no real edge, so confidence
+            # should reflect that uncertainty. The ×0.8 multiplier from
+            # the neutral strategy already dampens confidence, but without
+            # a hard cap it can still reach 60-75% via the calibration
+            # caps. Now we add a hard 50% cap for random_walk, which
+            # effectively makes these signals NEUTRAL most of the time
+            # (since the low_conf_skip at line ~850 converts <20 to NEUTRAL,
+            # and 50 * 0.8 = 40, close to that threshold).
+            _algo = strat.get("algorithm", "unknown")
+            if _algo == "random_walk" and signal != "NEUTRAL":
+                if confidence > 50:
+                    confidence = min(confidence, 50)
+                    all_reasons.append(
+                        f"_RANDOM_WALK_CAP: algorithm=random_walk → "
+                        f"cap confidence at 50 (coin flip territory)")
+
             if signal != "NEUTRAL" and confidence < _min_conf:
                 all_reasons.append(
                     f"_ALGO_STRATEGY: confidence {confidence} < {_min_conf} "
@@ -787,6 +829,20 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     if confidence > 75:
         if not (total_groups >= 3 and net_margin >= 0.6):
             confidence = min(confidence, 75)
+
+    # FIX (WIN-RATE-BOOST #1, 2026-07-23): per-pair max_confidence cap.
+    # Some pairs (e.g., USDMXN_otc with 0% historical win rate) should
+    # have their confidence capped at a very low level so they effectively
+    # emit NEUTRAL most of the time (since the low_conf_skip threshold at
+    # line ~830 converts signals below confidence 20 to NEUTRAL). This
+    # prevents bad pairs from generating wrong trades while still allowing
+    # the pair to fire if there's genuinely strong confluence.
+    _pair_max_conf = weight_adapter.get_max_confidence(asset)
+    if _pair_max_conf is not None and confidence > _pair_max_conf:
+        confidence = min(confidence, _pair_max_conf)
+        all_reasons.append(
+            f"_PAIR_CAP: {asset} max_confidence={_pair_max_conf} "
+            f"(historical win rate too low)")
 
     if (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
             and has_pattern_confluence):

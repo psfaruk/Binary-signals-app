@@ -156,3 +156,19 @@ class PairWeightAdapter:
         if config:
             return config["profile"]
         return "default"
+
+    # FIX (WIN-RATE-BOOST #1, 2026-07-23): per-pair max_confidence cap.
+    # Allows individual pairs (e.g., USDMXN_otc with 0% win rate) to be
+    # capped at a very low confidence level so they emit NEUTRAL most of
+    # the time. Returns None if no cap is set (use global calibration).
+    def get_max_confidence(self, asset: str) -> int | None:
+        """Get the per-pair max_confidence cap.
+
+        Returns:
+            int: the max confidence for this asset (e.g., 40 for USDMXN_otc)
+            None: no per-pair cap — use the global calibration caps
+        """
+        config = self.pair_configs.get(asset)
+        if config and "max_confidence" in config:
+            return config["max_confidence"]
+        return None
