@@ -3258,35 +3258,58 @@ class QuotexFeed:
                     # becomes NEUTRAL via Option A+B. The LIVE re-eval
                     # upgrade path (line 3141) is now blocked if a direction
                     # was ever locked this candle.
+                    #
+                    # FIX (STRENGTH-GATE-DELAY, 2026-07-23): user reported
+                    # that the signal arrives at t=3s (SIGNAL_DELAY_SEC) but
+                    # goes NEUTRAL by t=4s — too fast, no time to act on it.
+                    # Root cause: the strength gate fires as soon as
+                    # len(stream.ticks) >= 10 (~1-2s into the candle),
+                    # which is BEFORE the signal delay expires. So the user
+                    # sees the signal for ~1 second before it's demoted.
+                    # FIX: only run the strength gate in the LAST 30s of the
+                    # candle (time_to_close < 30). This gives the signal a
+                    # stable first 30s — enough time for the user to read it
+                    # and act. The gate still catches wrong signals before
+                    # the candle closes, so loss recovery still works.
                     if (ENABLE_STRENGTH_GATE and stream.prediction
                             and stream.prediction.get("signal") in ("CALL", "PUT")):
-                        gated = self._apply_strength_gate(stream, stream.prediction)
-                        if gated is not stream.prediction:
-                            # Option B: if the strength gate demoted to WEAK,
-                            # immediately promote to NEUTRAL. The original
-                            # direction is preserved in the reasons for audit.
-                            if gated.get("strength") == "WEAK":
-                                orig_signal = gated.get("signal", "NEUTRAL")
-                                orig_conf = gated.get("confidence", 0)
-                                # FIX (LOSS-HISTORY-FIX): record the original
-                                # direction as locked so LIVE re-eval can't
-                                # flip to a different direction later.
-                                if not getattr(stream, '_locked_direction', None):
-                                    stream._locked_direction = orig_signal
-                                gated["signal"] = "NEUTRAL"
-                                gated["strength"] = "NEUTRAL"
-                                gated["confidence"] = 0
-                                gated.setdefault("reasons", []).append(
-                                    f"LIVE WEAK→NEUTRAL (Option B): running ticks "
-                                    f"opposed original {orig_signal} (conf was "
-                                    f"{orig_conf}) — skip is +EV.")
-                                # Force a rebroadcast so the browser sees
-                                # the NEUTRAL signal immediately, instead of
-                                # waiting for the next natural tick broadcast.
-                                pred_changed = True
-                            stream.prediction = gated
-                            # Don't set pred_changed for non-WEAK strength-only
-                            # updates — they don't need a rebroadcast.
+                        # Compute time_to_close — only gate in the last 30s
+                        _time_to_close = -1
+                        if stream.candle_open_time > 0:
+                            _time_to_close = (stream.candle_open_time
+                                             + stream.period) - time.time()
+                        # Only apply the strength gate in the last 30s of
+                        # the candle. Earlier in the candle, the signal
+                        # stays as-is (stable for the user to read).
+                        if 0 < _time_to_close < 30:
+                            gated = self._apply_strength_gate(stream, stream.prediction)
+                            if gated is not stream.prediction:
+                                # Option B: if the strength gate demoted to WEAK,
+                                # immediately promote to NEUTRAL. The original
+                                # direction is preserved in the reasons for audit.
+                                if gated.get("strength") == "WEAK":
+                                    orig_signal = gated.get("signal", "NEUTRAL")
+                                    orig_conf = gated.get("confidence", 0)
+                                    # FIX (LOSS-HISTORY-FIX): record the original
+                                    # direction as locked so LIVE re-eval can't
+                                    # flip to a different direction later.
+                                    if not getattr(stream, '_locked_direction', None):
+                                        stream._locked_direction = orig_signal
+                                    gated["signal"] = "NEUTRAL"
+                                    gated["strength"] = "NEUTRAL"
+                                    gated["confidence"] = 0
+                                    gated.setdefault("reasons", []).append(
+                                        f"LIVE WEAK→NEUTRAL (Option B): running ticks "
+                                        f"opposed original {orig_signal} (conf was "
+                                        f"{orig_conf}) — skip is +EV. "
+                                        f"(gated in last 30s of candle)")
+                                    # Force a rebroadcast so the browser sees
+                                    # the NEUTRAL signal immediately, instead of
+                                    # waiting for the next natural tick broadcast.
+                                    pred_changed = True
+                                stream.prediction = gated
+                                # Don't set pred_changed for non-WEAK strength-only
+                                # updates — they don't need a rebroadcast.
 
                     # Skip broadcast if open price is still 0 (no valid tick yet)
                     # — prevents LightweightCharts "Value is null" on the client
