@@ -63,9 +63,9 @@ def build_micro(ticks, open_price):
                      if (up_count + dn_count) > 0 else 50)
     vol_count_diverge = abs(buy_pct - count_buy_pct) > 20
 
-    if buy_pct >= 62:
+    if buy_pct >= 55:
         pressure = "BUYER"
-    elif sell_pct >= 62:
+    elif sell_pct >= 55:
         pressure = "SELLER"
     else:
         pressure = "FIGHT"

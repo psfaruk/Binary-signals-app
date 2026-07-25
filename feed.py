@@ -467,6 +467,17 @@ class _AssetStream:
     base_candles: list = field(default_factory=list)
     base_ticks: list = field(default_factory=list)
     _live_reeval_ticks: int = 0   # last tick-count LIVE re-eval fired at
+    # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-04): Option B fired flag —
+    # set True when WEAK→NEUTRAL conversion happens, blocks LIVE re-eval
+    # upgrades for the rest of the candle. Reset at candle close.
+    _option_b_fired: bool = False
+    # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-1-01): track when payout was
+    # last refreshed. Previously stream.payout was set ONCE at stream startup
+    # and never updated — so payout_spike / payout_drop events in
+    # algorithm_monitor NEVER fired. Quotex OTC pairs cycle payout 30%-90%
+    # every few minutes, so this disabled the user's primary defense against
+    # algorithm switches. Now we refresh every 60s.
+    _last_payout_refresh: float = 0.0
     # ── Last-10s optimization (2026-07-10) ────────────────────────────────
     # Cached recent_accuracy — queried ONCE per candle (accuracy only changes
     # at candle close, so re-querying mid-candle is pure waste).
@@ -1647,10 +1658,17 @@ class QuotexFeed:
         # cache so the blender can apply accuracy-aware self-correction.
         # stream.cached_accuracy is refreshed once at candle open by _run_eoc.
         _recent_acc = getattr(stream, 'cached_accuracy', None) if stream is not None else None
-        result = predict_from_candle(candles, ticks=list(ticks) if ticks else [],
-                                     micro=_micro_for_pred, asset=asset,
-                                     htf_trend=htf_trend, period=_period_for_pred,
-                                     recent_accuracy=_recent_acc)
+        # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-12): wrap
+        # predict_from_candle in asyncio.to_thread so the CPU-bound
+        # prediction work doesn't block the event loop. Previously this
+        # sync call blocked for ~1.9s at minute boundaries when 38 streams
+        # all closed candles simultaneously — causing tick stutter.
+        result = await asyncio.to_thread(
+            predict_from_candle, candles,
+            ticks=list(ticks) if ticks else [],
+            micro=_micro_for_pred, asset=asset,
+            htf_trend=htf_trend, period=_period_for_pred,
+            recent_accuracy=_recent_acc)
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
@@ -1829,8 +1847,18 @@ class QuotexFeed:
             return None
         # Zero-move candle = broker refund (draw), not a win or a loss.
         # Grading close>=open as UP silently counted draws as CALL wins.
+        # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-01): detect degenerate
+        # candles (data-drop artifacts where high==low==open==close). These
+        # are NOT real draws — they are MISSING DATA from Quotex subscription
+        # drops. Marking them as "draw" inflated the draw rate to 4.38% (healthy
+        # <2%) AND excluded them from recent_accuracy, hiding losses.
+        # Now: return "skip" so the caller can skip logging entirely.
         if just_closed["close"] == just_closed["open"]:
-            return "draw"
+            # Degenerate candle check: if high==low==open==close, it's data drop
+            if (just_closed.get("high") == just_closed.get("low")
+                    == just_closed["open"] == just_closed["close"]):
+                return "skip"  # data drop — don't log
+            return "draw"  # genuine doji (range > 0 but close == open)
         actual_up = just_closed["close"] > just_closed["open"]
         pred_up   = pred_signal == "CALL"
         return "correct" if actual_up == pred_up else "wrong"
@@ -1865,11 +1893,22 @@ class QuotexFeed:
         original direction) — skip grading as before.
         """
         accuracy = self._accuracy(closed, prediction, period=period)
+        # FIX (LIVE-DB-AUDIT-2026-07-25): skip degenerate candles (data drops)
+        if accuracy == "skip":
+            return None  # don't log data-drop candles
         if not prediction:
             return accuracy
 
         # FIX (LOSS-HISTORY-FIX): recover original direction from WEAK→NEUTRAL
         # conversions so loss signals are properly graded and saved.
+        # FIX (LIVE-DB-AUDIT-2026-07-25): also recover a meaningful confidence
+        # value — previously NEUTRAL→CALL/PUT recovery left confidence=0,
+        # which made /api/stats show 16 of 20 failed signals with confidence=0.
+        # This polluted calibration analysis and made STRONG signals appear
+        # to never fire (because zero-confidence signals can never reach STRONG
+        # tier). Now we recover a minimum confidence of 15 (just above the
+        # LOW_CONF_SKIP threshold of 20 → marks as "WEAK_RECOVERED") so the
+        # signal is properly logged with a non-zero confidence.
         pred_signal = prediction.get("signal")
         if pred_signal == "NEUTRAL":
             # Check if this NEUTRAL was a WEAK→NEUTRAL conversion
@@ -1896,6 +1935,21 @@ class QuotexFeed:
                 prediction = dict(prediction)
                 prediction["signal"] = orig_signal
                 prediction["_was_weak_neutral"] = True
+                # LIVE-DB-AUDIT FIX: recover a non-zero confidence so the
+                # signal is properly logged. Original confidence was lost
+                # when NEUTRAL conversion happened (NEUTRAL sets conf=0).
+                # Use 15 — below LOW_CONF_SKIP=20 (so it would have been
+                # skipped), but non-zero so calibration analysis works.
+                # Mark with a tag so analysts can filter these out.
+                if prediction.get("confidence", 0) == 0:
+                    prediction["confidence"] = 15
+                    prediction["_confidence_recovered"] = True
+                    prediction.setdefault("reasons", []).append(
+                        "_RECOVERED_CONFIDENCE: 0→15 (WEAK→NEUTRAL recovery)")
+                # Recover strength as WEAK (was NEUTRAL, now a real signal
+                # but with low confidence)
+                if prediction.get("strength") == "NEUTRAL":
+                    prediction["strength"] = "WEAK"
             else:
                 # Genuine NEUTRAL — no original direction to recover.
                 # Skip grading as before.
@@ -2450,6 +2504,15 @@ class QuotexFeed:
                           f"losses — cooling down for 30 min")
             elif accuracy == "correct":
                 stream._consecutive_losses = 0
+            # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-09): reset
+            # consecutive_losses when cooldown expires. Previously a pair
+            # could enter 30-min cooldown, then immediately hit 5 losses
+            # again because _consecutive_losses was never reset on cooldown
+            # expiry. This silenced pairs for hours.
+            if (stream._loss_cooldown_until > 0
+                    and time.time() > stream._loss_cooldown_until):
+                stream._consecutive_losses = 0
+                stream._loss_cooldown_until = 0
         except Exception:
             pass
 
@@ -2556,8 +2619,21 @@ class QuotexFeed:
         # monitor. It maintains a rolling 30-candle window per asset and
         # detects payout-driven algorithm switches (Quotex's behavior of
         # cycling candle-generation algorithms when payout spikes).
+        # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-1-01): refresh payout
+        # every 60s. Previously stream.payout was set ONCE at stream start
+        # and never updated — payout_spike/drop detection was dead code.
         try:
             from core.algorithm_monitor import record_candle
+            # Refresh payout every 60s (Quotex cycles payout every few minutes)
+            _now = time.time()
+            if _now - stream._last_payout_refresh > 60.0:
+                try:
+                    pay = self._client.get_payout_by_asset(stream.asset)
+                    if pay is not None:
+                        stream.payout = int(pay)
+                except Exception:
+                    pass
+                stream._last_payout_refresh = _now
             payout = getattr(stream, 'payout', None) or 0
             tick_count = int(_micro_snap.get('tick_count', 0)) if _micro_snap else 0
             record_candle(
@@ -2584,6 +2660,10 @@ class QuotexFeed:
         # set (via EOC prediction or LIVE re-eval), it can't flip to the
         # opposite direction on the same candle.
         stream._locked_direction = None
+        # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-04): reset Option B
+        # flag at candle close so the next candle can use the LIVE re-eval
+        # upgrade path normally.
+        stream._option_b_fired = False
 
         return accuracy
 
@@ -3156,17 +3236,40 @@ class QuotexFeed:
                                             # score/confidence/strength only.
                                             # Do NOT set pred_changed (no
                                             # rebroadcast — signal is stable).
+                                            # FIX (LIVE-DB-AUDIT-2026-07-25 /
+                                            # AUDIT-LIVE-2-08): also update
+                                            # "strength" — the LIVE re-eval
+                                            # comment lied. Previously strength
+                                            # was NEVER updated here, so a
+                                            # MEDIUM signal could never be
+                                            # upgraded to STRONG based on live
+                                            # tick data. This is why STRONG
+                                            # signals fired only 7 times in
+                                            # 7783 (0.09%) — STRONG could only
+                                            # emerge from EOC, which has zero
+                                            # live tick data. Now strength is
+                                            # updated too, allowing MEDIUM→STRONG
+                                            # upgrades when running ticks
+                                            # confirm the direction strongly.
                                             stream.prediction = {
                                                 **stream.prediction,
                                                 "score": fresh.get("score",
                                                     stream.prediction.get("score")),
                                                 "confidence": fresh.get("confidence",
                                                     stream.prediction.get("confidence")),
+                                                "strength": fresh.get("strength",
+                                                    stream.prediction.get("strength")),
                                                 "agree": fresh.get("agree",
                                                     stream.prediction.get("agree")),
                                                 "total": fresh.get("total",
                                                     stream.prediction.get("total")),
                                             }
+                                            # If strength upgraded to STRONG,
+                                            # force a rebroadcast so the user
+                                            # sees the upgrade immediately.
+                                            if (fresh.get("strength") == "STRONG"
+                                                    and stream.prediction.get("strength") != "STRONG"):
+                                                pred_changed = True
                                         # else: different direction → IGNORE.
                                         # The original EOC signal stays.
                                     elif locked_dir == "NEUTRAL" and fresh_dir in ("CALL", "PUT"):
@@ -3180,26 +3283,37 @@ class QuotexFeed:
                                         # allow upgrade to a DIFFERENT direction.
                                         # This prevents the "CALL then PUT"
                                         # flip the user reported.
-                                        prev_locked = getattr(stream, '_locked_direction', None)
-                                        if prev_locked and fresh_dir != prev_locked:
-                                            # Block the flip — keep the
-                                            # original locked direction as
-                                            # NEUTRAL (don't upgrade to a
-                                            # conflicting direction).
+                                        # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-04):
+                                        # Also block ALL upgrades if Option B
+                                        # fired this candle — prevents the
+                                        # CALL↔NEUTRAL oscillation (Option B
+                                        # demotes CALL→NEUTRAL, then this path
+                                        # re-upgrades NEUTRAL→CALL, repeat).
+                                        if getattr(stream, '_option_b_fired', False):
+                                            # Option B already fired — block
+                                            # the upgrade. Signal stays NEUTRAL.
                                             pass
-                                        elif prev_locked and fresh_dir == prev_locked:
-                                            # Same direction as the original
-                                            # locked direction — allow upgrade
-                                            # back (the original signal is
-                                            # being restored).
-                                            stream.prediction = fresh
-                                            pred_changed = True
                                         else:
-                                            # No previous lock — first time
-                                            # establishing a direction. Allow.
-                                            stream.prediction = fresh
-                                            stream._locked_direction = fresh_dir
-                                            pred_changed = True
+                                            prev_locked = getattr(stream, '_locked_direction', None)
+                                            if prev_locked and fresh_dir != prev_locked:
+                                                # Block the flip — keep the
+                                                # original locked direction as
+                                                # NEUTRAL (don't upgrade to a
+                                                # conflicting direction).
+                                                pass
+                                            elif prev_locked and fresh_dir == prev_locked:
+                                                # Same direction as the original
+                                                # locked direction — allow upgrade
+                                                # back (the original signal is
+                                                # being restored).
+                                                stream.prediction = fresh
+                                                pred_changed = True
+                                            else:
+                                                # No previous lock — first time
+                                                # establishing a direction. Allow.
+                                                stream.prediction = fresh
+                                                stream._locked_direction = fresh_dir
+                                                pred_changed = True
                             except Exception as exc:
                                 print(f"[feed] LIVE re-eval error "
                                       f"({stream.asset}@{stream.period}s): {exc}")
@@ -3258,6 +3372,15 @@ class QuotexFeed:
                                     # flip to a different direction later.
                                     if not getattr(stream, '_locked_direction', None):
                                         stream._locked_direction = orig_signal
+                                    # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-04):
+                                    # set _option_b_fired flag so the LIVE re-eval
+                                    # upgrade path (NEUTRAL→CALL/PUT) is blocked
+                                    # for the rest of this candle. Previously the
+                                    # LIVE re-eval could re-upgrade NEUTRAL→CALL
+                                    # (same direction allowed at line 3190), causing
+                                    # CALL↔NEUTRAL oscillation every 5-10s in the
+                                    # last 30s. User reported "signal flipping".
+                                    stream._option_b_fired = True
                                     gated["signal"] = "NEUTRAL"
                                     gated["strength"] = "NEUTRAL"
                                     gated["confidence"] = 0

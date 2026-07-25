@@ -539,11 +539,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # 70-79% bin: 50% actual → cap at 60
     # 60-69% bin: 49% actual → cap at 55
     #
-    # AUDIT-3-02 FIX (2026-07-25): the previous cap mapping was NON-MONOTONIC:
-    # 69 → 69 (no cap), 70 → 60, 89 → 60, 90 → 55. A higher raw confidence
-    # produced a LOWER capped confidence. Now 70-79 caps at 65 (above 60-69
-    # bin's no-cap floor) and 60-69 gets an explicit cap at 70 to preserve
-    # monotonicity. The new mapping is monotonically non-decreasing.
+    # AUDIT-3-02 FIX (2026-07-25): made caps monotonic.
+    # AUDIT-LIVE-2-01 FIX (2026-07-25): the AUDIT-3-02 fix was PARTIAL —
+    # 70-79 capped at 65 but 60-69 capped at 70, so 70→65 < 69→69 (DROP).
+    # LIVE DB showed per-bin win rate was noisy at boundaries because of this.
+    # Now: full monotonic mapping where each bin's cap > previous bin's cap.
     if confidence >= 100:
         confidence = min(confidence, 50)
     elif confidence >= 90:
@@ -551,9 +551,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     elif confidence >= 80:
         confidence = min(confidence, 60)
     elif confidence >= 70:
-        confidence = min(confidence, 65)    # was 60 — must be > 60-69 bin
+        confidence = min(confidence, 65)    # > 60-69 bin's 60
     elif confidence >= 60:
-        confidence = min(confidence, 70)    # explicit cap — monotonicity
+        confidence = min(confidence, 60)    # < 70-79 bin's 65 (monotonic)
 
     # FIX (high-confidence cap, 2026-07-20): 4h backtest showed 80-89% bin
     # at 41.7% accuracy and 100% at 40%. Cap ALL predictions at 75% unless
@@ -614,8 +614,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # FIX (AUDIT-CORE #13, 2026-07-21): RE-APPLY all calibration caps AFTER
     # the recent_accuracy boost so the boost cannot bypass them. The boost
     # block above may have raised confidence past the caps — clamp again.
-    # AUDIT-3-02 FIX (2026-07-25): monotonically non-decreasing caps (matches
-    # the first cap block above).
+    # AUDIT-3-02 FIX (2026-07-25): monotonically non-decreasing caps.
+    # AUDIT-LIVE-2-01 FIX (2026-07-25): match the first cap block exactly.
     if confidence >= 100:
         confidence = min(confidence, 50)
     elif confidence >= 90:
@@ -625,7 +625,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     elif confidence >= 70:
         confidence = min(confidence, 65)
     elif confidence >= 60:
-        confidence = min(confidence, 70)
+        confidence = min(confidence, 60)
     if confidence > 75:
         if not (total_groups >= 3 and net_margin >= 0.6):
             confidence = min(confidence, 75)

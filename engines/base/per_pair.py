@@ -94,6 +94,13 @@ class PairWeightAdapter:
         """Blend static weights with DB-learned per-module win rates.
 
         Returns a new dict; the input is not mutated.
+
+        FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-1-03): also read
+        brain_learning recommended_weight and blend it in. Previously
+        brain_learning was computed but NEVER read by any code — the brain
+        "learned" for 4-5 days and the engine ignored every recommendation.
+        Now we blend 50% DB-stats-adapted + 50% brain-recommended when
+        brain_learning has data (>= 30 samples).
         """
         try:
             import db as _db
@@ -106,6 +113,9 @@ class PairWeightAdapter:
         except Exception:
             # DB read failed (locked, missing table, etc.) → static fallback.
             return static_weights.copy()
+
+        # FIX (AUDIT-LIVE-1-03): read brain_learning recommended_weight
+        brain_recs = self._read_brain_learning(asset)
 
         adapted = {}
         for module, static_w in static_weights.items():
@@ -126,9 +136,54 @@ class PairWeightAdapter:
             # Prior-weighted blend: keep mostly the static config, layer in
             # a fraction of the learned value.
             blended = _ADAPT_PRIOR * static_w + (1.0 - _ADAPT_PRIOR) * learned_w
+
+            # FIX (AUDIT-LIVE-1-03): also blend in brain_learning
+            # recommended_weight if available. The brain uses more samples
+            # and per-pair granularity, so give it significant weight.
+            brain_rec = brain_recs.get(module)
+            if brain_rec and brain_rec.get("total", 0) >= 30:
+                brain_w = brain_rec["recommended_weight"]
+                # 50/50 blend of DB-stats-adapted and brain-recommended
+                blended = 0.5 * blended + 0.5 * brain_w
+
             adapted[module] = round(blended, 2)
 
         return adapted
+
+    def _read_brain_learning(self, asset: str) -> dict:
+        """Read brain_learning recommended_weight per module for an asset.
+
+        FIX (AUDIT-LIVE-1-03): previously this method did not exist —
+        brain_learning was write-only. Now per_pair adapter reads it.
+
+        Returns:
+            dict: {module_name: {recommended_weight, win_rate, total}}
+            Empty dict if brain_learning table doesn't exist or read fails.
+        """
+        try:
+            import sqlite3
+            import os
+            db_path = os.environ.get("DB_PATH",
+                os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                             "signals.db"))
+            if not os.path.exists(db_path):
+                return {}
+            conn = sqlite3.connect(db_path, timeout=5)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """SELECT module_name, recommended_weight, win_rate, total
+                       FROM brain_learning WHERE asset = ?""",
+                    (asset,)
+                ).fetchall()
+                return {r["module_name"]: dict(r) for r in rows}
+            except sqlite3.OperationalError:
+                # brain_learning table doesn't exist
+                return {}
+            finally:
+                conn.close()
+        except Exception:
+            return {}
 
     def invalidate_cache(self, asset: str = None, period: int = None):
         """Clear the DB-adaptation cache.
