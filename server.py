@@ -172,8 +172,12 @@ async def broadcast(msg: dict):
         return
     results = await asyncio.gather(*tasks, return_exceptions=True)
     # Remove dead clients
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-06): use BaseException so
+    # asyncio.CancelledError (a BaseException since 3.8) also triggers
+    # client removal. Otherwise dead clients accumulate and every future
+    # broadcast wastes time sending to them.
     for cid, result in zip(cids, results):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             clients.pop(cid, None)
 
 
@@ -209,7 +213,20 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         print(f"[server] algorithm monitor init failed (non-fatal): {_e}")
     # Start feed in background task
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-07): add a done-callback so
+    # if feed.run() crashes during startup (e.g. _db.init failure or
+    # _auto_login_startup raising), the exception is logged instead of
+    # silently dying. Without this the server starts but never receives
+    # data and /api/status shows connected: False forever with no error.
+    def _on_feed_done(task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            print(f"[server] FATAL: feed task died: "
+                  f"{type(exc).__name__}: {exc}")
     feed_task = asyncio.create_task(feed.run(broadcast))
+    feed_task.add_done_callback(_on_feed_done)
     print("[server] lifespan: feed task started")
     # Auto-open browser (local dev only — disabled on Railway via env var)
     _auto_open_browser()
@@ -357,12 +374,25 @@ async def index():
 # the token. For a personal app this is acceptable. For production with
 # multiple users, add an auth header check.
 @app.get("/api/set-token")
-async def set_token_get(token: str):
+async def set_token_get(token: str, x_admin_key: str = None):
     """Set Quotex token at runtime — no restart needed.
 
     Usage: open in browser:
     https://binary-signals-app-production.up.railway.app/api/set-token?token=YOUR_TOKEN
+
+    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-08): optional shared-secret
+    admin-key check. If ADMIN_KEY env var is set, callers MUST pass the
+    matching X-Admin-Key header (or query param) or get 403. If ADMIN_KEY
+    is unset, the endpoint stays open (backwards-compatible for personal
+    deployments).
     """
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-08): admin-key gate.
+    expected = os.environ.get("ADMIN_KEY", "").strip()
+    if expected:
+        # Accept header OR ?x_admin_key=... query param for browser use.
+        provided = (x_admin_key or "").strip()
+        if provided != expected:
+            raise HTTPException(status_code=403, detail="forbidden")
     return await _apply_token(token)
 
 
@@ -387,8 +417,13 @@ async def _apply_token(token: str):
     sim mode is permanently disabled), and forces an immediate reconnect on
     the next feed loop tick.
     """
-    if not token or len(token) < 10:
-        return {"ok": False, "error": "token too short (min 10 chars)"}
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-05): raise minimum length
+    # from 10 to 50. Real Quotex SSID tokens are JWT-style (200+ chars).
+    # A 10-char minimum let garbage like "aaaaaaaaaa" through, which then
+    # wasted 30s on a doomed authorization attempt before being cleared.
+    if not token or len(token) < 50:
+        return {"ok": False, "error": "token too short "
+                "(real Quotex tokens are 200+ chars)"}
 
     import os as _os
     import time as _time
@@ -400,6 +435,10 @@ async def _apply_token(token: str):
     # SIM-MODE-DISABLED (2026-07-25): sim delegate should never be set
     # anymore, but defensively clear it if a previous deploy (running old
     # code) left one. This makes the runtime token-update forward-compatible.
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-04): await cancelled stream
+    # tasks before clearing _streams so their finally blocks can't race
+    # with the clear() and KeyError on broadcast. Defensive only — sim
+    # mode is permanently disabled.
     if hasattr(feed, '_sim_delegate') and feed._sim_delegate is not None:
         try:
             sim = feed._sim_delegate
@@ -408,17 +447,30 @@ async def _apply_token(token: str):
                 if s.task:
                     s._evicting = True
                     s.task.cancel()
+                    try:
+                        await asyncio.wait_for(s.task, timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                        pass
             sim._streams.clear()
             print("[server] cleared stale sim delegate (sim mode is disabled)")
         except Exception as e:
             print(f"[server] sim delegate cleanup error: {e}")
 
-    # Reset the real feed's connection state so it retries immediately
+    # Reset the real feed's connection state so it retries immediately.
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-03): set _token_update_pending
+    # so feed._connect() (if currently suspended in await client.connect())
+    # discards the in-flight attempt with the OLD token and retries with the
+    # new one. Without this, an in-flight connect succeeds with the old
+    # token and overwrites _connected=True, silently losing the update.
     feed._connected = False
     feed._abandoned = False
     feed._reconnect_attempts = 0
     feed._last_error = None
     feed._last_error_time = 0
+    try:
+        feed._token_update_pending = True
+    except Exception:
+        pass
 
     # Clear any stale idle_since timestamps on existing streams
     for s in getattr(feed, '_streams', {}).values():

@@ -213,10 +213,19 @@ def detect_candle_patterns(candles):
     # FIX (BUG-Q, 2026-07-20): exhaustion threshold is now vol-scaled.
     # In low vol, 0.65 is too tight (normal noise shrinks bodies); in high
     # vol, 0.65 is too loose (meaningful shrinkage is larger).
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-01): swap exhaust_ratio values.
+    # The condition `c3_body < c2_body * exhaust_ratio` means a LARGER ratio
+    # is LOOSER (needs less shrink) and a SMALLER ratio is STRICTER (needs
+    # more shrink). In high volatility (large bodies) even a small relative
+    # shrink is statistically meaningful, so the threshold should be LARGER
+    # (looser). In low volatility (small bodies) noise dominates, so the
+    # threshold should be SMALLER (stricter). Previously the values were
+    # swapped, which suppressed exhaustion signals in high-vol regimes and
+    # fired false exhaustion reversals in low-vol regimes.
     if vol_pct > 1.3:
-        exhaust_ratio = 0.55  # high vol: smaller shrink counts as exhaustion
+        exhaust_ratio = 0.75  # high vol: bodies big, even small relative shrink is meaningful
     elif vol_pct < 0.7:
-        exhaust_ratio = 0.75  # low vol: need bigger shrink to be meaningful
+        exhaust_ratio = 0.55  # low vol: bodies small, need bigger relative shrink to be real
     else:
         exhaust_ratio = 0.65
     if b1 > 0 and b2 > 0 and b3 > 0 and c3["close"] > c2["close"] > c1["close"]:
@@ -426,10 +435,15 @@ def classify_market_regime(candles, lookback=30):
     # results when sample count is small (which is correct).
     for i in range(2, len(recent) - 2):
         c = recent[i]
-        is_swing_high = (c["high"] >= recent[i - 1]["high"] and c["high"] >= recent[i - 2]["high"]
-                         and c["high"] >= recent[i + 1]["high"] and c["high"] >= recent[i + 2]["high"])
-        is_swing_low = (c["low"] <= recent[i - 1]["low"] and c["low"] <= recent[i - 2]["low"]
-                        and c["low"] <= recent[i + 1]["low"] and c["low"] <= recent[i + 2]["low"])
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-02): require strict `>` / `<`
+        # on the OUTER neighbors (i-2, i+2) while keeping `>=`/`<=` on the
+        # INNER ones. A plateau of equal highs/lows previously created
+        # multiple swing pivots at the same price, inflating LH/LL counts
+        # and biasing regime classification toward TREND_DOWN.
+        is_swing_high = (c["high"] >= recent[i - 1]["high"] and c["high"] > recent[i - 2]["high"]
+                         and c["high"] >= recent[i + 1]["high"] and c["high"] > recent[i + 2]["high"])
+        is_swing_low = (c["low"] <= recent[i - 1]["low"] and c["low"] < recent[i - 2]["low"]
+                        and c["low"] <= recent[i + 1]["low"] and c["low"] < recent[i + 2]["low"])
         if is_swing_high:
             if prev_swing_high is not None:
                 if c["high"] > prev_swing_high:
@@ -495,12 +509,15 @@ def find_key_levels(candles, lookback=50):
 
     for i in range(2, len(recent) - 2):
         c = recent[i]
-        if (c["high"] >= recent[i - 1]["high"] and c["high"] >= recent[i - 2]["high"]
-                and c["high"] >= recent[i + 1]["high"] and c["high"] >= recent[i + 2]["high"]):
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-02): require strict `>`/`<` on
+        # outer neighbors to avoid plateau plateaus creating duplicate pivots
+        # at the same price.
+        if (c["high"] >= recent[i - 1]["high"] and c["high"] > recent[i - 2]["high"]
+                and c["high"] >= recent[i + 1]["high"] and c["high"] > recent[i + 2]["high"]):
             levels.append({"price": c["high"], "type": "resistance",
                            "idx": i + offset})
-        if (c["low"] <= recent[i - 1]["low"] and c["low"] <= recent[i - 2]["low"]
-                and c["low"] <= recent[i + 1]["low"] and c["low"] <= recent[i + 2]["low"]):
+        if (c["low"] <= recent[i - 1]["low"] and c["low"] < recent[i - 2]["low"]
+                and c["low"] <= recent[i + 1]["low"] and c["low"] < recent[i + 2]["low"]):
             levels.append({"price": c["low"], "type": "support",
                            "idx": i + offset})
 
@@ -697,8 +714,15 @@ def compute_statistical_edge(candles, lookback=50):
     # set so percentile reflects where the close sits vs PRIOR closes.
     prior_closes = [c["close"] for c in recent[:-1]] if len(recent) > 1 else []
     if prior_closes:
-        close_rank = sum(1 for cl in prior_closes if cl <= last["close"])
-        close_percentile = (close_rank / len(prior_closes)) * 100
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-04): use the proper
+        # percentile-rank formula that handles ties. The previous `<=`
+        # convention counted all prior closes that EQUAL the current close
+        # as "below", inflating percentile to 100% for flat-price periods
+        # (common in low-volatility OTC pairs). Now ties count as 0.5,
+        # which gives the correct midpoint rank for equal values.
+        count_below = sum(1 for cl in prior_closes if cl < last["close"])
+        count_equal = sum(1 for cl in prior_closes if cl == last["close"])
+        close_percentile = ((count_below + 0.5 * count_equal) / len(prior_closes)) * 100
     else:
         close_percentile = 50
 
@@ -837,12 +861,14 @@ def key_levels_rich(candles, lookback=60):
     levels = []
     for i in range(2, len(recent) - 2):
         c = recent[i]
-        if (c["high"] >= recent[i - 1]["high"] and c["high"] >= recent[i - 2]["high"]
-                and c["high"] >= recent[i + 1]["high"] and c["high"] >= recent[i + 2]["high"]):
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-02): require strict `>`/`<`
+        # on outer neighbors to avoid plateau plateaus creating duplicate pivots.
+        if (c["high"] >= recent[i - 1]["high"] and c["high"] > recent[i - 2]["high"]
+                and c["high"] >= recent[i + 1]["high"] and c["high"] > recent[i + 2]["high"]):
             levels.append({"type": "swing_high", "price": c["high"],
                            "idx": i + offset, "time": c.get("time", 0)})
-        if (c["low"] <= recent[i - 1]["low"] and c["low"] <= recent[i - 2]["low"]
-                and c["low"] <= recent[i + 1]["low"] and c["low"] <= recent[i + 2]["low"]):
+        if (c["low"] <= recent[i - 1]["low"] and c["low"] < recent[i - 2]["low"]
+                and c["low"] <= recent[i + 1]["low"] and c["low"] < recent[i + 2]["low"]):
             levels.append({"type": "swing_low", "price": c["low"],
                            "idx": i + offset, "time": c.get("time", 0)})
     swing_highs = [lv for lv in levels if lv["type"] == "swing_high"][-10:]

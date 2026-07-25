@@ -46,6 +46,13 @@ class PairWeightAdapter:
         self.engine_name = engine_name
         # Per-instance DB-adaptation cache. Keyed by (asset, period).
         self._adapt_cache: dict = {}
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-10): invalidation epoch
+        # counter — bumped on every invalidate_cache call. The cache-miss
+        # path reads the epoch before the slow DB query and re-checks after;
+        # if the epoch changed (invalidation happened during the query), the
+        # stale result is NOT written to the cache, preventing the
+        # invalidate→stale-write→60s-TTL-stale-read race condition.
+        self._invalidation_epoch: dict = {}
         self._lock = threading.Lock()
 
     def get_weights(self, asset: str, period: int = 60, use_db: bool = True) -> dict:
@@ -77,17 +84,31 @@ class PairWeightAdapter:
         # across many streams), and per_module_accuracy does a SQL scan
         # each call. Acquire the lock only around the cache mutation, not
         # the DB read (which can be slow).
-        now = time.time()
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-10): capture the
+        # invalidation epoch INSIDE the lock before releasing it to do the
+        # slow DB query. After the query, re-check the epoch under the lock;
+        # if it changed, an invalidate_cache call happened during the query —
+        # discard our result (don't cache) so the next caller sees fresh data.
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-23): use a lock-free read
+        # for the cache HIT path (Python dict reads are atomic under the GIL).
+        # The lock is now only acquired on cache MISSES, cutting lock
+        # contention from 240/min to ~5/min (only first-call-per-asset-per-TTL).
         cache_key = (asset, period)
+        cached = self._adapt_cache.get(cache_key)
+        if cached and (time.time() - cached["ts"]) < _ADAPT_CACHE_TTL:
+            return cached["weights"]
+
         with self._lock:
-            cached = self._adapt_cache.get(cache_key)
-            if cached and (now - cached["ts"]) < _ADAPT_CACHE_TTL:
-                return cached["weights"]
+            invalidation_epoch = self._invalidation_epoch.get(cache_key, 0)
 
         adapted = self._adapt_from_db(base, asset, period)
 
         with self._lock:
-            self._adapt_cache[cache_key] = {"ts": now, "weights": adapted.copy()}
+            # Re-check: if invalidation happened during the DB query, discard
+            # our result — don't cache stale data. The next call will re-query.
+            if self._invalidation_epoch.get(cache_key, 0) != invalidation_epoch:
+                return adapted  # uncached — let next caller re-query
+            self._adapt_cache[cache_key] = {"ts": time.time(), "weights": adapted.copy()}
         return adapted
 
     def _adapt_from_db(self, static_weights: dict, asset: str, period: int) -> dict:
@@ -122,8 +143,26 @@ class PairWeightAdapter:
             s = stats.get(module, {})
             total = s.get("total", 0)
             win_rate = s.get("win_rate")
-            if total < _ADAPT_MIN_SAMPLES or win_rate is None:
+            if total == 0 or win_rate is None:
                 adapted[module] = static_w
+                continue
+
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-09 + AUDIT-LIVE-2-18):
+            # previously used a FIXED 0.7/0.3 (static/learned) blend regardless
+            # of sample count. A 0% win-rate module over 1000 samples only got
+            # -9% weight reduction — the adapter could NEVER fully disable a
+            # bad module. Also, the hard threshold `_ADAPT_MIN_SAMPLES = 20`
+            # caused weight oscillation for rare-firing modules (key_level)
+            # hovering around 20 votes. Now:
+            #   (a) Use a SMOOTH blend that transitions from 100% static at
+            #       total=0 to 100% adapted at total=50 (adapt_fraction).
+            #       This eliminates the threshold oscillation for rare modules.
+            #   (b) Hard-disable modules with win_rate < 0.30 AND total >= 50
+            #       (set weight to 0.05) so catastrophically broken modules
+            #       actually get disabled, matching the auto_tune behavior
+            #       (AUDIT-2-21 in core/auto_tune.py).
+            if win_rate < 0.30 and total >= 50:
+                adapted[module] = 0.05
                 continue
 
             # Map win_rate ∈ [0, 1] to a scaling factor centered at 1.0.
@@ -133,9 +172,14 @@ class PairWeightAdapter:
             deviation = win_rate - 0.50
             scale = max(-_ADAPT_CAP, min(_ADAPT_CAP, deviation * 1.5))
             learned_w = static_w * (1.0 + scale)
-            # Prior-weighted blend: keep mostly the static config, layer in
-            # a fraction of the learned value.
-            blended = _ADAPT_PRIOR * static_w + (1.0 - _ADAPT_PRIOR) * learned_w
+            # Smooth blend: 0% adapted at total=0, 100% adapted at total>=50.
+            # This replaces the FIXED _ADAPT_PRIOR (0.7) blend that was
+            # sample-count-independent. For total >= 50, the adapter fully
+            # trusts the DB-learned weight (matching the auto_tune behavior).
+            # For total < 50, the adapter progressively shifts from static
+            # to learned as samples accumulate — no threshold discontinuity.
+            adapt_fraction = min(1.0, total / 50.0)
+            blended = (1.0 - adapt_fraction) * static_w + adapt_fraction * learned_w
 
             # FIX (AUDIT-LIVE-1-03): also blend in brain_learning
             # recommended_weight if available. The brain uses more samples
@@ -191,15 +235,28 @@ class PairWeightAdapter:
         Called after a batch of new signal log writes so the next
         prediction reflects fresh accuracy data. Safe to call from any
         thread.
+
+        FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-10): bump the invalidation
+        epoch for the affected cache_key(s) BEFORE popping the cache entry.
+        This ensures that any concurrent cache-miss path that captured the
+        OLD epoch before this call will detect the change when it tries to
+        write its (stale) result back, and discard the write.
         """
         with self._lock:
             if asset is None:
+                # Invalidate everything. Clearing the epoch dict causes any
+                # concurrent miss-path caller (which captured a non-zero epoch
+                # for its key) to see epoch=0 on re-check, which differs from
+                # its captured value — so it discards its stale result.
                 self._adapt_cache.clear()
+                self._invalidation_epoch.clear()
             else:
                 keys_to_drop = [k for k in self._adapt_cache
                                 if k[0] == asset and (period is None or k[1] == period)]
                 for k in keys_to_drop:
                     self._adapt_cache.pop(k, None)
+                    # Bump epoch so concurrent miss-path callers see the change.
+                    self._invalidation_epoch[k] = self._invalidation_epoch.get(k, 0) + 1
 
     def get_profile(self, asset: str) -> str:
         """Get the behavior profile for an asset.

@@ -65,11 +65,18 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
     buy_pct = micro.get("buy_pct", 50)
     pressure = micro.get("pressure", "FIGHT")
     if pressure == "BUYER":
-        score = 3 if buy_pct >= 70 else 2
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-36): align threshold with
+        # SUB-SIGNAL 1 (line 55) which uses >= 65. The previous >= 70 here
+        # meant a microstructure with ed_buy=68 and buy_pct=68 got score 3
+        # from SUB-SIGNAL 1 but only score 2 from SUB-SIGNAL 2 — an
+        # inconsistent score for the same pressure level.
+        score = 3 if buy_pct >= 65 else 2
         sub_votes.append(("CALL", score, f"buyer pressure ({buy_pct}%)"))
     elif pressure == "SELLER":
         sell_pct = 100 - buy_pct
-        score = 3 if sell_pct >= 70 else 2
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-36): same threshold fix
+        # as the BUYER branch above (>= 65 instead of >= 70).
+        score = 3 if sell_pct >= 65 else 2
         sub_votes.append(("PUT", score, f"seller pressure ({sell_pct}%)"))
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -224,19 +231,32 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
             sub_votes.append(("CALL", 1,
                 "last-N recovery after down move → weak CALL"))
         elif net > 0:
-            sub_votes.append(("PUT", 1,
-                "last-N recovery after up move → weak PUT"))
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-37): change direction
+            # from PUT to CALL. "RECOVERY" means recent ticks are recovering
+            # (going UP). After an UP net move, continued up-ticks = CALL
+            # continuation, not PUT reversal. The previous PUT direction was
+            # semantically wrong and would flip the composite direction in
+            # close-call scenarios. Now both RECOVERY sub-cases vote CALL
+            # (reversal after down move AND continuation after up move).
+            sub_votes.append(("CALL", 1,
+                "last-N recovery continuing up move → weak CALL"))
 
     # ═══════════════════════════════════════════════════════════════════════
     # SUB-SIGNAL 12: Phase momentum alignment (NEW)
     # All 3 phases (early/mid/late) same direction = strong trend
     # ═══════════════════════════════════════════════════════════════════════
     phases = micro.get("phases", [])
-    if len(phases) == 3:
-        if phases[0] == "UP" and phases[1] == "UP" and phases[2] == "UP":
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-38): use `>= 3` instead of
+    # strict `== 3` and check the LAST 3 phases via `phases[-3:]`. The
+    # microstructure.phases function should always return 3, but defensively
+    # this prevents the signal from being silently dropped if it ever returns
+    # a different length (cold-start, unusual cases, future bugs).
+    if len(phases) >= 3:
+        p = phases[-3:]
+        if p[0] == "UP" and p[1] == "UP" and p[2] == "UP":
             sub_votes.append(("CALL", 2,
                 "all 3 phases UP → strong bullish momentum"))
-        elif phases[0] == "DOWN" and phases[1] == "DOWN" and phases[2] == "DOWN":
+        elif p[0] == "DOWN" and p[1] == "DOWN" and p[2] == "DOWN":
             sub_votes.append(("PUT", 2,
                 "all 3 phases DOWN → strong bearish momentum"))
 
@@ -257,14 +277,23 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
         return []  # exact tie — no vote
 
     # Determine prior direction for CONTINUATION vs REVERSAL classification
-    prior_dir = 0  # 1=up, -1=down, 0=doji/unknown
-    if len(candles) >= 2:
-        prev = candles[-2]
-        prev_body = prev["close"] - prev["open"]
-        if prev_body > 0:
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-34): look back further to find
+    # the last non-doji candle. The previous check only looked at candles[-2];
+    # if the prior candle was a doji (prev_body == 0), prior_dir stayed 0 and
+    # the composite was classified as "REVERSAL fresh-direction" with a score
+    # penalty. But a doji after a long UP streak is just a pause — the prior
+    # TREND was UP. Now we scan backward to find the last non-doji candle.
+    prior_dir = 0  # 1=up, -1=down, 0=doji/unknown (only if all are dojis)
+    for _i in range(len(candles) - 2, -1, -1):
+        _prev = candles[_i]
+        _prev_body = _prev["close"] - _prev["open"]
+        if _prev_body > 0:
             prior_dir = 1
-        elif prev_body < 0:
+            break
+        elif _prev_body < 0:
             prior_dir = -1
+            break
+        # else: doji, keep looking back
 
     # Composite score scales with:
     # 1. Net score difference (depth)
@@ -286,7 +315,17 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
             composite_type = "REVERSAL"
             type_reason = "prior doji, fresh-direction"
             composite_score = max(1, composite_score - 1)
-        confidence = min(70, composite_score * 12 + call_n * 2)
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-35): weight confidence by
+        # the MAX sub-signal score (depth) instead of the COUNT of agreeing
+        # sub-signals (breadth). The previous formula `composite_score * 12 +
+        # call_n * 2` rewarded many weak sub-signals over few strong ones —
+        # 5 sub-signals of score 1 (composite_score=6, call_n=5) got conf 70
+        # while 1 sub-signal of score 5 (composite_score=5, call_n=1) got conf
+        # 62. The strong-signal case is more reliable but got LOWER
+        # confidence. Now uses max_sub_signal_score so depth is rewarded over
+        # breadth. composite_score multiplier raised 12→14 to compensate.
+        max_sub_signal_score = max((s for d, s, _ in sub_votes if d == "CALL"), default=0)
+        confidence = min(70, composite_score * 14 + max_sub_signal_score * 2)
         return [ModuleResult(
             module_name="running_tick", direction="CALL", score=composite_score,
             confidence=confidence,
@@ -307,7 +346,10 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
         composite_type = "REVERSAL"
         type_reason = "prior doji, fresh-direction"
         composite_score = max(1, composite_score - 1)
-    confidence = min(70, composite_score * 12 + put_n * 2)
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-35): same depth-over-breadth
+    # fix as the CALL branch above (use max_sub_signal_score instead of put_n).
+    max_sub_signal_score = max((s for d, s, _ in sub_votes if d == "PUT"), default=0)
+    confidence = min(70, composite_score * 14 + max_sub_signal_score * 2)
     return [ModuleResult(
         module_name="running_tick", direction="PUT", score=composite_score,
         confidence=confidence,

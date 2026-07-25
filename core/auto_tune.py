@@ -31,6 +31,12 @@ from collections import defaultdict
 DB_PATH = os.environ.get("DB_PATH",
     os.path.join(os.path.dirname(__file__), "..", "signals.db"))
 
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-24): make the win-rate query LIMIT
+# env-configurable so operators can widen the sample window on large DBs.
+# The old hardcoded 2000 over-weighted recent performance after the DB
+# grew past ~100k signals (only the latest 2% was sampled).
+_AUTO_TUNE_MAX_ROWS = int(os.environ.get("AUTO_TUNE_MAX_ROWS", "5000"))
+
 # Static (baseline) weights — the starting point. Auto-tune adjusts from here.
 STATIC_WEIGHTS_OTC = {
     "candle_reaction": 1.3,
@@ -68,7 +74,17 @@ def _get_module_win_rates() -> dict:
             "indicator", "key_level", "otc_pattern", "trend_follow",
         )
 
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-23): use db._conn() to inherit
+    # WAL mode + synchronous=NORMAL. A raw non-WAL reader on a WAL-mode DB
+    # causes lock contention with the feed's WAL writers — every
+    # apply_tuned_weights_to_engines call (every ~100 graded signals) blocks
+    # writes for 100ms+ on slow disks. Falls back to raw connect if db
+    # module isn't importable.
+    try:
+        import db as _db
+        conn = _db._conn()
+    except Exception:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     try:
         # Try ts column first (production schema), fall back to ctime
@@ -77,13 +93,13 @@ def _get_module_win_rates() -> dict:
                                    FROM signal_log
                                    WHERE signal IN ('CALL','PUT')
                                      AND accuracy IN ('correct','wrong')
-                                   ORDER BY ts DESC LIMIT 2000""").fetchall()
+                                   ORDER BY ts DESC LIMIT ?""", (_AUTO_TUNE_MAX_ROWS,)).fetchall()
         except sqlite3.OperationalError:
             rows = conn.execute("""SELECT signal, accuracy, reasons
                                    FROM signal_log
                                    WHERE signal IN ('CALL','PUT')
                                      AND accuracy IN ('correct','wrong')
-                                   ORDER BY ctime DESC LIMIT 2000""").fetchall()
+                                   ORDER BY ctime DESC LIMIT ?""", (_AUTO_TUNE_MAX_ROWS,)).fetchall()
     finally:
         conn.close()
 
@@ -110,13 +126,32 @@ def _get_module_win_rates() -> dict:
             module = reason_str[1:end_bracket].strip()
             if module not in MODULE_NAMES:
                 continue
-            upper = reason_str.upper()
-            if "PUT" in upper or "BEAR" in upper or "SELLER" in upper:
-                module_dir = "PUT"
-            elif "CALL" in upper or "BULL" in upper or "BUYER" in upper:
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-25): parse direction
+            # from the END of the reason (after the final "→") rather than
+            # substring-scanning the whole string. The old logic checked
+            # PUT/BEAR/SELLER BEFORE CALL/BULL/BUYER, so a reason mentioning
+            # BOTH (e.g. "[running_tick] seller pressure easing, buyer taking
+            # over → CALL") was misclassified as PUT. This corrupted per-
+            # module win rates for modules whose reasons naturally mention
+            # both directions.
+            #
+            # Strategy: find the final arrow in the reason and look at the
+            # trailing token. If neither matches, fall back to the legacy
+            # scan (still PUT-first, but only for reasons with no arrow).
+            tail = reason_str.rsplit("→", 1)[-1].strip().upper() if "→" in reason_str else ""
+            if tail.endswith("CALL") or " CALL" in tail or tail == "CALL":
                 module_dir = "CALL"
+            elif tail.endswith("PUT") or " PUT" in tail or tail == "PUT":
+                module_dir = "PUT"
             else:
-                continue
+                # Legacy fallback: PUT-first scan (only used when no arrow present).
+                upper = reason_str.upper()
+                if "CALL" in upper or "BULL" in upper or "BUYER" in upper:
+                    module_dir = "CALL"
+                elif "PUT" in upper or "BEAR" in upper or "SELLER" in upper:
+                    module_dir = "PUT"
+                else:
+                    continue
 
             if accuracy not in ("correct", "wrong"):
                 continue
@@ -139,31 +174,44 @@ def _get_module_win_rates() -> dict:
     return result
 
 
-def _win_rate_to_weight(win_rate: float, static_weight: float) -> float:
+def _win_rate_to_weight(win_rate: float, static_weight: float,
+                         total: int = 0) -> float:
     """Convert a win rate to a tuned weight.
 
-    Uses a piecewise function:
-      >= 0.55 → 1.3 (boost)
-      0.50-0.54 → 1.0 (keep)
-      0.45-0.49 → 0.8 (dampen)
-      0.35-0.44 → 0.5 (severe)
-      < 0.35 → 0.1 (disabled)
+    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-2-15): use a CONTINUOUS linear
+    mapping (win_rate 0.30→0.1, 0.70→1.5) instead of the piecewise-constant
+    buckets. The old piecewise mapping produced a 30% weight jump at the 55%
+    boundary (54.9%→1.0, 55.0%→1.3), which caused weight THRASHING as win
+    rates oscillated near boundaries due to sampling noise. The continuous
+    mapping eliminates the discontinuities while preserving the boost/dampen
+    intent.
 
-    Then blends with static weight (70% static, 30% tuned).
+    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-21 + AUDIT-LIVE-1-11): the blend
+    is now sample-size-adaptive instead of fixed 70/30. The old 70% static
+    prior meant even a 0% win-rate module over 1000 samples only dropped from
+    1.3 to 0.94 — the auto-tuner could NEVER fully disable a bad module. Now
+    the tuned-weight blend shifts from 30% (at MIN_SAMPLES) to 90% (at 200+
+    samples), so a catastrophically broken module with sufficient data gets
+    dampened all the way to _MIN_WEIGHT (0.1).
     """
-    if win_rate >= 0.55:
-        tuned = 1.3
-    elif win_rate >= 0.50:
-        tuned = 1.0
-    elif win_rate >= 0.45:
-        tuned = 0.8
-    elif win_rate >= 0.35:
-        tuned = 0.5
-    else:
+    # FIX (AUDIT-LIVE-2-15): continuous linear mapping.
+    if win_rate <= 0.30:
         tuned = 0.1
+    elif win_rate >= 0.70:
+        tuned = 1.5
+    else:
+        tuned = 0.1 + (win_rate - 0.30) / 0.40 * (1.5 - 0.1)
 
-    # Blend: 70% static, 30% tuned
-    blended = 0.7 * static_weight + 0.3 * tuned
+    # FIX (AUDIT-2-21): adaptive blend. tuned_weight_blend goes from 0.3 at
+    # MIN_SAMPLES (20) to 0.9 at 200+ samples. A 0% win-rate module with
+    # 200+ samples now gets blended = 0.1*static + 0.9*0.1 = ~0.22 (clamped to
+    # _MIN_WEIGHT 0.1) instead of the old 0.94.
+    if total is None or total <= 0:
+        tuned_weight_blend = 0.3
+    else:
+        _N_REF_MAX = 200  # sample count at which tuned weight dominates (90%).
+        tuned_weight_blend = min(0.9, 0.3 + 0.6 * max(0, total - MIN_SAMPLES) / max(1, _N_REF_MAX - MIN_SAMPLES))
+    blended = (1 - tuned_weight_blend) * static_weight + tuned_weight_blend * tuned
 
     # Clamp
     return max(_MIN_WEIGHT, min(_MAX_WEIGHT, blended))
@@ -195,8 +243,8 @@ def compute_tuned_weights(engine: str = "otc") -> dict:
             # Not enough data — use static weight unchanged
             tuned[module] = static_w
         else:
-            # Auto-tune based on win rate
-            tuned[module] = round(_win_rate_to_weight(wr, static_w), 2)
+            # Auto-tune based on win rate (pass total for adaptive blend).
+            tuned[module] = round(_win_rate_to_weight(wr, static_w, total), 2)
 
     return tuned
 
@@ -218,15 +266,27 @@ def get_tuning_report() -> dict:
 
     for module, stats in win_rates.items():
         wr = stats.get("win_rate")
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-22): use explicit `is not None`
+        # checks instead of truthy `if wr`. The old `if wr` treated wr=0.0
+        # (all signals wrong) as falsy, so a catastrophically broken module
+        # was reported as "NO_DATA" instead of "DISABLE". Its weight stayed at
+        # the static default and the operator never knew it was failing.
+        wr_total = stats.get("total", 0)
+        if wr is not None:
+            status = ("BOOST" if wr >= 0.55 else
+                      "KEEP" if wr >= 0.50 else
+                      "DAMPEN" if wr >= 0.45 else
+                      "SEVERE" if wr >= 0.35 else
+                      "DISABLE")
+            wr_display = round(wr * 100, 1)
+        else:
+            status = "NO_DATA"
+            wr_display = None
         report["win_rates"][module] = {
             "correct": stats.get("correct", 0),
-            "total": stats.get("total", 0),
-            "win_rate": round(wr * 100, 1) if wr else None,
-            "status": "BOOST" if wr and wr >= 0.55 else
-                      "KEEP" if wr and wr >= 0.50 else
-                      "DAMPEN" if wr and wr >= 0.45 else
-                      "SEVERE" if wr and wr >= 0.35 else
-                      "DISABLE" if wr else "NO_DATA",
+            "total": wr_total,
+            "win_rate": wr_display,
+            "status": status,
         }
 
     return report

@@ -54,6 +54,11 @@ Each strategy produces a set of multipliers:
 The blender reads these multipliers and applies them AFTER all other
 adjustments, as the FINAL step before returning the prediction.
 """
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-17): enable PEP 604/PEP 585
+# syntax on Python 3.8/3.9 (PEP 563 deferred evaluation). Without this, the
+# `dict | None` and `dict[str, dict]` type hints raise TypeError at import
+# time on Python 3.8/3.9, crashing the entire app.
+from __future__ import annotations
 import json
 import os
 import sqlite3
@@ -160,27 +165,55 @@ def _get_algo_state(asset: str) -> dict:
 
 
 def _check_recent_change(asset: str) -> dict | None:
-    """Check if there was a recent algorithm change (within last 5 candles = ~5 min)."""
+    """Check if there was a recent algorithm change (within last cooldown window).
+
+    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-15 + AUDIT-LIVE-1-08):
+      1. Cutoff is now `_COOLDOWN_DURATION * 60` (5 min) instead of hardcoded
+         360s (6 min). The old 6-min window caused the cooldown to re-trigger
+         after expiry (effective cooldown = 10 min instead of 5 min).
+      2. Return ALL changes in the window (was `LIMIT 1` — most recent only).
+         The old behavior masked payout spikes when a regime_shift happened
+         afterward: the query returned the regime_shift, which didn't match
+         the payout_spike/payout_drop branch, so `cautious` was never set.
+         Callers iterate the list and check each against its applicable branch.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-16): wrap connection lifecycle
+    # in try/finally so the connection is closed even on exception. Previously
+    # an exception between `sqlite3.connect()` and `conn.close()` leaked the
+    # connection — under load this could exhaust file descriptors.
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cutoff = time.time() - 360  # last 6 minutes (6 candles)
-        row = cur.execute("""SELECT * FROM algorithm_changes
+        # FIX (AUDIT-2-15): cutoff = cooldown duration, not 360s.
+        cutoff = time.time() - (_COOLDOWN_DURATION * 60)
+        # FIX (AUDIT-LIVE-1-08): fetch ALL changes in the window (no LIMIT 1)
+        # so callers can check each against its applicable branch.
+        rows = cur.execute("""SELECT * FROM algorithm_changes
                              WHERE asset=? AND ts >= ?
-                             ORDER BY ts DESC LIMIT 1""",
-                          (asset, cutoff)).fetchone()
-        conn.close()
-        if row:
-            return {
-                "type": row["change_type"],
-                "ts": row["ts"],
-                "old_payout": row["old_payout"],
-                "new_payout": row["new_payout"],
-            }
-        return None
+                             ORDER BY ts DESC""",
+                          (asset, cutoff)).fetchall()
+        if not rows:
+            return None
+        # Return the most-recent row for backward compat (callers that only
+        # need one change), but also expose the full list for callers that
+        # need to scan all changes in the window.
+        first = rows[0]
+        return {
+            "type": first["change_type"],
+            "ts": first["ts"],
+            "old_payout": first["old_payout"],
+            "new_payout": first["new_payout"],
+            "all_changes": [
+                {"type": r["change_type"], "ts": r["ts"],
+                 "old_payout": r["old_payout"], "new_payout": r["new_payout"]}
+                for r in rows
+            ],
+        }
     except Exception:
         return None
+    finally:
+        conn.close()
 
 
 def determine_strategy(asset: str) -> dict:
@@ -263,26 +296,35 @@ def determine_strategy(asset: str) -> dict:
             }
 
     # ── Step 1: Check for recent payout change → CAUTIOUS ──────────────
-    if recent and recent["type"] in ("payout_spike", "payout_drop"):
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-1-08): scan ALL recent changes
+    # in the cooldown window (not just the most recent). The old code only
+    # checked the most-recent change, so a payout_spike followed by a
+    # regime_shift was masked — the cautious cooldown never fired.
+    all_changes = recent.get("all_changes") or [recent] if recent else []
+    has_payout_change = any(c["type"] in ("payout_spike", "payout_drop") for c in all_changes)
+    if has_payout_change:
+        # Find the most-recent payout change for the reason string.
+        pc = next((c for c in all_changes if c["type"] in ("payout_spike", "payout_drop")), recent)
         _ASSET_STRATEGY[asset] = {
             "strategy": "cautious",
             "until": time.time() + (_COOLDOWN_DURATION * 60),  # 5 candles = 5 min
             "cooldown_candles": _COOLDOWN_DURATION,
-            "reason": f"payout {recent['old_payout']}→{recent['new_payout']} ({recent['type']})",
+            "reason": f"payout {pc['old_payout']}→{pc['new_payout']} ({pc['type']})",
         }
         strat = STRATEGIES["cautious"]
         return {
             "strategy": "cautious",
             "name": strat["name"],
             "icon": strat["icon"],
-            "reason": f"payout {recent['old_payout']}→{recent['new_payout']} — algorithm just changed, conservative",
+            "reason": f"payout {pc['old_payout']}→{pc['new_payout']} — algorithm just changed, conservative",
             "multipliers": strat,
             "algorithm": algo,
             "payout": payout,
         }
 
     # ── Step 2: Check for recent tick density shift → RESET ────────────
-    if recent and recent["type"] == "tick_density_shift":
+    has_tick_shift = any(c["type"] == "tick_density_shift" for c in all_changes)
+    if has_tick_shift:
         _ASSET_STRATEGY[asset] = {
             "strategy": "reset",
             "until": time.time() + (_RESET_DURATION * 60),  # 3 candles = 3 min

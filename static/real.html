@@ -41,7 +41,12 @@
       <span class="spacer"></span>
       <button id="sound-btn" type="button" aria-pressed="false" aria-label="Sound">🔇</button>
       <button id="market-switch-btn" type="button" aria-label="Switch market">
-        <span class="switch-icon">⇄</span><span class="switch-text">Real</span>
+        <!-- FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-21): set the correct
+             initial switch-button label per page. The Real page's next
+             market is otc (per _nextCategory in common.js), so the
+             initial label is "OTC" — was "Real" which was wrong for the
+             ~100-500ms before renderPairs updates the label. -->
+        <span class="switch-icon">⇄</span><span class="switch-text">OTC</span>
       </button>
     </div>
   </header>

@@ -490,6 +490,15 @@ class QuotexWSClient:
         ok = await self._wait_for_auth()
         if not ok:
             await self._cleanup()
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-19): distinguish
+            # timeout from reject so feed._connect doesn't clear a valid
+            # token on a slow 15s timeout. _wait_for_auth now sets
+            # self._auth_fail_reason; we forward it as the reason string.
+            _reason = getattr(self, "_auth_fail_reason", "") or "rejected"
+            if _reason == "timeout":
+                return False, "authorization timeout (15s)"
+            elif _reason == "ws_closed":
+                return False, "authorization failed (ws closed)"
             return False, "authorization rejected"
 
         self._connected = True
@@ -519,15 +528,30 @@ class QuotexWSClient:
         timeout. The caller did `if not ok: ... "authorization rejected"`,
         and `not None` is True, so a TIMEOUT was misreported as "rejected".
         Now explicitly returns False on timeout.
+
+        FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-19): set
+        self._auth_fail_reason so the caller can distinguish a TIMEOUT
+        from an actual REJECT. Previously both were labeled
+        "authorization rejected", which caused feed._connect to
+        _clear_stale_token on a slow-but-valid token (15s timeout) and
+        then fall back to email/password login (Cloudflare-blocked on
+        Railway). Now timeout reports "authorization timeout" so
+        feed._connect can keep the token and retry.
         """
         deadline = time.time() + 15
         while time.time() < deadline:
             if getattr(self, "_auth_result", None) is not None:
+                if self._auth_result:
+                    self._auth_fail_reason = ""
+                else:
+                    self._auth_fail_reason = "rejected"
                 return self._auth_result
             if not self._ws_is_open():
+                self._auth_fail_reason = "ws_closed"
                 return False
             await asyncio.sleep(0.05)
         # Explicit timeout — caller can distinguish via _last_reason if needed
+        self._auth_fail_reason = "timeout"
         return False
 
     def _ws_is_open(self) -> bool:
@@ -699,12 +723,16 @@ class QuotexWSClient:
             price = float(tick[2])
         except (TypeError, ValueError):
             return
-        # Deduplicate by timestamp — the server sometimes resends the last
-        # tick on reconnect, which would confuse feed.py's "new_ticks since
-        # last_tick_ts" filter.
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-20): dedup against the
+        # last 5 ticks instead of just the last one. On reconnect, Quotex
+        # may resend the last 5-10 ticks (Socket.IO replay); only the very
+        # last was being deduplicated, so older duplicates with timestamps
+        # matching earlier buffer entries were appended — inflating
+        # buy_pct/sell_pct and crosses in the microstructure analysis.
         buf = self._realtime[asset]
-        if buf and buf[-1]["time"] == ts:
-            return
+        for _t in list(buf)[-5:]:
+            if _t["time"] == ts:
+                return
         tick_dict = {"time": ts, "price": price}
         buf.append(tick_dict)
         # ── Event-driven fan-out ──────────────────────────────────────────
@@ -742,16 +770,34 @@ class QuotexWSClient:
             self._tick_callbacks.pop(asset, None)
 
     async def _handle_binary(self, payload: Any, raw) -> None:
-        """Handle a binary-event header or a binary attachment."""
-        # If payload is bytes, it's a binary attachment — append to whichever
-        # asset's history buffer is pending.
+        """Handle a binary-event header or a binary attachment.
+
+        FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-08): previously a
+        binary attachment was attributed to ALL pending assets in
+        _pending_history. On reconnect, feed.py re-arms streams
+        staggered (~0.5s apart) and multiple history fetches can be
+        in-flight simultaneously — the attachment for stream A was
+        also attributed to stream B → cross-pair history
+        contamination. Now we track the asset from the JSON header in
+        self._binary_history_target and only attribute binary bytes to
+        that specific asset.
+        """
+        # If payload is bytes, it's a binary attachment — append to the
+        # asset identified by the most recent history/load header.
         if isinstance(payload, (bytes, bytearray)):
-            # Find any pending asset — Quotex only sends one binary history
-            # at a time, so this is safe in practice.
-            for asset, fut in list(self._pending_history.items()):
+            target = getattr(self, "_binary_history_target", None)
+            if target and target in self._pending_history:
+                fut = self._pending_history[target]
                 if not fut.done():
-                    self._binary_history_buf[asset] = (
-                        self._binary_history_buf.get(asset, b"") + bytes(payload))
+                    self._binary_history_buf[target] = (
+                        self._binary_history_buf.get(target, b"") + bytes(payload))
+            else:
+                # Fallback: legacy behavior (attribute to all pending).
+                # Should rarely fire now that we track the target.
+                for asset, fut in list(self._pending_history.items()):
+                    if not fut.done():
+                        self._binary_history_buf[asset] = (
+                            self._binary_history_buf.get(asset, b"") + bytes(payload))
             return
 
         # payload is the parsed JSON head: [event_name, body, ...]
@@ -761,6 +807,10 @@ class QuotexWSClient:
                 body = payload[1] or {}
                 asset = body.get("asset") or body.get("instrument")
                 if asset and asset in self._pending_history:
+                    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-08):
+                    # record the target so the subsequent binary attachment
+                    # is attributed to THIS asset only.
+                    self._binary_history_target = asset
                     # FIX (2026-07-13): the binary attachment will follow in
                     # the next frame; _handle_binary(bytes) above collects it
                     # into _binary_history_buf. The old code did `pass` here
@@ -799,6 +849,19 @@ class QuotexWSClient:
                     if time.time() - self._last_pong > PING_INTERVAL * 2.5:
                         print(f"[quotex_ws] no pong in {PING_INTERVAL * 2.5:.0f}s — "
                               f"connection presumed dead, breaking ping loop")
+                        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-07):
+                        # force-close the WS so _reader_loop's `async for raw
+                        # in self._ws:` raises ConnectionClosed immediately,
+                        # triggering its finally block (which sets
+                        # _connected=False and wakes feed.py's reconnect).
+                        # Without this, the reader loop stays blocked on the
+                        # dead socket for up to ~60s waiting for a TCP FIN
+                        # from the silently-dropped connection.
+                        try:
+                            if self._ws is not None:
+                                await self._ws.close()
+                        except Exception:
+                            pass
                         break
                     try:
                         # Engine.IO ping
@@ -865,14 +928,26 @@ class QuotexWSClient:
         self._instruments.append(inst)
 
     async def get_instruments(self) -> list:
-        """Return the cached instruments list, refreshing once if empty."""
-        if not self._instruments:
-            await self._fetch_instruments()
-            # Wait briefly for the response
-            for _ in range(20):
-                if self._instruments:
-                    break
-                await asyncio.sleep(0.1)
+        """Return the cached instruments list, refreshing once if empty.
+
+        FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-27): previously waited
+        only 2s (20 × 0.1s) for the instruments/list response. On slow
+        connections (Railway → Quotex latency often >2s), _instruments
+        was empty → feed._load_pairs returned early → all pairs had
+        payout=None → _reconcile_always_on treated ALL pairs as locked
+        (payout is None or payout < floor). No always-on streams would
+        start. Now retry up to 3 times with a 5s wait per attempt.
+        """
+        for _attempt in range(3):
+            if not self._instruments:
+                await self._fetch_instruments()
+                # Wait up to 5s for the response (50 × 0.1s)
+                for _ in range(50):
+                    if self._instruments:
+                        break
+                    await asyncio.sleep(0.1)
+            if self._instruments:
+                break
         return list(self._instruments)
 
     def get_payout_by_asset(self, asset: str) -> int | None:
@@ -998,7 +1073,21 @@ class QuotexWSClient:
             except asyncio.TimeoutError:
                 return []
 
-            # If a binary buffer accumulated, prefer that (more granular)
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-06): the JSON
+            # header (451-["history/load",...]) resolves `fut` immediately,
+            # but the binary attachment with the actual candle data follows
+            # in a separate frame and may not have been processed yet.
+            # Wait briefly (up to 2s) for the binary buffer to populate
+            # before falling through to the (empty) JSON normalization path.
+            # Without this, ~10-20% of stream starts get [] history and the
+            # first candle has no prediction.
+            binary_buf = self._binary_history_buf.get(asset)
+            if not binary_buf:
+                for _ in range(20):  # 2s
+                    binary_buf = self._binary_history_buf.get(asset)
+                    if binary_buf:
+                        break
+                    await asyncio.sleep(0.1)
             binary_buf = self._binary_history_buf.pop(asset, None)
             if binary_buf:
                 parsed = _parse_binary_history(binary_buf)
@@ -1010,6 +1099,9 @@ class QuotexWSClient:
         finally:
             self._pending_history.pop(asset, None)
             self._binary_history_buf.pop(asset, None)
+            # Clear the target so a future fetch starts clean.
+            if getattr(self, "_binary_history_target", None) == asset:
+                self._binary_history_target = None
 
     async def get_historical_candles(self, asset: str,
                                      amount_of_seconds: int,

@@ -68,8 +68,20 @@ def init_algorithm_monitor():
                 old_regime_summary TEXT,
                 new_regime_summary TEXT,
                 confidence REAL,
-                notes TEXT
+                notes TEXT,
+                ctime INT
             )""")
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-20): add ctime column so we
+            # can dedup by (asset, ctime, change_type). The old UNIQUE(asset, ts,
+            # change_type) used `ts = time.time()` (microsecond precision), so a
+            # watchdog restart that re-processed the same candle inserted a new
+            # row with a new ts — duplicate detection failed. Adding ctime
+            # (candle-open timestamp, 1-minute granularity) lets the new UNIQUE
+            # index catch true duplicates. We use ALTER TABLE for existing DBs.
+            try:
+                cur.execute("ALTER TABLE algorithm_changes ADD COLUMN ctime INT")
+            except Exception:
+                pass  # column already exists
             cur.execute("""CREATE INDEX IF NOT EXISTS ix_ac_asset_ts
                           ON algorithm_changes(asset, ts DESC)""")
             cur.execute("""CREATE INDEX IF NOT EXISTS ix_ac_ts
@@ -100,6 +112,20 @@ def init_algorithm_monitor():
                     CREATE UNIQUE INDEX IF NOT EXISTS ux_ac_asset_ts_type
                     ON algorithm_changes(asset, ts, change_type)
                 """)
+                # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-20): second UNIQUE
+                # index on (asset, ctime, change_type). The original index used
+                # ts=time.time() which differs on every call — a watchdog
+                # restart re-processing the same candle would get a new ts and
+                # bypass the dedup. The ctime-based index catches true duplicates
+                # (same asset, same candle, same change_type) regardless of
+                # when the row was inserted.
+                try:
+                    cur.execute("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS ux_ac_asset_ctime_type
+                        ON algorithm_changes(asset, ctime, change_type)
+                    """)
+                except Exception as _e2:
+                    print(f"[algo_monitor] could not create ctime UNIQUE index: {_e2}")
             except Exception as _e:
                 print(f"[algo_monitor] could not create UNIQUE index: {_e}")
             # ── per-pair rolling stats cache ────────────────────────────────
@@ -125,6 +151,15 @@ _WINDOW_SIZE = 30
 _LAST_PAYOUT: dict[str, float] = {}
 _LAST_ALGO_GUESS: dict[str, str] = {}
 _LAST_TICK_DENSITY: dict[str, float] = {}
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-18): hysteresis counters for
+# regime-shift detection. A pair whose autocorrelation hovers near the 0.6
+# trending threshold can flip-flop between "trending" and "random_walk" every
+# candle, flooding algorithm_changes with regime_shift rows. We require the
+# new guess to persist for _REGIME_CONFIRM_COUNT consecutive calls before
+# logging a shift — this eliminates the flip-flop spam without missing real
+# regime changes (which persist for many candles).
+_REGIME_CONFIRM_COUNT = 3
+_ALGO_GUESS_STREAK: dict[str, dict] = {}  # asset → {"guess": str, "count": int}
 
 
 def record_candle(asset: str, ctime: int, payout: float,
@@ -185,7 +220,7 @@ def record_candle(asset: str, ctime: int, payout: float,
             notes = (f"payout {last_payout:.0f}%→{payout:.0f}% "
                      f"({'algorithm switch likely' if delta > 0 else 'algorithm revert likely'})")
             _log_change(asset, change_type, last_payout, payout,
-                        old_summary, new_summary, confidence, notes)
+                        old_summary, new_summary, confidence, notes, ctime)
     if payout is not None:
         _LAST_PAYOUT[asset] = payout
 
@@ -197,14 +232,32 @@ def record_candle(asset: str, ctime: int, payout: float,
     # If the guess changes (e.g. trending → random_walk), log it as a
     # 'regime_shift' event. Only fires when we have enough samples (>= 15)
     # to trust the guess, and only on significant transitions.
+    #
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-18): add hysteresis. A pair
+    # whose autocorrelation hovers near the 0.6 trending threshold can flip-
+    # flop between "trending" and "random_walk" every candle, flooding
+    # algorithm_changes with noise. We now require the new guess to persist
+    # for _REGIME_CONFIRM_COUNT (3) consecutive calls before logging a shift.
+    # This eliminates flip-flop spam without missing real regime changes
+    # (which persist for many candles).
     window = _WINDOWS[asset]
     if len(window) >= 15:
         current_summary = _summarize_window(window)
         current_guess = current_summary.get("algorithm_guess", "unknown")
         prev_guess = _LAST_ALGO_GUESS.get(asset)
-        if prev_guess is not None and prev_guess != current_guess and prev_guess != "unknown" and current_guess != "unknown":
-            # Significant transition: e.g. trending → reversing, or
-            # random_walk → trending. Log it.
+        # Track streak for hysteresis
+        streak = _ALGO_GUESS_STREAK.get(asset, {"guess": current_guess, "count": 0})
+        if current_guess == streak.get("guess"):
+            streak["count"] = streak.get("count", 0) + 1
+        else:
+            streak = {"guess": current_guess, "count": 1}
+        _ALGO_GUESS_STREAK[asset] = streak
+
+        if (prev_guess is not None and prev_guess != current_guess
+                and prev_guess != "unknown" and current_guess != "unknown"
+                and streak["count"] >= _REGIME_CONFIRM_COUNT):
+            # Significant transition PERSISTED for N candles: e.g. trending →
+            # reversing, or random_walk → trending. Log it.
             old_summary = _summarize_window(window, exclude_last=5)
             new_summary = current_summary
             confidence = 0.6  # medium confidence — regime shifts are softer signals
@@ -212,21 +265,58 @@ def record_candle(asset: str, ctime: int, payout: float,
                      f"(autocorr {old_summary.get('direction_autocorr','?')}→"
                      f"{new_summary.get('direction_autocorr','?')}, "
                      f"body {old_summary.get('avg_body_pct','?')}→"
-                     f"{new_summary.get('avg_body_pct','?')}%)")
+                     f"{new_summary.get('avg_body_pct','?')}%, "
+                     f"confirmed after {streak['count']} candles)")
             _log_change(asset, "regime_shift",
                         last_payout or 0, payout or 0,
-                        old_summary, new_summary, confidence, notes)
-        _LAST_ALGO_GUESS[asset] = current_guess
+                        old_summary, new_summary, confidence, notes, ctime)
+            # Once logged, update prev_guess so we don't re-log the same shift.
+            _LAST_ALGO_GUESS[asset] = current_guess
+        elif prev_guess is None:
+            # First-ever guess for this asset — just record it, no shift log.
+            _LAST_ALGO_GUESS[asset] = current_guess
+        # Note: if streak < _REGIME_CONFIRM_COUNT, we DON'T update
+        # _LAST_ALGO_GUESS — the next candle gets a chance to confirm.
+        # This is the hysteresis: only commit to a new guess after N candles.
 
     # FIX (ALGO-FIX-2026-07-22): tick-density shift detection. Even when
     # the algorithm_guess doesn't change (stays random_walk), a sudden
     # change in tick density (e.g. 140→60 ticks/candle) indicates Quotex
     # switched to a different data-feed or algorithm. Log this separately.
+    #
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-19): compare the current
+    # candle's tick_count to the HISTORICAL average (excluding the current
+    # candle), not the previous rolling average. The old logic compared two
+    # 30-candle rolling averages, which dilutes a sudden 50% drop spread
+    # over 5 candles to ~8%/candle — below the 30% threshold, so gradual
+    # feed switches were never detected. The new logic compares the current
+    # candle's tick_count to the historical average of the prior 29 candles,
+    # so even a single-candle spike is visible.
     if len(window) >= 15:
         current_summary = _summarize_window(window)
         current_ticks = current_summary.get("avg_tick_count", 0)
+        # Historical average excludes the current (last) candle.
+        hist_window = list(window)[:-1] if len(window) > 1 else list(window)
+        hist_ticks_list = [x.get("tick_count", 0) for x in hist_window]
+        historical_avg = (sum(hist_ticks_list) / len(hist_ticks_list)
+                          if hist_ticks_list else 0)
+        current_candle_ticks = window[-1].get("tick_count", 0) if window else 0
         prev_ticks = _LAST_TICK_DENSITY.get(asset)
-        if prev_ticks is not None and prev_ticks > 0:
+        # Primary check: single-candle spike vs historical average.
+        if historical_avg > 0:
+            tick_delta_pct = abs(current_candle_ticks - historical_avg) / historical_avg * 100
+            if tick_delta_pct >= 50:  # 50% single-candle change
+                old_summary = _summarize_window(window, exclude_last=5)
+                confidence = min(0.8, tick_delta_pct / 100)
+                notes = (f"tick_density hist_avg={historical_avg:.0f}→"
+                         f"current={current_candle_ticks} "
+                         f"({tick_delta_pct:.0f}% spike — possible feed switch)")
+                _log_change(asset, "tick_density_shift",
+                            last_payout or 0, payout or 0,
+                            old_summary, current_summary, confidence, notes, ctime)
+        # Fallback: rolling-average change (preserves old behavior for
+        # sudden drops that DO show up in the rolling average).
+        elif prev_ticks is not None and prev_ticks > 0:
             tick_delta_pct = abs(current_ticks - prev_ticks) / prev_ticks * 100
             if tick_delta_pct >= 30:  # 30% change in tick density
                 old_summary = _summarize_window(window, exclude_last=5)
@@ -235,7 +325,7 @@ def record_candle(asset: str, ctime: int, payout: float,
                          f"({tick_delta_pct:.0f}% change — possible feed switch)")
                 _log_change(asset, "tick_density_shift",
                             last_payout or 0, payout or 0,
-                            old_summary, current_summary, confidence, notes)
+                            old_summary, current_summary, confidence, notes, ctime)
         _LAST_TICK_DENSITY[asset] = current_ticks
 
 
@@ -304,7 +394,7 @@ def _guess_algorithm(autocorr: float, avg_body: float, avg_ticks: float) -> str:
 def _log_change(asset: str, change_type: str,
                 old_payout: float, new_payout: float,
                 old_summary: dict, new_summary: dict,
-                confidence: float, notes: str):
+                confidence: float, notes: str, ctime: int = None):
     """Insert a row into algorithm_changes.
 
     FIX (AUDIT-DEEP #13, 2026-07-23): use INSERT OR IGNORE so the UNIQUE
@@ -315,6 +405,11 @@ def _log_change(asset: str, change_type: str,
     by the broad `except Exception` below and logged — non-fatal but
     noisy, and the duplicate was silently dropped anyway. Now it's silent
     by design.
+
+    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-20): pass `ctime` (candle open
+    time) so the new UNIQUE(asset, ctime, change_type) index catches true
+    duplicates — same asset, same candle, same change_type — regardless of
+    when the row is inserted (handles watchdog re-processing).
     """
     conn = _conn()
     try:
@@ -322,14 +417,14 @@ def _log_change(asset: str, change_type: str,
             cur = conn.cursor()
             cur.execute("""INSERT OR IGNORE INTO algorithm_changes
                 (ts, asset, change_type, old_payout, new_payout,
-                 old_regime_summary, new_regime_summary, confidence, notes)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
+                 old_regime_summary, new_regime_summary, confidence, notes, ctime)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (time.time(), asset, change_type,
                  float(old_payout) if old_payout is not None else None,
                  float(new_payout) if new_payout is not None else None,
                  json.dumps(old_summary) if old_summary else None,
                  json.dumps(new_summary) if new_summary else None,
-                 float(confidence), notes))
+                 float(confidence), notes, ctime))
             conn.commit()
     except Exception as e:
         print(f"[algo_monitor] log_change error: {e}")

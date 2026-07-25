@@ -41,6 +41,11 @@
       <span class="spacer"></span>
       <button id="sound-btn" type="button" aria-pressed="false" aria-label="Sound">🔇</button>
       <button id="market-switch-btn" type="button" aria-label="Switch market">
+        <!-- FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-21): set the correct
+             initial switch-button label per page. The All-Time OTC page's
+             next market is real (per _nextCategory in common.js cycle
+             real→otc→alltime_otc→real), so the initial label "Real" is
+             already correct here — no change needed beyond this comment. -->
         <span class="switch-icon">⇄</span><span class="switch-text">Real</span>
       </button>
     </div>

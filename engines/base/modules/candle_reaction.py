@@ -77,6 +77,13 @@ def analyze(candles, ctx: MarketContext) -> list:
     else:
         streak_thresh_5, streak_thresh_4, streak_thresh_3 = 5, 4, 3
         body_mult = 1.5
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-02): enforce a minimum
+    # consec >= 3 floor on the s3 trigger regardless of vol regime. In
+    # low-vol, the previous floor of 2 fired the "3+ streak reversal"
+    # signal on a 2-candle streak — mostly noise since consec=2 is common.
+    # The reason text claims a backtested win rate for 3+ streaks, so the
+    # floor must match.
+    streak_thresh_3 = max(3, streak_thresh_3)
 
     # ── SIGNAL 1: Consecutive streak reversal (BODY group) ───────────────
     # FIX (OTC issue 2, 2026-07-19): when the streak ALIGNS with a strong
@@ -93,7 +100,11 @@ def analyze(candles, ctx: MarketContext) -> list:
              or (trend_regime == "TREND_DOWN" and streak_dir == -1))
     )
     # Dampening factors (applied to score & confidence)
-    if streak_aligns_with_strong_trend and trend_strength > 0.7:
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-03): use >= for the strong-
+    # dampen threshold so trend_strength = 0.7 (a strong trend by most
+    # conventions) gets STRONG dampening, not moderate. Same boundary
+    # issue existed at SIGNAL 2 (line 203) and SIGNAL 4 (line 293, 310).
+    if streak_aligns_with_strong_trend and trend_strength >= 0.7:
         s5_score, s5_conf = 1, 56   # was 4/75 — strong dampen
         s4_score, s4_conf = 1, 53   # was 3/60
         s3_score, s3_conf = 1, 51   # was 2/55
@@ -192,15 +203,22 @@ def analyze(candles, ctx: MarketContext) -> list:
             # FIX (Bug #19, 2026-07-17): Z-score boost threshold is now
             # volatility-scaled (was static Z > 2.0). Matches the same
             # scaling used in otc_pattern.SIGNAL 3 for consistency.
-            if vol_pct >= 1.3:
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-08): use strict > / <
+            # for the z_boost_threshold vol_pct bands so they MATCH the
+            # body_mult / streak_thresh bands at line 71-79 (which use strict).
+            # At vol_pct = 1.3 exactly, body_mult was normal (1.5) but z_boost
+            # was high-vol (2.0) — an inconsistent mix. Now both are normal.
+            if vol_pct > 1.3:
                 z_boost_threshold = 2.0
-            elif vol_pct <= 0.7:
+            elif vol_pct < 0.7:
                 z_boost_threshold = 2.8
             else:
                 z_boost_threshold = 2.3
             z_boost = 1 if stats["z_body"] > z_boost_threshold else 0
             # FIX (OTC issue 2): trend-aware dampening for big body
-            if body_aligns_with_strong_trend and trend_strength > 0.7:
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-03): use >= 0.7 for
+            # the strong-dampen threshold (same boundary fix as SIGNAL 1).
+            if body_aligns_with_strong_trend and trend_strength >= 0.7:
                 base_score, base_conf = 1, 53  # was 3/64 — strong dampen
             elif body_aligns_with_strong_trend:
                 base_score, base_conf = 2, 58  # moderate dampen
@@ -268,9 +286,11 @@ def analyze(candles, ctx: MarketContext) -> list:
         elif lw_pct > 50 and body_pct < 30:
             # Lower-wick rejection → CALL (bullish reversal)
             # Skip if strong TREND_DOWN (counter-trend → noise)
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-05): equalize conf to
+            # 55 to match the upper-wick PUT branch (was 54 — 1-point PUT bias).
             if not (strong_trend and trend_regime == "TREND_DOWN"):
                 results.append(ModuleResult(
-                    module_name="candle_reaction", direction="CALL", score=2, confidence=54,
+                    module_name="candle_reaction", direction="CALL", score=2, confidence=55,
                     signal_type="REVERSAL", reliability="CANDLE", group="WICK",
                     reasons=[f"Lower wick rejection ({lw_pct:.0f}%) → CALL (56% win rate)"]))
             # else: skipped — counter-trend wick in strong TREND_DOWN is noise
@@ -290,7 +310,9 @@ def analyze(candles, ctx: MarketContext) -> list:
                 and trend_strength > 0.5
                 and trend_regime == "TREND_UP"
             )
-            if close_aligns_with_strong_trend and trend_strength > 0.7:
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-03): use >= 0.7 for
+            # the strong-dampen threshold (boundary consistency fix).
+            if close_aligns_with_strong_trend and trend_strength >= 0.7:
                 base_score, base_conf = 1, 53   # strong dampen
             elif close_aligns_with_strong_trend:
                 base_score, base_conf = 1, 56   # moderate dampen
@@ -307,12 +329,16 @@ def analyze(candles, ctx: MarketContext) -> list:
                 and trend_strength > 0.5
                 and trend_regime == "TREND_DOWN"
             )
-            if close_aligns_with_strong_trend and trend_strength > 0.7:
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-03 + AUDIT-4-04):
+            # use >= 0.7 for strong-dampen boundary consistency AND equalize
+            # the full-strength branch to conf=62 to match the PUT branch
+            # (was 60 — 2-point PUT bias at range extremes).
+            if close_aligns_with_strong_trend and trend_strength >= 0.7:
                 base_score, base_conf = 1, 53
             elif close_aligns_with_strong_trend:
                 base_score, base_conf = 1, 56
             else:
-                base_score, base_conf = 2, 60
+                base_score, base_conf = 2, 62
             results.append(ModuleResult(
                 module_name="candle_reaction", direction="CALL", score=base_score + percentile_boost, confidence=base_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
@@ -367,7 +393,17 @@ def analyze(candles, ctx: MarketContext) -> list:
     # `body_pct >= 30` are equivalent (0.30 == 30% as a ratio), but the
     # mixed units make the code confusing. This is functional but should
     # ideally use one convention. Leaving as-is for backward compat.
-    if is_trending and trend_strength > 0.4 and len(candles) >= 3:
+    #
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-07): raise the trend-strength
+    # gate from > 0.4 to > 0.5 to align with SIGNAL 1's moderate-dampen
+    # threshold. At trend_strength = 0.45 (a weak trend the regime classifier
+    # barely acknowledges), the continuation vote was noise — the trend is
+    # too weak to support a continuation bet.
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-06): removed the dead
+    # `b3 = abs(body)` assignments in both branches — `b3` was computed but
+    # never used (the rising-closes check uses `body_pct`, which is the
+    # current body ratio, not `b3`). Removing to avoid future confusion.
+    if is_trending and trend_strength > 0.5 and len(candles) >= 3:
         c1_close = candles[-3]["close"]
         c2_close = candles[-2]["close"]
         c3_close = candles[-1]["close"]
@@ -379,7 +415,6 @@ def analyze(candles, ctx: MarketContext) -> list:
             #       but expressed in different units (ratio vs percentage).
             b1 = abs(candles[-3]["close"] - candles[-3]["open"])
             b2 = abs(candles[-2]["close"] - candles[-2]["open"])
-            b3 = abs(body)
             r1 = candles[-3]["high"] - candles[-3]["low"]
             r2 = candles[-2]["high"] - candles[-2]["low"]
             if (r1 > 0 and r2 > 0 and rng > 0
@@ -393,7 +428,6 @@ def analyze(candles, ctx: MarketContext) -> list:
         elif c1_close > c2_close > c3_close:
             b1 = abs(candles[-3]["close"] - candles[-3]["open"])
             b2 = abs(candles[-2]["close"] - candles[-2]["open"])
-            b3 = abs(body)
             r1 = candles[-3]["high"] - candles[-3]["low"]
             r2 = candles[-2]["high"] - candles[-2]["low"]
             if (r1 > 0 and r2 > 0 and rng > 0

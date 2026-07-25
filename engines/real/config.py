@@ -11,9 +11,14 @@ Holds the Real-engine-specific bits that differ from the OTC engine:
 REAL-MARKET TUNING:
 Real-market pairs (live exchange prices, real order flow) reflect actual
 liquidity moves — indicators and continuation patterns are MORE reliable
-than in OTC. INDICATOR tier is bumped 1.0 → 1.3. A new TREND tier (1.3)
-is added for the trend_follow module's signals. MICRO is bumped 0.6 → 0.7
-because real tick microstructure reflects real volume.
+than in OTC. INDICATOR tier is 1.2 (was 1.3, dampened 2026-07-20 due to
+overlap with trend_follow logic). TREND tier is 1.0 (was 1.3, dampened
+2026-07-20 because trend_follow has 27.3% win rate — see DEFAULT_WEIGHTS
+trend_follow note and the FIX comment at line 27 below). MICRO is 0.7
+(was 0.6 in OTC; real tick microstructure reflects real volume).
+FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-09 + AUDIT-5-10): the previous
+header claimed INDICATOR=1.3 and TREND=1.3 — both stale. Updated to match
+the actual RELIABILITY map values (1.2 and 1.0 respectively).
 
 Everything else is imported from engines.base.
 """
@@ -28,14 +33,21 @@ from core.constants import REAL_MODULES
 # module has 28.9% win rate — dampened TREND tier from 1.3 to 1.0 until the
 # module improves. INDICATOR also dampened slightly (1.3→1.2) since
 # indicators overlap with trend_follow logic.
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-04): removed the dead
+# `"STAT": 1.3` entry — no module in engines/base/modules/ emits
+# reliability="STAT". The blender's `reliability.get(r.reliability, 1.0)`
+# returns 1.0 default for unknown tiers, so removing the entry has no
+# behavioral effect.
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-11): removed the dead
+# `"OTC": 1.2` entry — the Real engine uses trend_follow (TREND tier) for
+# module 6, NOT otc_pattern (OTC tier). No Real-engine signal uses the OTC
+# tier; the entry was misleading dead code.
 RELIABILITY = {
     "PATTERN":   1.5,   # multi-candle patterns (highest conviction)
-    "STAT":      1.3,   # statistical edge (Z-score, rarity)
     "LEVEL":     1.3,   # key S/R level confluence
     "TREND":     1.0,   # was 1.3 — trend_follow underperforming, dampened
     "INDICATOR": 1.2,   # was 1.3 — slight dampen due to overlap with trend_follow
     "CANDLE":    1.0,   # single-candle signals (baseline)
-    "OTC":       1.2,   # kept for dict compat (Real engine uses TREND module instead)
     "MICRO":     0.7,   # REAL-MARKET: tick microstructure is more meaningful (real volume) — was 0.6
 }
 
@@ -50,6 +62,19 @@ RELIABILITY = {
 #   trend_follow:    27.3% → DISABLE 1.2 → 0.1 ( catastrophically bad —
 #                     nearly disabled, kept at 0.1 for module breakdown
 #                     display, but effectively zero weight)
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-08): the DEFAULT trend_follow=0.1
+# value NEVER fires for any of the 28 configured real pairs — every per-pair
+# entry in PAIR_CONFIGS_REAL overrides trend_follow back to 1.1-1.3 (full
+# weight). So the "effectively disabled" intent documented above is NOT
+# actually applied on configured pairs. The per-pair overrides reflect the
+# original (pre-2026-07-20) calibration where trend_follow was full-weight;
+# they were not updated when DEFAULT was dampened to 0.1. To preserve
+# current behavior (no breakage), the per-pair overrides are kept. To
+# actually disable trend_follow on real pairs, set every per-pair
+# `trend_follow` value to 0.1 (recommend a separate calibration batch with
+# full backtest re-measurement first). Tracked as a follow-up — for now,
+# this comment block makes the contradiction explicit so a future maintainer
+# is not misled.
 DEFAULT_WEIGHTS = {
     "candle_reaction": 1.3,   # 54.3% win rate — BEST, boosted
     "running_tick":    1.0,   # 50.7% — average
@@ -409,6 +434,23 @@ PAIR_CONFIGS = {
         },
         "description": "EUR/NZD real — volatile, key levels",
     },
+
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-12): real exotics NOT configured.
+    # feed._FOREX_BASES (computed by stripping _otc from _FOREX_OTC) yields 40
+    # base symbols including 12 exotics (USDMXN, USDTRY, USDPKR, USDCOP, USDBDT,
+    # INRUSD, EURSGD, BRLUSD, USDARS, USDDZD, USDBRL, USDIDR). PAIR_CONFIGS_REAL
+    # only has 28 majors+minors. If Quotex ever publishes any exotic as a real
+    # instrument (rare but possible), that pair falls back to DEFAULT_WEIGHTS_REAL.
+    # The DEFAULT correctly dampens trend_follow to 0.1 (matching the 27.3% win
+    # rate intent) but indicator/key_level/candle_reaction values are majors-tuned
+    # — not ideal for exotics. The proper fix is to filter exotics OUT of
+    # _FOREX_BASES in feed.py (out of scope for this config-only batch). Adding
+    # explicit max_confidence:0 "do-not-trade" entries here was considered but
+    # skipped because (a) the 12 entries are speculative (these pairs may never
+    # be served as real), (b) max_confidence:0 would force NEUTRAL even if a
+    # real exotic becomes tradeable in the future. Recommend a feed.py filter
+    # follow-up that strips exotics from _FOREX_BASES so the Real engine never
+    # sees them.
 }
 
 

@@ -191,6 +191,27 @@ function initChart(){
     },
     rightPriceScale: { borderColor: '#30363d', scaleMargins: { top: 0.1, bottom: 0.1 } },
     timeScale: { borderColor: '#30363d', timeVisible: true, secondsVisible: false, rightOffset: 3 },
+    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-13 + AUDIT-5-14): the vendored
+    // LightweightCharts v4.1.3 default time formatter uses getUTCHours()/
+    // getUTCMinutes() — confirmed by grep on the bundle (5× getUTCDate, 2×
+    // getUTCSeconds, 2× getUTCMinutes, 2× getUTCHours, ZERO getHours/Minutes/
+    // Seconds). So the chart x-axis displayed UTC by default while the
+    // history list (renderHistory) and detail modal (showSignalDetail) used
+    // toLocaleTimeString / toLocaleString → LOCAL time. A UTC+6 user looking
+    // at a 12:00 UTC candle saw "12:00" on the chart but "18:00" in history
+    // for the same signal — impossible to correlate. This timeFormatter
+    // overrides the default to display LOCAL time, matching the history list
+    // and modal. The `time` arg is a UTCTimestamp (UTC seconds).
+    localization: {
+      timeFormatter: (time) => {
+        try {
+          return new Date(time * 1000).toLocaleTimeString('en-US',
+            { hour: '2-digit', minute: '2-digit', hour12: false });
+        } catch(_) {
+          return new Date(time * 1000).toISOString().substring(11, 16);
+        }
+      },
+    },
     handleScroll: { vertTouchDrag: false },
   });
   candleSeries = chart.addCandlestickSeries({
@@ -578,8 +599,14 @@ function renderSignal(pred){
   _setText('signal-label', s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT' : '➖ NEUTRAL');
 
   const score = pred.score || 0;
-  _setText('sig-score', (score >= 0 ? '+' : '') + score);
-  _setStyle('sig-score', 'color', score >= 0 ? 'var(--green)' : 'var(--red)');
+  // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-18): when score===0 (NEUTRAL
+  // prediction with equal CALL/PUT votes), the old display showed "+0" in
+  // green — green typically implies a CALL/positive bias, but score=0 is
+  // genuinely neutral. Now: no "+" prefix for 0, and neutral color (text-dim)
+  // for score===0 so the score-color matches the "➖ NEUTRAL" label.
+  _setText('sig-score', (score > 0 ? '+' : '') + score);
+  _setStyle('sig-score', 'color',
+    score > 0 ? 'var(--green)' : score < 0 ? 'var(--red)' : 'var(--text-dim)');
 
   const str = (pred.strength || '').toUpperCase();
   const strCls = str === 'STRONG'
@@ -669,11 +696,26 @@ function renderSignal(pred){
   // Active engine badge — shows which engine produced this prediction.
   const engineLabel = $('engine-label');
   if(engineLabel){
-    const cat = pred.category || currentCategory;
+    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-16 + AUDIT-5-20): use
+    // currentCategory as authoritative source for the engine-label decision
+    // instead of pred.category. The engines router (engines/__init__.py)
+    // normalizes category="alltime_otc" to "otc" before routing, so
+    // pred.category is "otc" even for alltime_otc subscriptions — causing
+    // the All-Time OTC page to always show "OTC ENGINE" in yellow instead
+    // of "ALL-OTC ENGINE" in cyan (the alltime_otc accent color). The page's
+    // currentCategory is authoritative for UI labeling. Added a third
+    // branch for alltime_otc with the cyan accent color matching the rest
+    // of the page (per common.js:2260 statActiveCat, alltime_otc.html
+    // router link, etc.).
+    const cat = currentCategory;
     if(cat === 'real'){
       engineLabel.textContent = 'REAL ENGINE';
       engineLabel.style.background = 'rgba(0,200,83,.15)';
       engineLabel.style.color = 'var(--green)';
+    } else if(cat === 'alltime_otc'){
+      engineLabel.textContent = 'ALL-OTC ENGINE';
+      engineLabel.style.background = 'rgba(0,229,255,.15)';
+      engineLabel.style.color = '#00e5ff';
     } else {
       engineLabel.textContent = 'OTC ENGINE';
       engineLabel.style.background = 'rgba(255,193,7,.15)';
@@ -1122,6 +1164,11 @@ function showSignalDetail(idx){
   detailTitle.innerHTML = `<span style="color:${sig==='CALL'?'var(--green)':'var(--red)'}">${sig}</span> <span style="color:${accColor};font-size:13px;margin-left:8px">${accIcon}</span>`;
 
   let rows = '';
+  // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-14): toLocaleString() displays
+  // LOCAL time. This was already local — the bug was the CHART (UTC by default).
+  // Once the chart's localization.timeFormatter was set to local (AUDIT-5-13
+  // fix above), chart x-axis, history list, and this detail modal all agree
+  // on LOCAL time. No code change needed here — kept comment for clarity.
   const dateStr = d.ctime ? new Date(d.ctime * 1000).toLocaleString() : '—';
   rows += detailRow('Time', dateStr);
   rows += detailRow('Asset', currentAsset);
@@ -1468,6 +1515,32 @@ function renderPairs(payload){
     }
     opt.disabled = true;
     pairSelect.appendChild(opt);
+    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-17): when the active list is
+    // empty (e.g., Real market on weekend, or alltime_otc list temporarily
+    // empty), update the chart-loading-overlay with a clear market-closed
+    // message instead of leaving it stuck on "Loading…" indefinitely. The
+    // initial onopen subscribe already fired for currentAsset (which has no
+    // stream), so we can't get a snapshot to dismiss the overlay naturally.
+    // This is the "graceful empty-list handler" the audit proposed — we
+    // keep the onopen subscribe (it's harmless — the server doesn't
+    // validate against the pair list) but surface the closed state to the
+    // user. The dead-connection keepalive check at 45s will eventually
+    // close the WS and reconnect, but the user sees a clear message
+    // immediately instead of an infinite spinner.
+    const overlay = $('chart-loading-overlay');
+    if(overlay){
+      overlay.classList.add('show');
+      const txt = $('chart-loading-text');
+      if(txt){
+        if(currentCategory === 'real'){
+          txt.textContent = 'Real market closed (weekend). Switch to OTC for 24/7 signals.';
+        } else if(currentCategory === 'alltime_otc'){
+          txt.textContent = 'No All-Time OTC pairs available right now.';
+        } else {
+          txt.textContent = 'No OTC pairs available right now.';
+        }
+      }
+    }
   } else {
     activeList.forEach(p => {
       const opt = document.createElement('option');
@@ -1785,6 +1858,26 @@ function onTick(msg){
     while(tickTimestamps.length > 0 && nowMs - tickTimestamps[0] > 1000){
       tickTimestamps.shift();
     }
+    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-19): proactive stale detection.
+    // The variable `staleTimeout` was declared (line 86) and cleared in
+    // clearStale() (line ~1869) but NEVER SET anywhere — confirmed by the
+    // comment at the keepalive block ("previously the proactive stale-
+    // detection (staleTimeout) was scheduled but never set"). The only
+    // stale-detection path was the 45s dead-connection check inside the
+    // 15s keepalive interval (45-60s actual latency). Now schedule a 10s
+    // staleTimeout on every tick — cleared by the next tick (or by
+    // clearStale() on snapshot/eoc/tick). If no tick arrives in 10s,
+    // show the stale overlay immediately so the user knows the feed is
+    // frozen (broker disconnect, network hiccup, etc.) instead of waiting
+    // 45-60s for the keepalive to fire. The keepalive check remains as a
+    // backstop (it closes the WS for reconnect).
+    if(staleTimeout) clearTimeout(staleTimeout);
+    staleTimeout = setTimeout(() => {
+      const staleOverlay = $('stale-overlay');
+      const staleMsg = $('stale-msg');
+      if(staleOverlay) staleOverlay.classList.add('show');
+      if(staleMsg) staleMsg.textContent = '⚠ No ticks for 10s — feed may be stale';
+    }, 10000);
   }
   if(c) addTapeTick(c.close);
   if(msg.micro) renderMicro(msg.micro);

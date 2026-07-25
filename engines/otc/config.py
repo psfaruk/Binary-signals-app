@@ -22,18 +22,29 @@ from core.constants import OTC_MODULES
 
 # ── Reliability tier multipliers (OTC tuning) ────────────────────────────
 # OTC markets are broker-generated — indicators and patterns are less
-# reliable than in real markets. OTC-specific patterns (mean-reversion)
-# get a slight bonus because they exploit the broker's tendency to
-# revert price to a mean.
+# reliable than in real markets. OTC-specific patterns (mean-reversion AND
+# momentum continuation — see otc_pattern.py SIGNAL 6) get a slight bonus
+# because they exploit the broker's tendency to revert price to a mean and
+# to extend momentum in confirmed trends.
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-04 + AUDIT-5-07): removed the
+# dead `"STAT": 1.3` entry — no module in engines/base/modules/ emits
+# reliability="STAT". The otc_pattern module's statistical signals
+# (Z-score, rarity, percentile) all use reliability="OTC" (×1.2). The
+# preferred fix (tagging those signals as STAT for ×1.3) requires editing
+# otc_pattern.py which is out of scope for this batch — left as follow-up.
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-05): removed the dead
+# `"TREND": 1.0` entry — the OTC engine uses otc_pattern (OTC tier) for
+# module 6, NOT trend_follow (TREND tier). No OTC-engine signal uses the
+# TREND tier; the entry was misleading dead code. The blender's
+# `reliability.get(r.reliability, 1.0)` returns 1.0 default for unknown
+# tiers, so removing the entry has no behavioral effect.
 RELIABILITY = {
     "PATTERN":   1.5,   # multi-candle patterns (highest conviction)
-    "STAT":      1.3,   # statistical edge (Z-score, rarity)
     "LEVEL":     1.3,   # key S/R level confluence
     "INDICATOR": 1.0,   # technical indicators (RSI, MACD, etc.) — baseline in OTC
     "CANDLE":    1.0,   # single-candle signals (baseline)
-    "OTC":       1.2,   # OTC-specific patterns (slight bonus)
+    "OTC":       1.2,   # OTC-specific patterns (slight bonus, includes momentum continuation)
     "MICRO":     0.6,   # tick microstructure (single data source, noisy)
-    "TREND":     1.0,   # not used by OTC engine (kept for dict compat)
 }
 
 
@@ -160,6 +171,24 @@ PAIR_CONFIGS = {
             "otc_pattern":     1.2,
         },
         "description": "BRL — volatile, key levels important",
+    },
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-03 + AUDIT-5-22): USDBRL_otc
+    # is the canonical ISO form of BRLUSD_otc (broker accepts both symbols).
+    # Previously missing → fell back to DEFAULT_WEIGHTS (exotic mean-reverting
+    # profile) instead of the volatile profile that matches BRLUSD_otc.
+    # Mirrors BRLUSD_otc exactly so the same underlying asset (USD/BRL) gets
+    # the same prediction profile regardless of which symbol the broker sends.
+    "USDBRL_otc": {
+        "profile": "volatile",
+        "weights": {
+            "candle_reaction": 1.1,
+            "running_tick":    1.0,
+            "pattern":         1.0,
+            "indicator":       0.7,
+            "key_level":       1.2,
+            "otc_pattern":     1.2,
+        },
+        "description": "USD/BRL — volatile, key levels important (canonical ISO form of BRLUSD_otc)",
     },
 
     # ── MAJOR OTC PAIRS (more trending) ────────────────────────────────
@@ -288,6 +317,42 @@ PAIR_CONFIGS = {
             "otc_pattern":     1.1,
         },
         "description": "NZD/USD — stable, balanced",
+    },
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-01): AUDUSD_otc is served by
+    # the feed but was missing from PAIR_CONFIGS_OTC → fell back to
+    # DEFAULT_WEIGHTS (exotic mean-reverting profile). AUDUSD_otc is a STABLE
+    # major (commodity-correlated, like its real-market twin AUDUSD at
+    # real/config.py:116 which is profile="stable"). Now uses the stable
+    # major profile matching NZDUSD_otc (its commodity sibling).
+    "AUDUSD_otc": {
+        "profile": "stable",
+        "weights": {
+            "candle_reaction": 1.1,
+            "running_tick":    1.0,
+            "pattern":         1.1,
+            "indicator":       1.0,
+            "key_level":       1.1,
+            "otc_pattern":     1.1,
+        },
+        "description": "AUD/USD OTC — stable, commodity-correlated",
+    },
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-02): USDCAD_otc is served by
+    # the feed but was missing from PAIR_CONFIGS_OTC → fell back to
+    # DEFAULT_WEIGHTS (exotic mean-reverting profile). USDCAD_otc is a STABLE
+    # major (oil-correlated, like its real-market twin USDCAD at
+    # real/config.py:128 which is profile="stable"). Now uses the stable
+    # major profile matching the other stable OTC majors.
+    "USDCAD_otc": {
+        "profile": "stable",
+        "weights": {
+            "candle_reaction": 1.1,
+            "running_tick":    1.0,
+            "pattern":         1.1,
+            "indicator":       1.0,
+            "key_level":       1.1,
+            "otc_pattern":     1.1,
+        },
+        "description": "USD/CAD OTC — stable, oil-correlated",
     },
     "EURNZD_otc": {
         "profile": "volatile",
@@ -532,8 +597,14 @@ PAIR_CONFIGS = {
     # This pair's mean-reversion behavior is weak — the otc_pattern module's
     # signals are mostly noise here. Heavy dampen + max_confidence cap of 50
     # ensures this pair doesn't generate wrong trades from otc_pattern noise.
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-06): profile changed from
+    # "mean_reverting" to "volatile" — the 39% otc_pattern win rate proves
+    # this pair does NOT mean-revert (it's noise-dominated). The previous
+    # "mean_reverting" label was misleading the blender's strategy selector
+    # (reversal boost ×1.3 in OTC trends was being applied to a pair that
+    # doesn't exhibit mean-reversion behavior).
     "USDIDR_otc": {
-        "profile": "mean_reverting",
+        "profile": "volatile",
         "weights": {
             "candle_reaction": 1.3,
             "running_tick":    1.0,   # boost — tick data more reliable than patterns

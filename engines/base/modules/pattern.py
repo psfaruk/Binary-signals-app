@@ -85,7 +85,14 @@ def analyze(candles, ctx: MarketContext) -> list:
     trend_regime = regime.get("regime", "RANGE")  # TREND_UP / TREND_DOWN / RANGE / VOLATILE
     # Strong trend threshold — only classify engulfing as continuation
     # when trend is clearly established.
-    strong_trend = is_trending and trend_strength > 0.5
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-33): raise the threshold from
+    # > 0.5 to > 0.7 to align with candle_reaction's strong-dampen threshold.
+    # At trend_strength = 0.6, an engulfing pattern was classified as
+    # CONTINUATION here (getting the ×1.3 trend-continuation multiplier in
+    # the blender) while streak signals in candle_reaction got only moderate
+    # dampening — inconsistent treatment of moderate trends. Now both modules
+    # require trend_strength > 0.7 for the strong/continuation case.
+    strong_trend = is_trending and trend_strength > 0.7
 
     for pat in patterns:
         name = pat["name"]
@@ -115,15 +122,27 @@ def analyze(candles, ctx: MarketContext) -> list:
                 sig_type = "REVERSAL"
                 type_note = f" (range reversal: regime={trend_regime})"
         else:
-            # Unknown pattern — default to reversal (safe default for
-            # any future patterns added to detect_candle_patterns).
-            sig_type = "REVERSAL"
-            type_note = ""
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-31): SKIP unknown
+            # patterns instead of defaulting to REVERSAL. The previous
+            # "safe default = REVERSAL" biased the engine toward reversal for
+            # any unrecognized pattern, and a truly safe default is to NOT
+            # emit a signal at all (so the unknown pattern doesn't contribute
+            # a vote based on a guessed classification). All current patterns
+            # are classified, so this only affects FUTURE patterns added to
+            # detect_candle_patterns without updating ALWAYS_* sets.
+            continue
 
         results.append(ModuleResult(
             module_name="pattern",
             direction=direction,
             score=pat["score"],
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-32): documented the
+            # multiplier reasoning. Confidence = score * 18 chosen so score 3
+            # → 54 (matching candle_reaction's big-body reversal conf) and
+            # score 4 → 72. Score 2 → 36 (above LOW_CONF_SKIP=20). Score 1
+            # → 18 (below LOW_CONF_SKIP, would be skipped) — but
+            # detect_candle_patterns currently returns scores 2-4 only, so
+            # the score-1 case doesn't arise in practice.
             confidence=pat["score"] * 18,  # 3→54, 4→72
             signal_type=sig_type,
             reliability="PATTERN",

@@ -86,7 +86,53 @@ def _compute_module_stats_inner(cur, total_query=None):
     """Inner stats computation — takes a cursor, returns the stats dict.
     Split out so the connection lifecycle can be managed separately.
     """
-    total = cur.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-29): use a single consistent
+    # sample window for ALL three queries (total count, per-module breakdown,
+    # overall accuracy). The old code scanned ALL rows for total_signals /
+    # overall_win_pct but only the last 5000 rows (LIMIT STATS_MAX_ROWS) for
+    # the per-module breakdown. This produced contradictory numbers: overall
+    # win rate 55% but no individual module above 50% (because the recent 5k
+    # had more losses than the historical 45k). Now we apply the same window
+    # to all three so /api/stats is internally consistent.
+    _stats_max_rows = int(os.environ.get("STATS_MAX_ROWS", "5000"))
+    # Total + accuracy: count only CALL/PUT rows with a graded accuracy.
+    # We use a subquery to derive the cutoff timestamp (the ts of the
+    # Nth-most-recent graded signal) so the same window is applied to both
+    # queries. Falls back to COUNT(*) if the subquery fails (older schemas).
+    try:
+        total_row = cur.execute("""
+            SELECT COUNT(*) as n FROM signal_log
+            WHERE signal IN ('CALL','PUT')
+              AND accuracy IN ('correct','wrong')
+              AND ts >= COALESCE((
+                  SELECT MIN(ts) FROM (
+                      SELECT ts FROM signal_log
+                      WHERE signal IN ('CALL','PUT')
+                        AND accuracy IN ('correct','wrong')
+                      ORDER BY ts DESC LIMIT ?
+                  )
+              ), 0)
+        """, (_stats_max_rows,)).fetchone()
+        total = total_row[0] if total_row else 0
+    except sqlite3.OperationalError:
+        # Fallback: ctime column (older schema) or simple count.
+        try:
+            total_row = cur.execute("""
+                SELECT COUNT(*) as n FROM signal_log
+                WHERE signal IN ('CALL','PUT')
+                  AND accuracy IN ('correct','wrong')
+                  AND ctime >= COALESCE((
+                      SELECT MIN(ctime) FROM (
+                          SELECT ctime FROM signal_log
+                          WHERE signal IN ('CALL','PUT')
+                            AND accuracy IN ('correct','wrong')
+                          ORDER BY ctime DESC LIMIT ?
+                      )
+                  ), 0)
+            """, (_stats_max_rows,)).fetchone()
+            total = total_row[0] if total_row else 0
+        except sqlite3.OperationalError:
+            total = cur.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
     if total == 0:
         return {"total_signals": 0, "message": "No signals logged yet"}
 
@@ -131,13 +177,30 @@ def _compute_module_stats_inner(cur, total_query=None):
             module = reason_str[1:end_bracket].strip()
             if module not in MODULE_NAMES:
                 continue
-            reason_upper = reason_str.upper()
-            if "PUT" in reason_upper or "BEAR" in reason_upper or "SELLER" in reason_upper:
-                direction = "PUT"
-            elif "CALL" in reason_upper or "BULL" in reason_upper or "BUYER" in reason_upper:
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-25): parse direction
+            # from the END of the reason (after the final "→") rather than
+            # substring-scanning the whole string. The old logic checked
+            # PUT/BEAR/SELLER BEFORE CALL/BULL/BUYER, so a reason mentioning
+            # BOTH (e.g. "[running_tick] seller pressure easing, buyer taking
+            # over → CALL") was misclassified as PUT. This corrupted per-
+            # module win rates for modules whose reasons naturally mention
+            # both directions. The fix mirrors the same change in
+            # core/auto_tune.py.
+            tail = reason_str.rsplit("→", 1)[-1].strip().upper() if "→" in reason_str else ""
+            if tail.endswith("CALL") or " CALL" in tail or tail == "CALL":
                 direction = "CALL"
+            elif tail.endswith("PUT") or " PUT" in tail or tail == "PUT":
+                direction = "PUT"
             else:
-                continue
+                # Legacy fallback: CALL-first scan (only when no arrow present).
+                # Note: we check CALL first now to avoid the order-bias bug.
+                reason_upper = reason_str.upper()
+                if "CALL" in reason_upper or "BULL" in reason_upper or "BUYER" in reason_upper:
+                    direction = "CALL"
+                elif "PUT" in reason_upper or "BEAR" in reason_upper or "SELLER" in reason_upper:
+                    direction = "PUT"
+                else:
+                    continue
 
             # Attribution logic:
             # - Module vote matched final AND final was correct → module correct
@@ -192,12 +255,48 @@ def _compute_module_stats_inner(cur, total_query=None):
         })
 
     # ── Overall accuracy ──────────────────────────────────────────────────
-    acc_rows = cur.execute("""
-        SELECT accuracy, COUNT(*) as n
-        FROM signal_log
-        WHERE signal IN ('CALL','PUT') AND accuracy IN ('correct','wrong')
-        GROUP BY accuracy
-    """).fetchall()
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-29): apply the same window as the
+    # per-module query (LIMIT STATS_MAX_ROWS) so overall_win_pct is consistent
+    # with the per-module win rates. The old code counted ALL rows here, which
+    # disagreed with the LIMIT-ed per-module breakdown.
+    try:
+        acc_rows = cur.execute("""
+            SELECT accuracy, COUNT(*) as n
+            FROM signal_log
+            WHERE signal IN ('CALL','PUT') AND accuracy IN ('correct','wrong')
+              AND ts >= COALESCE((
+                  SELECT MIN(ts) FROM (
+                      SELECT ts FROM signal_log
+                      WHERE signal IN ('CALL','PUT')
+                        AND accuracy IN ('correct','wrong')
+                      ORDER BY ts DESC LIMIT ?
+                  )
+              ), 0)
+            GROUP BY accuracy
+        """, (_stats_max_rows,)).fetchall()
+    except sqlite3.OperationalError:
+        try:
+            acc_rows = cur.execute("""
+                SELECT accuracy, COUNT(*) as n
+                FROM signal_log
+                WHERE signal IN ('CALL','PUT') AND accuracy IN ('correct','wrong')
+                  AND ctime >= COALESCE((
+                      SELECT MIN(ctime) FROM (
+                          SELECT ctime FROM signal_log
+                          WHERE signal IN ('CALL','PUT')
+                            AND accuracy IN ('correct','wrong')
+                          ORDER BY ctime DESC LIMIT ?
+                      )
+                  ), 0)
+                GROUP BY accuracy
+            """, (_stats_max_rows,)).fetchall()
+        except sqlite3.OperationalError:
+            acc_rows = cur.execute("""
+                SELECT accuracy, COUNT(*) as n
+                FROM signal_log
+                WHERE signal IN ('CALL','PUT') AND accuracy IN ('correct','wrong')
+                GROUP BY accuracy
+            """).fetchall()
     total_correct = sum(r["n"] for r in acc_rows if r["accuracy"] == "correct")
     total_wrong = sum(r["n"] for r in acc_rows if r["accuracy"] == "wrong")
     total_graded = total_correct + total_wrong

@@ -73,12 +73,13 @@ def analyze(candles, ctx: MarketContext) -> list:
                     signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
                     reasons=[f"Key resistance bounce ({lvl_price:.5f}, {dist:.2f} ATR) → PUT boost"]))
         elif action == "breakout":
-            if lvl_type == "resistance":
-                # DISABLED breakout signals (ultra-deep: 47.3% win rate)
-                # breakouts on 1m candles are mostly false breakouts
-                pass
-            else:
-                pass
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-21): removed the dead
+            # `if lvl_type == "resistance": pass / else: pass` branch —
+            # both sub-branches did nothing, so the entire elif was dead code.
+            # Now we skip directly. Breakout signals are intentionally disabled
+            # (ultra-deep: 47.3% win rate — breakouts on 1m candles are mostly
+            # false breakouts).
+            pass
 
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 2: Round number proximity — DISABLED (ultra-deep, 2026-07-20)
@@ -95,7 +96,16 @@ def analyze(candles, ctx: MarketContext) -> list:
         prev_high = prev["high"]
         prev_low = prev["low"]
         tol = atr * 0.10
-        eps = abs(close) * 1e-7 + 1e-9
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-20): use a pair-granularity-
+        # aware eps floor so JPY pairs (price ~150) get an eps of at least
+        # 0.001 (0.1 pip) instead of the price-scaled 1.5e-5 (which is far
+        # smaller than the typical 0.01 pip granularity). Non-JPY pairs use
+        # 0.00001 (0.1 of a 0.0001 pip). The previous eps was too small for
+        # JPY pairs, causing the `close > prev_high + eps` check to fire for
+        # any close above prev_high even when they were effectively equal at
+        # the pair's granularity (over-firing breakout signals).
+        _granularity = 0.01 if abs(close) > 50 else 0.0001
+        eps = max(abs(close) * 1e-7, _granularity * 0.1)
 
         if abs(close - prev_high) < tol:
             if close < prev_high - eps:
@@ -134,8 +144,14 @@ def analyze(candles, ctx: MarketContext) -> list:
 
         if swing_range > atr * 2:  # meaningful swing
             # Determine trend direction: if swing_high is more recent → uptrend
-            high_idx = max(range(len(window)), key=lambda i: window[i]["high"])
-            low_idx = max(range(len(window)), key=lambda i: window[i]["low"])
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-17): add index `i` as a
+            # tiebreaker in the max() key so that when two candles share the
+            # highest high (or lowest low), the MOST RECENT one (largest index)
+            # is returned. The previous key returned the FIRST occurrence, which
+            # could flip the trend direction (high_idx > low_idx is uptrend).
+            # Common in OTC pairs that hover at round numbers.
+            high_idx = max(range(len(window)), key=lambda i: (window[i]["high"], i))
+            low_idx = max(range(len(window)), key=lambda i: (window[i]["low"], i))
 
             fib_levels = {}
             # FIX (AUDIT-DEEP-A5, 2026-07-23): when high_idx == low_idx
@@ -217,6 +233,13 @@ def analyze(candles, ctx: MarketContext) -> list:
                         module_name="key_level", direction="CALL", score=2, confidence=57,
                         signal_type="REVERSAL", reliability="LEVEL", group="SR_FLIP",
                         reasons=[f"Broken resistance now support ({lvl_price:.5f}) → CALL"]))
+                    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-22): break after
+                    # the first SR_FLIP signal so a whipsaw around a level
+                    # (broken resistance AND broken support detected in the
+                    # same candle) doesn't emit contradictory CALL+PUT votes,
+                    # and so multiple broken resistances don't inflate the
+                    # CALL vote count beyond what a single level warrants.
+                    break
             elif lvl_type == "support" and prev["close"] < lvl_price and close < lvl_price:
                 # Broken support — now acts as resistance
                 if abs(close - lvl_price) < atr * 0.2:
@@ -224,6 +247,9 @@ def analyze(candles, ctx: MarketContext) -> list:
                         module_name="key_level", direction="PUT", score=2, confidence=57,
                         signal_type="REVERSAL", reliability="LEVEL", group="SR_FLIP",
                         reasons=[f"Broken support now resistance ({lvl_price:.5f}) → PUT"]))
+                    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-22): same break-
+                    # after-first-signal rule for the support side.
+                    break
 
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 7: Trendline Breakout (NEW — basic linear regression)
@@ -245,14 +271,23 @@ def analyze(candles, ctx: MarketContext) -> list:
         # if the bearish trendline fires (descending highs), the bullish
         # check is skipped. The first condition (descending highs + close
         # above them) is the stronger reversal signal anyway.
-        if highs[0] > highs[-1] and all(highs[i] >= highs[i+1] - atr*0.3 for i in range(len(highs)-1)):
+        #
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-19): remove the 0.3×ATR
+        # tolerance on the descending-highs (and ascending-lows) check. The
+        # tolerance allowed each high to be up to 0.3×ATR HIGHER than the
+        # prior, so a strictly-ascending sequence with small steps qualified
+        # as "descending". Now requires strictly descending highs (each high
+        # >= next high, no upticks allowed).
+        if highs[0] > highs[-1] and all(highs[i] >= highs[i+1]
+                                        for i in range(len(highs)-1)):
             if close > max(highs[-2], highs[-1]):
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=2, confidence=56,
                     signal_type="REVERSAL", reliability="LEVEL", group="TRENDLINE",
                     reasons=[f"Trendline breakout above descending highs → CALL reversal"]))
         # Ascending lows = bullish trendline
-        elif lows[0] < lows[-1] and all(lows[i] <= lows[i+1] + atr*0.3 for i in range(len(lows)-1)):
+        elif lows[0] < lows[-1] and all(lows[i] <= lows[i+1]
+                                        for i in range(len(lows)-1)):
             if close < min(lows[-2], lows[-1]):
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=2, confidence=56,

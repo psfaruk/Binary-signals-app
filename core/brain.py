@@ -187,6 +187,31 @@ def init_brain():
             notes TEXT
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_bl_asset_module ON brain_learning(asset, module_name)")
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-08): add a UNIQUE constraint
+        # on (asset, module_name, period) so the `INSERT OR REPLACE` below
+        # actually upserts (updates in place) instead of accumulating a new
+        # row per analyze_and_learn call (~every 50 graded signals). Without
+        # this constraint, `INSERT OR REPLACE` is just `INSERT`, and the
+        # brain_learning table grew ~100x faster than intended — bloating
+        # the DB and causing stale weights to coexist with new ones. We
+        # dedupe any existing duplicates first so the index creation succeeds.
+        try:
+            cur.execute("""
+                DELETE FROM brain_learning WHERE id IN (
+                    SELECT a1.id FROM brain_learning a1
+                    WHERE EXISTS (
+                        SELECT 1 FROM brain_learning a2
+                        WHERE a2.asset = a1.asset
+                          AND a2.module_name = a1.module_name
+                          AND a2.period = a1.period
+                          AND a2.id > a1.id
+                    )
+                )
+            """)
+            cur.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ux_bl_asset_module_period
+                ON brain_learning(asset, module_name, period)""")
+        except Exception as _e:
+            print(f"[brain] could not create UNIQUE index on brain_learning: {_e}")
 
         conn.commit()
         print("[brain] brain tables initialized")
@@ -199,6 +224,48 @@ def init_brain():
 # ═══════════════════════════════════════════════════════════════════════════
 #  RECORD — save full prediction context
 # ═══════════════════════════════════════════════════════════════════════════
+
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-07 + AUDIT-LIVE-1-02): derive
+# signal_type from per-module `signal_type` metadata (passed in the modules
+# dict) rather than substring-matching reason text. Reason strings routinely
+# contain BOTH "continuation" and "reversal" (e.g. blender's metadata
+# "_REGIME: TREND_UP → continuation ×1.3, reversal ×0.8") which corrupted
+# the old substring check, tagging nearly every TREND_UP prediction as
+# "CONTINUATION". This helper takes the majority signal_type across modules
+# that voted in the final direction; defaults to REVERSAL if no signal_type
+# metadata is present (preserving old behavior for legacy callers).
+def _derive_signal_type(modules: dict, reasons: list) -> str:
+    """Return 'CONTINUATION' or 'REVERSAL' based on per-module metadata.
+
+    Counts each module's `signal_type` field (if present). If most voting
+    modules tag themselves as continuation, return 'CONTINUATION'. Otherwise
+    return 'REVERSAL'. Falls back to the old substring check when no module
+    carries a `signal_type` field (backward compat with legacy callers).
+    """
+    try:
+        cont = 0
+        rev = 0
+        has_meta = False
+        if isinstance(modules, dict):
+            for _name, mdata in modules.items():
+                if not isinstance(mdata, dict):
+                    continue
+                st = mdata.get("signal_type")
+                if not st:
+                    continue
+                has_meta = True
+                st_upper = str(st).upper()
+                if "CONTINUATION" in st_upper:
+                    cont += 1
+                elif "REVERSAL" in st_upper:
+                    rev += 1
+        if has_meta:
+            return "CONTINUATION" if cont >= rev else "REVERSAL"
+    except Exception:
+        pass
+    # Legacy fallback: substring scan (only used if no per-module metadata).
+    return "CONTINUATION" if "continuation" in " ".join(reasons).lower() else "REVERSAL"
+
 
 def record_prediction(prediction: dict, asset: str, period: int,
                       ctime: int, actual: str, accuracy: str,
@@ -244,11 +311,16 @@ def record_prediction(prediction: dict, asset: str, period: int,
         # Session detection
         dt = datetime.fromtimestamp(ctime, tz=timezone.utc)
         hour = dt.hour
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-14): rename 21-24 UTC bucket
+        # from "LATE_NY" to "ASIA_OPEN". NY session closes at 21:00-22:00 UTC;
+        # 21-24 UTC is actually the Sydney/Tokyo pre-open (Asian session start).
+        # The old label misled session-pattern insights ("skip LATE_NY" when the
+        # real issue is the Asia pre-open).
         if 0 <= hour < 7: session = "ASIAN"
         elif 7 <= hour < 13: session = "LONDON"
         elif 13 <= hour < 17: session = "OVERLAP"
         elif 17 <= hour < 21: session = "NY"
-        else: session = "LATE_NY"
+        else: session = "ASIA_OPEN"
 
         # Compute net margin
         #
@@ -269,6 +341,19 @@ def record_prediction(prediction: dict, asset: str, period: int,
         except (TypeError, ValueError):
             net_margin = 0
 
+        # Brain-predictions stat columns (streak / z_body / close_percentile).
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-1-19): these were previously
+        # hardcoded to 0. The caller may include a `stats` sub-dict in the
+        # prediction payload (engines/base/blender threads `ctx.stats` in);
+        # if so we read from it. Otherwise fall back to 0 (backward compatible
+        # with older callers that don't pass stats).
+        _stats = prediction.get("stats") or {}
+        _streak = _stats.get("current_streak", 0) if isinstance(_stats, dict) else 0
+        _streak_dir = _stats.get("streak_direction", 0) if isinstance(_stats, dict) else 0
+        _streak_rarity = _stats.get("streak_rarity", 0) if isinstance(_stats, dict) else 0
+        _close_pctile = _stats.get("close_percentile", 0) if isinstance(_stats, dict) else 0
+        _z_body = _stats.get("z_body", 0) if isinstance(_stats, dict) else 0
+
         # Insert brain_predictions — using dict-based insert to avoid column mismatch
         pred_data = {
             "ts": time.time(),
@@ -286,14 +371,14 @@ def record_prediction(prediction: dict, asset: str, period: int,
             "regime_strength": regime.get("trend_strength", 0),
             "htf_trend": htf_trend,
             "vol_pct": regime.get("volatility_pct", 1.0),
-            "atr": 0,
+            "atr": prediction.get("atr", 0),
             "ema9": regime.get("ema9", 0),
             "ema21": regime.get("ema21", 0),
-            "streak": 0,
-            "streak_dir": 0,
-            "streak_rarity": 0,
-            "close_percentile": 0,
-            "z_body": 0,
+            "streak": _streak,
+            "streak_dir": _streak_dir,
+            "streak_rarity": _streak_rarity,
+            "close_percentile": _close_pctile,
+            "z_body": _z_body,
             "near_level": "",
             "level_action": "",
             "tick_count": micro.get("tick_count", 0),
@@ -309,11 +394,11 @@ def record_prediction(prediction: dict, asset: str, period: int,
             "last_react": micro.get("last_react"),
             "htf_aligned": htf_aligned,
             "regime_aligned": regime_aligned,
-            "call_groups": prediction.get("agree", 0),
-            "put_groups": prediction.get("total", 0) - prediction.get("agree", 0),
+            "call_groups": prediction.get("agree", 0) if signal == "CALL" else (prediction.get("total", 0) - prediction.get("agree", 0)),
+            "put_groups": (prediction.get("total", 0) - prediction.get("agree", 0)) if signal == "CALL" else prediction.get("agree", 0),
             "total_groups": prediction.get("total", 0),
             "net_margin": net_margin,
-            "signal_type": "CONTINUATION" if "continuation" in " ".join(reasons).lower() else "REVERSAL",
+            "signal_type": _derive_signal_type(modules, reasons),
             "session_hour": hour,
             "session_name": session,
             "reasons_json": json.dumps(reasons),
@@ -377,9 +462,14 @@ def record_prediction(prediction: dict, asset: str, period: int,
                 "direction": mdir,
                 "score": mdata.get("score", 0),
                 "confidence": mdata.get("confidence", 0),
-                "signal_type": "",
-                "reliability": "",
-                "signal_group": "",
+                # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-1-02): populate
+                # signal_type/reliability/signal_group from per-module metadata
+                # so the brain can analyze per-(module, signal_type) win rates.
+                # Previously these were empty strings — the brain couldn't tell
+                # continuation votes from reversal votes.
+                "signal_type": str(mdata.get("signal_type", "") or ""),
+                "reliability": str(mdata.get("reliability", "") or ""),
+                "signal_group": str(mdata.get("signal_group", "") or ""),
                 "reason": m_reason,
                 "actual": actual,
                 "prediction_accuracy": accuracy,
@@ -483,7 +573,12 @@ def analyze_and_learn(min_samples: int = 20):
 
 def _analyze_module_performance(cur, min_samples):
     """Per-module per-pair win rates with recommendations."""
-    rows = cur.execute("""SELECT asset, module_name,
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-09): GROUP BY period as well as
+    # (asset, module_name). Previously the query mixed win rates across all
+    # periods for a pair (60s, 300s, etc.) and stored the blended result
+    # under period=60. Now each (asset, module, period) tuple gets its own
+    # row, so multi-period pairs are tuned correctly.
+    rows = cur.execute("""SELECT asset, period, module_name,
         COUNT(*) as total,
         SUM(module_correct) as correct,
         SUM(CASE WHEN direction='CALL' THEN 1 ELSE 0 END) as call_total,
@@ -492,7 +587,7 @@ def _analyze_module_performance(cur, min_samples):
         SUM(CASE WHEN direction='PUT' AND module_correct=1 THEN 1 ELSE 0 END) as put_correct
         FROM brain_module_votes
         WHERE module_correct IS NOT NULL
-        GROUP BY asset, module_name
+        GROUP BY asset, period, module_name
         HAVING total >= ?""", (min_samples,)).fetchall()
 
     for row in rows:
@@ -539,19 +634,49 @@ def _analyze_module_performance(cur, min_samples):
             notes += f" {bias} bias: CALL={call_wr:.0%}, PUT={put_wr:.0%}."
 
         # Upsert brain_learning
-        cur.execute("""INSERT OR REPLACE INTO brain_learning (
-            ts, asset, period, module_name,
-            total, correct, wrong,
-            win_rate, call_total, call_correct,
-            put_total, put_correct,
-            recommended_weight, recommended_score_adjustment,
-            notes
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (time.time(), row["asset"], 60, row["module_name"],
-             row["total"], row["correct"], row["total"] - row["correct"],
-             wr, row["call_total"], row["call_correct"],
-             row["put_total"], row["put_correct"],
-             rec_weight, rec_weight - 1.0, notes))
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-08 + AUDIT-2-09): use
+        # ON CONFLICT upsert against the new UNIQUE(asset, module_name,
+        # period) index, and pass the actual `period` from the row (was
+        # hardcoded to 60). The old `INSERT OR REPLACE` was a no-op because
+        # no UNIQUE constraint existed, so rows accumulated ~100x. Now we
+        # update in place.
+        try:
+            cur.execute("""INSERT INTO brain_learning (
+                ts, asset, period, module_name,
+                total, correct, wrong,
+                win_rate, call_total, call_correct,
+                put_total, put_correct,
+                recommended_weight, recommended_score_adjustment,
+                notes
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(asset, module_name, period) DO UPDATE SET
+                ts=excluded.ts, total=excluded.total, correct=excluded.correct,
+                wrong=excluded.wrong, win_rate=excluded.win_rate,
+                call_total=excluded.call_total, call_correct=excluded.call_correct,
+                put_total=excluded.put_total, put_correct=excluded.put_correct,
+                recommended_weight=excluded.recommended_weight,
+                recommended_score_adjustment=excluded.recommended_score_adjustment,
+                notes=excluded.notes""",
+                (time.time(), row["asset"], row["period"], row["module_name"],
+                 row["total"], row["correct"], row["total"] - row["correct"],
+                 wr, row["call_total"], row["call_correct"],
+                 row["put_total"], row["put_correct"],
+                 rec_weight, rec_weight - 1.0, notes))
+        except Exception:
+            # Fallback for older SQLite without ON CONFLICT support.
+            cur.execute("""INSERT OR REPLACE INTO brain_learning (
+                ts, asset, period, module_name,
+                total, correct, wrong,
+                win_rate, call_total, call_correct,
+                put_total, put_correct,
+                recommended_weight, recommended_score_adjustment,
+                notes
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (time.time(), row["asset"], row["period"], row["module_name"],
+                 row["total"], row["correct"], row["total"] - row["correct"],
+                 wr, row["call_total"], row["call_correct"],
+                 row["put_total"], row["put_correct"],
+                 rec_weight, rec_weight - 1.0, notes))
 
         # Generate insight for severe cases
         if wr < 0.40 or wr > 0.60:
@@ -646,17 +771,19 @@ def _analyze_confidence_calibration(cur, min_samples):
 
 def _analyze_signal_agreement(cur, min_samples):
     """When modules agree vs disagree, who's right?"""
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-12): replace the O(n²) correlated
+    # subquery (one SELECT per brain_module_votes row) with a LEFT JOIN on
+    # brain_predictions. With 100k votes, the old query ran ~100k subqueries;
+    # the JOIN version is O(n log n) and completes in milliseconds.
     rows = cur.execute("""SELECT
-        module_name,
-        SUM(CASE WHEN direction = (
-            SELECT signal FROM brain_predictions bp
-            WHERE bp.id = brain_module_votes.prediction_id
-        ) THEN 1 ELSE 0 END) as agreed_with_final,
-        SUM(CASE WHEN module_correct = 1 THEN 1 ELSE 0 END) as module_correct_count,
+        bmv.module_name,
+        SUM(CASE WHEN bmv.direction = bp.signal THEN 1 ELSE 0 END) as agreed_with_final,
+        SUM(CASE WHEN bmv.module_correct = 1 THEN 1 ELSE 0 END) as module_correct_count,
         COUNT(*) as total
-        FROM brain_module_votes
-        WHERE module_correct IS NOT NULL
-        GROUP BY module_name
+        FROM brain_module_votes bmv
+        LEFT JOIN brain_predictions bp ON bp.id = bmv.prediction_id
+        WHERE bmv.module_correct IS NOT NULL
+        GROUP BY bmv.module_name
         HAVING total >= ?""", (min_samples,)).fetchall()
 
     for row in rows:
@@ -714,33 +841,63 @@ def _analyze_loss_clusters(cur):
 
     # Find consecutive loss streaks
     current_streak = 0
-    max_streak = 0
     streak_start = None
     current_asset = None
 
     for row in rows:
         if row["asset"] != current_asset:
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-10): flush any in-progress
+            # streak when switching assets. Previously a loss streak at the END
+            # of one asset's data was never logged because the loop just reset
+            # the counter — the most recent (most actionable) loss clusters
+            # were systematically missed.
+            if current_asset is not None and current_streak >= 5:
+                _insert_insight_dedup(cur, 'LOSS_CLUSTER',
+                    f"{current_asset}: {current_streak} consecutive losses",
+                    f"Pair {current_asset} had {current_streak} consecutive losses "
+                    f"starting at {datetime.fromtimestamp(streak_start, tz=timezone.utc).isoformat()}. "
+                    f"This may indicate a regime shift or broker pattern change.",
+                    f"Skip {current_asset} for 30 minutes or reduce confidence",
+                    'HIGH', 0.0, applies_to=current_asset)
             current_asset = row["asset"]
             current_streak = 0
-            max_streak = 0
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-11): removed the dead
+            # `max_streak` tracking — it was never read after the loop.
 
         if row["accuracy"] == "wrong":
             if current_streak == 0:
                 streak_start = row["ctime"]
             current_streak += 1
-            max_streak = max(max_streak, current_streak)
         else:
             if current_streak >= 5:
                 # Record loss cluster
                 # FIX (AUDIT-CORE #59, 2026-07-21): route through dedup helper.
+                # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-13): use UTC-aware
+                # datetime to match the rest of brain.py (record_prediction uses
+                # tz=timezone.utc). The naive datetime previously displayed in
+                # local time, mismatching other brain timestamps.
                 _insert_insight_dedup(cur, 'LOSS_CLUSTER',
                     f"{current_asset}: {current_streak} consecutive losses",
                     f"Pair {current_asset} had {current_streak} consecutive losses "
-                    f"starting at {datetime.fromtimestamp(streak_start).isoformat()}. "
+                    f"starting at {datetime.fromtimestamp(streak_start, tz=timezone.utc).isoformat()}. "
                     f"This may indicate a regime shift or broker pattern change.",
                     f"Skip {current_asset} for 30 minutes or reduce confidence",
                     'HIGH', 0.0, applies_to=current_asset)
             current_streak = 0
+
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-10): post-loop check for a
+    # streak that's still in progress at the end of the dataset. The previous
+    # code only logged a LOSS_CLUSTER when a `correct` prediction ENDED the
+    # streak — so a pair whose last 7 predictions were all wrong was never
+    # flagged. Now we check after the loop.
+    if current_asset is not None and current_streak >= 5:
+        _insert_insight_dedup(cur, 'LOSS_CLUSTER',
+            f"{current_asset}: {current_streak} consecutive losses (ongoing)",
+            f"Pair {current_asset} had {current_streak} consecutive losses "
+            f"starting at {datetime.fromtimestamp(streak_start, tz=timezone.utc).isoformat()}. "
+            f"This may indicate a regime shift or broker pattern change.",
+            f"Skip {current_asset} for 30 minutes or reduce confidence",
+            'HIGH', 0.0, applies_to=current_asset)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

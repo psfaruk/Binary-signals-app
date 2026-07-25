@@ -42,8 +42,17 @@ def category_of(asset: str) -> str:
 
     "EURUSD_otc" → "otc"
     "EURUSD"     → "real"
+
+    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-28): also check for "OTC"
+    suffix (case-insensitive) without underscore, so a pair named
+    "EURUSDOTC" (typo or non-standard broker format) is still classified
+    as "otc" rather than routed to the Real engine. Quotex consistently
+    uses "_otc", but this is a defensive check.
     """
-    return "otc" if (asset or "").endswith("_otc") else "real"
+    asset_lower = (asset or "").lower()
+    if asset_lower.endswith("_otc") or asset_lower.endswith("otc"):
+        return "otc"
+    return "real"
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
@@ -121,7 +130,15 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # Echo the resolved category so the UI / signal_log can record which
     # engine produced this prediction (useful for per-engine accuracy
     # tracking in /api/stats).
-    result = dict(result)
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-34): use copy.deepcopy
+    # instead of dict() (shallow copy). The previous code created a shallow
+    # copy — nested dicts (regime, modules) were SHARED references. If a
+    # downstream consumer mutated result["regime"]["foo"] = "bar", it would
+    # corrupt the engine's regime dict (which is freshly computed per
+    # prediction via compute_context, so unlikely to cause issues in
+    # practice, but a latent footgun). deepcopy fully isolates the result.
+    import copy
+    result = copy.deepcopy(result)
     result["category"] = category
     return result
 

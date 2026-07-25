@@ -34,6 +34,19 @@ DB_PATH = os.environ.get("DB_PATH",
 
 _lock = threading.Lock()
 
+# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-30): short-lived in-memory cache for
+# get_all_patterns(asset). The blender calls get_time_adjustment,
+# get_regime_adjustment, and get_tag_adjustment on EVERY prediction, and each
+# one independently calls get_all_patterns(asset) — opening a SQLite
+# connection and querying the time_session_patterns table. With ~240
+# predictions/minute, that was 720 DB connections/minute just for pattern
+# lookups. The cache holds the patterns for an asset for _PATTERNS_CACHE_TTL
+# seconds (default 5s), so the three calls within a single prediction reuse
+# the same cached dict and hit the DB at most once per (asset, 5s window).
+# This cuts DB connections by ~3x without changing the public API.
+_PATTERNS_CACHE_TTL = float(os.environ.get("TIME_PATTERNS_CACHE_TTL", "5"))
+_PATTERNS_CACHE: dict = {}  # asset → (timestamp, patterns_dict)
+
 
 def _conn():
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -67,11 +80,16 @@ def init_patterns():
 
 def session_for_hour(hour):
     """Map UTC hour (0-23) to a trading-session label."""
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-14): rename 21-24 UTC bucket from
+    # "LATE_NY" to "ASIA_OPEN". NY session closes at 21:00-22:00 UTC; 21-24 UTC
+    # is actually the Sydney/Tokyo pre-open (Asian session start). The old
+    # label misled session-pattern insights ("skip LATE_NY" when the real
+    # issue is the Asia pre-open).
     if 0 <= hour < 7:   return "ASIAN"
     if 7 <= hour < 13:  return "LONDON"
     if 13 <= hour < 17: return "OVERLAP"
     if 17 <= hour < 21: return "NY"
-    return "LATE_NY"
+    return "ASIA_OPEN"
 
 
 def bulk_upsert_patterns(rows):
@@ -103,7 +121,18 @@ def bulk_upsert_patterns(rows):
 def get_all_patterns(asset):
     """Return all stored patterns for an asset, grouped by dimension.
     Returns: {dimension: {key: {win_rate, total, correct, wrong, last_updated}}}
+
+    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-30): consult the short-lived
+    in-memory cache before hitting the DB. The blender calls this function
+    three times per prediction (via get_time/regime/tag_adjustment), so
+    caching for 5s eliminates 2/3 of the DB round-trips.
     """
+    now = time.time()
+    cached = _PATTERNS_CACHE.get(asset)
+    if cached is not None:
+        cached_ts, cached_patterns = cached
+        if now - cached_ts < _PATTERNS_CACHE_TTL:
+            return cached_patterns
     conn = _conn()
     try:
         cur = conn.cursor()
@@ -122,9 +151,20 @@ def get_all_patterns(asset):
                 "wrong":    r["wrong"],
                 "last_updated": r["last_updated"],
             }
-        return out
     finally:
         conn.close()
+    # Cache the result (even if empty, so repeated lookups for an asset with
+    # no patterns don't all hit the DB).
+    _PATTERNS_CACHE[asset] = (now, out)
+    return out
+
+
+def invalidate_patterns_cache(asset: str = None):
+    """Clear the patterns cache (call after recompute_from_signal_log)."""
+    if asset is None:
+        _PATTERNS_CACHE.clear()
+    else:
+        _PATTERNS_CACHE.pop(asset, None)
 
 
 def get_time_adjustment(asset, ctime):
@@ -165,14 +205,25 @@ def get_time_adjustment(asset, ctime):
     # With n=5, binomial variance is so high that pure noise produces
     # extreme observed win rates. n=30 gives ~±18% confidence interval
     # at p=0.5, which is acceptable for a nudge.
+    #
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-1-12): the hour dimension
+    # gets a LOWER threshold (15) because each (asset, hour) bucket has fewer
+    # samples than (asset, session) buckets — there are 24 hour-buckets vs 5
+    # session-buckets, so the same data is spread 5x thinner per bucket. With
+    # MIN_SAMPLES=30 for hour, almost no hour-bucket qualified after 4-5 days
+    # of live data; the hour adjustment (the most granular dimension) never
+    # fired. Lowering to 15 lets more hour-buckets activate while still
+    # avoiding pure-noise thresholds (n=15 → ~±25% CI at p=0.5, acceptable
+    # for a ±6% nudge).
     MIN_SAMPLES = 30
+    MIN_SAMPLES_HOUR = 15
 
     weighted_devs = []   # [(dev, weight), ...]
     notes = []
 
     # Hour dimension
     hour_p = patterns.get("hour", {}).get(str(hour))
-    if hour_p and hour_p["total"] >= MIN_SAMPLES:
+    if hour_p and hour_p["total"] >= MIN_SAMPLES_HOUR:
         dev = hour_p["win_rate"] - 0.50
         # Weight by sqrt(n) — larger samples count more, but with diminishing returns.
         # Cap weight at sqrt(100) = 10 so a single huge sample doesn't dominate.
@@ -415,6 +466,11 @@ def recompute_from_signal_log(min_samples=3, days_window=None):
         summary[asset][dim] += 1
 
     bulk_upsert_patterns(upsert_rows)
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-30): invalidate the in-memory
+    # patterns cache so the next prediction sees the freshly-recomputed
+    # patterns immediately (otherwise stale cached patterns would persist
+    # for up to _PATTERNS_CACHE_TTL seconds after recompute).
+    invalidate_patterns_cache()
     return summary
 
 

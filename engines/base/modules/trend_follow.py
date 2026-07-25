@@ -94,7 +94,16 @@ def analyze(candles, ctx: MarketContext) -> list:
         lookback = min(consec, len(candles))
         bodies = [abs(candles[i]["close"] - candles[i]["open"])
                   for i in range(-lookback, 0)]
-        rising_bodies = all(bodies[i] >= bodies[i-1] * 0.85
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-39): tighten the rising-bodies
+        # tolerance from 0.85 to 0.95 (was 15% shrinkage per step, now 5%).
+        # The previous 0.85 allowed a SHRINKING streak like [1.0, 0.86, 0.74]
+        # (each 14% below the prior) to qualify as "rising" — but that's an
+        # exhaustion pattern, not momentum. The 0.95 tolerance still allows
+        # small noise (e.g. [1.0, 0.96, 0.97]) but rejects the obvious
+        # exhaustion case. This prevents SIGNAL 1 (CALL continuation) from
+        # firing simultaneously with SIGNAL 6 (PUT exhaustion reversal) on
+        # the same streak.
+        rising_bodies = all(bodies[i] >= bodies[i-1] * 0.95
                             for i in range(1, len(bodies)) if bodies[i-1] > 0)
         avg_body = sum(bodies) / len(bodies) if bodies else 0
         atr_normalized_body = avg_body / atr if atr > 0 else 0
@@ -104,7 +113,14 @@ def analyze(candles, ctx: MarketContext) -> list:
         # below-average volatility but still meaningful momentum).
         # Lowered to 0.7. Body filter (0.5 ATR) remains the primary gate.
         body_significant = atr_normalized_body >= 0.5
-        vol_confirms = vol_pct >= 0.7
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-40): require len(candles) >=
+        # 20 for vol_confirms. The previous `vol_pct >= 0.7` was True for
+        # cold-start (len < 10) where ctx.vol_pct defaults to 1.0 (no real
+        # volatility data yet). Firing a continuation signal on cold-start
+        # with a default vol_pct has no statistical basis. Now vol_confirms
+        # is False until enough candles have accumulated for the volatility
+        # ratio to be meaningful.
+        vol_confirms = (vol_pct >= 0.7) if len(candles) >= 20 else False
         if rising_bodies and len(bodies) >= 3 and body_significant and vol_confirms:
             # Continuation: 3+ rising-body candles with ATR-significant bodies
             # and at-or-above-average volatility → next candle continues
@@ -238,7 +254,16 @@ def analyze(candles, ctx: MarketContext) -> list:
 
         # Bullish breakout: current close above recent_high + buffer AND body extends
         # beyond the level (filters out upper-wick-only pokes).
-        if close > recent_high + buffer and (close - max(o, recent_high)) > buffer:
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-41): the body-confirmation
+        # check `(close - max(o, recent_high)) > buffer` was a NO-OP when
+        # `open <= recent_high` (the common non-gap case) because
+        # `max(o, recent_high) = recent_high`, making condition 2 identical to
+        # condition 1. So the body-confirmation only worked for gap-up
+        # candles. Now we use `body_size > buffer` where `body_size =
+        # abs(close - o)` — this is the actual candle body, independent of the
+        # gap, so it works for non-gap breakouts (the majority).
+        _bull_body_size = abs(close - o)
+        if close > recent_high + buffer and _bull_body_size > buffer:
             # Multi-candle confirmation: prior candle also closed above the level.
             confirmed = prior_close > recent_high
             if recent_failed_bull:
@@ -256,7 +281,12 @@ def analyze(candles, ctx: MarketContext) -> list:
             #         signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
             #         reasons=[f"Unconfirmed breakout above 10-candle high → CALL (weak)"]))
         # Bearish breakout (mirror)
-        elif close < recent_low - buffer and (min(o, recent_low) - close) > buffer:
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-41): same body-confirmation
+        # NO-OP fix as the bullish branch above — use `_bull_body_size > buffer`
+        # (actual candle body, already computed above as `abs(close - o)`,
+        # independent of gap) instead of `(min(o, recent_low) - close) > buffer`
+        # which was a NO-OP when `open >= recent_low` (the common non-gap case).
+        elif close < recent_low - buffer and _bull_body_size > buffer:
             confirmed = prior_close < recent_low
             if recent_failed_bear:
                 pass
@@ -362,11 +392,19 @@ def analyze(candles, ctx: MarketContext) -> list:
             # Look for 2 consecutive down candles (pullback)
             c1 = candles[-2]
             c2 = candles[-1]
-            # FIX: prior swing low = min of the lows of the 3 candles BEFORE
-            # the pullback started (candles[-4] and candles[-3]). Using min
-            # of highs would be wrong; using min of lows gives the actual
-            # recent swing low that the pullback must hold above.
-            prior_swing_low = min(candles[-3]["low"], candles[-4]["low"])
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-42): use a wider lookback
+            # for the prior swing low. The previous `min(candles[-3]["low"],
+            # candles[-4]["low"])` only checked 2 candles, missing the actual
+            # uptrend swing low which could be many candles earlier. Now we
+            # scan up to 10 candles before the 2-candle pullback, so the
+            # check verifies the trend structure is actually intact (current
+            # close > the real prior swing low, not just > a 2-candle min).
+            _pullback_start = max(0, len(candles) - 12)
+            _swing_window = candles[_pullback_start:len(candles) - 2]
+            if _swing_window:
+                prior_swing_low = min(c["low"] for c in _swing_window)
+            else:
+                prior_swing_low = min(candles[-3]["low"], candles[-4]["low"])
             if (c1["close"] < c1["open"] and c2["close"] < c2["open"]
                     and c2["close"] > prior_swing_low  # FIX: was candles[-3]["close"]
                     and c2["close"] > ema9):  # still above EMA9
@@ -379,9 +417,15 @@ def analyze(candles, ctx: MarketContext) -> list:
             # Look for 2 consecutive up candles (rally)
             c1 = candles[-2]
             c2 = candles[-1]
-            # FIX: prior swing high = max of recent highs. The pullback
-            # (rally) must stay below this for the downtrend to be intact.
-            prior_swing_high = max(candles[-3]["high"], candles[-4]["high"])
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-42): same wider-lookback
+            # fix as the TREND_UP branch above (use max of highs over up to
+            # 10 candles before the rally, not just 2).
+            _rally_start = max(0, len(candles) - 12)
+            _swing_window = candles[_rally_start:len(candles) - 2]
+            if _swing_window:
+                prior_swing_high = max(c["high"] for c in _swing_window)
+            else:
+                prior_swing_high = max(candles[-3]["high"], candles[-4]["high"])
             if (c1["close"] > c1["open"] and c2["close"] > c2["open"]
                     and c2["close"] < prior_swing_high  # FIX: was candles[-3]["close"]
                     and c2["close"] < ema9):  # still below EMA9
@@ -410,19 +454,38 @@ def analyze(candles, ctx: MarketContext) -> list:
     # Score reduced 2→1 since signal is weak on 1m candles.
     if len(candles) >= 5 and atr > 0:
         window = candles[-5:]
-        if (window[-1]["high"] > window[-3]["high"]
-                and abs(window[-1]["close"] - window[-1]["open"]) < abs(window[-3]["close"] - window[-3]["open"]) * 0.4
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-43): find the prior swing
+        # high (highest high before the current candle) dynamically instead
+        # of using a fixed `window[-3]` comparison. The previous 3-candle
+        # lookback missed divergences where the prior swing high was 4-5
+        # candles ago. Now we find the max-high index in `window[:-1]` and
+        # compare the current candle against THAT candle's high and body.
+        # Same fix for the bullish divergence mirror.
+        if len(window) >= 2:
+            _prior_high_idx = max(range(len(window) - 1), key=lambda i: window[i]["high"])
+            _prior_high = window[_prior_high_idx]["high"]
+            _prior_high_body = abs(window[_prior_high_idx]["close"] - window[_prior_high_idx]["open"])
+            _prior_low_idx = min(range(len(window) - 1), key=lambda i: window[i]["low"])
+            _prior_low = window[_prior_low_idx]["low"]
+            _prior_low_body = abs(window[_prior_low_idx]["close"] - window[_prior_low_idx]["open"])
+        else:
+            _prior_high = window[0]["high"]
+            _prior_high_body = abs(window[0]["close"] - window[0]["open"])
+            _prior_low = window[0]["low"]
+            _prior_low_body = _prior_high_body
+        if (window[-1]["high"] > _prior_high
+                and abs(window[-1]["close"] - window[-1]["open"]) < _prior_high_body * 0.4
                 and window[-1]["close"] > window[-1]["open"]):
             results.append(ModuleResult(
                 module_name="trend_follow", direction="PUT", score=1, confidence=53,
                 signal_type="REVERSAL", reliability="TREND", group="TREND_DIVERGE",
-                reasons=[f"Bearish divergence: higher high but body <40% of prior → PUT reversal"]))
-        elif (window[-1]["low"] < window[-3]["low"]
-                and abs(window[-1]["close"] - window[-1]["open"]) < abs(window[-3]["close"] - window[-3]["open"]) * 0.4
+                reasons=[f"Bearish divergence: higher high but body <40% of prior swing high → PUT reversal"]))
+        elif (window[-1]["low"] < _prior_low
+                and abs(window[-1]["close"] - window[-1]["open"]) < _prior_low_body * 0.4
                 and window[-1]["close"] < window[-1]["open"]):
             results.append(ModuleResult(
                 module_name="trend_follow", direction="CALL", score=1, confidence=53,
                 signal_type="REVERSAL", reliability="TREND", group="TREND_DIVERGE",
-                reasons=[f"Bullish divergence: lower low but body <40% of prior → CALL reversal"]))
+                reasons=[f"Bullish divergence: lower low but body <40% of prior swing low → CALL reversal"]))
 
     return results

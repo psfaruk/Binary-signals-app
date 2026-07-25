@@ -244,7 +244,17 @@ def build_micro(ticks, open_price):
     # ── 8. MOMENTUM SHIFT: direction change in last third ─────────────────
     momentum_shift = None
     if n >= 20:
-        t2_3 = 2 * n // 3
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-27): use `t2_3 = 2 * t3` (where
+        # t3 = n // 3) instead of `2 * n // 3`. The old expression evaluated
+        # as `(2 * n) // 3` due to left-to-right same-precedence, which gives a
+        # DIFFERENT value for n not divisible by 3 (e.g. n=11: 2*t3=6 but
+        # 2*n//3=7). This was inconsistent with the phase computation at
+        # line 168-171 which uses `ticks[2 * t3]`. The two analyses used
+        # inconsistent segmentation of the same tick list, producing
+        # contradictory signals (BULL_SHIFT from momentum_shift vs no-shift
+        # from phases).
+        t3 = max(n // 3, 1)
+        t2_3 = 2 * t3   # consistent with phase computation (2 * (n // 3))
         early_dir = "UP" if ticks[t2_3] > ticks[0] else ("DOWN" if ticks[t2_3] < ticks[0] else "FLAT")
         late_dir = "UP" if ticks[-1] > ticks[t2_3] else ("DOWN" if ticks[-1] < ticks[t2_3] else "FLAT")
         if early_dir != "FLAT" and late_dir != "FLAT" and early_dir != late_dir:
@@ -261,9 +271,18 @@ def build_micro(ticks, open_price):
         last5 = ticks[-1] - ticks[-5]
         last10 = ticks[-1] - ticks[-10] if n >= 10 else ticks[-1] - ticks[0]
         last20 = ticks[-1] - ticks[-20] if n >= 20 else ticks[-1] - ticks[0]
-        spd5 = last5 / min(5, n)
-        spd10 = last10 / min(10, n)
-        spd20 = last20 / min(20, n)
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-26): divide by (n_ticks - 1)
+        # (the number of INTERVALS), not n_ticks. `last5 = ticks[-1] - ticks[-5]`
+        # is the net move over 4 intervals (5 ticks → 4 deltas). Dividing by 5
+        # understates the per-interval speed by 20%, which propagates into
+        # `accel_ratio = spd5 / spd10` (understated by ~11%). Deceleration
+        # detection (exhaustion indicator) fired less often than it should.
+        _n5 = min(5, n)
+        _n10 = min(10, n)
+        _n20 = min(20, n)
+        spd5 = last5 / (_n5 - 1) if _n5 > 1 else 0
+        spd10 = last10 / (_n10 - 1) if _n10 > 1 else 0
+        spd20 = last20 / (_n20 - 1) if _n20 > 1 else 0
         if abs(spd10) > 0:
             accel_ratio = spd5 / spd10
         else:
@@ -303,7 +322,11 @@ def build_micro(ticks, open_price):
     if len(streaks) >= 2:
         last_d, last_l = streaks[-1]
         prev_d, prev_l = streaks[-2]
-        if last_d != prev_d and last_d != 0 and prev_d != 0:
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-28): removed the redundant
+        # `last_d != 0 and prev_d != 0` check — streaks only ever contain
+        # direction ±1 (zero-deltas are skipped at line 289-290), so the check
+        # was always True. Minor dead-code removal.
+        if last_d != prev_d:
             if last_l >= 3 and prev_l >= 3:
                 v_shape = "V_TOP" if prev_d > 0 else "V_BOTTOM"
 

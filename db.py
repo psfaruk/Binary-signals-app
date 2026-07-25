@@ -39,6 +39,17 @@ def _cursor():
 
 def init():
     with _cursor() as c:
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-28): metadata table for
+        # one-time migration tracking. Previously the signal_log dedup
+        # query (a correlated O(n²) subquery) ran on EVERY startup. For a
+        # DB with 100k+ rows this took minutes, blocking lifespan startup
+        # and causing Railway health checks to time out and restart the
+        # container. Now we record 'signal_log_dedup_done' in _meta so the
+        # expensive dedup runs only once per DB.
+        c.execute("""CREATE TABLE IF NOT EXISTS _meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )""")
         c.execute("""CREATE TABLE IF NOT EXISTS candle_micro (
             asset TEXT, period INT, ctime INT,
             open REAL, high REAL, low REAL, close REAL,
@@ -63,6 +74,17 @@ def init():
             tags TEXT, postmortem TEXT,
             category TEXT,        -- FIX (2026-07-17): track which engine produced this signal
             ts REAL DEFAULT (strftime('%s','now')))""")
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-18): add `total`
+        # column so the agreement ratio (agree/total) can be computed from
+        # the DB. Previously only `agree` was stored, making it impossible
+        # to distinguish 4/6 agreement from 4/10.
+        try:
+            cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
+            if "total" not in cols:
+                c.execute("ALTER TABLE signal_log ADD COLUMN total INT")
+                print("[db] migrated signal_log: added `total` column")
+        except Exception as _e:
+            print(f"[db] signal_log `total` column migration skipped: {_e}")
         # Indexes — added ctime composite for faster recent_accuracy queries
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_asset_period ON signal_log(asset, period)")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ctime ON signal_log(asset, period, ctime DESC)")
@@ -88,37 +110,61 @@ def init():
         #   3. Drop any legacy UNIQUE indexes (from prior schemas) so the
         #      new one can be created cleanly.
         #   4. Create the UNIQUE index.
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-28): gate the O(n²)
+        # dedup query on a _meta flag so it only runs ONCE per DB, not on
+        # every startup. On a 100k-row DB this query took 2-5 minutes,
+        # causing Railway health checks to time out and restart the
+        # container in a loop.
         try:
-            # Step 1+2: dedupe existing rows.
-            dup_count = c.execute("""
-                SELECT COUNT(*) AS n FROM signal_log s1
-                WHERE EXISTS (
-                    SELECT 1 FROM signal_log s2
-                    WHERE s2.asset = s1.asset
-                      AND s2.period = s1.period
-                      AND s2.ctime  = s1.ctime
-                      AND s2.id     > s1.id
-                )
-            """).fetchone()
-            dup_n = dup_count[0] if dup_count else 0
-            if dup_n > 0:
-                print(f"[db] dedup signal_log: removing {dup_n} duplicate rows "
-                      f"(keeping latest id per (asset,period,ctime))")
-                c.execute("""
-                    DELETE FROM signal_log
-                    WHERE id IN (
-                        SELECT s1.id FROM signal_log s1
-                        WHERE EXISTS (
-                            SELECT 1 FROM signal_log s2
-                            WHERE s2.asset = s1.asset
-                              AND s2.period = s1.period
-                              AND s2.ctime  = s1.ctime
-                              AND s2.id     > s1.id
-                        )
+            done_row = c.execute(
+                "SELECT value FROM _meta WHERE key='signal_log_dedup_done'"
+            ).fetchone()
+            already_done = bool(done_row and done_row["value"])
+        except Exception:
+            already_done = False
+
+        if not already_done:
+            try:
+                # Step 1+2: dedupe existing rows.
+                dup_count = c.execute("""
+                    SELECT COUNT(*) AS n FROM signal_log s1
+                    WHERE EXISTS (
+                        SELECT 1 FROM signal_log s2
+                        WHERE s2.asset = s1.asset
+                          AND s2.period = s1.period
+                          AND s2.ctime  = s1.ctime
+                          AND s2.id     > s1.id
                     )
-                """)
-        except Exception as _e:
-            print(f"[db] signal_log dedup skipped: {_e}")
+                """).fetchone()
+                dup_n = dup_count[0] if dup_count else 0
+                if dup_n > 0:
+                    print(f"[db] dedup signal_log: removing {dup_n} duplicate rows "
+                          f"(keeping latest id per (asset,period,ctime))")
+                    c.execute("""
+                        DELETE FROM signal_log
+                        WHERE id IN (
+                            SELECT s1.id FROM signal_log s1
+                            WHERE EXISTS (
+                                SELECT 1 FROM signal_log s2
+                                WHERE s2.asset = s1.asset
+                                  AND s2.period = s1.period
+                                  AND s2.ctime  = s1.ctime
+                                  AND s2.id     > s1.id
+                            )
+                        )
+                    """)
+            except Exception as _e:
+                print(f"[db] signal_log dedup skipped: {_e}")
+            # Record completion so we never re-run the expensive query.
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                    ("signal_log_dedup_done", "1"))
+            except Exception as _e:
+                print(f"[db] could not record dedup-done flag: {_e}")
+        else:
+            # Dedup already ran on a prior startup — skip.
+            pass
 
         # Step 3: drop legacy UNIQUE indexes (best-effort).
         # FIX (AUDIT-CRITICAL #008, 2026-07-21): older deployments may have
@@ -241,6 +287,10 @@ def log_signal(asset, period, ctime, signal, score, confidence,
     # watchdog restarts / double-EOC. The REPLACE preserves all columns
     # from the latest grade (postmortem, tags, etc.). id changes on REPLACE
     # but that's acceptable — id is only used for tie-breaking in queries.
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-18): persist `total`
+    # (module vote count) so the agreement ratio (agree/total) can be
+    # computed from the DB. Without it, 4/6 and 4/10 agreement are
+    # indistinguishable.
     conn = _conn()
     try:
         with _lock:
@@ -252,11 +302,17 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                 category = kw.get("category")
                 if category is None:
                     category = "otc" if asset.endswith("_otc") else "real"
+                # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-18): write
+                # `total` if the column exists (post-migration). Older rows
+                # written before the migration will have NULL — callers must
+                # handle that.
+                total_val = kw.get("total")
                 cur.execute("""INSERT OR REPLACE INTO signal_log
                     (asset,period,ctime,signal,score,confidence,theories,
                      actual,accuracy,strength,agree,right_codes,wrong_codes,
-                     reasons,a_open,a_close,regime,zone,tags,postmortem,category)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     reasons,a_open,a_close,regime,zone,tags,postmortem,
+                     category,total)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (asset, period, ctime, signal, score, confidence, _as_text(theories),
                      actual, accuracy,
                      kw.get("strength"), kw.get("agree"),
@@ -265,7 +321,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                      kw.get("a_open"), kw.get("a_close"),
                      kw.get("regime"), kw.get("zone"),
                      _as_text(kw.get("tags")), kw.get("postmortem"),
-                     category))
+                     category, total_val))
                 conn.commit()
             except sqlite3.Error as e:
                 print(f"[db] log_signal sqlite3.{type(e).__name__}: {e}")
@@ -338,6 +394,13 @@ def recent_accuracy(asset, period, n=20):
     Returns (None, 0) when no graded rows exist.
     A single graded row returns (1.0 or 0.0, 1) — caller is responsible for
     gating on sample size (prediction engine requires recent_n >= 8 before flipping).
+
+    NOTE (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-09): the N-sample window
+    can stretch across multiple algorithm regimes if the pair was in a
+    cooldown (no graded rows for 30 min). feed.py's recent_accuracy cache
+    now uses a smaller N (RECENT_ACCURACY_N env, default 50) to limit the
+    stretch, but the legacy LIMIT-N semantics are preserved here for
+    backwards compatibility with all callers.
     """
     with _cursor() as c:
         rows = c.execute("""SELECT accuracy
@@ -475,7 +538,13 @@ def cleanup(days=7):
     # feed.py's run() calls it once at startup (acceptable — one-time prune
     # before the event loop is busy), while periodic 6-hour cleanups go
     # through asyncio.to_thread(_db.cleanup) to avoid blocking the loop.
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-20): clean signal_log
+    # by `ctime` (candle open time, immutable) instead of `ts` (which is
+    # refreshed on every INSERT OR REPLACE). Previously a re-graded row
+    # had its ts reset to today, so old rows could linger >7 days if
+    # they were ever re-graded (watchdog restart, double-EOC). Using
+    # ctime guarantees the row ages out based on the actual candle time.
     cutoff = time.time() - days * 86400
     with _cursor() as c:
         c.execute("DELETE FROM candle_micro WHERE ctime < ?", (int(cutoff),))
-        c.execute("DELETE FROM signal_log WHERE ts < ?", (cutoff,))
+        c.execute("DELETE FROM signal_log WHERE ctime < ?", (int(cutoff),))

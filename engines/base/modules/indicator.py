@@ -57,8 +57,13 @@ def _rsi(closes, period=14):
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-09): return 50 (neutral) when
+    # BOTH avg_gain and avg_loss are 0 (perfectly flat market). The previous
+    # `if avg_loss == 0: return 100` fired even when avg_gain == 0 too,
+    # producing a false overbought signal in flat markets (rare but possible
+    # during low-volume sessions). RSI 50 is the conventionally neutral value.
     if avg_loss == 0:
-        return 100
+        return 100 if avg_gain > 0 else 50
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
@@ -85,8 +90,14 @@ def _macd(closes, fast=12, slow=26, signal=9):
         seed_sma = sum(values[:seed_n]) / seed_n
         for i in range(len(values)):
             if i < seed_n - 1:
-                # Not enough data yet — use running average
-                ema_arr.append(sum(values[:i+1]) / (i+1))
+                # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-11): mark indices
+                # before the seed as None instead of using a running average.
+                # The running average was a non-EMA approximation that could
+                # mislead future code reading `ema_arr[i]` for small `i`.
+                # None makes the invalidity explicit. MACD consumers only read
+                # indices >= slow-1 (where both EMAs are valid), so this is
+                # safe for current callers.
+                ema_arr.append(None)
             elif i == seed_n - 1:
                 ema_arr.append(seed_sma)
             else:
@@ -158,14 +169,15 @@ def _stochastic(candles, k_period=14, d_period=3):
     k = _k_at(len(candles) - 1)
     # Current %D = SMA of last d_period %K values
     k_values = [_k_at(len(candles) - 1 - i) for i in range(d_period)]
-    k_values.reverse()  # oldest → newest, for SMA readability
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-12): removed the pointless
+    # `k_values.reverse()` call — sum() is order-independent, so reversing
+    # the list has no effect on the SMA. Same fix below for k_values_prev.
     d = sum(k_values) / len(k_values) if k_values else k
 
     # Previous %K and %D (one candle earlier)
     if len(candles) >= k_period + 1:
         k_prev = _k_at(len(candles) - 2)
         k_values_prev = [_k_at(len(candles) - 2 - i) for i in range(d_period)]
-        k_values_prev.reverse()
         d_prev = sum(k_values_prev) / len(k_values_prev) if k_values_prev else k_prev
     else:
         k_prev, d_prev = k, d
@@ -235,8 +247,10 @@ def analyze(candles, ctx: MarketContext) -> list:
                 signal_type="CONTINUATION", reliability="INDICATOR", group="IND_RSI",
                 reasons=[f"RSI oversold ({rsi:.0f}) in strong downtrend (str={trend_strength:.2f}) → PUT continuation (momentum)"]))
         else:
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-10): equalize conf to
+            # 62 to match the overbought-PUT branch (was 60 — 2-point PUT bias).
             results.append(ModuleResult(
-                module_name="indicator", direction="CALL", score=3, confidence=60,
+                module_name="indicator", direction="CALL", score=3, confidence=62,
                 signal_type="REVERSAL", reliability="INDICATOR", group="IND_RSI",
                 reasons=[f"RSI oversold ({rsi:.0f}) → CALL reversal (60% win rate)"]))
 
@@ -265,7 +279,17 @@ def analyze(candles, ctx: MarketContext) -> list:
         # Magnitude threshold raised 10x (0.0001 → 0.001) to filter noise
         # crossovers. Score reduced (3→1) and confidence reduced (60→52)
         # since the signal is unreliable on 1m candles.
-        mag_threshold = abs(last_close) * 0.001 if last_close > 0 else 0.001
+        #
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-15 + AUDIT-LIVE-2-13):
+        # use ATR-relative threshold instead of price-relative. The previous
+        # `abs(last_close) * 0.001` made the threshold pair-dependent: JPY
+        # pairs (price ~150) got a 0.15 threshold (~15 pips, too strict for
+        # their typical 0.05-0.15 histogram swings), while EUR pairs (price
+        # ~1.08) got a 0.0011 threshold (~1 pip, too loose for their typical
+        # 0.0005-0.001 swings). ATR captures each pair's own volatility, so
+        # the threshold adapts. ctx.atr is already computed in MarketContext.
+        _atr_val = ctx.atr if ctx.atr > 0 else (abs(last_close) * 0.001 if last_close > 0 else 0.001)
+        mag_threshold = _atr_val * 0.1
         fresh_bull_cross = (hist_prev <= 0 and histogram > 0
                             and abs(histogram) > mag_threshold)
         fresh_bear_cross = (hist_prev >= 0 and histogram < 0
@@ -311,13 +335,30 @@ def analyze(candles, ctx: MarketContext) -> list:
     bb_mid, bb_upper, bb_lower = _bollinger(closes, 20, 2)
     if bb_upper > 0 and bb_lower > 0:
         bb_width = (bb_upper - bb_lower) / bb_mid if bb_mid > 0 else 0
-        if last_close >= bb_upper:
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-14): skip Bollinger signals
+        # when bands are degenerate (std near 0 in flat/near-flat markets).
+        # Without this guard, last_close >= bb_upper fires for any close at
+        # or above the SMA when std == 0 (since bb_upper == bb_lower == sma),
+        # producing false reversal signals in low-volatility consolidation.
+        if bb_width < 0.0001:
+            # Degenerate bands — skip Bollinger signals for this candle.
+            pass
+        elif last_close >= bb_upper:
             if strong_trend and trend_regime == "TREND_UP":
                 # Riding the upper band in an uptrend = continuation.
                 results.append(ModuleResult(
                     module_name="indicator", direction="CALL", score=1, confidence=54,
                     signal_type="CONTINUATION", reliability="INDICATOR", group="IND_BB",
                     reasons=[f"Close riding upper Bollinger band in uptrend (str={trend_strength:.2f}) → CALL continuation"]))
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-13): a close at/above
+            # the upper band during a strong DOWNTREND is a counter-trend
+            # spike (deep rally) — classify as PUT continuation (trend
+            # resumes after the spike), not PUT reversal (mean reversion).
+            elif strong_trend and trend_regime == "TREND_DOWN":
+                results.append(ModuleResult(
+                    module_name="indicator", direction="PUT", score=1, confidence=54,
+                    signal_type="CONTINUATION", reliability="INDICATOR", group="IND_BB",
+                    reasons=[f"Close at upper Bollinger band in strong downtrend (str={trend_strength:.2f}) → PUT continuation (counter-trend spike) deflating back into downtrend"]))
             else:
                 results.append(ModuleResult(
                     module_name="indicator", direction="PUT", score=2, confidence=58,
@@ -330,6 +371,16 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="indicator", direction="PUT", score=1, confidence=54,
                     signal_type="CONTINUATION", reliability="INDICATOR", group="IND_BB",
                     reasons=[f"Close riding lower Bollinger band in downtrend (str={trend_strength:.2f}) → PUT continuation"]))
+            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-13): a close at/below
+            # the lower band during a strong UPTREND is a deep pullback —
+            # classify as CALL continuation (trend resumes after the dip),
+            # not CALL reversal (mean reversion). The signal_type affects
+            # the blender's strategy multiplier downstream.
+            elif strong_trend and trend_regime == "TREND_UP":
+                results.append(ModuleResult(
+                    module_name="indicator", direction="CALL", score=1, confidence=54,
+                    signal_type="CONTINUATION", reliability="INDICATOR", group="IND_BB",
+                    reasons=[f"Close at lower Bollinger band in strong uptrend (str={trend_strength:.2f}) → CALL continuation (deep pullback resuming uptrend)"]))
             else:
                 results.append(ModuleResult(
                     module_name="indicator", direction="CALL", score=2, confidence=58,
@@ -368,13 +419,17 @@ def analyze(candles, ctx: MarketContext) -> list:
     # bearish and `k_prev < 30` for bullish, with a relaxed `max(k, k_prev)`
     # fallback so we don't miss signals where K was just barely below the
     # threshold on the prior candle.
-    if fresh_bear_cross and (k_prev > 70 or max(k, k_prev) > 75):
+    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-16): use >= / <= for the
+    # primary zone check so a bearish cross at k_prev = 70 (exactly at the
+    # relaxed overbought boundary) fires, and a bullish cross at k_prev = 30
+    # fires. The strict > / < missed these boundary cases.
+    if fresh_bear_cross and (k_prev >= 70 or max(k, k_prev) > 75):
         # %K crossed below %D from overbought zone → bearish reversal
         results.append(ModuleResult(
             module_name="indicator", direction="PUT", score=2, confidence=57,
             signal_type="REVERSAL", reliability="INDICATOR", group="IND_STOCH",
             reasons=[f"Stochastic fresh bearish cross (%K={k:.0f}, %D={d:.0f}, was {k_prev:.0f}/{d_prev:.0f}) → PUT"]))
-    elif fresh_bull_cross and (k_prev < 30 or min(k, k_prev) < 25):
+    elif fresh_bull_cross and (k_prev <= 30 or min(k, k_prev) < 25):
         # %K crossed above %D from oversold zone → bullish reversal
         results.append(ModuleResult(
             module_name="indicator", direction="CALL", score=2, confidence=57,

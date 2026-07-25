@@ -27,11 +27,21 @@ def compute_context(candles) -> MarketContext:
         level_confluence, ema9, ema21, vol_pct, closes
     """
     if not candles or len(candles) < 3:
+        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-11): cold-start defaults
+        # were biased toward reversal (is_ranging=True boosts reversal ×1.3
+        # via the blender regime multiplier) AND triggered the exhaustion
+        # gate too easily (atr=0.0001 → exhaustion threshold atr*0.5 =
+        # 0.00005, almost any net move passes). A new stream that just
+        # connected would emit reversal signals with inflated confidence
+        # based on only 3 candles — no statistical basis. Now: NEUTRAL
+        # regime (all flags False) so no regime multiplier applies, and a
+        # larger ATR floor (0.0010 ≈ 10 pips) so the exhaustion gate only
+        # fires on genuine moves.
         return MarketContext(
             regime={"regime": "RANGE", "trend_strength": 0.0,
                     "volatility_pct": 1.0, "ema9": 0, "ema21": 0,
-                    "is_trending": False, "is_ranging": True, "is_volatile": False},
-            atr=0.0001,
+                    "is_trending": False, "is_ranging": False, "is_volatile": False},
+            atr=0.0010,
             stats={"z_body": 0, "z_range": 0, "close_percentile": 50,
                    "streak_rarity": 0, "current_streak": 0, "streak_direction": 0},
             key_levels=[],
