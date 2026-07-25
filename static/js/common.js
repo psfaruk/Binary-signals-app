@@ -1541,27 +1541,59 @@ function _updateSwitchButtonLabel(){
 
 /* ─── MARKET STATUS INDICATOR ──────────────────────────────────────────────
    Updates the small LIVE / CLOSED / 24/7 pill in row 2.
-   Real market is closed on weekends (Sat/Sun UTC). OTC runs 24/7. */
+   Real forex market: opens Monday 00:00 UTC, closes Friday 22:00 UTC,
+   re-opens Sunday 22:00 UTC. OTC runs 24/7/365.
+   AUDIT-5-15 FIX (2026-07-25): previously checked only `day === 0 || day === 6`,
+   which gave wrong results on Friday evenings and Sunday evenings. Now uses
+   full UTC day-of-week + hour-of-day check. */
 function updateMarketStatusIndicator(){
   const el = $('market-status-indicator');
   if(!el) return;
   if(currentCategory === 'real'){
-    // Real market: closed on weekends (UTC Sat=6, Sun=0).
-    const day = new Date().getUTCDay();
-    const closed = (day === 0 || day === 6);
+    // AUDIT-5-15 FIX: full UTC datetime check.
+    // Real forex: open Mon 00:00 UTC → Fri 22:00 UTC, closed Fri 22:00 → Sun 22:00 UTC.
+    const now = new Date();
+    const day = now.getUTCDay();     // 0=Sun, 1=Mon, ..., 6=Sat
+    const hour = now.getUTCHours();
+    let closed = false;
+    let reason = '';
+    if (day === 6) {
+      // Saturday — fully closed.
+      closed = true;
+      reason = 'Saturday (UTC) — forex market closed all day';
+    } else if (day === 0 && hour < 22) {
+      // Sunday before 22:00 UTC — closed.
+      closed = true;
+      reason = 'Sunday before 22:00 UTC — forex market still closed';
+    } else if (day === 5 && hour >= 22) {
+      // Friday after 22:00 UTC — closed (market closes at 22:00 UTC).
+      closed = true;
+      reason = 'Friday after 22:00 UTC — forex market closed for weekend';
+    } else if (day === 0 && hour >= 22) {
+      // Sunday after 22:00 UTC — market just opened (Sydney session).
+      closed = false;
+      reason = 'Sunday after 22:00 UTC — Sydney session open';
+    } else {
+      // Monday-Thursday, or Friday before 22:00 UTC — fully open.
+      closed = false;
+      reason = 'Weekday (UTC) — forex market open';
+    }
     if(closed){
       el.className = 'market-status closed';
       el.innerHTML = '<span class="status-dot"></span>REAL MARKET — CLOSED';
-      el.title = 'Real forex market is closed on weekends (UTC). OTC market is open 24/7.';
+      el.title = 'Real forex market is closed (' + reason + '). ' +
+                 'OTC market is open 24/7/365 — switch to OTC tab to trade now.';
     } else {
       el.className = 'market-status live';
       el.innerHTML = '<span class="status-dot"></span>REAL MARKET — LIVE';
-      el.title = 'Real market is live.';
+      el.title = 'Real market is live (' + reason + ').';
     }
   } else {
+    // OTC market: 24/7/365 (broker-generated synthetic pairs).
     el.className = 'market-status always';
     el.innerHTML = '<span class="status-dot"></span>OTC MARKET — 24/7';
-    el.title = 'OTC market runs 24 hours a day, 7 days a week.';
+    el.title = 'OTC market runs 24 hours a day, 7 days a week, 365 days a year. ' +
+               'Broker-generated synthetic pairs — always live, never closes.';
   }
 }
 

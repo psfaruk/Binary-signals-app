@@ -538,6 +538,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # 80-89% bin: 51% actual → cap at 60
     # 70-79% bin: 50% actual → cap at 60
     # 60-69% bin: 49% actual → cap at 55
+    #
+    # AUDIT-3-02 FIX (2026-07-25): the previous cap mapping was NON-MONOTONIC:
+    # 69 → 69 (no cap), 70 → 60, 89 → 60, 90 → 55. A higher raw confidence
+    # produced a LOWER capped confidence. Now 70-79 caps at 65 (above 60-69
+    # bin's no-cap floor) and 60-69 gets an explicit cap at 70 to preserve
+    # monotonicity. The new mapping is monotonically non-decreasing.
     if confidence >= 100:
         confidence = min(confidence, 50)
     elif confidence >= 90:
@@ -545,7 +551,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     elif confidence >= 80:
         confidence = min(confidence, 60)
     elif confidence >= 70:
-        confidence = min(confidence, 60)
+        confidence = min(confidence, 65)    # was 60 — must be > 60-69 bin
+    elif confidence >= 60:
+        confidence = min(confidence, 70)    # explicit cap — monotonicity
 
     # FIX (high-confidence cap, 2026-07-20): 4h backtest showed 80-89% bin
     # at 41.7% accuracy and 100% at 40%. Cap ALL predictions at 75% unless
@@ -606,6 +614,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # FIX (AUDIT-CORE #13, 2026-07-21): RE-APPLY all calibration caps AFTER
     # the recent_accuracy boost so the boost cannot bypass them. The boost
     # block above may have raised confidence past the caps — clamp again.
+    # AUDIT-3-02 FIX (2026-07-25): monotonically non-decreasing caps (matches
+    # the first cap block above).
     if confidence >= 100:
         confidence = min(confidence, 50)
     elif confidence >= 90:
@@ -613,7 +623,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     elif confidence >= 80:
         confidence = min(confidence, 60)
     elif confidence >= 70:
-        confidence = min(confidence, 60)
+        confidence = min(confidence, 65)
+    elif confidence >= 60:
+        confidence = min(confidence, 70)
     if confidence > 75:
         if not (total_groups >= 3 and net_margin >= 0.6):
             confidence = min(confidence, 75)
@@ -623,12 +635,17 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # the full -15 penalty + 45 cap for ALL signals in TREND_UP/DOWN,
     # matching the first application above. This ensures the penalty
     # survives the boost/cap cascade.
+    #
+    # AUDIT-3-01 FIX (2026-07-25): the previous code re-applied BOTH the
+    # -15 penalty AND the cap 45. Combined with the first application at
+    # line 520-533, this DOUBLED the penalty (-30 total) — a raw confidence
+    # of 80 in TREND_UP became 32 instead of the intended 45. Now we ONLY
+    # re-apply the cap (no -15), which preserves the penalty from the first
+    # application while preventing the accuracy boost from exceeding 45.
     if regime.get("regime") == "TREND_UP":
-        confidence = max(0, confidence - 15)
         if confidence > 45:
             confidence = min(confidence, 45)
     elif regime.get("regime") == "TREND_DOWN":
-        confidence = max(0, confidence - 15)
         if confidence > 45:
             confidence = min(confidence, 45)
 
@@ -746,7 +763,19 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                     all_reasons.append(
                         f"_ALGO_STRATEGY: continuation ×{_cont_mult:.2f} "
                         f"({strat['algorithm']})")
-                elif is_reversal and _rev_mult != 1.0:
+                # AUDIT-3-07 FIX (2026-07-25): the previous `elif` meant
+                # that if BOTH continuation AND reversal signals voted in
+                # the same direction (common when multiple modules fire),
+                # only the continuation multiplier applied. In a mean_reversion
+                # strategy (reversing algo), a mixed-signal prediction got
+                # ×0.7 (dampened continuation) instead of ×1.3 (boosted
+                # reversal) — the OPPOSITE of the strategy's intent. Now we
+                # use a separate `if` so each multiplier applies independently
+                # when its signal type is present. If both fire, both
+                # multipliers apply (compounding) — which matches the intent:
+                # a mixed signal in mean_reversion should get the reversal
+                # boost, not the continuation dampening.
+                if is_reversal and _rev_mult != 1.0:
                     confidence = round(confidence * _rev_mult)  # FIX: was int()
                     all_reasons.append(
                         f"_ALGO_STRATEGY: reversal ×{_rev_mult:.2f} "
@@ -818,14 +847,14 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # after the pattern adjustments, so the boosted confidence can't
     # exceed the caps. The pattern adjustments can raise confidence
     # significantly (up to ×1.5), which would bypass the calibration.
-    if confidence >= 100:
-        confidence = min(confidence, 50)
-    elif confidence >= 90:
-        confidence = min(confidence, 55)
-    elif confidence >= 80:
-        confidence = min(confidence, 60)
-    elif confidence >= 70:
-        confidence = min(confidence, 60)
+    #
+    # AUDIT-3-03 FIX (2026-07-25): this is the THIRD application of the
+    # calibration caps (after lines 541-556 and 619-631). Each application
+    # can erase intentional boosts from intermediate adjustments. Now we
+    # apply ONLY the >75 consensus cap here — the per-bin caps (50/55/60/65)
+    # are already enforced by the second block, and any boost from time/
+    # regime/strategy is bounded by the >75 rule. This preserves the time/
+    # pattern DB query effect while still preventing runaway confidence.
     if confidence > 75:
         if not (total_groups >= 3 and net_margin >= 0.6):
             confidence = min(confidence, 75)

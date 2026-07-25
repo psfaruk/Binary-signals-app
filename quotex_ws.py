@@ -401,6 +401,23 @@ class QuotexWSClient:
         except Exception as exc:
             print(f"[quotex_ws] could not save session.json: {exc}")
 
+    @staticmethod
+    def save_token_only(token: str, email: str = "runtime-token") -> None:
+        """Persist only a token to session.json (used by /api/set-token endpoint).
+
+        AUDIT-1-02 FIX: server.py was calling save_session_json(token) with 1
+        arg, but that method requires 4 (email, token, cookies, user_agent).
+        This raised TypeError, silently caught — token NEVER persisted across
+        Railway redeployments. This convenience method fills cookies/ua with
+        empty strings (they are not required for token-only auth).
+        """
+        QuotexWSClient.save_session_json(
+            email=email,
+            token=token,
+            cookies="",
+            user_agent="",
+        )
+
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def connect(self) -> tuple[bool, str]:
@@ -616,6 +633,19 @@ class QuotexWSClient:
             print(f"[quotex_ws] ⚠️  authorization rejected: {args}")
             print(f"[quotex_ws]    Token has expired or is invalid.")
             print(f"[quotex_ws]    App will auto-relogin on next retry cycle.")
+            # AUDIT-1-18 FIX: previously, the ping loop kept re-sending the
+            # same expired ssid every 5 min, and the WS stayed open. feed.py
+            # thought the connection was healthy (because _connected=True)
+            # but no ticks flowed. Now: close the WS so feed.py's reader-loop
+            # finally block fires and triggers a full reconnect with a fresh
+            # token (or falls back to sim mode after retries exhaust).
+            try:
+                if self._ws is not None:
+                    await self._ws.close()
+                    print("[quotex_ws] closed WS after auth/reject — "
+                          "feed.py will reconnect with a fresh token")
+            except Exception as _exc:
+                print(f"[quotex_ws] WS close after auth/reject failed: {_exc}")
         elif name == "instruments/update":
             # Per-instrument update — usually a list with one entry
             if args and isinstance(args[0], list):

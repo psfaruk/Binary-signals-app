@@ -651,8 +651,17 @@ def compute_statistical_edge(candles, lookback=50):
                 "streak_rarity": 0, "current_streak": 0, "streak_direction": 0}
 
     recent = candles[-lookback:] if len(candles) > lookback else candles
-    bodies = [_abs_body(c) for c in recent]
-    ranges = [_range(c) for c in recent]
+    # AUDIT-2-03 FIX (2026-07-25): the previous code included the CURRENT
+    # candle in `bodies` and `ranges` — the very candle whose Z-score we're
+    # computing. This dampened Z by ~5-15% because the current candle's
+    # value pulled the mean toward itself and inflated the variance. Now
+    # we exclude the current candle from the comparison set, so Z reflects
+    # how extreme the current candle is RELATIVE TO PRIOR candles. This is
+    # consistent with the same fix already applied to `close_percentile`
+    # (Bug 24, 2026-07-19) — Z-score was missed in that audit.
+    prior_for_stats = recent[:-1] if len(recent) > 1 else recent
+    bodies = [_abs_body(c) for c in prior_for_stats]
+    ranges = [_range(c) for c in prior_for_stats]
 
     mean_body = sum(bodies) / len(bodies) if bodies else 0
     # FIX (Bug 6, deep audit 2026-07-19): use SAMPLE variance (/(N-1)) instead

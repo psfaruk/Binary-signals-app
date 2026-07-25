@@ -155,8 +155,20 @@ def analyze(candles, ctx: MarketContext) -> list:
     # but the structural elif fix is still important for correctness
     # and to prevent regressions if the threshold changes.
     if len(candles) >= 10:
-        recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
-                         for i in range(-min(20, len(candles)), 0)]
+        # AUDIT-4-01 FIX (2026-07-25): the previous median window INCLUDED
+        # the current candle's body in its own comparison set. The current
+        # candle is at index -1; if it has a large body, it inflates the
+        # median, dampening the "big body" detection by ~10-15%. Now we
+        # exclude the current candle (range -N to -1, exclusive of -1) so
+        # the median reflects the PRIOR distribution.
+        _window_n = min(20, len(candles) - 1)  # exclude current candle
+        if _window_n < 5:
+            _window_n = min(20, len(candles))  # fallback: include current
+            recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
+                             for i in range(-_window_n, 0)]
+        else:
+            recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
+                             for i in range(-_window_n - 1, -1)]
         # FIX (AUDIT-DEEP #06, 2026-07-23): the previous median calculation
         # took only `sorted(recent_bodies)[len(recent_bodies) // 2]`, which
         # for an EVEN-length list returns the UPPER middle element (e.g. for

@@ -799,7 +799,12 @@ class QuotexFeed:
         (24/7 broker-generated), so they're never filtered.
         """
         if getattr(self, '_sim_delegate', None) is not None:
-            return self._sim_delegate.available_pairs()
+            # SIM-MODE-DISABLED (2026-07-25): sim delegate should never be
+            # set anymore. Defensive: clear it and proceed with real feed.
+            print("[feed] available_pairs: WARNING — sim_delegate set but "
+                  "sim mode is disabled. Clearing.")
+            self._sim_delegate = None
+            os.environ["USE_SIM"] = "0"
         active_real = [p for p in self._real_pairs_list if p["status"] == "live"]
         active_otc  = [p for p in self._otc_pairs_list  if p["status"] == "otc"]
         # FIX (DATA-FLOW-2026-07-22): all-time OTC pairs — always in the
@@ -1011,15 +1016,34 @@ class QuotexFeed:
         An already-running stream is NEVER rejected or torn down here — those
         guards only gate the creation of a brand-new stream.
 
-        FIX (AUDIT-FEED #2, 2026-07-19): if sim fallback has fired
-        (self._sim_delegate is set), route the call to the sim feed
-        instead of trying to use the dead real feed. Previously the
-        delegate was set but never consulted — new subscribers would
-        hang forever because the real feed's _client was None.
+        SIM-MODE-DISABLED (2026-07-25): the _sim_delegate routing is now
+        dead code (sim mode is permanently disabled). If a sim_delegate
+        somehow exists, we clear it and proceed with the real feed.
+        If no Quotex credentials are configured, we return a clear error
+        instead of silently serving fake data.
         """
-        # Route to sim delegate if sim fallback has taken over.
+        # SIM-MODE-DISABLED: defensive — clear any stray sim delegate.
         if getattr(self, '_sim_delegate', None) is not None:
-            return await self._sim_delegate.ensure_stream(asset, period, cid=cid)
+            print("[feed] ensure_stream: WARNING — sim_delegate set but sim "
+                  "mode is disabled. Clearing.")
+            self._sim_delegate = None
+            os.environ["USE_SIM"] = "0"
+
+        # LIVE-DATA-ONLY (2026-07-25): if no credentials configured, fail
+        # loud with an actionable error. Do NOT silently fall back to sim.
+        _qx_token = os.environ.get("QX_TOKEN", "").strip()
+        _qx_email = os.environ.get("QX_EMAIL", "").strip()
+        if not _qx_token and not _qx_email:
+            err = ("no Quotex credentials — sim mode is disabled. "
+                   "Set QX_TOKEN via Railway Variables or visit "
+                   "/api/set-token?token=YOUR_TOKEN to provision at runtime.")
+            print(f"[feed] ❌ ensure_stream({asset}@{period}s): {err}")
+            return {
+                "ok": False,
+                "status": "no_credentials",
+                "error": err,
+                "action": "set_token",
+            }
         key = (asset, period)
         # FIX (AUDIT-CORE #71, 2026-07-21): acquire per-key lock so concurrent
         # ensure_stream() calls for the same (asset, period) serialize. The
@@ -1094,115 +1118,60 @@ class QuotexFeed:
             self._streams[key] = stream
             stream.task = asyncio.create_task(self._run_stream(stream))
 
-        # FIX (2026-07-15): "connected but no candles" problem.
-        # If real feed is connected but stream fails to get any ticks/candles
-        # within 30s (common when token expired mid-session, or Quotex WS
-        # silently drops the subscription), auto-fallback to sim mode so
-        # the user at least sees a working chart instead of a blank screen.
-        # The fallback only triggers if we're NOT already in sim mode.
-        if self._connected and not os.environ.get("USE_SIM") == "1":
-            asyncio.create_task(self._fallback_to_sim_if_stuck(asset, period, stream))
+        # ══════════════════════════════════════════════════════════════════════
+        # SIM FALLBACK DISABLED (2026-07-25)
+        # ══════════════════════════════════════════════════════════════════════
+        # Previously, if a stream got 0 candles/ticks within 30s, the feed
+        # would auto-fall-back to sim_feed.py and serve FAKE predictions.
+        # This caused the "app runs on simulation data" problem — the user
+        # thought they were trading on live data but were actually on sim.
+        #
+        # Now: NO sim fallback. If a stream is stuck, we log a clear error
+        # and broadcast it to clients. The real feed's run() loop continues
+        # retrying the Quotex connection. The user MUST provide a valid
+        # QX_TOKEN (via Railway Variables or /api/set-token) for the app
+        # to function — there is no silent escape hatch anymore.
+        # ══════════════════════════════════════════════════════════════════════
+        if self._connected:
+            asyncio.create_task(self._warn_if_stuck(asset, period, stream))
 
         return {"ok": True, "status": "starting"}
 
-    async def _fallback_to_sim_if_stuck(self, asset: str, period: int,
-                                         stream: '_AssetStream') -> None:
-        """If a stream has 0 candles after 30s, switch to sim feed.
+    async def _warn_if_stuck(self, asset: str, period: int,
+                              stream: '_AssetStream') -> None:
+        """Log + broadcast a clear warning if a stream stays stuck.
 
-        Common cause: Quotex token expired mid-session. The WS connection
-        shows 'connected' but no data flows. Auto-fallback lets the user
-        keep using the app while the real feed reconnects in background.
-
-        FIX (H4, 2026-07-19): previously this method started a sim feed
-        but DID NOT stop the real feed's run() loop — leaving a zombie
-        real-feed manager fighting with the sim feed over broadcasts.
-        Now we mark the real feed as "abandoned" so the run() loop exits
-        cleanly before starting the sim feed.
-
-        FIX (LIVE-DATA-2026-07-21): the previous implementation used
-        `importlib.reload(sim_feed)` which is FRAGILE — reloading a
-        module re-executes all top-level code and can break existing
-        instances. Also, `await sim_stream.run(...)` would block this
-        task forever, never returning control. Now we just instantiate
-        sim_feed.QuotexFeed() (no reload), set the delegate, and let
-        the main server lifespan start the sim feed's run() loop in a
-        separate task. The sim feed then handles ensure_stream calls
-        via the existing _sim_delegate routing.
+        Replaces _fallback_to_sim_if_stuck (which silently switched to
+        fake data). Now: no sim mode at all — if stuck, we just warn
+        loudly and let the real feed retry.
         """
         try:
             await asyncio.sleep(30)
             if stream.candles or stream.ticks:
-                return  # data arrived, no fallback needed
+                return  # data arrived, all good
             err = (f"stream {asset}@{period}s stuck (0 candles/ticks after 30s) "
-                   "— token may have expired. Auto-falling back to SIM mode.")
-            print(f"[feed] {err}")
+                   "— token may have expired. NOT falling back to sim mode "
+                   "(sim is permanently disabled). Use /api/set-token to refresh.")
+            print(f"[feed] ⚠️  {err}")
             self._last_error = err
             self._last_error_time = time.time()
-
-            # Cancel the stuck stream task
-            if stream.task:
-                stream.task.cancel()
-            # Use the per-key lock to safely remove from _streams
-            key = (asset, period)
-            if key in self._stream_locks:
-                async with self._stream_locks[key]:
-                    self._streams.pop(key, None)
-            else:
-                self._streams.pop(key, None)
-
-            # If a sim delegate is already set (previous fallback), don't
-            # spawn another — just return.
-            if getattr(self, '_sim_delegate', None) is not None:
-                print("[feed] sim delegate already active — skipping re-init")
-                return
-
-            # Mark the real feed as abandoned so the run() loop exits.
-            self._abandoned = True
-            if getattr(self, '_manager_task', None) is not None:
-                self._manager_task.cancel()
+            # Broadcast the error to subscribers so the frontend can show it
+            if self._broadcast:
                 try:
-                    await self._manager_task
-                except asyncio.CancelledError:
+                    self._broadcast({
+                        "type": "error",
+                        "asset": asset,
+                        "period": period,
+                        "error": "stuck_stream_no_sim_fallback",
+                        "message": err,
+                        "action": "refresh_token",
+                    })
+                except Exception:
                     pass
-                except Exception as exc:
-                    print(f"[feed] manager task cleanup error: {exc}")
-
-            # Cancel every other real-feed stream task too — they all share
-            # the same broken Quotex connection.
-            for k, s in list(self._streams.items()):
-                if s.task and not s.task.done():
-                    s._evicting = True
-                    s.task.cancel()
-            self._streams.clear()
-
-            # FIX (LIVE-DATA-2026-07-21): DO NOT importlib.reload — that's
-            # fragile and breaks existing references. Just import and
-            # instantiate. The sim module is already cached in sys.modules.
-            # Set USE_SIM=1 so any code that reads the env var also switches.
-            os.environ["USE_SIM"] = "1"
-            import sim_feed as _sim_module
-            sim_stream = _sim_module.QuotexFeed()
-            # FIX (RECONNECT-2026-07-23): copy ALL pair lists, not just
-            # _pairs_list. Without _alltime_otc_pairs_list, the sim feed
-            # can't serve All-Time OTC pairs → streams stay empty.
-            sim_stream._pairs_list = list(self._pairs_list)
-            sim_stream._real_pairs_list = list(getattr(self, '_real_pairs_list', []))
-            sim_stream._otc_pairs_list = list(getattr(self, '_otc_pairs_list', []))
-            sim_stream._alltime_otc_pairs_list = list(getattr(self, '_alltime_otc_pairs_list', []))
-            # Copy broadcast fn (set later by run())
-            sim_stream._broadcast = self._broadcast
-            # Mark as delegate — ensure_stream() will route to it.
-            self._sim_delegate = sim_stream
-            # Start the sim feed's run() loop in a background task —
-            # don't await it (would block forever).
-            sim_stream._manager_task = asyncio.create_task(sim_stream.run(self._broadcast))
-            print(f"[feed] sim delegate started — feed is now in SIM mode "
-                  f"({len(sim_stream._pairs_list)} pairs, "
-                  f"{len(sim_stream._alltime_otc_pairs_list)} all-time OTC)")
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            print(f"[feed] fallback error: {exc}")
+            print(f"[feed] _warn_if_stuck error: {exc}")
 
     async def drop_interest(self, cid: str) -> None:
         """A viewer disconnected — stop counting it toward any stream's
@@ -1211,50 +1180,44 @@ class QuotexFeed:
         FIX (AUDIT-FEED #2, 2026-07-19): also drop interest on the sim
         delegate if one is active — otherwise the sim feed leaks viewer
         slots and idle-eviction never fires for streams the user left.
+        SIM-MODE-DISABLED (2026-07-25): the _sim_delegate routing is now
+        dead code (sim mode is permanently disabled), but kept as a no-op
+        for safety in case any path still sets it.
         """
         for s in self._streams.values():
             s.interested_cids.discard(cid)
+        # _sim_delegate is now always None (sim mode disabled) — but keep
+        # the check for safety in case any code path still sets it.
         if getattr(self, '_sim_delegate', None) is not None:
-            await self._sim_delegate.drop_interest(cid)
+            try:
+                await self._sim_delegate.drop_interest(cid)
+            except Exception:
+                pass
 
     async def _aggressive_reconnect(self) -> None:
         """FIX (RECONNECT-2026-07-23): aggressive auto-reconnect.
 
         User complaint: 'candle data আসা বন্ধ হয়ে গেলো, reconnect হয় না'
-        Root cause: when Quotex token expires, _fallback_to_sim_if_stuck
-        fires ONCE but the sim delegate's streams take time to spin up.
-        Meanwhile the user sees 0 streams and a blank chart. This method
-        runs every 10s and:
-          1. If _sim_delegate is set but has 0 streams -> force it to
-             reconcile always-on streams immediately.
-          2. If no _sim_delegate and no active streams -> retry connection.
-          3. If _abandoned flag is set -> clear it and retry real feed.
+        Root cause: when Quotex token expires, the WS connection silently
+        drops and the user sees 0 streams / blank chart.
 
-        This guarantees: within 10 seconds of ANY data stop, the system
-        is actively trying to reconnect.
+        SIM-MODE-DISABLED (2026-07-25): previously this method also
+        reconciled sim delegate streams — that path is now dead code
+        (sim is permanently disabled). Only the real-feed reconnect
+        logic remains.
         """
         try:
             while True:
                 await asyncio.sleep(10)
-                # Check sim delegate
+                # SIM-MODE-DISABLED: sim delegate path is dead code now.
+                # Keep the check for safety in case any code path sets it.
                 sim = getattr(self, '_sim_delegate', None)
                 if sim is not None:
-                    sim_streams = getattr(sim, '_streams', {})
-                    if len(sim_streams) == 0:
-                        print("[feed] aggressive_reconnect: sim has 0 streams - forcing reconcile")
-                        try:
-                            sim._reconcile_always_on()
-                            for p in sim._pairs_list:
-                                if p.get("status") in ("live", "otc") and not p.get("locked"):
-                                    key = (p["asset"], 60)
-                                    if key not in sim._streams:
-                                        s = sim._AssetStream(asset=p["asset"], period=60, always_on=True)
-                                        sim._streams[key] = s
-                                        s.task = asyncio.create_task(sim._run_stream(s))
-                                        print(f"[feed] aggressive_reconnect: started sim stream {p['asset']}")
-                        except Exception as e:
-                            print(f"[feed] aggressive_reconnect sim error: {e}")
-                    continue
+                    # Defensive: clear any stray sim delegate (shouldn't happen).
+                    print("[feed] aggressive_reconnect: WARNING — sim_delegate set "
+                          "but sim mode is disabled. Clearing.")
+                    self._sim_delegate = None
+                    os.environ["USE_SIM"] = "0"
 
                 # No sim delegate - check if we need to reconnect real feed
                 if not self._streams and not getattr(self, '_abandoned', False):

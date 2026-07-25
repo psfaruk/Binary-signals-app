@@ -12,6 +12,16 @@
   },
   "env": {
     "AUTO_OPEN_BROWSER": "0",
-    "HEADLESS": "1"
+    "HEADLESS": "1",
+    "QX_USE_RAW_WS": "0",
+    "QX_PAYOUT_FLOOR_REAL": "70",
+    "QX_PAYOUT_FLOOR_OTC": "85"
+  },
+  "env_required": {
+    "QX_TOKEN": {
+      "description": "Quotex ssid token (extract from browser DevTools). Required for live data — sim mode is permanently disabled.",
+      "required": true,
+      "example": "quotex-token.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    }
   }
 }

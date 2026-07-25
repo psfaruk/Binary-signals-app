@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -30,11 +30,20 @@ if sys.platform != "win32":
 
 import db as _db
 
-# Auto-detect: use real feed.py if pyquotex is available, else sim_feed.
-# Set USE_SIM=1 to force the simulated feed even when pyquotex is installed.
+# ════════════════════════════════════════════════════════════════════════════
+# SIMULATION MODE DISABLED (2026-07-25)
+# ════════════════════════════════════════════════════════════════════════════
+# The app now ALWAYS runs on live Quotex data. sim_feed.py is no longer
+# imported. If QX_TOKEN is missing, the server will still start (so the
+# /api/set-token endpoint is reachable to provision a token at runtime),
+# but the feed will be in a "no token" state and stream subscriptions will
+# return an error to clients. This is intentional — a loud failure is far
+# safer than a silent sim fallback that produces fake predictions.
 #
-# QX_USE_RAW_WS=1 (default) enables the raw WebSocket backend (quotex_ws.py)
-# which bypasses pyquotex entirely and speaks Socket.IO v3 directly to
+# USE_SIM env var is now IGNORED (treated as 0 always). Setting it has no
+# effect — sim mode is structurally disabled.
+# ════════════════════════════════════════════════════════════════════════════
+
 # ── Quotex backend selection ────────────────────────────────────────────────
 # QX_USE_RAW_WS=0 (DEFAULT): vendored pyquotex with Firefox TLS cipher suite
 #                             → bypasses Cloudflare without Playwright/curl_cffi
@@ -57,21 +66,34 @@ else:
     print("[server] QX_USE_RAW_WS=0 — vendored pyquotex with Firefox TLS "
           "(Cloudflare bypass)")
 
+# USE_SIM is now IGNORED — sim mode is permanently disabled.
 if os.environ.get("USE_SIM") == "1":
-    _HAS_PYQUOTEX = False
-    print("[server] USE_SIM=1 — forcing simulated feed")
+    print("[server] ⚠️  USE_SIM=1 ignored — simulation mode is permanently "
+          "disabled. The app now requires live Quotex credentials.")
 
-# Auto-fallback to sim if no Quotex credentials and not forcing sim
-if _HAS_PYQUOTEX and not os.environ.get("QX_TOKEN", "").strip() and not os.environ.get("QX_EMAIL", "").strip():
-    _HAS_PYQUOTEX = False
-    print("[server] no Quotex credentials — falling back to SIMULATED feed")
+# Always import the real feed. sim_feed.py is no longer used.
+from feed import QuotexFeed as _Feed
+print("[server] ✅ using REAL Quotex feed (live data only — sim mode disabled)")
 
-if _HAS_PYQUOTEX:
-    from feed import QuotexFeed as _Feed
-    print("[server] real feed available — using REAL Quotex feed")
+# Token status check — log a clear, actionable error if missing.
+_QX_TOKEN = os.environ.get("QX_TOKEN", "").strip()
+_QX_EMAIL = os.environ.get("QX_EMAIL", "").strip()
+if not _QX_TOKEN and not _QX_EMAIL:
+    print("[server] ❌❌❌ CRITICAL: no Quotex credentials found ❌❌❌")
+    print("[server]    QX_TOKEN env var is not set.")
+    print("[server]    The server will start (so /api/set-token is reachable)")
+    print("[server]    but ALL stream subscriptions will return errors until")
+    print("[server]    a token is provisioned. To fix:")
+    print("[server]      1. Set QX_TOKEN in Railway Variables (one-time)")
+    print("[server]      2. OR visit /api/set-token?token=YOUR_TOKEN in browser")
+    print("[server]      3. OR send POST /api/set-token with JSON body")
+    print("[server]    See RAILWAY_TOKEN_SETUP.md for full instructions.")
+elif _QX_TOKEN:
+    print(f"[server] ✅ QX_TOKEN found ({_QX_TOKEN[:8]}...{_QX_TOKEN[-4:]})")
 else:
-    from sim_feed import QuotexFeed as _Feed
-    print("[server] real feed NOT available — using SIMULATED feed")
+    print(f"[server] ⚠️  QX_EMAIL found but no QX_TOKEN — will try email/password")
+    print("[server]    Note: email/password login is blocked by Cloudflare on Railway.")
+    print("[server]    Set QX_TOKEN manually via Railway Variables or /api/set-token.")
 
 feed = _Feed()
 clients: dict[str, WebSocket] = {}   # cid -> ws
@@ -266,8 +288,52 @@ def _auto_open_browser():
 
 @app.get("/healthz")
 async def healthz():
-    """Railway healthcheck endpoint — returns 200 if the process is up."""
+    """Railway healthcheck endpoint — returns 200 if the process is up.
+
+    Note: this returns ok:true even if QX_TOKEN is not set, so Railway's
+    healthcheck passes (the server must be up for /api/set-token to work).
+    Use /api/token-status to check whether the app has live credentials.
+    """
     return {"ok": True}
+
+
+@app.get("/api/token-status")
+async def token_status():
+    """Returns whether the app has live Quotex credentials.
+
+    Frontend uses this to show a clear "No Token" warning banner when
+    QX_TOKEN is missing, instead of silently failing on stream subscribe.
+
+    SIM-MODE-DISABLED (2026-07-25): sim mode is permanently disabled, so
+    the only way to get live data is to set QX_TOKEN. This endpoint exposes
+    the token presence state (without leaking the token itself).
+    """
+    qx_token = os.environ.get("QX_TOKEN", "").strip()
+    qx_email = os.environ.get("QX_EMAIL", "").strip()
+    has_token = bool(qx_token)
+    has_email = bool(qx_email)
+    if has_token:
+        preview = f"{qx_token[:8]}...{qx_token[-4:]}" if len(qx_token) > 12 else "(short)"
+        status = "live_token"
+        message = f"QX_TOKEN is set ({preview}) — app is on live data."
+    elif has_email:
+        status = "email_only"
+        message = ("QX_EMAIL is set but no QX_TOKEN — will try email/password "
+                   "login. Note: Cloudflare blocks this on Railway datacenter IPs. "
+                   "Set QX_TOKEN manually via Railway Variables or /api/set-token.")
+    else:
+        status = "no_credentials"
+        message = ("❌ No Quotex credentials — sim mode is permanently disabled. "
+                   "Set QX_TOKEN via Railway Variables or visit "
+                   "/api/set-token?token=YOUR_TOKEN to provision at runtime.")
+    return {
+        "status": status,
+        "has_token": has_token,
+        "has_email": has_email,
+        "sim_mode_disabled": True,
+        "message": message,
+        "action": "set_token" if status == "no_credentials" else None,
+    }
 
 
 @app.get("/")
@@ -301,7 +367,7 @@ async def set_token_get(token: str):
 
 
 @app.post("/api/set-token")
-async def set_token_post(request):
+async def set_token_post(request: Request):
     """Set Quotex token via POST (for programmatic updates).
 
     Body: {"token": "YOUR_TOKEN"}
@@ -317,8 +383,9 @@ async def set_token_post(request):
 async def _apply_token(token: str):
     """Apply a new Quotex token at runtime.
 
-    Sets the token in os.environ, clears sim_delegate fallback,
-    and forces an immediate reconnect on the next feed loop tick.
+    Sets the token in os.environ, clears any stale sim_delegate (defensive —
+    sim mode is permanently disabled), and forces an immediate reconnect on
+    the next feed loop tick.
     """
     if not token or len(token) < 10:
         return {"ok": False, "error": "token too short (min 10 chars)"}
@@ -328,13 +395,13 @@ async def _apply_token(token: str):
 
     # Set the token in the environment so _connect() picks it up
     _os.environ["QX_TOKEN"] = token
-    _os.environ["USE_SIM"] = "0"
+    _os.environ["USE_SIM"] = "0"  # defensive — sim is permanently disabled
 
-    # Clear the sim delegate if it was set (from a previous fallback)
-    # so the real feed's run() loop resumes instead of routing to sim
+    # SIM-MODE-DISABLED (2026-07-25): sim delegate should never be set
+    # anymore, but defensively clear it if a previous deploy (running old
+    # code) left one. This makes the runtime token-update forward-compatible.
     if hasattr(feed, '_sim_delegate') and feed._sim_delegate is not None:
         try:
-            # Gracefully shut down the sim delegate's streams
             sim = feed._sim_delegate
             feed._sim_delegate = None
             for s in list(sim._streams.values()):
@@ -342,7 +409,7 @@ async def _apply_token(token: str):
                     s._evicting = True
                     s.task.cancel()
             sim._streams.clear()
-            print("[server] sim delegate cleared — switching back to real feed")
+            print("[server] cleared stale sim delegate (sim mode is disabled)")
         except Exception as e:
             print(f"[server] sim delegate cleanup error: {e}")
 
@@ -358,9 +425,10 @@ async def _apply_token(token: str):
         s.idle_since = None
 
     # Save token to session.json so it persists across restarts
+    # AUDIT-1-02 FIX: was calling save_session_json(token) with wrong arg count
     try:
         from quotex_ws import QuotexWSClient
-        QuotexWSClient.save_session_json(token)
+        QuotexWSClient.save_token_only(token)
         print(f"[server] token saved to session.json ({token[:8]}...)")
     except Exception as e:
         print(f"[server] session.json save error: {e}")
@@ -373,8 +441,8 @@ async def _apply_token(token: str):
         "ok": True,
         "message": f"Token set ({token_preview}). Real feed reconnecting...",
         "timestamp": _time.time(),
-        "sim_mode_cleared": True,
-        "next_step": "Wait 5-10 seconds, then check /api/debug to confirm sim_mode=False",
+        "sim_mode_disabled_permanently": True,
+        "next_step": "Wait 5-10 seconds, then check /api/debug to confirm connected:true",
     }
 
 

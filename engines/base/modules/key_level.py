@@ -237,15 +237,22 @@ def analyze(candles, ctx: MarketContext) -> list:
         lows = [c["low"] for c in window[-6:]]
 
         # Descending highs = bearish trendline
+        # AUDIT-4-18 FIX (2026-07-25): changed `if` → `elif` so a triangle
+        # pattern (both descending highs AND ascending lows) doesn't fire
+        # BOTH CALL and PUT signals simultaneously. A triangle is a NEUTRAL
+        # consolidation — emitting both directions causes the blender's
+        # CALL/PUT votes to cancel out, deflating vote_ratio. With `elif`,
+        # if the bearish trendline fires (descending highs), the bullish
+        # check is skipped. The first condition (descending highs + close
+        # above them) is the stronger reversal signal anyway.
         if highs[0] > highs[-1] and all(highs[i] >= highs[i+1] - atr*0.3 for i in range(len(highs)-1)):
             if close > max(highs[-2], highs[-1]):
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=2, confidence=56,
                     signal_type="REVERSAL", reliability="LEVEL", group="TRENDLINE",
                     reasons=[f"Trendline breakout above descending highs → CALL reversal"]))
-
         # Ascending lows = bullish trendline
-        if lows[0] < lows[-1] and all(lows[i] <= lows[i+1] + atr*0.3 for i in range(len(lows)-1)):
+        elif lows[0] < lows[-1] and all(lows[i] <= lows[i+1] + atr*0.3 for i in range(len(lows)-1)):
             if close < min(lows[-2], lows[-1]):
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=2, confidence=56,
