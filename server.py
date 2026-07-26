@@ -89,9 +89,17 @@ if not _QX_TOKEN and not _QX_EMAIL:
 elif _QX_TOKEN:
     print(f"[server] ✅ QX_TOKEN found ({_QX_TOKEN[:8]}...{_QX_TOKEN[-4:]})")
 else:
-    print(f"[server] ⚠️  QX_EMAIL found but no QX_TOKEN — will try email/password")
-    print("[server]    Note: email/password login is blocked by Cloudflare on Railway.")
-    print("[server]    Set QX_TOKEN manually via Railway Variables or /api/set-token.")
+    # FIX (2026-07-26 / MANUAL-TOKEN-MODE): email/password is no longer
+    # attempted (Cloudflare blocks Railway IPs, and repeated failures
+    # caused Quotex to block the user's account). Operator MUST push a
+    # token via /api/set-token or set QX_TOKEN in Railway Variables.
+    print("[server] ⚠️  QX_TOKEN not set — app will wait for a token.")
+    print("[server]    Email/password login is DISABLED (Cloudflare blocks Railway IPs).")
+    print("[server]    To get live data, push a token via ONE of:")
+    print("[server]      1. Set QX_TOKEN in Railway Variables (persists across redeploys)")
+    print("[server]      2. POST /api/set-token {\"token\":\"YOUR_TOKEN\"} (runtime, no redeploy)")
+    print("[server]      3. GET  /api/set-token?token=YOUR_TOKEN (browser-friendly)")
+    print("[server]    See RAILWAY_TOKEN_SETUP.md for token extraction instructions.")
 
 feed = _Feed()
 clients: dict[str, WebSocket] = {}   # cid -> ws
@@ -547,10 +555,14 @@ async def token_status():
             status = "live_token"
             message = f"QX_TOKEN is set ({preview}) — connection state: {connection_status}"
     elif has_email:
-        status = "email_only"
-        message = ("QX_EMAIL is set but no QX_TOKEN — will try email/password "
-                   "login. Note: Cloudflare blocks this on Railway datacenter IPs. "
-                   "Set QX_TOKEN manually via Railway Variables or /api/set-token.")
+        status = "email_only_no_token"
+        # FIX (2026-07-26 / MANUAL-TOKEN-MODE): email/password login is
+        # DISABLED on Railway (Cloudflare blocks it). Don't say "will try
+        # email/password login" because we no longer do.
+        message = ("QX_EMAIL is set but no QX_TOKEN — email/password login "
+                   "is DISABLED on Railway (Cloudflare blocks datacenter IPs "
+                   "and Quotex may ban the account for repeated failures). "
+                   "Push a Quotex token via /api/set-token to get live data.")
     else:
         status = "no_credentials"
         message = ("❌ No Quotex credentials — sim mode is permanently disabled. "
@@ -661,13 +673,16 @@ async def _apply_token(token: str):
       `import time as _time` aliases — both modules are now imported
       once at the top of the file.
     """
-    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-05): raise minimum length
-    # from 10 to 50. Real Quotex SSID tokens are JWT-style (200+ chars).
-    # A 10-char minimum let garbage like "aaaaaaaaaa" through, which then
-    # wasted 30s on a doomed authorization attempt before being cleared.
-    if not token or len(token) < 50:
-        return {"ok": False, "error": "token too short "
-                "(real Quotex tokens are 200+ chars)"}
+    # FIX (2026-07-26 / MANUAL-TOKEN-MODE): lowered minimum from 50 to 20.
+    # Quotex has TWO token formats:
+    #   - Long JWT-style "quotex-token.eyJ..." (200+ chars) — older API
+    #   - Short alphanumeric "Nydjp4hzBRXUxig5g9yxxLBLqB7LHj2do3wJ0RbJ" (~40 chars)
+    #     — current Quotex market-qx.trade API (verified live 2026-07-26).
+    # The previous 50-char minimum rejected the short format, blocking the
+    # user's manual token push via /api/set-token. Now accepts both formats.
+    if not token or len(token) < 20:
+        return {"ok": False, "error": f"token too short ({len(token) if token else 0} chars) "
+                "(real Quotex tokens are 40+ chars)"}
 
     # Set the token in the environment so _connect() picks it up
     os.environ["QX_TOKEN"] = token

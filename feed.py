@@ -1406,10 +1406,19 @@ class QuotexFeed:
         reconciled sim delegate streams — that path is now dead code
         (sim is permanently disabled). Only the real-feed reconnect
         logic remains.
+
+        FIX (2026-07-26 / MANUAL-TOKEN-MODE): increase poll interval from
+        10s to 60s. Previous 10s poll + 10s reconnect = every ~10s a
+        Quotex connection attempt → 6 attempts/min → 76 in 20 min →
+        Quotex blocked the account for anti-abuse. Now: poll every 60s
+        (still much faster than the 5min exponential backoff cap, so a
+        freshly pushed token is picked up within 1 min).
         """
         try:
             while True:
-                await asyncio.sleep(10)
+                # FIX (2026-07-26 / MANUAL-TOKEN-MODE): 60s poll instead of
+                # 10s. Quotex anti-abuse triggered at ~6 attempts/min.
+                await asyncio.sleep(60)
                 # SIM-MODE-DISABLED (DEEP-AUDIT-2026-07-26 / F-01-52): removed
                 # dead _sim_delegate check/clear block (sim is permanently
                 # disabled, getattr returns None so the if-branch is
@@ -1675,6 +1684,29 @@ class QuotexFeed:
                     continue   # this method failed — try the next one
 
     async def _connect(self) -> bool:
+        """Connect to Quotex using ONLY the QX_TOKEN environment variable.
+
+        CONFIGURATION PHILOSOPHY (2026-07-26 / MANUAL-TOKEN-MODE):
+        The user manually extracts a Quotex token from their browser and
+        sets it in Railway Variables as QX_TOKEN. This is the ONLY source
+        of authentication. We do NOT attempt email/password login because:
+          1. Cloudflare blocks Railway datacenter IPs → "Forbidden"
+          2. Repeated failed attempts get the Quotex account blocked
+             (user already got blocked once for excessive retries).
+          3. The token is the most reliable path: it's what the browser
+             uses, and it bypasses Cloudflare entirely.
+
+        The previous code had THREE fallback attempts per cycle:
+          Attempt 1: QX_TOKEN
+          Attempt 2: email/password (Cloudflare-forbidden on Railway)
+          Attempt 3: retry with token from session_data
+
+        Each failed attempt counted toward Quotex's anti-abuse counter.
+        With 60+ reconnect attempts in 20 minutes, the account got blocked.
+        Now: ONE attempt per cycle. If it fails, we wait 5 minutes
+        (not 10s) before trying again — giving Quotex's anti-abuse
+        counter time to decay.
+        """
         try:
             _USE_RAW_WS = os.environ.get("QX_USE_RAW_WS", "0") == "1"
             if not _USE_RAW_WS:
@@ -1685,82 +1717,53 @@ class QuotexFeed:
             )
             # Firefox UA — matches the Firefox TLS cipher suite in ssl_utils.py
             # so Cloudflare sees a consistent Firefox fingerprint.
-            # FIX (DEEP-AUDIT-2026-07-26 / F-01-67): documented UA requirement.
-            # If Cloudflare bumps its minimum Firefox version, this fallback
-            # fails. Override via QX_UA env var if needed.
             ua = os.environ.get("QX_UA", "").strip() or (
                 "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) "
                 "Gecko/20100101 Firefox/119.0")
 
-            # ── Attempt 1: TOKEN (fast path, skipped if no token) ─────────────
+            # ── SINGLE ATTEMPT: QX_TOKEN only ─────────────────────────────────
+            # No email/password fallback. No retry-with-session-data. One
+            # connect attempt per cycle. If the token is good, we connect.
+            # If not, we wait 5 minutes (see run() backoff below) and try
+            # again — operator must push a fresh token via /api/set-token
+            # or Railway Variables.
             env_token = os.environ.get("QX_TOKEN", "").strip()
-            if env_token:
-                self._client = self._make_client(ua, root)
-                self._client.set_session(user_agent=ua, ssid=env_token)
-                print(f"[feed] connecting with session token=…{env_token[-4:]}")
-                # FIX (DEEP-AUDIT-2026-07-26 / F-01-68): previously logged
-                # token[:8] (first 8 chars). If logs are aggregated/shipped
-                # to a third party (Datadog etc.), partial token leakage.
-                # Now logs only the last 4 chars — enough for debugging
-                # without exposing a guessable prefix.
-                try:
-                    ok, reason = await asyncio.wait_for(
-                        self._client.connect(), timeout=30)
-                    if ok:
-                        self._remember_token()
-                        print(f"[feed] connect -> ok=True  reason={reason}")
-                        return True
-                    print(f"[feed] token auth failed ({reason}) — trying login")
-                except Exception as _te:
-                    print(f"[feed] token attempt error: {_te}")
-                await self._close_client(self._client)
-                # FIX (DEEP-AUDIT-2026-07-26 / F-01-19): only discard the
-                # token if the failure reason indicates an auth rejection.
-                # Previously the token was popped on ANY failure (incl. 30s
-                # timeout) — a valid token was thrown away on transient
-                # network slowness, falling back to email/password which may
-                # also fail on Railway (Cloudflare).
-                if reason and "reject" in str(reason).lower():
-                    os.environ.pop("QX_TOKEN", None)
+            if not env_token:
+                # No token set. Print ONCE per ~5 min to avoid log spam.
+                # Don't attempt email/password — that path is blocked on
+                # Railway and risks account ban.
+                now = time.time()
+                last_warn = getattr(self, "_last_no_token_warn", 0)
+                if now - last_warn > 300:
+                    print("[feed] ⚠️  QX_TOKEN not set — please push a token "
+                          "via Railway Variables or POST /api/set-token "
+                          "{\"token\":\"...\"}. Email/password login is "
+                          "disabled (Cloudflare blocks Railway IPs).")
+                    self._last_no_token_warn = now
+                return False
 
-            # ── Attempt 2: Fresh client, email/password (vendored pyquotex) ────
-            # This is the MAIN login path. Vendored pyquotex uses Firefox TLS
-            # cipher suite (ssl_utils.py) which bypasses Cloudflare. After
-            # successful login, pyquotex auto-saves token to session.json via
-            # update_session() in login.py — NO manual QX_TOKEN needed.
-            #
-            # SKIP for raw WS backend (it has no HTTP login).
-            if not _USE_RAW_WS:
-                print("[feed] connecting via email/password "
-                      "(vendored pyquotex + Firefox TLS)...")
-                self._client = self._make_client(ua, root)
+            self._client = self._make_client(ua, root)
+            self._client.set_session(user_agent=ua, ssid=env_token)
+            print(f"[feed] connecting with session token=…{env_token[-4:]}")
+            try:
                 ok, reason = await asyncio.wait_for(
-                    self._client.connect(), timeout=45)
-                print(f"[feed] connect -> ok={ok}  reason={reason}")
+                    self._client.connect(), timeout=30)
                 if ok:
                     self._remember_token()
+                    print(f"[feed] connect -> ok=True  reason={reason}")
                     return True
-                if reason and "reject" in str(reason).lower():
-                    self._clear_stale_token()
-
-                # ── Attempt 2b: auth may have succeeded internally but connect()
-                #    returned False (pyquotex race condition). If session_data
-                #    now holds a fresh token, one more connect() often succeeds.
-                new_tok = (self._client.session_data or {}).get("token", "")
-                if new_tok and new_tok != env_token:
-                    print(f"[feed] retrying with fresh token={new_tok[:8]}...")
-                    try:
-                        ok, reason = await asyncio.wait_for(
-                            self._client.connect(), timeout=30)
-                        print(f"[feed] retry -> ok={ok}  reason={reason}")
-                        if ok:
-                            self._remember_token()
-                            return True
-                        if reason and "reject" in str(reason).lower():
-                            self._clear_stale_token()
-                    except Exception as _re:
-                        print(f"[feed] retry error: {_re}")
-
+                print(f"[feed] connect -> ok=False  reason={reason}")
+                # Don't pop the token on failure — operator pushed it,
+                # they may re-push the SAME token after refreshing in
+                # their browser. Popping it would force them to re-push
+                # every time, increasing manual workload.
+                # If the rejection is auth-related (token expired/revoked),
+                # the operator will push a new one via /api/set-token.
+            except Exception as _te:
+                print(f"[feed] token attempt error: {_te}")
+                # Don't close+recreate the client — that wipes session
+                # state. Just let the next cycle retry with the same
+                # client + same token.
             return False
         except Exception as exc:
             err_msg = f"connect error: {exc}"
@@ -4648,44 +4651,30 @@ class QuotexFeed:
             print("[feed]   Set QX_EMAIL + QX_PASSWORD in Railway Variables")
 
     async def _auto_relogin(self) -> bool:
-        """Re-login after connection failure — clears stale tokens so
-        _connect() does a fresh login on next retry.
+        """Re-login after connection failure.
 
-        With vendored pyquotex, _connect() handles the actual login via
-        Firefox TLS. This method just clears stale state.
+        FIX (2026-07-26 / MANUAL-TOKEN-MODE): in manual-token mode, we
+        do NOT clear the QX_TOKEN env var on failure — the operator
+        pushed it deliberately and may re-push the SAME token after
+        refreshing their browser. Clearing it forces them to re-push
+        every time, increasing manual workload. The backoff in run()
+        handles pacing.
 
-        FIX (2026-07-13): this used to ALWAYS return True, which made the
-        caller reset _reconnect_attempts = 0 every 3rd failure and retry
-        immediately — the exponential backoff (10s, 20s, 40s, 60s) never
-        progressed past attempt 2. Now: only return True if we actually
-        cleared a stale token (meaning there's a reason to retry now
-        rather than waiting). If there was no token to clear, return
-        False so the caller continues the backoff.
+        Previously: cleared stale token + session.json → caused the
+        "token cleared after auth rejection" loop seen in logs (63
+        occurrences in 20 min). Now: NEVER clear on failure. Operator
+        pushes a new token via /api/set-token when they have one.
+
+        Returns False always — no reason to retry immediately. Let
+        the backoff pacing apply.
         """
-        cleared_something = False
-
-        # Clear stale QX_TOKEN env var
-        old_token = os.environ.get("QX_TOKEN", "").strip()
-        if old_token:
-            print(f"[feed] auto-relogin: clearing stale token ({old_token[:8]}...)")
-            os.environ.pop("QX_TOKEN", None)
-            cleared_something = True
-
-        # Clear stale token in session.json
-        try:
-            from quotex_ws import QuotexWSClient
-            QuotexWSClient.clear_session_json_token()
-            cleared_something = True
-        except Exception as _e:
-            print(f"[silent-except] feed.py:4641 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
-            pass
-
-        if cleared_something:
-            print("[feed] auto-relogin: cleared stale state — retrying _connect()")
-            return True
-        # Nothing to clear → no reason to retry immediately. Let the
-        # exponential backoff continue so we don't hammer Quotex.
-        print("[feed] auto-relogin: nothing to clear — continuing backoff")
+        # Intentionally do NOT clear QX_TOKEN. The operator set it; we
+        # trust their judgment. If it's actually dead, they'll push a
+        # new one via /api/set-token, which sets _token_update_pending
+        # and triggers immediate retry via _apply_token() in server.py.
+        print("[feed] auto-relogin: keeping QX_TOKEN (manual-token mode) "
+              "— backoff will retry; push a fresh token via /api/set-token "
+              "if the current one is dead.")
         return False
 
     async def run(self, broadcast) -> None:
@@ -4725,12 +4714,36 @@ class QuotexFeed:
         # orphaning the task on run() exit.
         self._reconnect_task = asyncio.create_task(self._aggressive_reconnect())
 
-        # ── Auto-login on startup (2026-07-11) ─────────────────────────────
-        # If QX_EMAIL + QX_PASSWORD are set but the connection keeps failing
-        # (e.g., token expired, Cloudflare blocking), try a fresh browser-login
-        # ONCE before entering the main loop. This makes the app fully
-        # auto-connecting — no manual token refresh needed.
-        await self._auto_login_startup()
+        # ── Auto-login on startup ──────────────────────────────────────────
+        # FIX (2026-07-26 / MANUAL-TOKEN-MODE): _auto_login_startup used to
+        # print "will login with email/password" — but email/password
+        # login is disabled on Railway (Cloudflare blocks Railway IPs).
+        # Now we just check if a token exists. If not, we print a clear
+        # instruction to push one via /api/set-token. No more misleading
+        # "vendored pyquotex + Firefox TLS will handle login" message.
+        env_token_check = os.environ.get("QX_TOKEN", "").strip()
+        if env_token_check:
+            print(f"[feed] startup: QX_TOKEN set (…{env_token_check[-4:]}) "
+                  f"— will use it to connect.")
+        else:
+            # Try session.json as fallback (works if Railway volume mounted)
+            try:
+                from quotex_ws import QuotexWSClient
+                sess_data = QuotexWSClient.load_session_json()
+                if sess_data and sess_data.get("token"):
+                    saved = sess_data["token"]
+                    print(f"[feed] startup: found saved token in session.json "
+                          f"(…{saved[-4:]}) — will use it.")
+                    os.environ["QX_TOKEN"] = saved
+                else:
+                    print("[feed] startup: no QX_TOKEN set and session.json "
+                          "empty — push a token via:")
+                    print("[feed]   POST /api/set-token {\"token\":\"...\"}")
+                    print("[feed]   or set QX_TOKEN in Railway Variables.")
+            except Exception as _e:
+                print(f"[feed] startup: no QX_TOKEN, session.json check failed: {_e}")
+                print("[feed]   Push a token via POST /api/set-token "
+                      "{\"token\":\"...\"}")
 
         # FIX L2 (2026-07-19): make housekeep/watchdog intervals env-tunable
         # so ops can dial them in for production tuning.
@@ -4774,15 +4787,22 @@ class QuotexFeed:
                                 self._reconnect_attempts = 0
                                 continue
 
-                        # Cap backoff at 60s — never wait longer than a minute.
-                        # This ensures the app picks up new QX_TOKEN env var
-                        # updates within 60s of the user setting them.
+                        # FIX (2026-07-26 / MANUAL-TOKEN-MODE): increase backoff
+                        # from 10s→60s to 60s→300s (5 min). Previous aggressive
+                        # retry (76 attempts in 20 min) caused Quotex to block
+                        # the account for anti-abuse. Now: 60s → 120s → 240s →
+                        # 300s (capped at 5 min). This still picks up a freshly
+                        # pushed token within 5 min, but stops hammering Quotex
+                        # when the token is dead/expired — operator pushes a
+                        # new token via /api/set-token and the next cycle (within
+                        # 5 min) picks it up.
                         self._reconnect_attempts += 1
-                        delay = min(10 * (2 ** min(self._reconnect_attempts - 1, 3)), 60)
+                        delay = min(60 * (2 ** min(self._reconnect_attempts - 1, 3)), 300)
                         print(f"[feed] reconnect attempt {self._reconnect_attempts} "
-                              f"failed — retrying in {delay}s")
-                        print(f"[feed]   (attempt counter resets every 60s — "
-                              f"app will keep trying forever)")
+                              f"failed — retrying in {delay}s "
+                              f"(gentle backoff — Quotex blocks aggressive retries)")
+                        print(f"[feed]   to push a fresh token NOW without waiting, "
+                              f"call: POST /api/set-token {{\"token\":\"...\"}}")
                         self._record_stream_error()
                         await asyncio.sleep(delay)
                         continue
