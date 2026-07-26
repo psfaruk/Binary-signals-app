@@ -466,7 +466,19 @@ class QuotexWSClient:
                     cookies: str | None = None,
                     **_unused) -> None:
         """Called by feed.py after a successful qx_login.fetch_session().
-        Stores the ssid + cookies so connect() can authorize on the WS."""
+        Stores the ssid + cookies so connect() can authorize on the WS.
+
+        FIX (LIVE-DATA-WS-FIX-2, 2026-07-26): when called with a NEW ssid
+        (different from the previous one), clear the token-dead backoff
+        state so the next connect() doesn't honor the 60s wait. This lets
+        /api/set-token refresh the token and have the next reconnect
+        succeed immediately instead of waiting 60s for no reason.
+        """
+        # If the new ssid differs from the old one, treat as fresh token:
+        # reset the dead-token counter and backoff state.
+        if ssid and ssid != self._ssid:
+            self._consecutive_rejects = 0
+            self._token_dead_at = 0
         self._user_agent = user_agent
         self._ssid = ssid
         self._cookies = cookies
@@ -631,7 +643,26 @@ class QuotexWSClient:
     # ── Connection lifecycle ──────────────────────────────────────────────
 
     async def connect(self) -> tuple[bool, str]:
-        """Open the WebSocket and authorize with the stored ssid."""
+        """Open the WebSocket and authorize with the stored ssid.
+
+        FIX (LIVE-DATA-WS-FIX-2, 2026-07-26): backoff when token has been
+        marked dead (3+ consecutive rejects in a row). Without this, the
+        feed.py retry loop hammers Quotex every few seconds with the same
+        dead token, which causes Quotex to flag the account as suspicious
+        and revoke the session entirely — a real problem we hit on
+        2026-07-26. With backoff, after 3 rejects the client waits 60s
+        between connect attempts (instead of ~3s), giving the operator
+        time to update the token via /api/set-token without triggering
+        Quotex's anti-abuse systems.
+        """
+        # Backoff check: if token is dead, wait before reconnecting.
+        token_dead_at = getattr(self, "_token_dead_at", 0)
+        if token_dead_at:
+            elapsed = time.time() - token_dead_at
+            backoff = 60.0  # 60s backoff after token marked dead
+            if elapsed < backoff:
+                wait_remaining = backoff - elapsed
+                return False, f"token dead — backing off {wait_remaining:.0f}s (refresh via /api/set-token)"
         # FIX (DEEP-AUDIT-2026-07-26 / F-15-03): previously short-circuited on
         # `self._connected and self._authorized` even when the socket was
         # actually dead (e.g., a prior process kill left the flags set with
@@ -893,15 +924,40 @@ class QuotexWSClient:
         # after 15s. Add `s_authorization` to the accept set; keep the old
         # names for backward compat (in case some legacy Quotex server still
         # emits them, or a future fork renames back).
+        # FIX (LIVE-DATA-WS-FIX-2, 2026-07-26): rate-limit retry attempts
+        #   to avoid hammering Quotex with the same dead token (which
+        #   caused Quotex to revoke a working session as suspicious).
+        #   After 3 consecutive rejects, the client backs off for 60s
+        #   before the next connect attempt, and signals the host app via
+        #   self.token_dead_callback so the app can show "please update
+        #   token" UI instead of silently looping.
         if name in ("authorization/accept", "authorization/success", "s_authorization"):
             self._auth_result = True
             self._authorized = True
+            # Reset reject counter on successful auth.
+            self._consecutive_rejects = 0
         elif name in ("authorization/reject", "authorization/error"):
             self._auth_result = False
             self._authorized = False
-            print(f"[quotex_ws] ⚠️  authorization rejected: {args}")
+            self._consecutive_rejects = getattr(self, "_consecutive_rejects", 0) + 1
+            print(f"[quotex_ws] ⚠️  authorization rejected ({self._consecutive_rejects}x): {args}")
             print(f"[quotex_ws]    Token has expired or is invalid.")
-            print(f"[quotex_ws]    App will auto-relogin on next retry cycle.")
+            if self._consecutive_rejects >= 3:
+                print(f"[quotex_ws]    ⛔ Token marked DEAD after {self._consecutive_rejects} "
+                      f"consecutive rejects — backing off 60s before retry.")
+                print(f"[quotex_ws]    → Action required: refresh the Quotex SSID and")
+                print(f"[quotex_ws]      set it via /api/set-token or Railway Variables.")
+                self._token_dead_at = time.time()
+                # Notify host app (feed.py) so it can stop hammering and
+                # surface the issue to the user instead of silent looping.
+                cb = getattr(self, "token_dead_callback", None)
+                if callable(cb):
+                    try:
+                        cb()
+                    except Exception:
+                        pass
+            else:
+                print(f"[quotex_ws]    App will auto-relogin on next retry cycle.")
             # AUDIT-1-18 FIX: previously, the ping loop kept re-sending the
             # same expired ssid every 5 min, and the WS stayed open. feed.py
             # thought the connection was healthy (because _connected=True)

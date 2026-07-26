@@ -458,15 +458,57 @@ async def token_status():
     SIM-MODE-DISABLED (2026-07-25): sim mode is permanently disabled, so
     the only way to get live data is to set QX_TOKEN. This endpoint exposes
     the token presence state (without leaking the token itself).
+
+    FIX (LIVE-DATA-WS-FIX-2, 2026-07-26): also report whether the app's
+    live Quotex connection is currently AUTHORIZED. Without this, the
+    frontend can't distinguish "no token set" from "token set but Quotex
+    rejected it" — both look like "no live data". Now the response includes
+    `connection_status` so the user can act on the actual problem.
     """
     qx_token = os.environ.get("QX_TOKEN", "").strip()
     qx_email = os.environ.get("QX_EMAIL", "").strip()
     has_token = bool(qx_token)
     has_email = bool(qx_email)
+
+    # Inspect the feed's live Quotex client state.
+    connection_status = "disconnected"
+    consecutive_rejects = 0
+    token_dead = False
+    try:
+        client = getattr(feed, "_client", None)
+        if client is not None:
+            authorized = bool(getattr(client, "_authorized", False))
+            connected = bool(getattr(client, "_connected", False))
+            consecutive_rejects = int(getattr(client, "_consecutive_rejects", 0))
+            token_dead = bool(getattr(client, "_token_dead_at", 0))
+            if authorized and connected:
+                connection_status = "live_authorized"
+            elif connected and not authorized:
+                connection_status = "connected_unauth"
+            elif token_dead:
+                connection_status = "token_dead_backoff"
+            else:
+                connection_status = "disconnected"
+    except Exception:
+        pass
+
     if has_token:
         preview = f"{qx_token[:8]}...{qx_token[-4:]}" if len(qx_token) > 12 else "(short)"
-        status = "live_token"
-        message = f"QX_TOKEN is set ({preview}) — app is on live data."
+        if connection_status == "live_authorized":
+            status = "live_token"
+            message = f"QX_TOKEN is set ({preview}) — connected + authorized. Live data flowing."
+        elif connection_status == "token_dead_backoff":
+            status = "token_dead"
+            message = (f"⛔ Quotex REJECTED the token {consecutive_rejects}x consecutively. "
+                       f"Token is likely EXPIRED or REVOKED by Quotex. Refresh the SSID and "
+                       f"set it via /api/set-token to restore live data.")
+        elif connection_status in ("connected_unauth", "disconnected"):
+            status = "token_set_but_connecting"
+            message = (f"QX_TOKEN is set ({preview}) but Quotex connection is "
+                       f"'{connection_status}'. Will retry shortly.")
+        else:
+            status = "live_token"
+            message = f"QX_TOKEN is set ({preview}) — connection state: {connection_status}"
     elif has_email:
         status = "email_only"
         message = ("QX_EMAIL is set but no QX_TOKEN — will try email/password "
@@ -481,9 +523,12 @@ async def token_status():
         "status": status,
         "has_token": has_token,
         "has_email": has_email,
+        "connection_status": connection_status,
+        "consecutive_rejects": consecutive_rejects,
+        "token_dead": token_dead,
         "sim_mode_disabled": True,
         "message": message,
-        "action": "set_token" if status == "no_credentials" else None,
+        "action": "refresh_token" if token_dead else ("set_token" if status == "no_credentials" else None),
     }
 
 
