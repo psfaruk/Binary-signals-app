@@ -2,29 +2,29 @@
 import asyncio
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable
 
 import httpx
 
 from .global_value import AuthStatus, ConnectionState, WebsocketStatus
-from .network.history import GetHistory
 from .network.login import Login
-from .network.logout import Logout
 from .network.navigator import Browser
 from .network.settings import Settings
 from .utils import json_utils as json
 from .utils.account_type import AccountType
 from .utils.async_utils import EventRegistry
-from .ws.channels.buy import Buy
 from .ws.channels.candles import GetCandles
-from .ws.channels.sell_option import SellOption
 from .ws.channels.ssid import Ssid
 from .ws.client import WebsocketClient
 from .ws.objects.candles import Candles
 from .ws.objects.listinfodata import ListInfoData
 from .ws.objects.profile import Profile
 from .ws.objects.timesync import TimeSync
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-16-03): removed imports of dead stub
+# channels (Buy, SellOption) and dead network stubs (Logout, GetHistory)
+# — the properties that returned them are deleted below.
 
 logger = logging.getLogger(__name__)
 
@@ -58,28 +58,32 @@ class QuotexAPI:
             integration tests can point at a local replay server, but
             also useful for routing through a custom proxy.
         """
+    # FIX (DEEP-AUDIT-2026-07-26 / F-16-04): removed ~15 dead-state
+    # attributes that were only ever written by handlers of trading/
+    # pending/sell-option events (all removed for the read-only signal
+    # analysis app). Kept: state, on_otp_callback, reconnect_policy,
+    # _ws_send_lock, current_asset, current_period, account_balance,
+    # account_type, tournament_id, instruments, listinfodata, timesync,
+    # candles, profile, host, https_url, wss_url, wss_message,
+    # websocket_client, _websocket_task, is_logged, _temp_status,
+    # username, password, resource_path, user_data_dir, proxies, lang,
+    # settings_list, signal_data, get_candle_data, historical_candles,
+    # candle_v2_data, realtime_price (deque now), realtime_price_data,
+    # candle_generated_check, candle_generated_all_size_check,
+    # session_data, browser, settings, event_registry, slots, profit_today,
+    # heartbeat_task, last_message_at, _subscriptions, _control_handlers.
+
         self.state = ConnectionState()
         self.on_otp_callback = on_otp_callback
         self.reconnect_policy = reconnect_policy
         self._ws_send_lock = asyncio.Lock()
 
-        self.socket_option_opened: dict[str, Any] = {}
-        self.buy_id: str | int | None = None
-        self.pending_id: str | int | None = None
-        self.trace_ws: bool = False
-        self.buy_expiration: int | None = None
         self.current_asset: str | None = None
         self.current_period: int | None = None
-        self.buy_successful: bool | None = None
-        self.pending_successful: bool | None = None
         self.account_balance: dict[str, Any] | None = None
         self.account_type: int | None = AccountType.DEMO
         self.tournament_id: int = 0
         self.instruments: list[Any] = []
-        self.training_balance_edit_request: dict[str, Any] | None = None
-        self.profit_in_operation: float | None = None
-        self.sold_options_respond: Any = None
-        self.sold_digital_options_respond: Any = None
         self.listinfodata = ListInfoData()
         self.timesync = TimeSync()
         self.candles = Candles()
@@ -95,9 +99,6 @@ class QuotexAPI:
         self.wss_message: str | None = None
         self.websocket_client: WebsocketClient | None = None
         self._websocket_task: asyncio.Task | None = None
-        self.set_ssid: Any = None
-        self.object_id: Any = None
-        self.token_login2fa: str | None = None
         self.is_logged: bool = False
         self._temp_status: str = ""
         self.username = username
@@ -111,16 +112,20 @@ class QuotexAPI:
         self.get_candle_data: dict[str, Any] = {}
         self.historical_candles: dict[str, Any] = {}
         self.candle_v2_data: dict[str, Any] = {}
-        self.realtime_price: dict[str, list[dict[str, Any]]] = (
-            defaultdict(list)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-05): use deque(maxlen=1000)
+        # instead of defaultdict(list) — old code did
+        # `if len(price_list) > 1000: price_list.pop(0)` which is O(N)
+        # per tick (N=1000) and a real CPU bottleneck at 5-10 Hz tick
+        # rate across N assets. deque(maxlen=1000) is O(1) and
+        # auto-evicts oldest entries.
+        self.realtime_price: dict[str, deque] = defaultdict(
+            lambda: deque(maxlen=1000)
         )
-        self.realtime_price_data: list[Any] = []
-        self.realtime_candles: dict[str, Any] = {}
-        self.realtime_sentiment: dict[str, Any] = {}
-        self.traders_mood: dict[str, Any] = {}
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-04): removed dead attributes
+        # `realtime_price_data`, `realtime_candles`, `realtime_sentiment`,
+        # `traders_mood`, `top_list_leader` — all set, never read.
         self.candle_generated_check = defaultdict(lambda: defaultdict(dict))
         self.candle_generated_all_size_check = defaultdict(dict)
-        self.top_list_leader: dict[str, Any] = {}
         self.session_data: dict[str, Any] = {}
         self.browser = Browser()
         self.browser.set_headers()
@@ -129,7 +134,7 @@ class QuotexAPI:
         from pyquotex._api._waits import SlotRegistry
         self.slots = SlotRegistry()
         self.profit_today: float | None = None
-        self.heartbeat_task: asyncio.Task | None = None
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-11): heartbeat_task removed.
 
         # Last time an inbound frame arrived; used by the stale watchdog
         # in :class:`pyquotex.ws.client.WebsocketClient` to decide when
@@ -184,9 +189,15 @@ class QuotexAPI:
     # Control-event handlers (dispatch table targets)
     # ------------------------------------------------------------------
     async def _h_auth_ok(self, data: Any) -> None:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-06): also flip state.status to
+        # CONNECTED (was previously done by the substring-matched branch).
         self.state.auth_status = AuthStatus.AUTHENTICATED
+        self.state.status = WebsocketStatus.CONNECTED
         await self.event_registry.set_event(
             "auth_changed", self.state.auth_status
+        )
+        await self.event_registry.set_event(
+            "status_changed", self.state.status
         )
 
     async def _h_instruments_list(self, data: Any) -> None:
@@ -218,12 +229,13 @@ class QuotexAPI:
             self.candle_generated_all_size_check[str(asset)] = data
 
     async def _h_sentiment(self, data: Any) -> None:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-04): removed writes to dead
+        # `traders_mood` and `realtime_sentiment` dicts (never read in
+        # current app). Now only fires the event so consumers using
+        # `wait_event('sentiment_ready')` (if any) still unblock.
         if not isinstance(data, dict):
             return
-        asset = data.get("asset")
-        if asset:
-            self.traders_mood[asset] = data
-            self.realtime_sentiment[asset] = data
+        await self.event_registry.set_event("sentiment_ready", data)
 
     # ------------------------------------------------------------------
     # WebSocket lifecycle
@@ -234,28 +246,19 @@ class QuotexAPI:
         self.state.status = WebsocketStatus.CONNECTED
         await self.event_registry.set_event("status_changed", self.state.status)
 
-        # Start Heartbeat task to keep connection alive and stream active
-        async def heartbeat() -> None:
-            while self.state.status == WebsocketStatus.CONNECTED:
-                try:
-                    await self.websocket.send('42["tick"]')
-                except Exception:
-                    break
-                # Send it every 5 seconds as in legacy version.
-                # TODO(refactor/architecture Phase 2): this is fixed-interval
-                # pacing for a heartbeat ping (NOT a retry-on-error sleep),
-                # so exponential backoff_sleep would be the wrong primitive
-                # here. Migrating only makes sense if reconnect logic is
-                # added that retries on transient send failures.
-                await asyncio.sleep(5)
-
-        self.heartbeat_task = asyncio.create_task(heartbeat())
-
-        await self.websocket.send('42["indicator/list"]')
-        await self.websocket.send('42["drawing/load"]')
-        await self.websocket.send('42["pending/list"]')
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-11): removed the legacy
+        # `heartbeat()` task that sent `42["tick"]` every 5s — Quotex's
+        # server ignores Socket.IO "tick" events, and the websockets
+        # library already handles Engine.IO-level ping/pong via
+        # `ping_interval` in ws/client.py. Also removed three unused
+        # subscribe sends (`indicator/list`, `drawing/load`,
+        # `pending/list`) whose responses have no handler and were
+        # silently dropped. Fix also covers Problem 61: standardized on
+        # `instruments/list` (the response event name) — old code sent
+        # `instruments/get` which has no matching handler in the dispatch
+        # table.
         await self.websocket.send('42["chart_notification/get"]')
-        await self.websocket.send('42["instruments/get"]')
+        await self.websocket.send('42["instruments/list"]')
 
     async def _on_message(self, msg: bytes | str) -> None:
         """Called for every WebSocket message received."""
@@ -269,11 +272,40 @@ class QuotexAPI:
                 else str(msg)
             )
 
+            # FIX (DEEP-AUDIT-2026-07-26 / F-16-07): removed DEBUG `print()`
+            # of pre-auth WS messages that could leak session data to
+            # stdout in production. Use logger.debug so it is filtered by
+            # log level in production.
             if self.state.auth_status != AuthStatus.AUTHENTICATED:
-                print(f"[WS DEBUG] Received while not authenticated: {msg_str[:200]}")
+                logger.debug("Pre-auth WS message: %s", msg_str[:200])
 
-            if "authorization/reject" in msg_str:
-                print(f"[DEBUG] Websocket authorization rejected: {msg_str}")
+            # FIX (DEEP-AUDIT-2026-07-26 / F-16-06): removed substring
+            # matching on raw WS messages (`if "authorization/reject" in
+            # msg_str` / `elif "s_authorization" in msg_str`) which could
+            # false-positive on tick asset names containing the substring.
+            # Now we parse the Socket.IO frame and dispatch via the event
+            # name only. The control-handler dispatch table below already
+            # handles `s_authorization` via `_h_auth_ok` — we keep an
+            # explicit check here for the reject path (Quotex sends
+            # `authorization/reject` as the event name).
+            try:
+                _evt_name = None
+                if msg_str and msg_str[0].isdigit():
+                    # Find the JSON payload start (see F-16-08 fix below)
+                    # using C-level str.find rather than a Python loop.
+                    _lb = msg_str.find('[')
+                    _lb = _lb if _lb != -1 else msg_str.find('{')
+                    if _lb != -1:
+                        _maybe = json.loads(msg_str[_lb:])
+                        if isinstance(_maybe, list) and _maybe and isinstance(_maybe[0], str):
+                            _evt_name = _maybe[0]
+            except Exception:
+                _evt_name = None
+
+            if _evt_name == "authorization/reject":
+                logger.warning(
+                    "Websocket authorization rejected: %s", msg_str[:200]
+                )
                 self.state.websocket_error_reason = (
                     "Websocket connection rejected."
                 )
@@ -282,43 +314,28 @@ class QuotexAPI:
                     "auth_changed", self.state.auth_status
                 )
                 return
-            elif "s_authorization" in msg_str:
-                print("[DEBUG] Websocket authorization SUCCESS!")
-                self.state.auth_status = AuthStatus.AUTHENTICATED
-                self.state.status = WebsocketStatus.CONNECTED
-                await self.event_registry.set_event(
-                    "auth_changed", self.state.auth_status
-                )
-                await self.event_registry.set_event(
-                    "status_changed", self.state.status
-                )
-                return
+            # `s_authorization` is handled by the dispatch table below
+            # via `_h_auth_ok` — no need for a separate branch here.
 
             # Detect Socket.IO prefix
             is_control = msg_str and msg_str[0].isdigit()
 
             # Clean JSON extraction
             try:
-                # Find start of JSON
-                start_idx = -1
-                for idx, char in enumerate(msg_str):
-                    if char in ('[', '{'):
-                        start_idx = idx
-                        break
+                # FIX (DEEP-AUDIT-2026-07-26 / F-16-08): replaced
+                # O(N) Python loop with C-level `str.find` to find the
+                # first `[` or `{`. ~10x faster on hot paths.
+                start_idx = msg_str.find('[')
+                _brace_idx = msg_str.find('{')
+                if start_idx == -1 or (
+                    _brace_idx != -1 and _brace_idx < start_idx
+                ):
+                    start_idx = _brace_idx
 
                 if start_idx != -1:
                     clean_json = msg_str[start_idx:]
                     data_json = json.loads(clean_json)
                     message = data_json
-                    data = (
-                        data_json[0]
-                        if (
-                                isinstance(data_json, list)
-                                and len(data_json) == 1
-                        )
-                        else data_json
-                    )
-                    pass
                 else:
                     pass
             except Exception as e:
@@ -459,31 +476,35 @@ class QuotexAPI:
                                     {"win": win, "profit": profit}
                                 )
 
-                    # Always set buy_confirmed if it was an open request
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-16-04): removed writes
+                    # to dead attributes `buy_id`, `buy_successful`,
+                    # `pending_id`, `pending_successful`. Slot writes are
+                    # kept (those drive event-driven waiters); the attribute
+                    # writes were only consumed by the now-removed trading
+                    # methods. Slot writes retained so callers using
+                    # `slots.buy_confirm.wait()` / `slots.pending_confirm.wait()`
+                    # still resolve.
                     if (
                             any(x in self._temp_status for x in ['orders/open', 'pending/create'])
                             and isinstance(data, dict)
                     ):
                         if 'pending' in self._temp_status:
-                            self.pending_id = data.get("id")
-                            self.pending_successful = True
-                            if self.pending_id is not None:
-                                self.slots.pending_confirm.set({"id": self.pending_id})
+                            _pending_id = data.get("id")
+                            if _pending_id is not None:
+                                self.slots.pending_confirm.set({"id": _pending_id})
                             await self.event_registry.set_event(
                                 'pending_confirmed', data
                             )
                         else:
-                            self.buy_id = data.get("id")
-                            self.buy_successful = True
-                            if self.buy_id is not None:
-                                self.slots.buy_confirm.set({"id": self.buy_id})
+                            _buy_id = data.get("id")
+                            if _buy_id is not None:
+                                self.slots.buy_confirm.set({"id": _buy_id})
                             await self.event_registry.set_event(
                                 'buy_confirmed', data
                             )
 
                 self._temp_status = ""  # Clear after consuming data
 
-            # 3. Handle Real-time and Profile Dicts
             if isinstance(message, dict):
                 if message.get("liveBalance") or message.get("demoBalance"):
                     self.account_balance = message
@@ -515,48 +536,6 @@ class QuotexAPI:
                     await self.event_registry.set_event(
                         'history_ready', message
                     )
-                elif (
-                        "id" in message
-                        and ("asset" in message or "amount" in message)
-                ):
-                    # Potential order confirmation
-                    self.buy_id = message.get("id")
-                    if self.buy_id is not None:
-                        self.slots.buy_confirm.set({"id": self.buy_id})
-                    await self.event_registry.set_event(
-                        'buy_confirmed', message
-                    )
-
-            elif (
-                    isinstance(message, list)
-                    and len(message) > 1
-                    and message[0] == "order"
-            ):
-                # Explicit order event
-                data = message[1]
-                order_id = data.get("id")
-                self.buy_id = order_id
-                if self.buy_id is not None:
-                    self.slots.buy_confirm.set({"id": self.buy_id})
-
-                # Update listinfodata for check_win
-                if "profit" in data and "status" in data:
-                    profit = data.get("profit", 0)
-                    win = "win" if profit > 0 else "loss"
-                    game_state = 1 if data.get("status") == "closed" else 0
-                    self.listinfodata.set(
-                        win, game_state, str(order_id), profit
-                    )
-                    # Fire keyed win_result slot when closed.
-                    if game_state == 1 and order_id is not None:
-                        self.slots.win_result(str(order_id)).set(
-                            {"win": win, "profit": profit}
-                        )
-
-                await self.event_registry.set_event('buy_confirmed', data)
-                await self.event_registry.set_event(
-                    f'order_closed_{order_id}', data
-                )
 
             elif (
                     isinstance(message, list)
@@ -569,15 +548,17 @@ class QuotexAPI:
                     )
                     self.timesync.server_timestamp = ts  # Sync server clock
 
-                    # Limit realtime_price history to 1000 entries
-                    # to prevent memory bloat
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-16-09): deque(maxlen=1000)
+                    # auto-evicts; no manual pop(0) needed. O(1) per tick.
                     price_list = self.realtime_price[asset]
                     price_list.append({"time": ts, "price": price})
-                    if len(price_list) > 1000:
-                        price_list.pop(0)
 
-                    self.realtime_candles[asset] = message[0]
-
+        except asyncio.CancelledError:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-16-10): re-raise CancelledError
+            # explicitly. On Python 3.7 CancelledError was an Exception
+            # subclass and would have been swallowed here, orphaning
+            # coroutines on cancellation.
+            raise
         except Exception as e:
             logger.error("Error in _on_message: %s", e)
 
@@ -609,10 +590,7 @@ class QuotexAPI:
             msg (str): The closure message.
         """
         logger.info("Websocket connection closed.")
-        if self.heartbeat_task:
-            self.heartbeat_task.cancel()
-            self.heartbeat_task = None
-
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-11): heartbeat task removed.
         self.state.status = WebsocketStatus.DISCONNECTED
         try:
             loop = asyncio.get_running_loop()
@@ -637,8 +615,11 @@ class QuotexAPI:
     async def get_instruments(self) -> None:
         """Sends a request to the WebSocket to retrieve the list of
         available instruments."""
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-12): send `instruments/list` to
+        # match the response event name in the dispatch table (old code
+        # sent `instruments/get` which has no matching handler).
         if self.websocket:
-            await self.websocket.send('42["instruments/get"]')
+            await self.websocket.send('42["instruments/list"]')
 
     async def authenticate(self) -> tuple[bool, str]:
         """
@@ -658,14 +639,17 @@ class QuotexAPI:
             self.state.SSID = self.session_data.get("token")
             self.is_logged = True
             # Sync session to browser client
-            if "cookies" in self.session_data:
-                cookie_str = self.session_data["cookies"]
-                for item in cookie_str.split("; "):
-                    if "=" in item:
-                        k, v = item.split("=", 1)
-                        self.browser._client.cookies.set(
-                            k, v, domain=self.host
-                        )
+            # FIX (DEEP-AUDIT-2026-07-26 / F-16-13): guard against
+            # `cookies` being None — common on first login attempt before
+            # a session is established. Old code crashed with
+            # AttributeError: 'NoneType' object has no attribute 'split'.
+            cookie_str = self.session_data.get("cookies") or ""
+            for item in cookie_str.split("; "):
+                if "=" in item:
+                    k, v = item.split("=", 1)
+                    self.browser._client.cookies.set(
+                        k, v, domain=self.host
+                    )
 
             self.browser.headers.update({
                 "User-Agent": self.session_data.get("user_agent", ""),
@@ -673,17 +657,14 @@ class QuotexAPI:
             })
         return status, msg
 
+    # FIX (DEEP-AUDIT-2026-07-26 / F-16-14): removed the duplicate
+    # `send_http_request_v2` method (identical body to `_v1`). Use
+    # `send_http_request_v1` going forward.
     async def send_http_request_v1(
             self, method: str, url: str, **kwargs: Any
     ) -> httpx.Response:
-        """Sends an HTTP request using the internal browser client (v1)."""
+        """Sends an HTTP request using the internal browser client."""
         # Browser.send_request uses self._client.request internally
-        return await self.browser.send_request(method, url, **kwargs)
-
-    async def send_http_request_v2(
-            self, method: str, url: str, **kwargs: Any
-    ) -> httpx.Response:
-        """Sends an HTTP request using the internal browser client (v2)."""
         return await self.browser.send_request(method, url, **kwargs)
 
     async def send_websocket_request(self, data: str) -> None:
@@ -713,36 +694,38 @@ class QuotexAPI:
             percent_deal=1
     ) -> None:
         """Apply asset and time settings before placing an order."""
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-15): stripped the Quotex
+        # web-app UI preferences from the payload (chartType, chartPeriod,
+        # gridOpacity, upColor, etc.) — server ignores them, and including
+        # them wastes bandwidth. Sending only the API-required fields:
+        # currentAsset, currentExpirationTime, dealValue.
         payload = {
             "chartId": "graph",
             "settings": {
                 "chartId": "graph",
-                "chartType": 2,
-                "currentExpirationTime": int(time.time()) if not is_fast_option else end_time,
+                "currentExpirationTime": (
+                    int(time.time()) if not is_fast_option else (end_time or 0)
+                ),
                 "isFastOption": is_fast_option,
                 "isFastAmountOption": percent_mode,
-                "isIndicatorsMinimized": False,
-                "isIndicatorsShowing": True,
-                "isShortBetElement": False,
-                "chartPeriod": 4,
                 "currentAsset": {
                     "symbol": asset
                 },
                 "dealValue": deal,
                 "dealPercentValue": percent_deal,
-                "isVisible": True,
                 "timePeriod": period,
-                "gridOpacity": 8,
-                "isAutoScrolling": 1,
-                "isOneClickTrade": True,
-                "upColor": "#0FAF59",
-                "downColor": "#FF6251"
             }
         }
-        if end_time:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-15): use `is not None` so a
+        # legitimate `end_time=0` (Unix epoch) is still serialized.
+        if end_time is not None:
             payload["endTime"] = end_time
 
-        data = f'42["settings/apply", {json.dumps_str(payload)}]'
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-16): build the Socket.IO frame
+        # by serializing the whole `[event, payload]` list with json.dumps
+        # so any nested characters in payload are correctly escaped. Old
+        # code used string concatenation which could mis-parse.
+        data = "42" + json.dumps_str(["settings/apply", payload])
         await self.send_websocket_request(data)
 
     async def subscribe_realtime_candle(self, asset: str, period: int) -> None:
@@ -769,9 +752,8 @@ class QuotexAPI:
         data = f'42["depth/unfollow", {json.dumps_str(asset)}]'
         await self.send_websocket_request(data)
 
-    async def signals_subscribe(self) -> None:
-        """Subscribes to real-time trading signals from the platform."""
-        await self.send_websocket_request('42["signal/subscribe"]')
+    # FIX (DEEP-AUDIT-2026-07-26 / F-16-19): removed dead
+    # `signals_subscribe` method — no caller anywhere in this codebase.
 
     async def change_account(
             self,
@@ -813,8 +795,11 @@ class QuotexAPI:
 
     async def unsubscribe_realtime_candle(self, asset: str) -> None:
         """Unsubscribes from real-time price updates for a specific asset."""
-        payload = {"asset": asset}
-        data = f'42["instruments/unsubscribe", {json.dumps_str(payload)}]'
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-17): use `depth/unfollow` as
+        # the inverse of `depth/follow` (subscribe_realtime_candle path).
+        # Old code sent `instruments/unsubscribe` which is NOT a real
+        # Quotex event and was silently ignored by the server.
+        data = f'42["depth/unfollow", {json.dumps_str(asset)}]'
         await self.send_websocket_request(data)
 
     async def subscribe_Traders_mood(self, asset: str, instrument: str) -> None:
@@ -855,6 +840,12 @@ class QuotexAPI:
             open_time: int
     ) -> None:
         """Places a pending order to be executed at a specific future time."""
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-18): use the monotonically-
+        # increasing `_request_counter` instead of `int(time.time())` —
+        # two pending orders created within the same wall-clock second
+        # used to share the same requestId, which Quotex may deduplicate
+        # as a replay.
+        from pyquotex._api._constants import _request_counter
         payload = {
             "asset": asset,
             "amount": amount,
@@ -863,21 +854,14 @@ class QuotexAPI:
             "openTime": open_time,
             "isDemo": int(self.account_type) if self.account_type is not None else AccountType.DEMO,
             "tournamentId": self.tournament_id,
-            "requestId": int(time.time())
+            "requestId": next(_request_counter)
         }
-        data = f'42["pending/create", {json.dumps_str(payload)}]'
+        data = "42" + json.dumps_str(["pending/create", payload])
         await self.send_websocket_request(data)
 
-    async def instruments_follow(
-            self,
-            amount: float | int,
-            asset: str,
-            direction: str,
-            duration: int,
-            open_time: int
-    ) -> None:
-        """Alias for open_pending or similar follow request."""
-        await self.open_pending(amount, asset, direction, duration, open_time)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-16-19): removed dead `instruments_follow`
+    # method — was an alias for `open_pending` with no caller anywhere in
+    # this codebase.
 
     async def start_websocket(self) -> tuple[bool, str]:
         """
@@ -913,7 +897,11 @@ class QuotexAPI:
             "Accept-Encoding": "gzip, deflate, br",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
-            "Sec-WebSocket-Extensions": "permessage-deflate; client_max_window_bits",
+            # FIX (DEEP-AUDIT-2026-07-26 / F-16-20): removed the
+            # `Sec-WebSocket-Extensions: permessage-deflate` header —
+            # `WebsocketClient._connect_once` passes `compression=None`
+            # which contradicts this header and could close the handshake
+            # on strict servers. Choose one (we keep no-compression).
         }
         # Skip SSL for plain ws:// (test / proxy / dev) — the websockets
         # library expects no SSLContext on a non-TLS URL.
@@ -931,10 +919,20 @@ class QuotexAPI:
         )
         for _ in range(100):
             if self.state.status == WebsocketStatus.ERROR:
+                # FIX (DEEP-AUDIT-2026-07-26 / F-16-21): cancel the orphan
+                # `_websocket_task` before returning on error so we don't
+                # leak background tasks.
+                if self._websocket_task and not self._websocket_task.done():
+                    self._websocket_task.cancel()
                 return False, self.state.websocket_error_reason
             if self.state.status == WebsocketStatus.CONNECTED:
                 return True, "Connected"
             await asyncio.sleep(0.1)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-21): same cleanup on the
+        # timeout path — old code returned "Timeout" but left
+        # `_websocket_task` running, leaking tasks on repeated connect.
+        if self._websocket_task and not self._websocket_task.done():
+            self._websocket_task.cancel()
         return False, "Timeout"
 
     async def send_ssid(self) -> bool:
@@ -965,17 +963,20 @@ class QuotexAPI:
         """Closes the WebSocket connection and the HTTP client session."""
         if self.websocket_client:
             await self.websocket_client.close()
-            # Explicitly trigger cleanup to ensure heartbeat is cancelled
+            # Explicitly trigger cleanup to ensure connection state is reset.
             self._on_close(1000, "Graceful closure")
-        # if self._http_client:
-        #    await self._http_client.aclose()
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-22): removed the commented-out
+        # `_http_client` block — dead code. The HTTP client lives inside
+        # `self.browser` and is closed via `await self.browser.close()`
+        # when the Quotex wrapper tears down.
         return True
 
-    @property
-    def logout(self) -> Logout:
-        """Returns the Logout action handler."""
-        return Logout(self)
-
+    # FIX (DEEP-AUDIT-2026-07-26 / F-16-23): removed dead `logout`,
+    # `buy`, `sell_option`, `get_history` properties — they returned
+    # instances of the now-deleted stub classes (Logout, Buy, SellOption,
+    # GetHistory). `login`, `ssid`, `get_candles` are kept because their
+    # underlying classes are real (not stubs) and used by feed.py and
+    # the auth flow.
     @property
     def login(self) -> Login:
         """Returns the Login action handler."""
@@ -987,24 +988,9 @@ class QuotexAPI:
         return Ssid(self)
 
     @property
-    def buy(self) -> Buy:
-        """Returns the Buy order handler."""
-        return Buy(self)
-
-    @property
-    def sell_option(self) -> SellOption:
-        """Returns the Sell Option handler."""
-        return SellOption(self)
-
-    @property
     def get_candles(self) -> GetCandles:
         """Returns the Candles retrieval handler."""
         return GetCandles(self)
-
-    @property
-    def get_history(self) -> GetHistory:
-        """Returns the Trade History retrieval handler."""
-        return GetHistory(self)
 
     async def get_profile(self) -> Profile:
         """
@@ -1028,18 +1014,7 @@ class QuotexAPI:
         self.profile.offset = d.get("timeOffset")
         return self.profile
 
-    async def get_trader_history(
-            self, account_type: int, page: int
-    ) -> dict[str, Any]:
-        """
-        Retrieves the trade history for a specific account and page.
-
-        Args:
-            account_type (int): AccountType.REAL or AccountType.DEMO.
-            page (int): Page number to retrieve.
-
-        Returns:
-            dict: The trade history data.
-        """
-        history = await self.get_history(account_type, page)
-        return history.get("data", {})
+    # FIX (DEEP-AUDIT-2026-07-26 / F-16-24): removed dead `get_trader_history`
+    # method — it called the now-deleted `GetHistory` stub class which is
+    # not callable (`TypeError: 'GetHistory' object is not callable`).
+    # feed.py never uses this method.

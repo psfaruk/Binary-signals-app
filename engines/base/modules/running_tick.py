@@ -31,17 +31,37 @@ count from ~78 to ~300+ and improve win rate from 56.4% to 58-62%.
 """
 from engines.base.types import ModuleResult, MarketContext
 
+# FIX (DEEP-AUDIT-2026-07-26 / F-10-31, A-05 P99): module-level constants
+# for the magic numbers in this module. Kept inline-equivalent for backward
+# compat — the values are unchanged, just named for readability.
+ATR_FALLBACK = 0.0001
+# Cap the backward scan for prior-direction detection — the last non-doji
+# candle in a realistic market is within 30 candles of the current one.
+# Scanning the full candle list was O(N) per call (PROBLEM 34).
+PRIOR_DIR_SCAN_CAP = 30
+
 
 def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
     """Analyze running candle tick microstructure.
 
     Returns list with 0 or 1 ModuleResult (composite vote).
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-10-32, A-05 P10/S6): the `ticks`
+    parameter is unused but kept in the signature for API stability —
+    `engines/base/blender.py:134` calls `mod_tick.analyze(candles, ticks,
+    micro, ctx)` with 4 positional args. Removing `ticks` would require a
+    coordinated change to the blender. All other modules use 2-arg
+    `(candles, ctx)` or 3-arg `(candles, ctx, asset)` signatures; this is
+    the only 4-arg module. The parameter is acknowledged as dead via the
+    `_ = ticks` statement below so linters don't flag it.
     """
+    # Acknowledge the unused `ticks` parameter (kept for API stability).
+    _ = ticks
     if not micro:
         return []
 
     sub_votes = []  # (direction, score, reason)
-    atr = ctx.atr if ctx.atr > 0 else 0.0001
+    atr = ctx.atr if ctx.atr > 0 else ATR_FALLBACK
 
     # ═══════════════════════════════════════════════════════════════════════
     # SUB-SIGNAL 1: Ending direction (last 10 ticks)
@@ -283,8 +303,18 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
     # the composite was classified as "REVERSAL fresh-direction" with a score
     # penalty. But a doji after a long UP streak is just a pause — the prior
     # TREND was UP. Now we scan backward to find the last non-doji candle.
+    #
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-33, A-05 P34/HIGH): cap the backward
+    # scan at PRIOR_DIR_SCAN_CAP candles (30) — the original `range(len-2,
+    # -1, -1)` was O(N) per call, scanning the entire candle list. For 1000+
+    # candles, that's a hot-path performance issue. The prior non-doji in a
+    # realistic market is within 30 candles of the current one (doji streaks
+    # longer than 30 are statistically negligible on 1m forex candles).
+    # Early-exit guard preserves the original semantics for the common case
+    # while bounding the worst-case scan to O(30).
     prior_dir = 0  # 1=up, -1=down, 0=doji/unknown (only if all are dojis)
-    for _i in range(len(candles) - 2, -1, -1):
+    _scan_start = max(0, len(candles) - 2 - PRIOR_DIR_SCAN_CAP)
+    for _i in range(len(candles) - 2, _scan_start - 1, -1):
         _prev = candles[_i]
         _prev_body = _prev["close"] - _prev["open"]
         if _prev_body > 0:
@@ -293,7 +323,7 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
         elif _prev_body < 0:
             prior_dir = -1
             break
-        # else: doji, keep looking back
+        # else: doji, keep looking back (up to PRIOR_DIR_SCAN_CAP)
 
     # Composite score scales with:
     # 1. Net score difference (depth)

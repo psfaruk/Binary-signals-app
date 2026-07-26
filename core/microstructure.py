@@ -61,7 +61,10 @@ def build_micro(ticks, open_price):
     sell_pct = 100 - buy_pct
     count_buy_pct = (round(up_count / (up_count + dn_count) * 100)
                      if (up_count + dn_count) > 0 else 50)
-    vol_count_diverge = abs(buy_pct - count_buy_pct) > 20
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-15): made divergence threshold
+    # consistent — was `> 20` here but `>= 20` for td_diverge at line 86
+    # (off-by-one at the boundary). Now both use `>= 20`.
+    vol_count_diverge = abs(buy_pct - count_buy_pct) >= 20
 
     if buy_pct >= 55:
         pressure = "BUYER"
@@ -86,9 +89,26 @@ def build_micro(ticks, open_price):
     td_diverge = abs(td_buy_pct - buy_pct) >= 20
 
     # ── 2. Fight zone: midpoint crossings ─────────────────────────────────
-    mid = (hi + lo) / 2
-    crosses = sum(1 for i in range(1, n)
-                  if (ticks[i - 1] < mid) != (ticks[i] < mid))
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-01): the old `mid = (hi + lo) / 2`
+    # used GLOBAL hi/lo derived from the FULL tick list (including FUTURE
+    # ticks), introducing lookahead bias into the live `is_fight` flag —
+    # early crosses were measured against a future-derived midline. Now
+    # compute a ROLLING midpoint per tick: `mid_i = (max(ticks[:i+1]) +
+    # min(ticks[:i+1])) / 2`, based ONLY on ticks seen up to and including
+    # i. Preserves the semantic of "crosses the midpoint of the observed
+    # range so far" without lookahead. The full-range `hi`/`lo`/`mid_full`
+    # are still used by legacy analytics below (live_wick, reaction, VAP).
+    crosses = 0
+    _run_hi = ticks[0]
+    _run_lo = ticks[0]
+    for i in range(1, n):
+        if ticks[i] > _run_hi:
+            _run_hi = ticks[i]
+        elif ticks[i] < _run_lo:
+            _run_lo = ticks[i]
+        _run_mid = (_run_hi + _run_lo) / 2
+        if (ticks[i - 1] < _run_mid) != (ticks[i] < _run_mid):
+            crosses += 1
     is_fight = crosses >= FIGHT_CROSSES
 
     # ── 3. Volume profile: where did price spend the most time? ───────────
@@ -112,7 +132,9 @@ def build_micro(ticks, open_price):
 
     # ── 3b. VAP MIGRATION ─────────────────────────────────────────────────
     vap_migration = None
-    if rng > 0 and n >= 10:
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-10): removed redundant `n >= 10`
+    # check — already guaranteed by the early-return at line 35.
+    if rng > 0:
         half = n // 2
         bin_size = rng / 10
         bins_first, bins_second = {}, {}
@@ -150,10 +172,16 @@ def build_micro(ticks, open_price):
         body_ratio = live_body / rng
         last_dir = "FLAT"
         if n >= 3:
-            tail = ticks[-3:]
-            if tail[-1] > tail[0]:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-06-14): old version compared
+            # tail[-1] vs tail[0] over a 3-tick tail, ignoring the middle
+            # tick. A V-shaped pattern like [10, 5, 10] was classified as
+            # FLAT (start == end) instead of UP, missing BULL_REJECT/BEAR_REJECT
+            # detections. Now compare the LAST TWO ticks to get the actual
+            # direction of the most recent move (which is what the reject
+            # signal cares about).
+            if ticks[-1] > ticks[-2]:
                 last_dir = "UP"
-            elif tail[-1] < tail[0]:
+            elif ticks[-1] < ticks[-2]:
                 last_dir = "DOWN"
         if lw_ratio > 0.35 and body_ratio < 0.30 and last_dir == "UP":
             live_wick = {"type": "BULL_REJECT", "lw_ratio": round(lw_ratio, 3),
@@ -223,9 +251,19 @@ def build_micro(ticks, open_price):
         second_half_signed = ticks[-1] - ticks[half]
         first_half_range = abs(first_half_signed)
         second_half_range = abs(second_half_signed)
-        spd_first = first_half_range / half if half > 0 else 0
-        spd_second = second_half_range / (n - half) if (n - half) > 0 else 0
-        avg_speed = (first_half_range + second_half_range) / n
+        # FIX (DEEP-AUDIT-2026-07-26 / A-03-CRIT-1):
+        # The price-change spans INTERVALS, not points. Between tick 0 and
+        # tick `half` there are `half` intervals. Between tick `half` and
+        # tick `n-1` there are `(n-1) - half` intervals. The old code divided
+        # `second_half_range` by `n - half` and `avg_speed` by `n`, both of
+        # which over-counted by 1 interval — understating per-tick speed
+        # by ~5% for n=20. Correct divisors:
+        first_intervals = half
+        second_intervals = (n - 1) - half
+        total_intervals = n - 1
+        spd_first = first_half_range / first_intervals if first_intervals > 0 else 0
+        spd_second = second_half_range / second_intervals if second_intervals > 0 else 0
+        avg_speed = (first_half_range + second_half_range) / total_intervals if total_intervals > 0 else 0
         if avg_speed > 0:
             accel_ratio = spd_second / spd_first if spd_first > 0 else 1.0
         else:
@@ -253,7 +291,10 @@ def build_micro(ticks, open_price):
         # inconsistent segmentation of the same tick list, producing
         # contradictory signals (BULL_SHIFT from momentum_shift vs no-shift
         # from phases).
-        t3 = max(n // 3, 1)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-06-11): removed redundant `t3 =
+        # max(n // 3, 1)` reassignment — already computed at line 168 above
+        # (used by the phases block). Reusing it keeps the two analyses
+        # guaranteed-consistent.
         t2_3 = 2 * t3   # consistent with phase computation (2 * (n // 3))
         early_dir = "UP" if ticks[t2_3] > ticks[0] else ("DOWN" if ticks[t2_3] < ticks[0] else "FLAT")
         late_dir = "UP" if ticks[-1] > ticks[t2_3] else ("DOWN" if ticks[-1] < ticks[t2_3] else "FLAT")
@@ -324,8 +365,10 @@ def build_micro(ticks, open_price):
         prev_d, prev_l = streaks[-2]
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-28): removed the redundant
         # `last_d != 0 and prev_d != 0` check — streaks only ever contain
-        # direction ±1 (zero-deltas are skipped at line 289-290), so the check
+        # direction ±1 (zero-deltas are skipped at line 318-319), so the check
         # was always True. Minor dead-code removal.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-06-12): corrected stale line reference
+        # (was "289-290", actually 318-319 in this file).
         if last_d != prev_d:
             if last_l >= 3 and prev_l >= 3:
                 v_shape = "V_TOP" if prev_d > 0 else "V_BOTTOM"
@@ -350,6 +393,12 @@ def build_micro(ticks, open_price):
             mean_size = sum(abs_deltas) / len(abs_deltas)
             big_threshold = max(median_size * 2.0, mean_size * 1.5)
             big_up = big_dn = ret_up = ret_dn = 0
+            # FIX (DEEP-AUDIT-2026-07-26 / F-06-13): added mid-tier bucket for
+            # deltas with `median_size < a < big_threshold`. Previously these
+            # were silently dropped, making `big_up+big_dn+ret_up+ret_dn <
+            # len(deltas)` and breaking any analysis relying on count
+            # exhaustiveness. Mid-tier deltas now get their own counter.
+            mid_up = mid_dn = 0
             big_up_vol = big_dn_vol = 0.0
             for d in deltas:
                 a = abs(d)
@@ -365,19 +414,27 @@ def build_micro(ticks, open_price):
                         ret_up += 1
                     else:
                         ret_dn += 1
+                else:
+                    if d > 0:
+                        mid_up += 1
+                    else:
+                        mid_dn += 1
             big_dir = "UP" if big_up > big_dn else ("DOWN" if big_dn > big_up else "FLAT")
             ret_dir = "UP" if ret_up > ret_dn else ("DOWN" if ret_dn > ret_up else "FLAT")
             imbalance = 0
             if big_dir != "FLAT" and ret_dir != "FLAT" and big_dir != ret_dir:
                 imbalance = 1
             big_total_vol = big_up_vol + big_dn_vol
-            big_buy_pct = (round(big_up_vol / big_total_vol * 100)
-                           if big_total_vol > 0 else 50)
+            # FIX (DEEP-AUDIT-2026-07-26 / F-06-17): removed redundant outer
+            # parens around the ternary (cosmetic, no behavior change).
+            big_buy_pct = round(big_up_vol / big_total_vol * 100) if big_total_vol > 0 else 50
             orderflow = {
                 "median_size": round(median_size, 7),
                 "mean_size": round(mean_size, 7),
                 "big_threshold": round(big_threshold, 7),
                 "big_up": big_up, "big_dn": big_dn,
+                # FIX (DEEP-AUDIT-2026-07-26 / F-06-13): expose mid-tier counts
+                "mid_up": mid_up, "mid_dn": mid_dn,
                 "ret_up": ret_up, "ret_dn": ret_dn,
                 "big_dir": big_dir,
                 "ret_dir": ret_dir,

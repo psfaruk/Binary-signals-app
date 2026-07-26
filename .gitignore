@@ -1,16 +1,48 @@
+# FIX (DEEP-AUDIT-2026-07-26 / F-19-49): consolidated and deduplicated.
+# Removed redundant `signals.db` lines (already covered by `*.db`).
+# Removed `signals.db-shm` / `signals.db-wal` (replaced with `*.db-shm` /
+# `*.db-wal` so renamed DBs are also ignored).
+# Added common venv directory names (`.venv/`, `venv/`, `env/`, `.env/`).
+# Added IDE / OS artifacts (`.DS_Store`, `.idea/`, `.vscode/`, `*.swp`).
+# Added Python tooling caches (`.pytest_cache/`, `.mypy_cache/`,
+# `*.egg-info/`, `build/`, `dist/`, `.coverage`, `htmlcov/`).
+# A-10 PROBLEMS 10, 44, 75, 76.
+
+# ─── Python / venv ───────────────────────────────────────────────────
 .venv/
+venv/
+env/
+.env/
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+
+# ─── App secrets + runtime state ────────────────────────────────────
 .env
 .env.backup
 session.json
-signals.db
+
+# ─── SQLite DBs (WAL mode generates -shm + -wal siblings) ───────────
 *.db
+*.db-shm
+*.db-wal
 qx_cache*/
+
+# ─── Logs + temp ────────────────────────────────────────────────────
 *.log
 .tmp/
 upload/
 settings/
-signals.db-shm
-signals.db-wal
-signals.db
+
+# ─── IDE / OS artifacts ─────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/

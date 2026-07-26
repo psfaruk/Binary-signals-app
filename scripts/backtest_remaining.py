@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# TODO (DEEP-AUDIT-2026-07-26 / F-20 / cross-file cleanup):
+#   Line 14 — `def test(name, condition, detail=""):` is DUPLICATED in
+#   `scripts/backtest_fixes.py:29` and `scripts/backtest_weak_neutral.py:26`.
+#   Consider extracting to `scripts/_helpers.py`. Audit ref: A-10 dup table.
 """
 Backtest for the A1-A10 LOW/MEDIUM fixes (the "remaining issues" from
 the comprehensive audit report).
@@ -42,8 +46,11 @@ def main():
          not old_pattern_present, f"old pattern still present: {old_pattern_present}")
     print()
 
-    # A2: trend_follow short-circuits when weight < 0.2
-    print("A2 (LOW): trend_follow short-circuits when weight < 0.2")
+    # A2: trend_follow short-circuits when weight < TREND_FOLLOW_MIN_WEIGHT
+    # FIX (DEEP-AUDIT-2026-07-26 / F-19-08): extract magic threshold 0.2
+    # to a named constant (A-10 PROBLEM 86).
+    TREND_FOLLOW_MIN_WEIGHT = 0.2
+    print(f"A2 (LOW): trend_follow short-circuits when weight < {TREND_FOLLOW_MIN_WEIGHT}")
     from engines.base.modules import trend_follow
     src_tf = inspect.getsource(trend_follow.analyze)
     has_short_circuit = "if _trend_weight < 0.2" in src_tf
@@ -61,7 +68,7 @@ def main():
     modules = r.get('modules', {})
     tf_module = modules.get('trend_follow', {})
     test("A2: trend_follow shows 'fired: False' in breakdown",
-         tf_module.get('fired') == False,
+         tf_module.get('fired') is False,
          f"trend_follow.fired = {tf_module.get('fired')}")
     print()
 
@@ -131,13 +138,18 @@ def main():
     test("A8: env-configurable thresholds added",
          has_env_config, f"env config present: {has_env_config}")
     # Verify env override works
+    # FIX (DEEP-AUDIT-2026-07-26 / F-19-07): wrap env-var manipulation in
+    # try/finally so subsequent tests aren't polluted if _guess_algorithm
+    # raises (A-10 PROBLEM 46).
     os.environ['ALGO_TREND_AUTOCORR'] = '0.5'  # lower threshold
     os.environ['ALGO_TREND_BODY'] = '40'
-    result = algorithm_monitor._guess_algorithm(0.55, 42, 100)
-    test("A8: env override triggers trending classification",
-         result == "trending", f"with autocorr=0.55, body=42, got: {result}")
-    del os.environ['ALGO_TREND_AUTOCORR']
-    del os.environ['ALGO_TREND_BODY']
+    try:
+        result = algorithm_monitor._guess_algorithm(0.55, 42, 100)
+        test("A8: env override triggers trending classification",
+             result == "trending", f"with autocorr=0.55, body=42, got: {result}")
+    finally:
+        os.environ.pop('ALGO_TREND_AUTOCORR', None)
+        os.environ.pop('ALGO_TREND_BODY', None)
     print()
 
     # A9: feed.py uses pred.get('signal') (defensive)

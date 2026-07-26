@@ -36,9 +36,14 @@ class Browser:
         # Build SSL context with specified cipher suite and ECDH curve
         self._ssl_context = create_ssl_context(cipher_suite=CIPHER_SUITE_FIREFOX)
 
-        if self.server_hostname:
-            self._ssl_context.check_hostname = False
-
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-01): previously set
+        # `self._ssl_context.check_hostname = False` whenever a
+        # `server_hostname` was supplied — disabling TLS hostname
+        # verification entirely and allowing MITM attacks with a
+        # valid-but-wrong certificate. SNI is provided via the
+        # `server_hostname` argument to the SSL handshake (httpx
+        # honours it via the AsyncClient's `extensions`), not by
+        # disabling hostname checks. Leave verification on.
         self.headers = self.get_headers()
 
         # Build httpx.AsyncClient

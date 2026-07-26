@@ -89,6 +89,17 @@ if "%QX_EMAIL%"=="" (
     pause
     exit /b 1
 )
+REM FIX (DEEP-AUDIT-2026-07-26 / F-19-45): basic email-format validation
+REM — previously any non-empty string was accepted, so "asdf" was written
+REM to .env and then server.py failed with a cryptic Cloudflare error
+REM (A-10 PROBLEM 72).
+echo "%QX_EMAIL%" | findstr /R ".*@.*\..*" >nul 2>&1
+if errorlevel 1 (
+    echo ❌ Email ফর্ম্যাট ঠিক নয়। অনুগ্রহ করে একটি সঠিক email দিন।
+    echo    উদাহরণ: yourname@example.com
+    pause
+    exit /b 1
+)
 
 set /p QX_PASSWORD="Quotex Password: "
 if "%QX_PASSWORD%"=="" (
@@ -101,9 +112,15 @@ REM .env ফাইল তৈরি করুন
 (
     echo QX_EMAIL=%QX_EMAIL%
     echo QX_PASSWORD=%QX_PASSWORD%
-    echo QX_USE_RAW_WS=1
+    echo QX_USE_RAW_WS=0
     echo PORT=8000
 ) > .env
+REM FIX (DEEP-AUDIT-2026-07-26 / F-19-44): changed QX_USE_RAW_WS=1 → 0.
+REM start.bat was the ONLY config source setting QX_USE_RAW_WS=1, contradicting
+REM .env.example, railway.json, README.md, and RAILWAY_TOKEN_SETUP.md (all say
+REM QX_USE_RAW_WS=0). The raw-WS backend (quotex_ws.py) is lighter but is
+REM blocked by Cloudflare on Railway datacenter IPs — vendored pyquotex
+REM (QX_USE_RAW_WS=0) is the recommended default (A-10 PROBLEM 3).
 
 echo.
 echo ✅ .env ফাইল তৈরি হয়েছে

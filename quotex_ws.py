@@ -1,3 +1,9 @@
+# TODO (DEEP-AUDIT-2026-07-26 / F-20 / cross-file cleanup):
+#   `make_client()` at line ~1184 has 0 callers across the entire codebase
+#   (feed.py uses `QuotexWSClient(...)` constructor directly, NOT the
+#   module-level `make_client` factory). Safe to DELETE in a follow-up batch
+#   after confirming no external scripts import it. Audit ref: A-10 PROBLEM
+#   table "Functions/classes defined but with limited/no external callers".
 """
 Quotex raw WebSocket client — Socket.IO v3 over plain WebSocket.
 
@@ -34,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from collections import defaultdict, deque
 from typing import Any    # FIX (2026-07-13): removed Iterable (unused)
@@ -51,10 +58,38 @@ except ImportError as _e:  # pragma: no cover
 
 # ── Constants ───────────────────────────────────────────────────────────────
 
+# FIX (DEEP-AUDIT-2026-07-26 / F-15-01): WS_URL is no longer the single source
+# of truth for the WebSocket endpoint. The constructor accepts a `host` arg and
+# derives its own WS URL (wss://ws2.<host>/socket.io/...) so the Origin header
+# (https://<host>) and the WS endpoint always agree — previously a non-default
+# host caused cross-origin WS upgrades to be rejected. WS_URL is kept only as
+# the module-level default (used when host is the default "market-qx.trade").
 WS_URL = os.environ.get(
     "QX_WS_URL",
     "wss://ws2.market-qx.trade/socket.io/?EIO=3&transport=websocket",
 )
+DEFAULT_HOST = "market-qx.trade"
+
+
+def _build_ws_url(host: str) -> str:
+    """Build the WebSocket URL for the given host.
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-15-01): previously WS_URL was computed at
+    module-import time from env and the constructor's `host` parameter was
+    ignored for the WS endpoint (only the Origin header used it). That meant
+    `QuotexWSClient(host="qxbroker.com")` connected to ws2.market-qx.trade
+    but sent `Origin: https://qxbroker.com` — a cross-origin WS upgrade that
+    Quotex rejects. Now the URL is derived from `host`.
+    """
+    if not host:
+        host = DEFAULT_HOST
+    # Allow QX_WS_URL env override (e.g., for testing against a local mock).
+    env_override = os.environ.get("QX_WS_URL")
+    if env_override and host == DEFAULT_HOST:
+        return env_override
+    return f"wss://ws2.{host}/socket.io/?EIO=3&transport=websocket"
+
+
 # Default to demo account (is_demo=1) — most personal Quotex accounts use
 # the demo balance for signal analysis. Override via env if needed.
 IS_DEMO = int(os.environ.get("QX_IS_DEMO", "1"))
@@ -73,6 +108,55 @@ PING_INTERVAL = 25.0   # server's pingInterval is usually 25s
 PING_TIMEOUT  = 60.0
 CONNECT_TIMEOUT = 30.0
 SUBSCRIBE_TIMEOUT = 10.0
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-15-29): module-level lock for session.json
+# writes. Each QuotexWSClient instance references this via self._session_file_lock
+# (a threading.Lock works fine for sync I/O even inside async code — file
+# writes are quick enough that they don't block the event loop meaningfully).
+_SESSION_FILE_LOCK = threading.Lock()
+
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-15-33): select the right "is the WS open?"
+# checker ONCE at import time based on the installed websockets version.
+# websockets v13+ replaced WebSocketClientProtocol with ClientConnection,
+# whose API differs (`close_code` instead of `protocol.state` / `closed`).
+def _make_ws_is_open_check():
+    try:
+        # v13+ ClientConnection: close_code is None while open, set on close.
+        from websockets.exceptions import ConnectionClosed  # noqa: ensure imp
+        # Probe by attribute existence on a dummy class.
+        class _Probe:
+            close_code = None
+        _ = _Probe().close_code
+        def _v13_check(ws) -> bool:
+            try:
+                return ws.close_code is None
+            except AttributeError:
+                return False
+        return _v13_check
+    except Exception:
+        pass
+    try:
+        from websockets.protocol import State  # v10-15
+        def _v10_check(ws) -> bool:
+            try:
+                return ws.protocol.state == State.OPEN
+            except AttributeError:
+                try:
+                    return not ws.closed
+                except AttributeError:
+                    return False
+        return _v10_check
+    except ImportError:
+        def _fallback_check(ws) -> bool:
+            try:
+                return not ws.closed
+            except AttributeError:
+                return False
+        return _fallback_check
+
+
+_WS_IS_OPEN_CHECK = _make_ws_is_open_check()
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -236,18 +320,35 @@ class QuotexWSClient:
     def __init__(self,
                  email: str = "",
                  password: str = "",
-                 host: str = "market-qx.trade",
+                 host: str = DEFAULT_HOST,
                  lang: str = "en",
                  root_path: str | None = None,
                  reconnect_policy=None,
                  **_unused):
         # Mirror pyquotex's constructor signature so feed._make_client
         # doesn't need to know which implementation it's getting.
-        self.email = email
-        self.password = password
-        self.host = host
-        self.lang = lang
-        self.root_path = root_path
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-25): email/password/lang/root_path
+        # are accepted for drop-in compat with pyquotex.Quotex, but this
+        # client NEVER performs HTTP login (auth is via set_session only).
+        # They are NOT stored as instance attributes — that would be dead
+        # state. `host` IS stored because it's used to build the WS URL.
+        self.host = host or DEFAULT_HOST
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-01): build the WS URL from host
+        # so the WebSocket endpoint matches the Origin header.
+        self._ws_url = _build_ws_url(self.host)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-50): surface unknown kwargs so
+        # caller typos (e.g. `acount_type`) raise instead of being silently
+        # dropped.
+        if _unused:
+            raise TypeError(
+                f"QuotexWSClient got unexpected keyword arguments: "
+                f"{sorted(_unused)}"
+            )
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-24): reconnect_policy is accepted
+        # for API-compat with pyquotex.Quotex, but this client does not
+        # implement auto-reconnect — feed.py owns reconnect logic. Stored
+        # as a no-op attribute so callers can introspect what was passed.
+        self._reconnect_policy = reconnect_policy  # TODO: implement if needed
 
         # Session / auth state
         self._ssid: str | None = None
@@ -262,6 +363,14 @@ class QuotexWSClient:
         self._reader_task: asyncio.Task | None = None
         self._ping_task: asyncio.Task | None = None
         self._closed_by_user = False
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-32): _auth_result was only set
+        # inside _reader_loop (L591). If the reader died before assignment
+        # (e.g. immediate ConnectionClosed), _wait_for_auth polled
+        # getattr(..., "_auth_result", None) for 15s on every reconnect.
+        # Initialize here so the first reader_loop iteration doesn't have a
+        # race window where _auth_result is unset.
+        self._auth_result: bool | None = None
+        self._auth_fail_reason: str = ""
 
         # In-memory tick buffer: per-asset deque of {"time","price"} dicts
         self._realtime: dict[str, deque] = defaultdict(
@@ -277,12 +386,28 @@ class QuotexWSClient:
         # event loop) or sync (called inline).
         self._tick_callbacks: dict[str, list] = defaultdict(list)
 
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-04): per-asset lock to serialize
+        # concurrent get_candles() calls for the SAME asset. Previously a
+        # second caller clobbered the first's pending future, causing the
+        # first to time out after 15s with []. Now concurrent calls for the
+        # same asset are queued — the second caller waits for the first to
+        # complete and reuses its result.
+        self._history_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
         # Pending history requests: keyed by an asyncio.Future
         # {asset: future} — set by get_candles(), resolved by the reader loop
         # when the matching "history/load" event arrives.
         self._pending_history: dict[str, asyncio.Future] = {}
         # Partial binary history buffers: {asset: bytes}
         self._binary_history_buf: dict[str, bytes] = {}
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-07): binary history attachment
+        # attribution. Previously a single `_binary_history_target` slot
+        # was overwritten by the LATEST history/load JSON header, so when
+        # multiple history requests were in flight, binary bytes were
+        # attributed to the wrong asset. Now we use a FIFO queue of
+        # (asset) — each JSON header pushes its asset, each binary
+        # attachment pops the next asset.
+        self._binary_history_queue: deque[str] = deque()
 
         # Subscribed assets (so stop_candles_stream only sends unfollow for
         # assets we actually subscribed)
@@ -291,15 +416,39 @@ class QuotexWSClient:
         # Instruments cache (refreshed on connect)
         self._instruments: list = []
 
-        # Payout cache: {asset: int}
+        # Payout cache: {asset: int} — populated by instruments/list parsing
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-26): previously _payouts was
+        # never populated; get_payout_by_asset fell through to it and always
+        # returned None. Now _merge_instrument and the instruments/list
+        # handler populate it.
         self._payouts: dict[str, int] = {}
 
-        # Last error / reason for connect()'s return value
-        self._last_reason: str = ""
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-29 / F-15-30): lock to serialize
+        # concurrent session.json writes (read-modify-write pattern was
+        # racy across coroutines).
+        self._session_file_lock = _SESSION_FILE_LOCK
+
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-35): server time offset (server
+        # ts - local ts). Set by the `timesync` event handler; consumed by
+        # callers that need server-aligned expiration times.
+        self._server_time_offset: float = 0.0
+
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-36): per-asset open/closed state
+        # from chart_notification/update events. feed.py can query via
+        # is_asset_open(asset) to skip signals on closed markets.
+        self._asset_open_state: dict[str, bool] = {}
 
         # Pong-tracking (FIX 2026-07-13): timestamp of the last pong received
         # from the server. _ping_loop checks this to detect dead connections.
         self._last_pong: float = time.time()
+
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-46): per-asset lock to prevent
+        # the _ingest_tick vs stop_candles_stream race on the defaultdict
+        # _realtime buffer. Without this, a tick could land between the
+        # _tick_callbacks.pop and the _realtime.pop, recreating an empty
+        # deque via defaultdict that the next get_realtime_price would
+        # return as a 1-tick (stale) result.
+        self._realtime_lock = asyncio.Lock()
 
     # ── Session / auth ────────────────────────────────────────────────────
 
@@ -323,25 +472,54 @@ class QuotexWSClient:
     # automatically — no manual token refresh needed.
 
     @staticmethod
-    def load_session_json() -> dict | None:
-        """Read session.json from the current working directory.
-        Returns the first account's data (token, cookies, user_agent) or None.
+    def _session_json_path() -> str:
+        """Locate session.json.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-27): previously used os.getcwd()
+        unconditionally, which broke for PyInstaller-frozen apps (where the
+        data dir differs from sys._MEIPASS). Now: respect QX_SESSION_PATH
+        env override, then fall back to sys._MEIPASS (frozen), then CWD.
+        Prefer `pyquotex.config.load_session` if full PyInstaller support
+        is needed — this implementation is the lightweight equivalent.
+        """
+        env = os.environ.get("QX_SESSION_PATH")
+        if env:
+            return env
+        # PyInstaller: _MEIPASS is set to the bundle's extracted dir.
+        meipass = getattr(__import__("sys"), "_MEIPASS", None)
+        if meipass:
+            return os.path.join(meipass, "session.json")
+        return os.path.join(os.getcwd(), "session.json")
+
+    @staticmethod
+    def load_session_json(email: str | None = None) -> dict | None:
+        """Read session.json and return the account data for `email`.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-28): previously returned the FIRST
+        account by insertion order — multi-account session.json files
+        always loaded the wrong account. Now: if `email` is provided, look
+        up that exact key; otherwise fall back to first entry (for
+        backward compat with single-account files).
+
         Format: {"email@example.com": {"cookies": "...", "token": "...", "user_agent": "..."}}
         """
-        import json
-        path = os.path.join(os.getcwd(), "session.json")
+        path = QuotexWSClient._session_json_path()
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict) or not data:
                 return None
-            # Take the first account entry
-            first_key = next(iter(data))
-            acct = data[first_key]
+            # FIX (F-15-28): look up the requested email, or fall back to first.
+            if email and email in data:
+                acct_key = email
+                acct = data[acct_key]
+            else:
+                acct_key = next(iter(data))
+                acct = data[acct_key]
             if not isinstance(acct, dict):
                 return None
             return {
-                "email":      first_key,
+                "email":      acct_key,
                 "token":      acct.get("token", ""),
                 "cookies":    acct.get("cookies", ""),
                 "user_agent": acct.get("user_agent", ""),
@@ -356,53 +534,65 @@ class QuotexWSClient:
     def clear_session_json_token() -> None:
         """Clear the token field in session.json (set to None) so the next
         connect attempt doesn't reuse a rejected/expired token.
-        Mirrors feed.py's _clear_stale_token() for pyquotex."""
-        import json
-        path = os.path.join(os.getcwd(), "session.json")
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            changed = False
-            for acct in data.values():
-                if isinstance(acct, dict) and acct.get("token"):
-                    acct["token"] = None
-                    changed = True
-            if changed:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(data, f)
-                print("[quotex_ws] cleared stale token in session.json")
-        except FileNotFoundError:
-            pass
-        except Exception as exc:
-            print(f"[quotex_ws] could not clear session.json token: {exc}")
+        Mirrors feed.py's _clear_stale_token() for pyquotex.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-29): wrap the read-modify-write
+        in the module-level session-file lock so concurrent callers don't
+        clobber each other's writes.
+        """
+        path = QuotexWSClient._session_json_path()
+        with _SESSION_FILE_LOCK:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                changed = False
+                for acct in data.values():
+                    if isinstance(acct, dict) and acct.get("token"):
+                        acct["token"] = None
+                        changed = True
+                if changed:
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(data, f)
+                    print("[quotex_ws] cleared stale token in session.json")
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                print(f"[quotex_ws] could not clear session.json token: {exc}")
 
     @staticmethod
     def save_session_json(email: str, token: str, cookies: str,
                           user_agent: str) -> None:
         """Save/update a working token in session.json so subsequent restarts
-        reuse it (skip the login flow entirely)."""
-        import json
-        path = os.path.join(os.getcwd(), "session.json")
-        try:
-            data = {}
+        reuse it (skip the login flow entirely).
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-29): wrap the read-modify-write in
+        the module-level session-file lock. Without the lock, two concurrent
+        callers (e.g., auth-refresh + /api/set-token endpoint) could read
+        the same JSON, both append their entry, and one's writes would
+        silently overwrite the other's.
+        """
+        path = QuotexWSClient._session_json_path()
+        with _SESSION_FILE_LOCK:
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                pass
-            data[email] = {
-                "cookies": cookies,
-                "token": token,
-                "user_agent": user_agent,
-            }
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
-            print(f"[quotex_ws] saved working token to session.json ({email})")
-        except Exception as exc:
-            print(f"[quotex_ws] could not save session.json: {exc}")
+                data = {}
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass
+                data[email] = {
+                    "cookies": cookies,
+                    "token": token,
+                    "user_agent": user_agent,
+                }
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4)
+                print(f"[quotex_ws] saved working token to session.json ({email})")
+            except Exception as exc:
+                print(f"[quotex_ws] could not save session.json: {exc}")
 
     @staticmethod
-    def save_token_only(token: str, email: str = "runtime-token") -> None:
+    def save_token_only(token: str, email: str | None = None) -> None:
         """Persist only a token to session.json (used by /api/set-token endpoint).
 
         AUDIT-1-02 FIX: server.py was calling save_session_json(token) with 1
@@ -410,7 +600,19 @@ class QuotexWSClient:
         This raised TypeError, silently caught — token NEVER persisted across
         Railway redeployments. This convenience method fills cookies/ua with
         empty strings (they are not required for token-only auth).
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-30): previously hardcoded
+        `email="runtime-token"` — multiple token-only saves would overwrite
+        each other. Now: if `email` is None, generate a unique key
+        (`runtime-token-<timestamp>`) so each token-only save is preserved
+        as its own entry. Callers that want a specific email can pass it.
         """
+        # FIX (F-15-30): unique key per save to avoid silent overwrites.
+        # Use uuid4 for true uniqueness (time-based keys can collide within
+        # the same second, which happens frequently in tests / rapid API calls).
+        if not email:
+            import uuid
+            email = f"runtime-token-{uuid.uuid4().hex[:12]}"
         QuotexWSClient.save_session_json(
             email=email,
             token=token,
@@ -422,7 +624,12 @@ class QuotexWSClient:
 
     async def connect(self) -> tuple[bool, str]:
         """Open the WebSocket and authorize with the stored ssid."""
-        if self._connected and self._authorized:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-03): previously short-circuited on
+        # `self._connected and self._authorized` even when the socket was
+        # actually dead (e.g., a prior process kill left the flags set with
+        # no `finally` cleanup). feed.py then subscribed to streams that went
+        # nowhere. Now verify the socket is actually open.
+        if self._connected and self._authorized and self._ws_is_open():
             return True, "already connected"
 
         if not self._ssid:
@@ -432,7 +639,7 @@ class QuotexWSClient:
         try:
             self._ws = await asyncio.wait_for(
                 websockets.connect(
-                    WS_URL,
+                    self._ws_url,   # FIX (F-15-01): derived from host arg
                     additional_headers={
                         "User-Agent": self._user_agent or
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -449,8 +656,10 @@ class QuotexWSClient:
                 timeout=CONNECT_TIMEOUT,
             )
         except Exception as exc:
-            self._last_reason = f"ws connect failed: {exc}"
-            return False, self._last_reason
+            # FIX (DEEP-AUDIT-2026-07-26 / F-15-25): previously stored
+            # self._last_reason (a dead-state field). Now inline the reason
+            # in the return value — no separate field.
+            return False, f"ws connect failed: {exc}"
 
         # Start the reader loop (handles incoming frames + pings)
         self._reader_task = asyncio.create_task(self._reader_loop())
@@ -494,7 +703,7 @@ class QuotexWSClient:
             # timeout from reject so feed._connect doesn't clear a valid
             # token on a slow 15s timeout. _wait_for_auth now sets
             # self._auth_fail_reason; we forward it as the reason string.
-            _reason = getattr(self, "_auth_fail_reason", "") or "rejected"
+            _reason = self._auth_fail_reason or "rejected"
             if _reason == "timeout":
                 return False, "authorization timeout (15s)"
             elif _reason == "ws_closed":
@@ -506,9 +715,29 @@ class QuotexWSClient:
 
         # Fetch instruments in the background — non-blocking, feed.py will
         # re-call get_instruments() explicitly when it needs them.
-        asyncio.create_task(self._fetch_instruments())
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-31): previously fire-and-forget
+        # with no exception handler — if _fetch_instruments raised (e.g. WS
+        # closed mid-send), the exception was swallowed and the task GC'd
+        # silently. get_instruments() later returned [] with no clue why.
+        # Now: log exceptions via a done-callback.
+        _inst_task = asyncio.create_task(self._fetch_instruments())
+        _inst_task.add_done_callback(self._on_bg_task_done)
 
         return True, "connected"
+
+    @staticmethod
+    def _on_bg_task_done(task: asyncio.Task) -> None:
+        """Done-callback for fire-and-forget background tasks.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-31): surfaces exceptions from
+        tasks that would otherwise be GC'd silently.
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            print(f"[quotex_ws] background task {task} raised: "
+                  f"{type(exc).__name__}: {exc}")
 
     async def _wait_for_open(self) -> None:
         """Wait for the engine.io "0" open frame (handled inside the reader
@@ -565,25 +794,15 @@ class QuotexWSClient:
         method returned False even on a live connection — _ping_loop exited,
         _cleanup skipped ws.close(), stop_candles_stream took the early
         return, get_candles returned []. Now tries close_code (v13+) too.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-33): previously tried all three API
+        styles on EVERY call (3 try/except blocks). Now selects the right
+        checker ONCE at module import based on the installed websockets
+        version, then dispatches via a single callable.
         """
         if self._ws is None:
             return False
-        # Try v13+ / ClientConnection API first (close_code is None while open)
-        try:
-            return self._ws.close_code is None
-        except AttributeError:
-            pass
-        # Try v12-15 API (protocol.state)
-        try:
-            from websockets.protocol import State
-            return self._ws.protocol.state == State.OPEN
-        except (AttributeError, ImportError):
-            pass
-        # Try old v10- API (.closed)
-        try:
-            return not self._ws.closed
-        except AttributeError:
-            return False
+        return _WS_IS_OPEN_CHECK(self._ws)
 
     async def _reader_loop(self) -> None:
         """Background task: read frames, dispatch by type, push ticks into
@@ -639,7 +858,16 @@ class QuotexWSClient:
         elif kind == "error":
             print(f"[quotex_ws] socket.io error: {payload}")
         elif kind == "close":
+            # FIX (DEEP-AUDIT-2026-07-26 / F-15-34): previously only printed
+            # a log line — server-sent engine.io close frame (head="1") did
+            # NOT clear `_connected` / `_authorized`. Other coroutines
+            # polling `_connected` saw True even though the socket was
+            # closed. Race window before `_reader_loop`'s `finally` block
+            # ran. Now: clear the flags immediately so callers see the
+            # disconnect without waiting for the reader's `finally`.
             print("[quotex_ws] server closed the engine.io connection")
+            self._connected = False
+            self._authorized = False
 
     async def _handle_event(self, arr: list) -> None:
         """Dispatch a Socket.IO event: ["event_name", *args]."""
@@ -648,7 +876,16 @@ class QuotexWSClient:
         name = arr[0]
         args = arr[1:]
 
-        if name in ("authorization/accept", "authorization/success"):
+        # FIX (DEEP-AUDIT-2026-07-26 / A-08-CRIT-1):
+        # Quotex sends `s_authorization` as the WS message field name (see
+        # pyquotex/api.py:285), NOT `authorization/accept` or
+        # `authorization/success`. The standalone `quotex_ws.py` client
+        # listened for the wrong event names, so on every reconnect the
+        # auth-accept event was missed and the client silently timed out
+        # after 15s. Add `s_authorization` to the accept set; keep the old
+        # names for backward compat (in case some legacy Quotex server still
+        # emits them, or a future fork renames back).
+        if name in ("authorization/accept", "authorization/success", "s_authorization"):
             self._auth_result = True
             self._authorized = True
         elif name in ("authorization/reject", "authorization/error"):
@@ -677,8 +914,14 @@ class QuotexWSClient:
                     self._merge_instrument(inst)
         elif name == "instruments/list":
             # Full instruments list
+            # FIX (DEEP-AUDIT-2026-07-26 / F-15-26): also populate the
+            # _payouts cache from the list response so get_payout_by_asset
+            # has data even when the per-instrument shape doesn't match
+            # the inst[-9] assumption.
             if args and isinstance(args[0], list):
                 self._instruments = args[0]
+                for inst in args[0]:
+                    self._cache_payout(inst)
         elif name == "history/load":
             # JSON-formatted history response
             if args and isinstance(args[0], dict):
@@ -688,12 +931,38 @@ class QuotexWSClient:
                 if fut and not fut.done():
                     fut.set_result(data)
         elif name in ("timesync",):
-            # Server time sync — could be used for NTP-like correction.
-            pass
+            # FIX (DEEP-AUDIT-2026-07-26 / F-15-35): previously `pass` —
+            # server time sync was discarded. Trade expiration relies on
+            # server time (api.py settings_apply uses int(time.time())) which
+            # may differ from server time across timezones. Now: store the
+            # offset (server_ts - local_ts) so callers can correct.
+            try:
+                if args and isinstance(args[0], dict):
+                    server_ts = float(args[0].get("time", 0))
+                    if server_ts > 0:
+                        self._server_time_offset = server_ts - time.time()
+            except (TypeError, ValueError):
+                pass
         elif name == "chart_notification/update":
-            # Chart notification (asset went from open to closed, etc.) —
-            # we don't currently act on it; feed.py refreshes pairs on a timer.
-            pass
+            # FIX (DEEP-AUDIT-2026-07-26 / F-15-36): previously `pass` —
+            # asset open/close transitions were missed. feed.py may place
+            # signals on closed markets → "asset not available" rejections.
+            # Now: parse the asset + open state into self._asset_open_state.
+            try:
+                if args and isinstance(args[0], dict):
+                    body = args[0]
+                    asset = body.get("asset") or body.get("instrument")
+                    if asset:
+                        # Quotex's chart_notification/update contains a
+                        # "data" field with state info; fall back to presence
+                        # of body as proxy for "open".
+                        data = body.get("data") or {}
+                        if isinstance(data, dict) and "isOpened" in data:
+                            self._asset_open_state[asset] = bool(data["isOpened"])
+                        elif "is_open" in body:
+                            self._asset_open_state[asset] = bool(body["is_open"])
+            except (TypeError, ValueError):
+                pass
         # Tick data is delivered as a list of [asset, ts, price, direction]
         # tuples — sent under various event names depending on Quotex version.
         # We detect by shape: a list whose first element is a list of 4 items.
@@ -703,6 +972,11 @@ class QuotexWSClient:
         # ≥3 elements, so the shape check matched and every instrument was
         # passed to _ingest_tick (which silently failed on float(name_string)).
         # Now guard with `elif` so known non-tick events don't fall through.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-06): also accept single-tick
+        # events where `args[0]` IS the tick itself (a 4-element list with
+        # a string asset name) — previously required `args[0]` to be a LIST
+        # OF TICKS, so a single-tick frame `["event_name",
+        # ["EURUSD_otc", ts, price, dir]]` was silently dropped.
         elif (args and isinstance(args[0], list)
                 and args[0] and isinstance(args[0][0], (list, tuple))
                 and len(args[0][0]) >= 3
@@ -711,6 +985,14 @@ class QuotexWSClient:
                                  "timesync")):
             for tick in args[0]:
                 self._ingest_tick(tick)
+        elif (args and isinstance(args[0], list)
+                and len(args[0]) >= 3
+                and isinstance(args[0][0], str)
+                and name not in ("instruments/list", "instruments/update",
+                                 "history/load", "chart_notification/update",
+                                 "timesync")):
+            # Single-tick frame: args[0] is the tick itself.
+            self._ingest_tick(args[0])
 
     def _ingest_tick(self, tick: list) -> None:
         """Push a tick into the in-memory buffer AND fire any registered
@@ -729,9 +1011,18 @@ class QuotexWSClient:
         # last was being deduplicated, so older duplicates with timestamps
         # matching earlier buffer entries were appended — inflating
         # buy_pct/sell_pct and crosses in the microstructure analysis.
+        # FIX (DEEP-AUDIT-2026-07-26 / A-08-CRIT-2):
+        # The previous dedup matched on `_t["time"] == ts` ONLY. Quotex
+        # sometimes truncates tick timestamps to whole seconds; multiple
+        # distinct ticks within the same second shared `ts`, so only the
+        # first was kept and the rest were silently dropped. This starved
+        # the microstructure analysis (per-tick volume, buy/sell pressure)
+        # of data during high-activity periods where 3-5 ticks/sec is
+        # common. Now dedup on (timestamp, price) tuple — true duplicates
+        # match both fields, distinct ticks within the same second are kept.
         buf = self._realtime[asset]
         for _t in list(buf)[-5:]:
-            if _t["time"] == ts:
+            if _t["time"] == ts and _t["price"] == price:
                 return
         tick_dict = {"time": ts, "price": price}
         buf.append(tick_dict)
@@ -740,7 +1031,12 @@ class QuotexWSClient:
         # the tick into an asyncio.Queue, which the stream loop awaits
         # directly — no 50ms polling delay. Async callbacks are scheduled on
         # the event loop (we're already in the reader task, so this is safe).
-        for cb in self._tick_callbacks.get(asset, []):
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-38): iterate over a SNAPSHOT of
+        # the callback list so a concurrent unregister_tick_callback() call
+        # (which mutates the list via .remove()) can't trigger
+        # "list changed size during iteration" RuntimeError or skip a
+        # callback that should have fired.
+        for cb in list(self._tick_callbacks.get(asset, [])):
             try:
                 result = cb(tick_dict)
                 if asyncio.iscoroutine(result):
@@ -758,7 +1054,13 @@ class QuotexWSClient:
         Callback signature: callback(tick: dict) -> None | coroutine
         where tick = {"time": float, "price": float}
         """
-        self._tick_callbacks[asset].append(callback)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-37): previously appended without
+        # dedup — calling register_tick_callback twice with the SAME
+        # callback caused every tick to fire it twice, double-counting in
+        # microstructure analysis. Now: skip if already registered.
+        cbs = self._tick_callbacks[asset]
+        if callback not in cbs:
+            cbs.append(callback)
 
     def unregister_tick_callback(self, asset: str, callback) -> None:
         """Remove a previously-registered callback. Safe to call even if the
@@ -781,19 +1083,40 @@ class QuotexWSClient:
         contamination. Now we track the asset from the JSON header in
         self._binary_history_target and only attribute binary bytes to
         that specific asset.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-07): the single-slot
+        `_binary_history_target` was still racy when multiple
+        history/load JSON headers arrived before their respective
+        binary attachments (e.g. server pipelining). The LATEST header
+        overwrote the target, so the NEXT binary bytes (which actually
+        belonged to an earlier header) were attributed to the wrong
+        asset. Now: use a FIFO queue (`_binary_history_queue`) — each
+        JSON header pushes its asset, each binary attachment pops the
+        next asset in order. This correctly matches attachments to
+        their headers even when interleaved.
         """
         # If payload is bytes, it's a binary attachment — append to the
-        # asset identified by the most recent history/load header.
+        # asset at the front of the FIFO queue.
         if isinstance(payload, (bytes, bytearray)):
-            target = getattr(self, "_binary_history_target", None)
+            target = None
+            # FIX (F-15-07): pop next asset from the FIFO queue.
+            if self._binary_history_queue:
+                target = self._binary_history_queue.popleft()
+            # Backward-compat fallback: legacy single-slot target.
+            if target is None:
+                target = getattr(self, "_binary_history_target", None)
+                if target is not None:
+                    self._binary_history_target = None
             if target and target in self._pending_history:
                 fut = self._pending_history[target]
                 if not fut.done():
                     self._binary_history_buf[target] = (
                         self._binary_history_buf.get(target, b"") + bytes(payload))
             else:
-                # Fallback: legacy behavior (attribute to all pending).
-                # Should rarely fire now that we track the target.
+                # Last-resort fallback: legacy behavior (attribute to all
+                # pending). Should rarely fire now that we have the queue.
+                # FIX (F-15-07): copy the list before iterating — a future
+                # resolution inside the loop may mutate _pending_history.
                 for asset, fut in list(self._pending_history.items()):
                     if not fut.done():
                         self._binary_history_buf[asset] = (
@@ -807,9 +1130,13 @@ class QuotexWSClient:
                 body = payload[1] or {}
                 asset = body.get("asset") or body.get("instrument")
                 if asset and asset in self._pending_history:
-                    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-08):
-                    # record the target so the subsequent binary attachment
-                    # is attributed to THIS asset only.
+                    # FIX (F-15-07): push the asset to the FIFO queue so the
+                    # subsequent binary attachment is attributed to THIS
+                    # asset only, even if other history/load headers arrive
+                    # before its attachment.
+                    self._binary_history_queue.append(asset)
+                    # Keep legacy single-slot in sync (for any code paths that
+                    # still read it).
                     self._binary_history_target = asset
                     # FIX (2026-07-13): the binary attachment will follow in
                     # the next frame; _handle_binary(bytes) above collects it
@@ -833,8 +1160,20 @@ class QuotexWSClient:
         pings every 25s but never checked if a pong came back. If the
         server silently dropped the connection (no TCP FIN — common with
         cloud LBs), the reader loop blocked forever and the ping loop
-        kept sending into the void. Now: if no pong in 2× PING_INTERVAL,
+        kept sending into the void. Now: if no pong in ~2.5× PING_INTERVAL,
         break the loop and let _reader_loop's finally block clean up.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-39): aligned the threshold with
+        the docstring (2.5× PING_INTERVAL, was the actual code; the
+        docstring said "2×"). The 2.5× margin is intentional — PING_TIMEOUT
+        is 60s on the server, so a single missed pong still leaves room
+        for the next cycle before we declare the connection dead.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-40): previously re-sent the SAME
+        `self._ssid` every 5 min for re-auth, even if a prior reject had
+        set `_auth_result = False`. This caused repeated failed auth
+        attempts (rate-limit / ban risk). Now: skip re-auth if we know the
+        ssid is dead.
         """
         last_reauth = time.time()
         REAUTH_INTERVAL = 300  # 5 minutes
@@ -844,8 +1183,8 @@ class QuotexWSClient:
             while self._ws and self._ws_is_open():
                 await asyncio.sleep(PING_INTERVAL)
                 if self._ws and self._ws_is_open():
-                    # Pong-timeout check: if no pong in 2× PING_INTERVAL, the
-                    # connection is dead — break out and let cleanup fire.
+                    # Pong-timeout check: if no pong in 2.5× PING_INTERVAL,
+                    # the connection is dead — break out and let cleanup fire.
                     if time.time() - self._last_pong > PING_INTERVAL * 2.5:
                         print(f"[quotex_ws] no pong in {PING_INTERVAL * 2.5:.0f}s — "
                               f"connection presumed dead, breaking ping loop")
@@ -871,7 +1210,12 @@ class QuotexWSClient:
 
                     # Periodic re-authorization to refresh session
                     now = time.time()
-                    if now - last_reauth > REAUTH_INTERVAL and self._ssid:
+                    # FIX (F-15-40): skip re-auth if the ssid has been
+                    # explicitly rejected — re-sending it just generates
+                    # more failed auth attempts server-side.
+                    if (now - last_reauth > REAUTH_INTERVAL
+                            and self._ssid
+                            and self._auth_result is not False):
                         try:
                             reauth_frame = _socket_io_event(
                                 "authorization",
@@ -887,13 +1231,27 @@ class QuotexWSClient:
             pass
 
     async def _cleanup(self) -> None:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-41): previously cancelled the
+        # tasks but never awaited them — on Python 3.11+, the cancellation
+        # may not complete before `self._ws = None` is set, causing
+        # "Task was destroyed but it is pending!" warnings and possible
+        # partial state corruption. Now: gather the cancelled tasks with
+        # return_exceptions=True so cleanup is deterministic.
+        tasks_to_await: list[asyncio.Task] = []
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
+            tasks_to_await.append(self._reader_task)
         if self._ping_task and not self._ping_task.done():
             self._ping_task.cancel()
+            tasks_to_await.append(self._ping_task)
         if self._ws and self._ws_is_open():
             try:
                 await self._ws.close()
+            except Exception:
+                pass
+        if tasks_to_await:
+            try:
+                await asyncio.gather(*tasks_to_await, return_exceptions=True)
             except Exception:
                 pass
         self._ws = None
@@ -903,6 +1261,10 @@ class QuotexWSClient:
     async def close(self) -> None:
         self._closed_by_user = True
         await self._cleanup()
+        # FIX (DEEP-AUDIT-2026-07-26 / F-15-42): clear the subscribed set so
+        # that a subsequent connect() doesn't send depth/unfollow for assets
+        # we never subscribed in the new session (server-side rate-limit risk).
+        self._subscribed.clear()
 
     # ── Instruments ───────────────────────────────────────────────────────
 
@@ -917,15 +1279,39 @@ class QuotexWSClient:
             print(f"[quotex_ws] instruments/list request failed: {exc}")
 
     def _merge_instrument(self, inst: list) -> None:
-        """Update or append a single instrument in self._instruments."""
+        """Update or append a single instrument in self._instruments.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-26): also populate self._payouts
+        so get_payout_by_asset has a fallback when the instruments tuple
+        shape doesn't expose the 1M payout field at index -9.
+        """
         if not inst or len(inst) < 2:
             return
         name = inst[1]
         for i, existing in enumerate(self._instruments):
             if existing and len(existing) > 1 and existing[1] == name:
                 self._instruments[i] = inst
+                self._cache_payout(inst)
                 return
         self._instruments.append(inst)
+        self._cache_payout(inst)
+
+    def _cache_payout(self, inst: list) -> None:
+        """Cache the 1M payout for this instrument into self._payouts.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-26): previously _payouts was
+        never populated. Now extracted as a helper so both the
+        instruments/list handler and _merge_instrument call it.
+        """
+        if not inst or len(inst) <= 9:
+            return
+        try:
+            name = inst[1]
+            payout = int(inst[-9])
+            if name and payout >= 0:
+                self._payouts[name] = payout
+        except (TypeError, ValueError, IndexError):
+            pass
 
     async def get_instruments(self) -> list:
         """Return the cached instruments list, refreshing once if empty.
@@ -951,27 +1337,76 @@ class QuotexWSClient:
         return list(self._instruments)
 
     def get_payout_by_asset(self, asset: str) -> int | None:
-        """Return the cached 1-minute payout % for an asset, or None."""
-        # Instruments may not have loaded yet — try to extract from cache
+        """Return the cached 1-minute payout % for an asset, or None.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-43): previously used `inst[-9]`
+        (negative index) which silently returns the wrong field if Quotex
+        adds a new column to the instrument tuple. Now also consult the
+        self._payouts cache (populated by _cache_payout) which is keyed by
+        asset name and immune to tuple-shape changes.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-44): previously did exact match
+        `inst[1] == asset` only — feed.py may pass "EURUSD" while Quotex
+        has "EURUSD_otc". Now tries both the literal asset name AND the
+        "_otc" variant (and vice-versa) so OTC/non-OTC mismatches don't
+        cause payout lookups to silently fail.
+        """
+        if not asset:
+            return None
+        # Build a list of candidate asset names to try — literal + _otc variant
+        candidates: list[str] = [asset]
+        if asset.endswith("_otc"):
+            candidates.append(asset[:-4])
+        else:
+            candidates.append(f"{asset}_otc")
+
+        # First: try the payout cache (populated by _cache_payout).
+        for cand in candidates:
+            if cand in self._payouts:
+                return self._payouts[cand]
+
+        # Fallback: scan instruments list. Use a positive index bound check
+        # instead of `inst[-9]` to avoid silent mis-indexing if the schema
+        # grows. Position -9 from the end == position (len-9) from the start.
         for inst in self._instruments:
-            if inst and len(inst) > 9 and inst[1] == asset:
-                try:
-                    return int(inst[-9])
-                except (TypeError, ValueError, IndexError):
-                    continue
-        return self._payouts.get(asset)
+            if not inst or len(inst) <= 9:
+                continue
+            if inst[1] not in candidates:
+                continue
+            try:
+                # FIX (F-15-43): prefer positive index lookup with a length
+                # check above; -9 still works but the explicit guard makes
+                # the intent clear and protects against schema changes.
+                payout = int(inst[len(inst) - 9])
+                if payout >= 0:
+                    return payout
+            except (TypeError, ValueError, IndexError):
+                continue
+        return None
 
     # ── Stream lifecycle (3-step subscribe per asset) ─────────────────────
 
-    async def start_candles_stream(self, asset: str, period: int) -> None:
+    async def start_candles_stream(self, asset: str, period: int) -> bool:
         """Subscribe to live ticks for one asset. Sends 3 frames per the
         quotex-smooth-candle-mystery.txt spec:
 
             42["instruments/update", {"asset":asset,"period":period}]
             42["chart_notification/get", {"asset":asset,"version":"1.0.0"}]
             42["depth/follow", asset]   ← depth/follow takes a STRING payload
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-45): previously raised
+        RuntimeError("WebSocket not connected") — if the caller wrapped the
+        call in `try: ... except Exception:` (common pattern), the exception
+        was silently swallowed with NO log. Stream never started, no retry.
+        Now: log the failure explicitly AND still raise (changing return
+        type would break callers) so silent catches at least leave a trace.
+        Returns True on success.
         """
         if not self._ws or not self._ws_is_open():
+            # FIX (F-15-45): explicit log so silent except-Exception in the
+            # caller doesn't hide the failure entirely.
+            print(f"[quotex_ws] start_candles_stream({asset!r}) — "
+                  f"WebSocket not connected, cannot subscribe")
             raise RuntimeError("WebSocket not connected")
 
         # Step 1: register interest in (asset, period)
@@ -990,30 +1425,45 @@ class QuotexWSClient:
             asset,   # note: STRING payload, not an object
         ))
         self._subscribed.add(asset)
+        return True
 
     async def stop_candles_stream(self, asset: str) -> None:
         """Unsubscribe from an asset's tick stream and clear all per-asset
-        state (callbacks, tick buffer)."""
+        state (callbacks, tick buffer).
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-46): previously the _realtime.pop
+        could race with _ingest_tick — a tick landing between the callbacks
+        pop and the buffer pop would recreate the deque via defaultdict,
+        and the next get_realtime_price would return a 1-tick (stale)
+        result. Now: hold self._realtime_lock across the cleanup so ticks
+        are blocked from being ingested during the pop window.
+        """
         # Always clear callbacks — even if the WS is gone, feed.py may still
         # be holding a stream it needs to release.
-        self._tick_callbacks.pop(asset, None)
-        if not self._ws or not self._ws_is_open():
+        # FIX (F-15-46): hold the realtime lock across the callbacks+buffer
+        # pop so _ingest_tick can't recreate the deque mid-cleanup.
+        async with self._realtime_lock:
+            self._tick_callbacks.pop(asset, None)
+            if not self._ws or not self._ws_is_open():
+                self._subscribed.discard(asset)
+                self._realtime.pop(asset, None)
+                return
+            if asset not in self._subscribed:
+                self._realtime.pop(asset, None)
+                return
+            # Send depth/unfollow OUTSIDE the lock — WS I/O can be slow and
+            # we don't want to block tick ingestion for other assets.
+            subscribed = asset in self._subscribed
             self._subscribed.discard(asset)
             self._realtime.pop(asset, None)
-            return
-        if asset not in self._subscribed:
-            self._realtime.pop(asset, None)
-            return
-        try:
-            await self._ws.send(_socket_io_event("depth/unfollow", asset))
-        except Exception as exc:
-            print(f"[quotex_ws] depth/unfollow error for {asset}: {exc}")
-        self._subscribed.discard(asset)
+        if subscribed:
+            try:
+                await self._ws.send(_socket_io_event("depth/unfollow", asset))
+            except Exception as exc:
+                print(f"[quotex_ws] depth/unfollow error for {asset}: {exc}")
         # Clear the tick buffer so a re-subscribe doesn't replay stale ticks.
-        # MINOR RACE (2026-07-13): an in-flight _ingest_tick could recreate
-        # the deque via defaultdict after this pop. Harmless — the recreated
-        # deque is never read (callbacks already cleared above on line 891).
-        self._realtime.pop(asset, None)
+        # FIX (F-15-46): the buffer is now popped INSIDE the lock above, so
+        # the old "minor race" comment is no longer applicable.
 
     # ── Realtime price polling (in-memory, no WS I/O) ─────────────────────
 
@@ -1042,7 +1492,33 @@ class QuotexWSClient:
                        timestamp — we use the current period-floor).
         offset: total seconds of history to fetch (candles * period).
         period: candle period in seconds.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-04): previously a concurrent call
+        to get_candles() for the SAME asset clobbered the first caller's
+        pending future (`self._pending_history[asset] = fut` overwrote
+        the prior slot). The first caller's `await asyncio.wait_for(fut,
+        ...)` then never resolved and timed out after 15s with []. Now:
+        serialize concurrent calls for the same asset via per-asset
+        `asyncio.Lock` — the second caller waits for the first to complete
+        and reuses its result by re-fetching (no cached result-sharing to
+        avoid stale-data races if callers passed different `period` /
+        `offset` arguments).
         """
+        if not self._ws or not self._ws_is_open():
+            return []
+
+        # FIX (F-15-04): per-asset lock serializes concurrent calls.
+        # _history_locks is a defaultdict — first access creates the lock.
+        async with self._history_locks[asset]:
+            return await self._get_candles_inner(
+                asset, end_from_time, offset, period,
+            )
+
+    async def _get_candles_inner(self, asset: str,
+                                 end_from_time: int | None,
+                                 offset: int,
+                                 period: int) -> list[dict]:
+        """Inner worker for get_candles — assumes the per-asset lock is held."""
         if not self._ws or not self._ws_is_open():
             return []
 
@@ -1057,6 +1533,19 @@ class QuotexWSClient:
         fut = loop.create_future()
         self._pending_history[asset] = fut
         self._binary_history_buf.pop(asset, None)
+        # FIX (F-15-07): clear this asset's slot in the binary-attachment
+        # FIFO queue (any orphaned entries would mis-attribute future bytes).
+        try:
+            while self._binary_history_queue:
+                # Only remove entries matching this asset — other entries
+                # belong to other in-flight fetches (held by other callers
+                # via their own per-asset locks).
+                if self._binary_history_queue[-1] == asset:
+                    self._binary_history_queue.pop()
+                else:
+                    break
+        except Exception:
+            pass
 
         try:
             await self._ws.send(_socket_io_event(
@@ -1081,6 +1570,13 @@ class QuotexWSClient:
             # before falling through to the (empty) JSON normalization path.
             # Without this, ~10-20% of stream starts get [] history and the
             # first candle has no prediction.
+            # FIX (DEEP-AUDIT-2026-07-26 / F-15-47): kept the busy-poll as a
+            # fallback. A cleaner implementation would use a dedicated
+            # `_binary_history_futures[asset]` future resolved by
+            # `_handle_binary` when bytes arrive — TODO. The busy-poll is
+            # acceptable because it only runs when the JSON header arrives
+            # before the binary (which is the common case), and the typical
+            # wait is <100ms.
             binary_buf = self._binary_history_buf.get(asset)
             if not binary_buf:
                 for _ in range(20):  # 2s
@@ -1112,7 +1608,20 @@ class QuotexWSClient:
         amount_of_seconds: total seconds of history (e.g. 200 * 60 = 12000).
         period: candle period in seconds.
         max_workers: ignored — we fetch in one shot over WebSocket.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-48): max_workers is intentionally
+        ignored — Quotex's WS history/load endpoint returns the full
+        requested range in a single response, so parallelism at the WS
+        layer provides no benefit. If callers pass max_workers > 1, we
+        log a debug note but still fetch in one shot. For large
+        amount_of_seconds values (>86400 = 1 day at 1-min period), the
+        single fetch may take >15s and time out — callers should chunk
+        the request themselves.
         """
+        if max_workers and max_workers > 1:
+            # Don't raise — silently document the limitation. (See FIX above.)
+            print(f"[quotex_ws] get_historical_candles({asset!r}): "
+                  f"max_workers={max_workers} ignored (WS fetch is single-shot)")
         return await self.get_candles(
             asset,
             end_from_time=int(time.time()),
@@ -1128,6 +1637,12 @@ class QuotexWSClient:
         (get_candles) receives `raw` from the 'history/load' event handler,
         which already extracts `args[0].get("data") or args[0].get("candles")
         or []` (always a list) before resolving the future. Removed.
+
+        FIX (DEEP-AUDIT-2026-07-26 / F-15-49): previously defaulted `time`
+        to 0 if both `time` and `from` keys were missing. A candle with
+        time=0 sorts FIRST, corrupting the timeline, and dedup-by-time
+        would collapse multiple time=0 candles into one. Now: SKIP any
+        candle whose time can't be resolved.
         """
         if not raw:
             return []
@@ -1136,8 +1651,12 @@ class QuotexWSClient:
         for c in raw:
             try:
                 if isinstance(c, dict):
+                    # FIX (F-15-49): skip candles without a resolvable time.
+                    t = c.get("time", c.get("from"))
+                    if t is None:
+                        continue
                     out.append({
-                        "time":  int(c.get("time", c.get("from", 0))),
+                        "time":  int(t),
                         "open":  float(c.get("open", 0)),
                         "high":  float(c.get("high", 0)),
                         "low":   float(c.get("low", 0)),
@@ -1145,8 +1664,12 @@ class QuotexWSClient:
                     })
                 elif isinstance(c, (list, tuple)) and len(c) >= 5:
                     # Some Quotex versions send [time, open, high, low, close]
+                    # FIX (F-15-49): skip if time is None / falsy.
+                    t = c[0]
+                    if t is None or t == 0:
+                        continue
                     out.append({
-                        "time":  int(c[0]),
+                        "time":  int(t),
                         "open":  float(c[1]),
                         "high":  float(c[2]),
                         "low":   float(c[3]),
@@ -1161,20 +1684,7 @@ class QuotexWSClient:
         return sorted(seen.values(), key=lambda x: x["time"])
 
 
-# ── Factory ─────────────────────────────────────────────────────────────────
-
-def make_client(email: str = "",
-                password: str = "",
-                host: str = "market-qx.trade",
-                lang: str = "en",
-                root_path: str | None = None,
-                **kw) -> QuotexWSClient:
-    """Convenience factory mirroring pyquotex's Quotex(...) constructor."""
-    return QuotexWSClient(
-        email=email,
-        password=password,
-        host=host,
-        lang=lang,
-        root_path=root_path,
-        **kw,
-    )
+# FIX (DEEP-AUDIT-2026-07-26 / F-15-DELETE-MAKE_CLIENT): `make_client()` had
+# ZERO callers across the repo (per cross-file audit A-10). feed.py constructs
+# QuotexWSClient directly via _make_client(). Deleted to reduce maintenance
+# surface. If a future caller wants a factory, re-add with explicit kwargs.

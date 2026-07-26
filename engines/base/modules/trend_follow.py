@@ -65,7 +65,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     atr = ctx.atr
     last = candles[-1]
     close = last["close"]
-    o, h, l, c = last["open"], last["high"], last["low"], last["close"]
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-01, A-05 P20): drop unused h, l, c
+    # destructuring — only `o` (open) is consumed downstream by the breakout
+    # body-size check. The high/low/close entries were dead since `close` is
+    # already defined above and `h`/`l` were never referenced.
+    o = last["open"]
     # FIX: define trend variables for new signals 7-9
     is_trending = regime.get("is_trending", False)
     trend_regime = regime.get("regime", "RANGE")
@@ -85,8 +89,13 @@ def analyze(candles, ctx: MarketContext) -> list:
     #   (b) ctx.vol_pct >= 0.9 (volatility is at-or-above average —
     #       sub-average vol on a "rising body streak" is a low-conviction
     #       drift, not institutional momentum)
-    consec = stats["current_streak"]
-    streak_dir = stats["streak_direction"]
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-02, A-05 ISSUE S5): defensive .get()
+    # defaults for cold-start safety — `ctx.stats` keys should always be
+    # present (analysis.py:667-668 returns them on cold-start), but a
+    # missing-key bug in analysis.py would crash this module via KeyError.
+    # Defaults match the cold-start sentinel values from analysis.py.
+    consec = stats.get("current_streak", 0)
+    streak_dir = stats.get("streak_direction", 0)
     # FIX (Bug 13, deep audit 2026-07-19): cap the lookback to
     # min(consec, len(candles)) so `range(-consec, 0)` never indexes past
     # the start of the list.
@@ -210,7 +219,11 @@ def analyze(candles, ctx: MarketContext) -> list:
         buffer = atr * 0.15 if atr > 0 else 0
         prior_close = candles[-2]["close"]
 
-        # Anti-fakeout: scan the last 6 closed candles (excluding current).
+        # Anti-fakeout: scan up to 10 prior closed candles (excluding current).
+        # FIX (DEEP-AUDIT-2026-07-26 / F-10-03, A-05 P71): outdated comment
+        # claimed "last 6 closed candles" but actual scan range is
+        # range(-min(11, len(candles)-1), -1) which checks up to 10 candles.
+        # Comment aligned with code; magic numbers documented inline below.
         # FIX (AUDIT-ENGINES #19): use a SEPARATE pre-level window that
         # does NOT overlap the scan range, so failed breakouts against a
         # real prior level can actually be detected.
@@ -262,8 +275,12 @@ def analyze(candles, ctx: MarketContext) -> list:
         # candles. Now we use `body_size > buffer` where `body_size =
         # abs(close - o)` — this is the actual candle body, independent of the
         # gap, so it works for non-gap breakouts (the majority).
-        _bull_body_size = abs(close - o)
-        if close > recent_high + buffer and _bull_body_size > buffer:
+        _body_size = abs(close - o)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-10-04, A-05 P9): renamed
+        # `_bull_body_size` → `_body_size` — the absolute candle body is
+        # direction-agnostic, used for BOTH bullish and bearish breakout
+        # checks. The previous name was misleading (suggested bull-only).
+        if close > recent_high + buffer and _body_size > buffer:
             # Multi-candle confirmation: prior candle also closed above the level.
             confirmed = prior_close > recent_high
             if recent_failed_bull:
@@ -274,19 +291,17 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="trend_follow", direction="CALL", score=2, confidence=56,
                     signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
                     reasons=[f"Confirmed breakout above 10-candle high ({recent_high:.5f}, body-confirmed, prior close {prior_close:.5f}) → CALL continuation"]))
-            # DISABLED unconfirmed breakout (ultra-deep: 48.3% win rate)
-            # else:
-            #     results.append(ModuleResult(
-            #         module_name="trend_follow", direction="CALL", score=2, confidence=55,
-            #         signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
-            #         reasons=[f"Unconfirmed breakout above 10-candle high → CALL (weak)"]))
+            # FIX (DEEP-AUDIT-2026-07-26 / F-10-05, A-05 P21): removed 6-line
+            # commented-out "unconfirmed breakout" dead block — disabled since
+            # ultra-deep audit showed 48.3% win rate; retaining the comment
+            # block added maintenance noise without functional value.
         # Bearish breakout (mirror)
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-41): same body-confirmation
-        # NO-OP fix as the bullish branch above — use `_bull_body_size > buffer`
+        # NO-OP fix as the bullish branch above — use `_body_size > buffer`
         # (actual candle body, already computed above as `abs(close - o)`,
         # independent of gap) instead of `(min(o, recent_low) - close) > buffer`
         # which was a NO-OP when `open >= recent_low` (the common non-gap case).
-        elif close < recent_low - buffer and _bull_body_size > buffer:
+        elif close < recent_low - buffer and _body_size > buffer:
             confirmed = prior_close < recent_low
             if recent_failed_bear:
                 pass
@@ -295,32 +310,21 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="trend_follow", direction="PUT", score=2, confidence=56,
                     signal_type="CONTINUATION", reliability="TREND", group="TREND_BREAKOUT",
                     reasons=[f"Confirmed breakdown below 10-candle low ({recent_low:.5f}, body-confirmed, prior close {prior_close:.5f}) → PUT continuation"]))
-            # DISABLED unconfirmed breakdown (ultra-deep: 48.3% win rate)
-            # else:
-            #     results.append(...)
+            # FIX (DEEP-AUDIT-2026-07-26 / F-10-06, A-05 P22): removed 3-line
+            # commented-out "unconfirmed breakdown" dead block — same rationale
+            # as the bullish unconfirmed-breakout removal above.
 
-    # ── SIGNAL 4: Higher-high / higher-low structure ─────────────────────
-    # DISABLED (deep diagnostic, 2026-07-20): backtest showed 44.4% win rate
-    # — the 10-candle window is too short to detect meaningful Dow structure.
-    # On 1m candles, swing highs/lows within 10 candles are mostly noise.
-    # The signal is counterproductive — removing it improves accuracy.
-    # if len(candles) >= 10:
-    #     ... (original code removed)
-
-    # ── SIGNAL 5: ATR expansion in trend direction ───────────────────────
-    # When volatility is expanding (vol_pct > 1.0) AND regime is trending,
-    # the trend has fuel — boost continuation signals.
-    # FIX (AUDIT-ENGINES #20, 2026-07-19): the previous version used
-    # `regime_dir = "TREND_UP" if regime.get("regime") == "TREND_UP" else "TREND_DOWN"`
-    # — meaning RANGE and VOLATILE regimes defaulted to TREND_DOWN, firing
-    # a PUT momentum boost in non-trending markets. Now we only fire this
-    # signal when the regime is EXPLICITLY TREND_UP or TREND_DOWN.
-    # DISABLED (ultra-deep, 2026-07-20): 47.4% win rate — ATR expansion
-    # on 1m candles is noise, not momentum fuel. Removed.
-    # vol_pct = ctx.vol_pct
-    # regime_name = regime.get("regime", "RANGE")
-    # if vol_pct > 1.1 and ... (disabled)
-    regime_name = regime.get("regime", "RANGE")
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-07, A-05 P23/P24/P25/P8): removed
+    # three disabled signal blocks (~25 lines of dead code):
+    #   - SIGNAL 4 (HH/HL structure): disabled since deep diagnostic 2026-07-20
+    #     (44.4% win rate on 1m candles)
+    #   - SIGNAL 5 (ATR expansion): disabled since ultra-deep 2026-07-20
+    #     (47.4% win rate — ATR expansion on 1m is noise)
+    #   - SIGNAL 8 (EMA bounce): disabled since ultra-deep 2026-07-20
+    #     (47.5% win rate on 2388 signals)
+    #   - `regime_name` variable (PROBLEM 8/39): was assigned but never used.
+    # Kept a single consolidated comment so future re-enablement has context.
+    # ── SIGNALS 4, 5, 8 remain DISABLED (backtest win rates 44-48%) ───────
 
     # ── SIGNAL 6: Trend exhaustion dampener ──────────────────────────────
     # FIX (Real-CALL-bias, 2026-07-20): backtest showed TREND_UP_UPTREND
@@ -386,7 +390,13 @@ def analyze(candles, ctx: MarketContext) -> list:
     # `len(candles) >= 5` check at line ~305 was added but the pullback
     # block also accesses candles[-4] which needs the same guard.
     # ═══════════════════════════════════════════════════════════════════════
-    if is_trending and trend_strength > 0.4 and len(candles) >= 5:
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-08, A-05 P74/S2): standardize the
+    # trend-strength threshold to >= 0.5 (moderate-trend boundary) so this
+    # module aligns with candle_reaction, otc_pattern, and pattern. The
+    # previous `> 0.4` was the loosest threshold in the codebase — at
+    # trend_strength = 0.45 the regime classifier barely acknowledges a
+    # trend, yet the pullback continuation vote fired.
+    if is_trending and trend_strength >= 0.5 and len(candles) >= 5:
         # Check for pullback: last 2 candles against trend
         if trend_regime == "TREND_UP":
             # Look for 2 consecutive down candles (pullback)
@@ -436,14 +446,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Pullback entry: 2 up candles in downtrend (str={trend_strength:.2f}) → PUT continuation (sell the rally)"]))
 
     # ═══════════════════════════════════════════════════════════════════════
-    # NEW SIGNAL 8: EMA Bounce (NEW — classic)
-    # In an uptrend, price bounces off EMA9 → CALL
-    # In a downtrend, price bounces off EMA9 → PUT
-    # DISABLED (ultra-deep, 2026-07-20): 47.5% win rate on 2388 signals —
-    # EMA9 bounce on 1m candles is noise. The EMA9 * 1.002 tolerance is too
-    # wide, catching almost every candle near EMA9. Removed.
-    # if is_trending and trend_strength > 0.3 and ema9 > 0 and atr > 0:
-    #     ... (disabled)
+    # NEW SIGNAL 8: EMA Bounce — REMAINS DISABLED (47.5% win rate)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-09, A-05 P25): the previous 5-line
+    # commented-out block was deleted. Re-enablement requires backtest proof
+    # that EMA9 bounce on 1m candles has >= 50% win rate (currently 47.5%
+    # on 2388 historical signals).
+    # ═══════════════════════════════════════════════════════════════════════
 
     # ═══════════════════════════════════════════════════════════════════════
     # NEW SIGNAL 9: Momentum Divergence (NEW — classic)

@@ -90,8 +90,13 @@ let alertedSignalDirection = null;
 let lastMessageAt = 0;
 let chartLoadingTimeout = null;
 let _resizeTimer = null;
-let _countdownInterval = null, _tickRateInterval = null, _keepaliveInterval = null;
-let _marketStatusInterval = null;  // FIX (AUDIT-FRONTEND #2): track so pagehide can clear it
+// FIX (DEEP-AUDIT-2026-07-26 / F-17-14 + F-17-16, HIGH): removed the unused
+// `_tickRateInterval` and `_marketStatusInterval` declarations — the
+// corresponding setInterval blocks were deleted (dead code targeting
+// non-existent HTML elements #market-status-indicator / #tick-rate-val /
+// #stat-active-cat / #stat-signals / #stat-winrate). The pagehide cleanup
+// references were also removed.
+let _countdownInterval = null, _keepaliveInterval = null;
 
 /* Active tab — 'chart' (default) | 'history' | 'accuracy' */
 let currentTab = 'chart';
@@ -109,6 +114,15 @@ let _tweenStart = 0, _rafActive = false;
 let $ = null;
 let countdownEl = null;
 let detailOverlay = null, detailBody = null, detailTitle = null;
+
+// FIX (DEEP-AUDIT-2026-07-26 / F-17-09, CRITICAL): guard flag for wireEvents()
+// so re-entrant initApp calls (e.g. bfcache restore via pageshow) don't
+// register duplicate event listeners. The DOM survives bfcache, so the
+// previous listeners are still attached and functional.
+let _eventsWired = false;
+// FIX (DEEP-AUDIT-2026-07-26 / F-17-03, CRITICAL): track the active category
+// so the bfcache pageshow handler can re-init the right page.
+let _lastInitCategory = null;
 
 /* ─── HELPERS ────────────────────────────────────────────────────────────── */
 function esc(s){
@@ -214,6 +228,12 @@ function initChart(){
     },
     handleScroll: { vertTouchDrag: false },
   });
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-27, HIGH): EXPECTS LightweightCharts v4.x.
+  // The vendored library at /static/lightweight-charts.js is v4.1.3 (April 2024).
+  // In v5 (current stable), addCandlestickSeries() is removed in favour of
+  // chart.addSeries(CandlestickSeries, options). If the library is upgraded
+  // to v5, both calls below will throw — breaking the chart entirely. Pin the
+  // library at v4.x explicitly (e.g., via a <script integrity> hash in HTML).
   candleSeries = chart.addCandlestickSeries({
     upColor: '#00c853', downColor: '#ff1744',
     borderUpColor: '#00c853', borderDownColor: '#ff1744',
@@ -496,7 +516,18 @@ function showChartLoading(){
   if(!overlay) return;
   overlay.classList.add('show');
   clearTimeout(chartLoadingTimeout);
-  chartLoadingTimeout = setTimeout(() => overlay.classList.remove('show'), 20000);
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-28, HIGH): on 20s timeout, surface an
+  // error message instead of silently hiding the overlay. Previously, if the
+  // WS connected but never delivered a snapshot (server bug, network issue),
+  // the overlay disappeared after 20s and the user saw a blank chart with no
+  // explanation. Now: replace the loading text with an error message AND keep
+  // the overlay visible so the user knows something went wrong (the next
+  // snapshot/tick arrival will hideChartLoading() naturally if data resumes).
+  chartLoadingTimeout = setTimeout(() => {
+    const txt = $('chart-loading-text');
+    if(txt) txt.textContent = 'No data received — check connection';
+    // Keep the overlay visible (don't remove 'show') so the message is seen.
+  }, 20000);
 }
 function hideChartLoading(){
   const overlay = $('chart-loading-overlay');
@@ -583,13 +614,30 @@ function renderSignal(pred){
   const s = pred.signal || 'NEUTRAL';
 
   // Alert dedup — one beep per candle, plus on direction change.
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-65, MEDIUM): guard for
+  // runningCandleOpenTime === 0. Before the first candle arrives,
+  // runningCandleOpenTime is 0, so `candleKey !== alertedCandleOpenTime`
+  // (0 !== 0 → false initially, but the very first renderSignal call sets
+  // alertedCandleOpenTime = 0, so the second call IS flagged as a new candle
+  // and beeps — even on a NEUTRAL prediction. Now: don't beep if no candle
+  // has arrived yet (runningCandleOpenTime === 0) — wait until we actually
+  // have a candle boundary to dedup against. shouldAlert stays declared at
+  // function scope (referenced later for signal-pop class + signalBeep).
   const candleKey = runningCandleOpenTime || 0;
-  const isNewCandle = candleKey !== alertedCandleOpenTime;
-  const isDirectionChange = alertedSignalDirection !== s;
-  const shouldAlert = isNewCandle || isDirectionChange;
-  if(shouldAlert){
-    alertedCandleOpenTime = candleKey;
+  let shouldAlert = false;
+  if(!candleKey){
+    // No candle yet — still record the signal direction so the first real
+    // candle can detect a direction change.
     alertedSignalDirection = s;
+    alertedCandleOpenTime = 0;
+  } else {
+    const isNewCandle = candleKey !== alertedCandleOpenTime;
+    const isDirectionChange = alertedSignalDirection !== s;
+    shouldAlert = isNewCandle || isDirectionChange;
+    if(shouldAlert){
+      alertedCandleOpenTime = candleKey;
+      alertedSignalDirection = s;
+    }
   }
 
   // FIX (UI-P0-3, 2026-07-21): null-safe setters throughout. Previously
@@ -642,18 +690,25 @@ function renderSignal(pred){
     : String(reg || '—');
   _setText('sig-regime', regStr);
 
-  // FIX (DEEP-IMPL-2026-07-23): display algorithm strategy in signal panel
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-01, CRITICAL): display algorithm strategy
+  // in signal panel. Previously the JS only unhid the inner <span
+  // id="sig-strategy"> but never the parent <div id="sig-strategy-row"
+  // style="display:none">, so the entire feature was invisible. Now we also
+  // unhide the parent row when a non-default strategy is present.
   const stratName = pred.strategy || '';
   const stratReason = pred.strategy_reason || '';
   const stratEl = $('sig-strategy');
+  const stratRow = $('sig-strategy-row');
   if(stratEl){
     if(stratName && stratName !== 'default'){
       stratEl.textContent = stratName;
       stratEl.title = stratReason;
       stratEl.style.display = 'block';
+      if(stratRow) stratRow.style.display = '';
     } else {
       stratEl.textContent = '—';
       stratEl.style.display = 'none';
+      if(stratRow) stratRow.style.display = 'none';
     }
   }
 
@@ -738,6 +793,14 @@ function renderModuleBreakdown(pred){
   // Pick the active category's 6-module set. If the prediction's category
   // field is set and differs from currentCategory, trust the prediction's
   // category (it's authoritative — that's the engine that produced it).
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-32, HIGH): document that all-time OTC
+  // uses the OTC engine (intentional — engines/__init__.py routes
+  // category='alltime_otc' through the OTC engine). So OTC_MODULES (with
+  // otc_pattern as the 6th module) is the correct module set for the
+  // alltime_otc page. The predCat fallback to currentCategory doesn't help
+  // because predCat === 'otc' matches first (the engines router normalizes
+  // category='alltime_otc' to 'otc' before routing, so pred.category is
+  // 'otc' even for alltime_otc subscriptions).
   const predCat = pred.category || currentCategory;
   const moduleSet = predCat === 'real' ? REAL_MODULES : OTC_MODULES;
 
@@ -810,17 +873,24 @@ function renderMicro(micro){
 
   const msFight = $('ms-fight');
   if(msFight){
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-13, HIGH): XSS — escape micro.crosses
+    // before interpolation into msFight.innerHTML. The server could send
+    // arbitrary JSON; previously the value was inserted raw.
+    const crossesStr = esc(micro.crosses != null ? String(micro.crosses) : '0');
     if(micro.is_fight){
-      msFight.innerHTML = '<span style="color:var(--yellow);font-weight:700">⚠ YES</span> <span style="color:var(--text-dim);font-size:10px">(' + (micro.crosses||0) + ' crosses)</span>';
+      msFight.innerHTML = '<span style="color:var(--yellow);font-weight:700">⚠ YES</span> <span style="color:var(--text-dim);font-size:10px">(' + crossesStr + ' crosses)</span>';
     } else {
-      msFight.innerHTML = 'No <span style="color:var(--text-dim);font-size:10px">(' + (micro.crosses||0) + ' crosses)</span>';
+      msFight.innerHTML = 'No <span style="color:var(--text-dim);font-size:10px">(' + crossesStr + ' crosses)</span>';
     }
   }
 
   const msHold = $('ms-hold');
   if(msHold){
     if(micro.hold_price != null){
-      msHold.innerHTML = '<span style="color:var(--blue)">' + fmtPrice(micro.hold_price) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + (micro.hold_visits||0) + 'x)</span>';
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-13, HIGH): XSS — escape micro.hold_visits
+      // (and fmtPrice already produces a finite number string for hold_price).
+      const holdVisitsStr = esc(micro.hold_visits != null ? String(micro.hold_visits) : '0');
+      msHold.innerHTML = '<span style="color:var(--blue)">' + esc(fmtPrice(micro.hold_price)) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + holdVisitsStr + 'x)</span>';
     } else {
       msHold.textContent = '—';
     }
@@ -830,7 +900,12 @@ function renderMicro(micro){
   ['early','mid','late'].forEach((p, i) => {
     const el = $('ph-' + p);
     if(!el) return;
-    const ph = phases[i];
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-62, MEDIUM): bounds-check the phases
+    // array. Previously `const ph = phases[i]` assumed phases always had 3
+    // elements — if the server sent `phases: ['UP', 'DOWN']` (only 2),
+    // `phases[2]` was undefined, dir fell back to '—', and the late phase
+    // silently showed '—' instead of an error.
+    const ph = (i < phases.length) ? phases[i] : undefined;
     const dir = (typeof ph === 'string' ? ph : (ph && ph.dir ? ph.dir : '—')).toUpperCase();
     const arrows = dir === 'UP' ? '↑↑' : dir === 'DOWN' ? '↓↓' : '→';
     el.textContent = (dir !== '—' ? dir + ' ' : '') + arrows;
@@ -854,33 +929,27 @@ function renderMicro(micro){
   const msRound = $('ms-round');
   if(msRound){
     if(rl.near_level){
-      msRound.innerHTML = '<span style="color:var(--yellow)">' + fmtPrice(rl.near_level) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + (rl.near_strength || '—') + ')</span>';
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-13, HIGH): XSS — escape rl.near_strength
+      // before interpolation (it could be a non-numeric string from the server).
+      const nearStrengthStr = esc(rl.near_strength != null ? String(rl.near_strength) : '—');
+      msRound.innerHTML = '<span style="color:var(--yellow)">' + esc(fmtPrice(rl.near_level)) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + nearStrengthStr + ')</span>';
     } else {
       msRound.textContent = '—';
     }
   }
 }
 
-/* ─── TICK TAPE ──────────────────────────────────────────────────────────── */
-function addTapeTick(price){
-  const prev = tapePrices[tapePrices.length - 1];
-  const dir = prev ? (price > prev ? 'up' : price < prev ? 'down' : 'flat') : 'flat';
-  tapePrices.push(price);
-  tapeDir.push(dir);
-  if(tapePrices.length > TICK_TAPE_MAX){ tapePrices.shift(); tapeDir.shift(); }
-  renderTape();
-}
-function renderTape(){
-  const tickTapeInner = $('tick-tape-inner');
-  if(!tickTapeInner) return;
-  let html = '';
-  for(let i = 0; i < tapePrices.length; i++){
-    html += '<span class="tape-price ' + tapeDir[i] + '"><span class="tape-arrow">'
-      + (tapeDir[i]==='up'?'↑':tapeDir[i]==='down'?'↓':'→') + '</span>'
-      + fmtPrice(tapePrices[i]) + '</span>';
-  }
-  tickTapeInner.innerHTML = html;
-}
+/* ─── TICK TAPE ────────────────────────────────────────────────────────────
+   FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): DELETED addTapeTick() and
+   renderTape(). The #tick-tape-inner element was removed from HTML but the
+   JS populating logic wasn't removed. addTapeTick() ran on every tick
+   (pushing to tapePrices[] / tapeDir[] up to TICK_TAPE_MAX=40) and called
+   renderTape() which early-returned via `if(!tickTapeInner) return;` —
+   pure dead code wasting CPU on every tick. Call sites in onSnapshot,
+   onTick, onEoc, and the pair-select change handler also removed below.
+   The tapePrices / tapeDir arrays and TICK_TAPE_MAX constant remain
+   (referenced by reset logic in initApp + pair-select handler) but are
+   no longer populated or read. */
 
 /* ─── SIGNAL HISTORY ─────────────────────────────────────────────────────── */
 // FIX (AUDIT-CRITICAL #009, 2026-07-21): dedup by ctime to prevent the
@@ -1053,6 +1122,11 @@ function renderHistory(){
     const strength = h.detail ? h.detail.strength : '';
     const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
     const strengthLetter = strength ? strength[0] : '·';
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-42, HIGH): add a title attribute so
+    // hovering reveals the full word. Previously the single-letter strength
+    // indicator (S/M/W) was ambiguous — "S" could mean "Strong" or "Sell"
+    // in trading context. Now the tooltip clarifies.
+    const strengthTitle = strength ? ('Strength: ' + strength) : 'No strength';
     const scoreVal = h.detail ? h.detail.score : null;
     const score = scoreVal != null ? ((scoreVal >= 0 ? '+' : '') + scoreVal) : '';
     const scoreCls = scoreVal != null ? (scoreVal >= 0 ? 'pos' : 'neg') : '';
@@ -1079,8 +1153,14 @@ function renderHistory(){
     const clickable = clickKey ? `onclick="window._showSignalDetail('${clickKey}')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._showSignalDetail('${clickKey}')}"` : '';
     html += `<div class="history-row${accCls}${recentCls}" ${clickable}>`
          +  `<span class="history-time">${time}</span>`
-         +  `<span class="history-signal ${sigCls}">${h.signal}</span>`
-         +  `<span class="history-strength ${strengthCls}">${strengthLetter}</span>`
+         // FIX (DEEP-AUDIT-2026-07-26 / F-17-11, HIGH): XSS — escape h.signal before
+         // interpolation. The signal field comes from the WS server response
+         // (onServerSignals → s.signal) and could contain arbitrary HTML if the
+         // server were compromised or a buggy payload sent. Previously it was
+         // interpolated raw into historyList.innerHTML, allowing script
+         // injection. esc() already existed but wasn't applied here.
+         +  `<span class="history-signal ${sigCls}">${esc(h.signal)}</span>`
+         +  `<span class="history-strength ${strengthCls}" title="${esc(strengthTitle)}">${strengthLetter}</span>`
          +  `<span class="history-score ${scoreCls}">${score || '—'}</span>`
          +  `<span class="history-icon">`
          +    `<span class="icon-emoji">${iconEmoji}</span>`
@@ -1093,9 +1173,19 @@ function renderHistory(){
   // The button uses the oldest visible signal's ctime as the cursor and
   // requests the next 100 signals from the server via the WS `signals`
   // message with a `before_ctime` field (newly supported by server.py).
-  // When filtering to last 1 hour (history tab), skip the load-more
-  // button — loading older would be outside the 1-hour window.
-  if(!filterLastHour){
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-02, CRITICAL): the previous logic
+  // rendered the button only when `!filterLastHour` (i.e. NOT on the
+  // History tab). But `#history-list` lives inside `#tab-history`, which
+  // is `display:none` whenever another tab is active — so when the
+  // button WAS rendered (on Chart/Stats tabs) it was invisible, and when
+  // the History tab was actually shown the button was suppressed. The
+  // pagination feature was completely unreachable. The intent of "skip
+  // load-more when filtering to last 1 hour" is wrong — the History tab
+  // is precisely where users want to load OLDER signals (which are
+  // outside the 1-hour window). Now: render the button ONLY on the
+  // History tab (where it's visible) using the full signalHistory (not
+  // the filtered displayHistory) to find the oldest ctime cursor.
+  if(filterLastHour){
     const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
       ? signalHistory[0].detail.ctime : 0;
     if(oldestCtime){
@@ -1143,6 +1233,12 @@ window._loadMoreHistory = function(){
   if(!signalHistory.length || !signalHistory[0] || !signalHistory[0].detail
      || !signalHistory[0].detail.ctime) return;
   const beforeCtime = signalHistory[0].detail.ctime;
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-97, MEDIUM): validate beforeCtime type.
+  // Previously a console user could call window._loadMoreHistory() with a
+  // malformed ctime (e.g., signalHistory[0].detail.ctime = 'malicious') — not
+  // a real attack vector (no public surface) but fragile. Now: bail if it's
+  // not a positive finite number.
+  if(typeof beforeCtime !== 'number' || !isFinite(beforeCtime) || beforeCtime <= 0) return;
   // Send the signals request with before_ctime — server returns the
   // 100 signals older than the cursor. onServerSignals merges them.
   send({ type: 'signals', asset: currentAsset, period: currentPeriod,
@@ -1150,6 +1246,19 @@ window._loadMoreHistory = function(){
   // Optimistically disable the load-more button to prevent double-clicks.
   const btn = $('history-load-more');
   if(btn){ btn.textContent = 'Loading…'; btn.style.opacity = '0.6'; }
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-59, MEDIUM): re-enable the load-more
+  // button after 5s if no server response arrived. Previously the button
+  // was optimistically disabled (`btn.textContent = 'Loading…'`) but never
+  // re-enabled if the server failed — the user couldn't retry. If
+  // onServerSignals succeeds, renderHistory() rebuilds the button
+  // (resetting its text); if it fails, this timeout re-enables it.
+  setTimeout(() => {
+    const btn2 = $('history-load-more');
+    if(btn2){
+      btn2.textContent = 'Load older signals ↓';
+      btn2.style.opacity = '';
+    }
+  }, 5000);
 };
 
 function showSignalDetail(idx){
@@ -1161,7 +1270,13 @@ function showSignalDetail(idx){
   const accIcon = acc === 'correct' ? '✅ WIN' : acc === 'wrong' ? '❌ LOSS' : '➖ DRAW';
   const accColor = acc === 'correct' ? 'var(--green)' : acc === 'wrong' ? 'var(--red)' : 'var(--text-dim)';
 
-  detailTitle.innerHTML = `<span style="color:${sig==='CALL'?'var(--green)':'var(--red)'}">${sig}</span> <span style="color:${accColor};font-size:13px;margin-left:8px">${accIcon}</span>`;
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-12, HIGH): XSS — escape `sig` before
+  // interpolation into detailTitle.innerHTML. `sig = d.signal || '—'` comes
+  // from the WS server response and could contain arbitrary HTML if the
+  // server were compromised. Previously interpolated raw, allowing script
+  // injection into the modal title. accIcon is a static emoji string so
+  // doesn't need escaping, but escape it too for defence-in-depth.
+  detailTitle.innerHTML = `<span style="color:${sig==='CALL'?'var(--green)':'var(--red)'}">${esc(sig)}</span> <span style="color:${accColor};font-size:13px;margin-left:8px">${esc(accIcon)}</span>`;
 
   let rows = '';
   // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-14): toLocaleString() displays
@@ -1494,7 +1609,6 @@ function renderPairs(payload){
   pairsList = realPairsList.concat(otcPairsList).concat(alltimeOtcPairsList);
 
   const pairSelect = $('pair-select');
-  const pairsCount = $('pairs-count');
 
   // Render only the active category's pairs in the dropdown.
   let activeList;
@@ -1555,13 +1669,11 @@ function renderPairs(payload){
     });
   }
 
-  if(pairsCount){
-    let label;
-    if(currentCategory === 'real')              label = 'Real: ';
-    else if(currentCategory === 'alltime_otc')  label = 'All-OTC: ';
-    else                                        label = 'OTC: ';
-    pairsCount.textContent = label + activeList.length;
-  }
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-17, HIGH): removed the dead `pairsCount`
+  // block. The #pairs-count element doesn't exist in any HTML file — the
+  // block `if(pairsCount){ pairsCount.textContent = label + activeList.length; }`
+  // was a no-op on every renderPairs() call (frequent — runs on every pair-list
+  // refresh and after every category switch).
 
   // If the currently-selected asset is NOT in the active category's list,
   // auto-switch to the first available pair.
@@ -1613,62 +1725,14 @@ function _updateSwitchButtonLabel(){
 }
 
 /* ─── MARKET STATUS INDICATOR ──────────────────────────────────────────────
-   Updates the small LIVE / CLOSED / 24/7 pill in row 2.
-   Real forex market: opens Monday 00:00 UTC, closes Friday 22:00 UTC,
-   re-opens Sunday 22:00 UTC. OTC runs 24/7/365.
-   AUDIT-5-15 FIX (2026-07-25): previously checked only `day === 0 || day === 6`,
-   which gave wrong results on Friday evenings and Sunday evenings. Now uses
-   full UTC day-of-week + hour-of-day check. */
-function updateMarketStatusIndicator(){
-  const el = $('market-status-indicator');
-  if(!el) return;
-  if(currentCategory === 'real'){
-    // AUDIT-5-15 FIX: full UTC datetime check.
-    // Real forex: open Mon 00:00 UTC → Fri 22:00 UTC, closed Fri 22:00 → Sun 22:00 UTC.
-    const now = new Date();
-    const day = now.getUTCDay();     // 0=Sun, 1=Mon, ..., 6=Sat
-    const hour = now.getUTCHours();
-    let closed = false;
-    let reason = '';
-    if (day === 6) {
-      // Saturday — fully closed.
-      closed = true;
-      reason = 'Saturday (UTC) — forex market closed all day';
-    } else if (day === 0 && hour < 22) {
-      // Sunday before 22:00 UTC — closed.
-      closed = true;
-      reason = 'Sunday before 22:00 UTC — forex market still closed';
-    } else if (day === 5 && hour >= 22) {
-      // Friday after 22:00 UTC — closed (market closes at 22:00 UTC).
-      closed = true;
-      reason = 'Friday after 22:00 UTC — forex market closed for weekend';
-    } else if (day === 0 && hour >= 22) {
-      // Sunday after 22:00 UTC — market just opened (Sydney session).
-      closed = false;
-      reason = 'Sunday after 22:00 UTC — Sydney session open';
-    } else {
-      // Monday-Thursday, or Friday before 22:00 UTC — fully open.
-      closed = false;
-      reason = 'Weekday (UTC) — forex market open';
-    }
-    if(closed){
-      el.className = 'market-status closed';
-      el.innerHTML = '<span class="status-dot"></span>REAL MARKET — CLOSED';
-      el.title = 'Real forex market is closed (' + reason + '). ' +
-                 'OTC market is open 24/7/365 — switch to OTC tab to trade now.';
-    } else {
-      el.className = 'market-status live';
-      el.innerHTML = '<span class="status-dot"></span>REAL MARKET — LIVE';
-      el.title = 'Real market is live (' + reason + ').';
-    }
-  } else {
-    // OTC market: 24/7/365 (broker-generated synthetic pairs).
-    el.className = 'market-status always';
-    el.innerHTML = '<span class="status-dot"></span>OTC MARKET — 24/7';
-    el.title = 'OTC market runs 24 hours a day, 7 days a week, 365 days a year. ' +
-               'Broker-generated synthetic pairs — always live, never closes.';
-  }
-}
+   FIX (DEEP-AUDIT-2026-07-26 / F-17-14, HIGH): DELETED. The entire
+   updateMarketStatusIndicator() function and its 30s setInterval were
+   dead code — the #market-status-indicator element was removed from
+   all HTML files during the "CLEAN LAYOUT OVERRIDES" CSS refactor but the
+   JS function and interval were never deleted. The function early-returned
+   via `if(!el) return;` every 30s, wasting CPU and leaking interval
+   handles on each initApp re-entry. Call site (initApp) and pagehide
+   cleanup also removed. */
 
 /* ─── setCategory(newCat) ──────────────────────────────────────────────────
    THE single category-switch function. Replaces the 3 duplicate handlers
@@ -1694,9 +1758,15 @@ function setCategory(newCat){
     'alltime_otc':  '/static/alltime_otc.html',
   };
   const target = targets[newCat] || '/static/otc.html';
-  // replace() — don't leave the old page in history so the browser back
-  // button doesn't bounce the user between the market pages.
-  window.location.replace(target);
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-46, HIGH): use location.href instead of
+  // location.replace(). Previously `replace()` removed the current page from
+  // browser history, breaking the back button — user on Real clicks "Switch
+  // to OTC", lands on OTC, presses back, and goes to whatever page was BEFORE
+  // Real (not back to Real as expected). Now: `href` pushes a new history
+  // entry so back returns to the previous market page. The original "bouncing
+  // between market pages" concern is moot — the cycle real→otc→alltime_otc→real
+  // is exactly what users want when navigating between markets.
+  window.location.href = target;
 }
 
 // FIX (DATA-FLOW-2026-07-22): cycle through the 3 markets on switch click.
@@ -1710,7 +1780,13 @@ function _nextCategory(cat){
 
 /* ─── WEBSOCKET ──────────────────────────────────────────────────────────── */
 function connect(){
-  if(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-21, HIGH): also bail if ws is in CLOSING
+  // state. Previously the guard only checked OPEN + CONNECTING, so calling
+  // connect() while ws.readyState === CLOSING created a NEW WebSocket — and
+  // the old socket's onclose fired later, calling scheduleReconnect() while
+  // a new socket was already connecting. The reconnect timer may fire later
+  // and create a THIRD socket. Now: only proceed if ws is null or fully CLOSED.
+  if(ws && ws.readyState !== WebSocket.CLOSED) return;
   setStatus('connecting');
   try { ws = new WebSocket(WS_URL); } catch(e){ scheduleReconnect(); return; }
   ws.onopen = () => {
@@ -1724,7 +1800,17 @@ function connect(){
   ws.onmessage = e => {
     lastMessageAt = Date.now();
     let msg;
-    try { msg = JSON.parse(e.data); } catch(err){ console.error('msg parse error', err); return; }
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-04, CRITICAL): surface malformed WS
+    // frames to the user via showError() instead of just console.error.
+    // Previously a malformed frame was logged and silently dropped — users
+    // on a flaky connection saw a frozen chart with no indication of why.
+    // Still return after showing the error (one bad frame shouldn't kill
+    // the whole connection — the next frame may be valid).
+    try { msg = JSON.parse(e.data); } catch(err){
+      console.error('msg parse error', err);
+      showError('Decoding feed error — retrying');
+      return;
+    }
     // FIX (UI-P3-18, 2026-07-21): wrap handleMsg in try/catch so a throw
     // inside any render function (renderSignal/renderMicro/renderHistory)
     // doesn't kill the WS message handler and break all subsequent messages.
@@ -1732,7 +1818,17 @@ function connect(){
     catch(err){ console.error('[ws] handleMsg error', err, msg); }
   };
   ws.onclose = () => { setStatus('disconnected'); scheduleReconnect(); };
-  ws.onerror = () => { try{ ws.close(); }catch(_){} /* scheduleReconnect fires via onclose */ };
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-20, HIGH): call scheduleReconnect()
+  // directly in onerror. Previously the comment assumed onclose would fire
+  // after ws.close(), but if ws.close() throws (already closed) or onclose
+  // is somehow not invoked (DNS failure, immediate close before onclose
+  // reliably fires), no reconnect was scheduled and the page was permanently
+  // stuck on "Connecting". scheduleReconnect() is idempotent (guarded by
+  // `if(reconnectTimer) return;`), so calling it directly is safe.
+  ws.onerror = () => {
+    try{ ws.close(); }catch(_){}
+    scheduleReconnect();
+  };
 }
 
 function send(obj){
@@ -1812,9 +1908,20 @@ function showError(text){
 function onSnapshot(msg){
   const c = msg.candles || [];
   updateChart(c, (msg.prediction && msg.prediction.candle) || null, true);
-  if(c.length) addTapeTick(c[c.length-1].close);
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed addTapeTick(c[c.length-1].close) — dead code.
   if(c.length){
     runningCandleOpenTime = c[c.length-1].time;
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-07, CRITICAL): initialise lastLivePrice
+    // from the snapshot's last close. Previously the live-price colour stayed
+    // 'flat' (grey) on the very first tick because `if(lastLivePrice > 0)`
+    // guarded the class-update branch — lastLivePrice was 0 until the first
+    // tick ran, so the up/down arrow didn't render until the SECOND tick.
+    // Now: seed lastLivePrice from the snapshot so the first tick compares
+    // against the last snapshot close (the correct "previous price").
+    const lastClose = c[c.length-1].close;
+    if(typeof lastClose === 'number' && isFinite(lastClose) && lastClose > 0){
+      lastLivePrice = lastClose;
+    }
   }
   if(msg.prediction){
     lastPrediction = msg.prediction;
@@ -1833,9 +1940,19 @@ function onTick(msg){
       const livePriceEl = $('live-price');
       const livePriceArrow = $('live-price-arrow');
       if(livePriceEl){
+        // FIX (DEEP-AUDIT-2026-07-26 / F-17-24, HIGH): use fmtPrice() for
+        // decimal consistency. Previously the live-price used ad-hoc logic
+        // (3 decimals for >100, 5 for ≤100) which didn't match the tick tape,
+        // market-state #ms-net, or signal-detail modal — all of which used
+        // fmtPrice()'s 4-tier magnitude-based formatting. The same asset's
+        // price displayed differently in different parts of the UI.
         livePriceEl.textContent = (typeof newPrice === 'number')
-          ? newPrice.toFixed(newPrice > 100 ? 3 : 5)
+          ? fmtPrice(newPrice)
           : '—';
+        // FIX (DEEP-AUDIT-2026-07-26 / F-17-66, MEDIUM): move lastLivePrice
+        // update OUTSIDE the `if(livePriceEl)` block. Previously it was set
+        // inside, so if livePriceEl was missing (DOM not ready) the value
+        // stayed stale and subsequent ticks compared against the old value.
         if(lastLivePrice > 0){
           if(newPrice > lastLivePrice){
             livePriceEl.className = 'live-price-val up';
@@ -1848,8 +1965,9 @@ function onTick(msg){
             if(livePriceArrow){ livePriceArrow.className = 'live-price-arrow flat'; livePriceArrow.textContent = '◆'; }
           }
         }
-        lastLivePrice = newPrice;
       }
+      // FIX (F-17-66): state update must happen regardless of DOM presence.
+      if(typeof newPrice === 'number' && isFinite(newPrice)) lastLivePrice = newPrice;
     }
     // Tick rate tracking.
     const nowMs = Date.now();
@@ -1879,7 +1997,7 @@ function onTick(msg){
       if(staleMsg) staleMsg.textContent = '⚠ No ticks for 10s — feed may be stale';
     }, 10000);
   }
-  if(c) addTapeTick(c.close);
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed addTapeTick(c.close) call — dead code (#tick-tape-inner doesn't exist).
   if(msg.micro) renderMicro(msg.micro);
   if(msg.running_conf){
     runningConf = msg.running_conf;
@@ -1895,7 +2013,7 @@ function onTick(msg){
 function onEoc(msg){
   const c = msg.candles || [];
   updateChart(c, (msg.prediction && msg.prediction.candle) || null);
-  if(c.length) addTapeTick(c[c.length-1].close);
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed addTapeTick(c[c.length-1].close) — dead code.
   if(c.length){
     runningCandleOpenTime = c[c.length-1].time;
   }
@@ -2004,10 +2122,25 @@ function updateNextSignalTimer(totalSec, idle){
 
 /* ─── EVENT WIRING ───────────────────────────────────────────────────────── */
 function wireEvents(){
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-09, CRITICAL): guard against duplicate
+  // listener registration on re-entrant initApp calls. Previously, calling
+  // initApp more than once (e.g. via the pageshow bfcache handler, or via
+  // console) registered ANOTHER listener for every addEventListener call —
+  // pair-select change fired twice, sound button toggled twice per click,
+  // modal close fired twice, etc. Only the Escape-key listener was guarded
+  // (by the _escapeWired flag). Now: skip the whole wiring block on re-entry;
+  // the DOM survives bfcache so the previous listeners are still attached.
+  if(_eventsWired) return;
+  _eventsWired = true;
   // Pair selector change → re-subscribe.
   const pairSelect = $('pair-select');
   if(pairSelect){
     pairSelect.addEventListener('change', () => {
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-22, HIGH): bail early if the user
+      // re-selected the SAME pair (Chrome doesn't fire change on re-select,
+      // but Safari does). Previously the heavy reset (wipe signalHistory,
+      // candleData, etc.) ran unnecessarily — wiping the chart and history.
+      if(pairSelect.value === currentAsset) return;
       currentAsset = pairSelect.value;
       const cur = pairsList.find(p => p.asset === currentAsset);
       const payoutLabel = $('payout-label');
@@ -2025,20 +2158,45 @@ function wireEvents(){
       // করা যায় না" was this redirect loop. Now: only redirect if the
       // asset's category TRULY mismatches (e.g. user somehow selected a
       // real pair on the OTC page). alltime_otc pairs stay on their page.
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-08, CRITICAL): look up the pair in
+      // pairsList to determine its ACTUAL category, then redirect to that
+      // category's page. Previously the redirect logic only knew about
+      // 'real' vs 'otc' (based on the _otc suffix) — so selecting an
+      // all-time OTC pair (e.g. USDBDT_otc) on the Real page redirected to
+      // the OTC page (not the alltime_otc page), and the OTC dropdown
+      // doesn't include USDBDT_otc, so the user got auto-switched to
+      // EURUSD_otc (losing their selection). Now: search pairsList for the
+      // selected asset; if it's in alltimeOtcPairsList, redirect to
+      // alltime_otc; if it's in otcPairsList, redirect to otc; if it's in
+      // realPairsList, redirect to real.
       const isOtcAsset = currentAsset.endsWith('_otc');
       let expectedCat;
       if(currentCategory === 'real')           expectedCat = isOtcAsset ? 'otc' : 'real';
       else if(currentCategory === 'alltime_otc') expectedCat = 'alltime_otc'; // stay
       else                                    expectedCat = isOtcAsset ? 'otc' : 'real';
-      // Only redirect if there's a genuine mismatch (real pair on OTC page,
-      // or non-OTC pair on OTC page). alltime_otc page never redirects.
-      if(currentCategory === 'real' && isOtcAsset){
-        setCategory('otc'); return;
+      // Look up the actual pair to determine its true category.
+      const selectedPair = pairsList.find(p => p.asset === currentAsset);
+      let actualCat = null;
+      if(selectedPair){
+        if(realPairsList.indexOf(selectedPair) !== -1)        actualCat = 'real';
+        else if(alltimeOtcPairsList.indexOf(selectedPair) !== -1) actualCat = 'alltime_otc';
+        else if(otcPairsList.indexOf(selectedPair) !== -1)    actualCat = 'otc';
       }
-      if(currentCategory === 'otc' && !isOtcAsset){
-        setCategory('real'); return;
+      // Only redirect if there's a genuine mismatch — and redirect to the
+      // ACTUAL category of the selected pair (not a guessed one).
+      if(actualCat && actualCat !== currentCategory){
+        setCategory(actualCat); return;
       }
-      // alltime_otc page: never redirect (all pairs there are intentional).
+      // Fallback: if we couldn't determine the actual category (pair not yet
+      // in pairsList), use the old suffix-based heuristic.
+      if(!actualCat){
+        if(currentCategory === 'real' && isOtcAsset){
+          setCategory('otc'); return;
+        }
+        if(currentCategory === 'otc' && !isOtcAsset){
+          setCategory('real'); return;
+        }
+      }
       signalHistory = []; totalCorrect = 0; totalSignals = 0;
       renderHistory(); renderAccuracy();
       candleData = []; tapePrices = []; tapeDir = [];
@@ -2051,8 +2209,9 @@ function wireEvents(){
       alertedCandleOpenTime = 0;
       alertedSignalDirection = null;
       renderPending();
-      const tickTapeInner = $('tick-tape-inner');
-      if(tickTapeInner) tickTapeInner.innerHTML = '<span class="tape-price flat">Waiting for data...</span>';
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed dead tick-tape
+      // reset (`const tickTapeInner = $('tick-tape-inner'); if(tickTapeInner)
+      // tickTapeInner.innerHTML = '...'`) — #tick-tape-inner doesn't exist in HTML.
       send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
              category: currentCategory });
       setTimeout(loadServerHistory, 500);
@@ -2097,12 +2256,17 @@ function wireEvents(){
   }
 
   // Sound toggle.
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): update aria-label dynamically
+  // so screen readers announce "Unmute sounds" / "Mute sounds" based on state.
+  // Previously aria-label was static "Sound" — screen reader users had no
+  // audible cue whether sound was on or off (only the emoji changed visually).
   const soundBtn = $('sound-btn');
   if(soundBtn){
     soundBtn.addEventListener('click', () => {
       soundEnabled = !soundEnabled;
       soundBtn.textContent = soundEnabled ? '🔔' : '🔇';
       soundBtn.setAttribute('aria-pressed', String(soundEnabled));
+      soundBtn.setAttribute('aria-label', soundEnabled ? 'Mute sounds' : 'Unmute sounds');
       soundBtn.classList.toggle('on', soundEnabled);
       if(soundEnabled){
         if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
@@ -2167,24 +2331,14 @@ function wireEvents(){
     });
   }
 
-  // FIX (UI-P1-8, 2026-07-21): mobile history drawer toggle. On phones
-  // the history panel collapses to a slim header; tap to expand into a
-  // 50vh bottom sheet (CSS handles the layout; JS just toggles the class).
-  const drawerToggle = $('history-drawer-toggle');
-  if(drawerToggle){
-    drawerToggle.addEventListener('click', () => {
-      const panel = $('history-panel');
-      if(!panel) return;
-      const isCollapsed = panel.classList.toggle('collapsed');
-      drawerToggle.setAttribute('aria-expanded', String(!isCollapsed));
-      drawerToggle.textContent = isCollapsed ? '▸' : '▾';
-    });
-    // On desktop, ensure not collapsed by default
-    if(window.innerWidth > 768){
-      const panel = $('history-panel');
-      if(panel) panel.classList.remove('collapsed');
-    }
-  }
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-18 + F-17-19, HIGH): DELETED the
+  // entire drawerToggle (#history-drawer-toggle) mobile-history-drawer
+  // wiring block (~18 lines). The mobile history drawer feature was
+  // removed (history is now a tab pane, not a bottom panel) — both
+  // #history-drawer-toggle and #history-panel no longer exist in any HTML
+  // file, so the whole `if(drawerToggle){...}` block was dead code that
+  // ran on every initApp call without effect. Also deleted the
+  // desktop-collapsed-removal branch.
 
   // FIX (UI-P1-3, 2026-07-21): Microstructure section collapse toggle.
   // On mobile it's collapsed by default (saves ~200px vertical space);
@@ -2195,9 +2349,11 @@ function wireEvents(){
     if(microTitle){
       microTitle.style.cursor = 'pointer';
       microTitle.addEventListener('click', (e) => {
-        // Don't toggle if the user clicked inside the micro-grid (e.g. on
-        // a micro-item). Only toggle when clicking the title itself.
-        if(e.target !== microTitle) return;
+        // FIX (DEEP-AUDIT-2026-07-26 / F-17-36, HIGH): use contains() instead
+        // of strict !== so clicks on child elements (icons, badges) still
+        // toggle collapse. Previously `if(e.target !== microTitle) return;`
+        // silently ignored clicks on any future child element of the title.
+        if(!microTitle.contains(e.target)) return;
         microSection.classList.toggle('collapsed');
       });
     }
@@ -2238,6 +2394,19 @@ function safeInit(){
   if(typeof LightweightCharts === 'undefined'){
     if(!safeInit._retries) safeInit._retries = 0;
     safeInit._retries++;
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-33, HIGH): show chart-loading overlay
+    // with a "Loading chart library…" message during retries. Previously
+    // the 5-second retry window was invisible to the user — the chart
+    // container showed nothing while safeInit polled every 100ms. Now:
+    // surface a loading message so the user knows the chart is loading
+    // (not broken). The overlay is dismissed by hideChartLoading() once a
+    // snapshot arrives, or by the 20s timeout in showChartLoading().
+    if(safeInit._retries === 1){
+      const overlay = $('chart-loading-overlay');
+      const txt = $('chart-loading-text');
+      if(overlay) overlay.classList.add('show');
+      if(txt) txt.textContent = 'Loading chart library…';
+    }
     if(safeInit._retries > 50){
       console.error('LightweightCharts failed to load after 5s');
       const el = $('chart-container');
@@ -2268,7 +2437,18 @@ function initApp(category){
   }
   // Reset module state — prevents cross-page leakage if initApp is somehow
   // called twice (it shouldn't be, but defensive programming is cheap).
-  ws = null; reconnectTimer = null; reconnectAttempts = 0;
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-31, HIGH): detach ws handlers BEFORE
+  // null-out. Previously, if a reconnect timer was already scheduled from
+  // a previous pagehide lifecycle, the timer fires connect() which
+  // re-creates ws — but the new ws had stale onclose/onerror handlers from
+  // the previous closure that referenced outdated currentAsset. Now we
+  // explicitly detach handlers and close any in-flight WS before reset.
+  if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if(ws){
+    try{ ws.onclose = null; ws.onerror = null; ws.onopen = null; ws.onmessage = null; ws.close(); }catch(_){}
+    ws = null;
+  }
+  reconnectAttempts = 0;
   chart = null; candleSeries = null; ghostSeries = null;
   candleData = []; lastPrediction = null;
   signalHistory = []; totalCorrect = 0; totalSignals = 0;
@@ -2308,6 +2488,13 @@ function initApp(category){
   // page on next visit.
   try{ localStorage.setItem('marketCategory', category); }catch(_){}
 
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-03, CRITICAL): remember the active
+  // category so the pageshow bfcache-restore handler can re-init the right
+  // page (the IIFE preserves module state across bfcache, so we must track
+  // it ourselves — DOMContentLoaded + bootstrap only fires on the initial
+  // load, not on bfcache restore).
+  _lastInitCategory = category;
+
   // Local $ helper bound to document.
   $ = id => document.getElementById(id);
 
@@ -2320,61 +2507,25 @@ function initApp(category){
   // Wire up DOM events.
   wireEvents();
 
-  // Update market status indicator (LIVE / CLOSED / 24/7).
-  updateMarketStatusIndicator();
-  // Refresh it every 30s — Real market status flips at weekend boundary.
-  // FIX (AUDIT-FRONTEND #2, 2026-07-19): store the interval handle so
-  // pagehide cleanup can clear it. Previously the handle was discarded,
-  // so every initApp re-entry (bfcache restore, pair switch, etc.)
-  // stacked another interval — leaking memory and referencing stale DOM.
-  _marketStatusInterval = setInterval(updateMarketStatusIndicator, 30000);
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-14, HIGH): removed updateMarketStatusIndicator()
+  // call and the 30s _marketStatusInterval. The #market-status-indicator
+  // element was removed from HTML during the "CLEAN LAYOUT OVERRIDES" CSS
+  // refactor but the JS function and interval were never deleted — wasted
+  // CPU every 30s and leaked interval handles on each initApp re-entry.
 
   // Boot.
   safeInit();
 
-  // Periodic intervals — countdown, tick rate display, keepalive.
-  _countdownInterval = setInterval(updateCandleCountdown, 200);
-
-  _tickRateInterval = setInterval(() => {
-    const nowMs = Date.now();
-    while(tickTimestamps.length > 0 && nowMs - tickTimestamps[0] > 1000){
-      tickTimestamps.shift();
-    }
-    const tickRateVal = $('tick-rate-val');
-    if(tickRateVal) tickRateVal.textContent = tickTimestamps.length;
-
-    const statActiveCat = $('stat-active-cat');
-    if(statActiveCat){
-      // FIX (DATA-FLOW-2026-07-22): 3 categories with distinct colors.
-      let label, color;
-      if(currentCategory === 'real'){
-        label = 'REAL'; color = 'var(--green)';
-      } else if(currentCategory === 'alltime_otc'){
-        label = 'ALL-OTC'; color = 'var(--accent, #00e5ff)';
-      } else {
-        label = 'OTC'; color = 'var(--yellow)';
-      }
-      statActiveCat.textContent = label;
-      statActiveCat.style.color = color;
-    }
-    const statSignals = $('stat-signals');
-    if(statSignals) statSignals.textContent = totalSignals;
-
-    const statWinrate = $('stat-winrate');
-    if(statWinrate){
-      if(totalSignals > 0){
-        const pct = Math.round((totalCorrect / totalSignals) * 100);
-        statWinrate.textContent = pct + '%';
-        statWinrate.style.color = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
-      } else {
-        statWinrate.textContent = '—';
-      }
-    }
-    // FIX (UI-P1-1, 2026-07-21): removed the #stat-countdown update block
-    // — that mini-stat no longer exists in the HTML. The chart-overlay
-    // #candle-countdown is the single source of truth for the countdown,
-    // updated by _countdownInterval (200ms) with color states.
-  }, 250);
+  // Periodic intervals — countdown + keepalive.
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-23, HIGH): countdown interval widened
+  // from 200ms (5Hz) to 500ms (2Hz) — the MM:SS display only changes once
+  // per second, and 500ms gives smooth color transitions in the critical /
+  // warn zones without 5x wasted CPU. Also FIX (F-17-16): the entire
+  // _tickRateInterval (250ms loop updating #tick-rate-val / #stat-active-cat
+  // / #stat-signals / #stat-winrate — none of which exist in HTML) is dead
+  // code; removed below. tickTimestamps array is still maintained by onTick
+  // (for future use) but no interval polls it.
+  _countdownInterval = setInterval(updateCandleCountdown, 500);
 
   _keepaliveInterval = setInterval(() => {
     if(ws && ws.readyState === WebSocket.OPEN){
@@ -2396,21 +2547,55 @@ function initApp(category){
   }, 15000);
 
   // Clean up on page hide — clear intervals + close WS + dispose chart.
-  window.addEventListener('pagehide', () => {
-    try{
-      if(_countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
-      if(_tickRateInterval){ clearInterval(_tickRateInterval); _tickRateInterval = null; }
-      if(_keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
-      if(_marketStatusInterval){ clearInterval(_marketStatusInterval); _marketStatusInterval = null; }
-      if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
-      if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
-      if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
-      if(_resizeTimer){ clearTimeout(_resizeTimer); _resizeTimer = null; }
-      _rafActive = false;
-      if(ws){ try{ ws.close(); }catch(_){} }
-      if(chart){ try{ chart.remove(); }catch(_){} chart = null; }
-    }catch(_){}
-  });
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-14 + F-17-16): removed cleanup for
+  // the deleted _marketStatusInterval and _tickRateInterval.
+  // FIX (F-17-03): named + guarded so initApp re-entry doesn't stack
+  // duplicate pagehide/pageshow listeners on window.
+  if(!_pageLifecycleWired){
+    _pageLifecycleWired = true;
+    window.addEventListener('pagehide', onPageHide);
+
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-03, CRITICAL): bfcache restore handler.
+    // On mobile Safari/Chrome, switching tabs and returning via back-forward
+    // cache (bfcache) leaves the page frozen — pagehide cleared all intervals,
+    // nullified timers, closed the WS, and disposed the chart. Without this
+    // pageshow handler, the page stayed frozen until hard-refresh because
+    // initApp is only called once via boot() on the initial DOMContentLoaded.
+    // Now: on persisted bfcache restore, re-run initApp(category) which
+    // re-establishes the WS, recreates the chart, and restarts intervals.
+    // wireEvents() is guarded by _eventsWired so it skips re-registering
+    // listeners (the DOM survives bfcache, so the previous listeners are
+    // still attached and functional).
+    window.addEventListener('pageshow', onPageShow);
+  }
+}
+
+// FIX (DEEP-AUDIT-2026-07-26 / F-17-03, CRITICAL): named pagehide/pageshow
+// handlers so we can guard against duplicate registration on initApp
+// re-entry. Previously the pagehide listener was an anonymous arrow added
+// on every initApp call — stacking listeners.
+let _pageLifecycleWired = false;
+function onPageHide(){
+  try{
+    if(_countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
+    if(_keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
+    if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
+    if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
+    if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if(_resizeTimer){ clearTimeout(_resizeTimer); _resizeTimer = null; }
+    _rafActive = false;
+    if(ws){ try{ ws.onclose = null; ws.onerror = null; ws.onopen = null; ws.onmessage = null; ws.close(); }catch(_){} }
+    if(chart){ try{ chart.remove(); }catch(_){} chart = null; }
+  }catch(_){}
+}
+function onPageShow(e){
+  // e.persisted === true means the page was restored from the bfcache
+  // (back-forward cache). The pagehide handler ran cleanup — we need to
+  // re-establish the WS, chart, and intervals. The DOM is intact.
+  if(!e.persisted) return;
+  if(_lastInitCategory){
+    try{ initApp(_lastInitCategory); }catch(err){ console.error('[pageshow] initApp error', err); }
+  }
 }
 
 // Expose initApp + setCategory globally so the page-specific bootstrap

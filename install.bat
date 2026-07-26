@@ -12,6 +12,10 @@ REM     4. সার্ভার চালু
 REM ════════════════════════════════════════════════════════════════════
 
 cd /d "%~dp0"
+REM FIX (DEEP-AUDIT-2026-07-26 / F-19-46): documented the `/d` switch.
+REM `/d` ALSO changes the drive letter (necessary if the user runs the
+REM .bat from D: but cmd's current drive is C:). Without `/d`, `cd` would
+REM silently fail in that case. A-10 PROBLEM 100.
 
 echo.
 echo ╔══════════════════════════════════════════════════════════════╗
@@ -84,7 +88,15 @@ echo ✅ App download সম্পূর্ণ
 :UPDATE_APP
 echo 🔄 App আপডেট হচ্ছে (যদি নতুন version থাকে)...
 git pull >nul 2>&1
-echo ✅ App আপ-টু-ডেট
+REM FIX (DEEP-AUDIT-2026-07-26 / F-19-47): check git pull exit code —
+REM previously printed "✅ App আপ-টু-ডেট" unconditionally, even on
+REM failure (no internet / not a git repo / auth required). A-10 PROBLEM 25.
+if errorlevel 1 (
+    echo ⚠️ App আপডেট করা যায়নি (ইন্টারনেট সংযোগ বা git auth চেক করুন)।
+    echo    পুরোনো version দিয়ে চালিয়ে যাওয়া হচ্ছে...
+) else (
+    echo ✅ App আপ-টু-ডেট
+)
 
 REM ── Dependencies ইনস্টল ───────────────────────────────────────────
 echo [4/4] Python dependencies ইনস্টল হচ্ছে...
@@ -93,6 +105,15 @@ python -m pip install -r requirements.txt
 if errorlevel 1 (
     echo ⚠️ কিছু dependency install করতে সমস্যা, আবার চেষ্টা করা হচ্ছে...
     python -m pip install --user -r requirements.txt
+)
+REM FIX (DEEP-AUDIT-2026-07-26 / F-19-48): check errorlevel after the
+REM retry — previously printed "✅ Python dependencies ইনস্টল সম্পূর্ণ"
+REM even if BOTH pip attempts failed (A-10 PROBLEM 26).
+if errorlevel 1 (
+    echo ❌ Python dependencies ইনস্টল করতে ব্যর্থ।
+    echo    দয়া করে যাচাই করুন যে Python + pip সঠিকভাবে ইনস্টল করা আছে।
+    pause
+    exit /b 1
 )
 echo ✅ Python dependencies ইনস্টল সম্পূর্ণ
 

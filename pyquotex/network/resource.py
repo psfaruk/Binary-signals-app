@@ -1,38 +1,8 @@
-"""Module for base Quotex http base resource."""
+"""Stub removed (DEEP-AUDIT-2026-07-26 / F-16-25).
 
-from typing import Any
-
-
-class Resource(object):
-    """Class for base Quotex API http resource."""
-    # pylint: disable=too-few-public-methods
-    url: str = ""
-
-    def __init__(self, api: Any):
-        """
-        :param api: The instance of :class:`QuotexAPI
-            <pyquotex.api.QuotexAPI>`.
-        """
-        self.api = api
-
-    async def send_http_request(
-            self,
-            method: str,
-            data: dict[str, Any] | None = None,
-            params: dict[str, Any] | None = None,
-            headers: dict[str, str] | None = None
-    ) -> Any:
-        """Send async http request to Quotex API.
-        :param str method: The http request method.
-        :param dict data: (optional) The http request data.
-        :param dict params: (optional) The http request params.
-        :param dict headers: (optional) The http request headers.
-        :returns: The httpx.Response instance.
-        """
-        return await self.api.send_http_request_v1(
-            method,
-            self.url,
-            data=data,
-            params=params,
-            headers=headers
-        )
+The Resource class was a base class for HTTP-resource subclasses. After
+the 2026-07-13 cleanup that removed trading/account/profile methods, no
+subclass remains in the codebase. The class was never instantiated —
+Login, Settings, etc. all extend Browser directly. This file is kept as
+an empty marker for the network package's importability.
+"""

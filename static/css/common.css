@@ -105,16 +105,11 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   animation:pulse-dot 2s infinite;
   flex-shrink:0;
 }
-.brand-title{
-  display:flex;flex-direction:column;line-height:1.1;
-}
-.brand-title .brand-name{
-  font-size:14px;font-weight:800;letter-spacing:.5px;color:var(--text);
-  text-transform:uppercase;
-}
-.brand-title .brand-sub{
-  font-size:10px;color:var(--text-dim);letter-spacing:.3px;text-transform:uppercase;
-}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-05): A-09 PROBLEM 76 — .brand-title and
+   children REMOVED (8 lines dead CSS). The HTML uses <div class="brand">
+   <span class="brand-name">…</span></div> — no .brand-title wrapper.
+   Direct .brand-name rules below and in CLEAN LAYOUT OVERRIDES (line ~1500)
+   cover all real elements. */
 
 /* Pair selector */
 .pair-wrap{position:relative;flex-shrink:0}
@@ -166,7 +161,12 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 .live-price-val.flat{color:var(--text-dim)}
 .live-price-arrow{font-size:14px;font-weight:700;transition:transform .2s}
 .live-price-arrow.up{color:var(--green)}
-.live-price-arrow.down{color:var(--red);transform:rotate(180deg)}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-08): A-09 PROBLEM 29 — REMOVED the
+   `transform:rotate(180deg)` from .live-price-arrow.down. The arrow glyph
+   `▼` (U+25BC) is already down-pointing, so the rotation was incorrectly
+   flipping it back to up-pointing — showing a red UP triangle on price
+   drops. Now the arrow correctly points down (red ▼) when price drops. */
+.live-price-arrow.down{color:var(--red)}
 .live-price-arrow.flat{color:var(--text-dim)}
 
 /* Payout pill */
@@ -260,17 +260,10 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 }
 #market-switch-btn:hover .switch-icon{transform:rotate(180deg)}
 
-/* Row 2: status banner + mini stats */
-#topbar-row2{
-  display:flex;
-  align-items:center;
-  gap:10px;
-  padding:0 14px;
-  background:rgba(0,0,0,.2);
-  border-top:1px solid var(--border-soft);
-  min-height:36px;
-  flex-wrap:wrap;
-}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-06): A-09 PROBLEM 75 — #topbar-row2
+   REMOVED (10 lines dead CSS). The simplified topbar (CLEAN LAYOUT OVERRIDES)
+   uses only #topbar-row1 — #topbar-row2 element does not exist in any HTML
+   file (verified by grep across real.html / otc.html / alltime_otc.html). */
 
 /* Market status indicator (LIVE / CLOSED / 24/7) */
 .market-status{
@@ -822,53 +815,15 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   font-family:var(--mono);font-size:10px;
 }
 
-/* ============================================================================
-   BOTTOM BAR — tick tape + accuracy + signal history
-   ============================================================================ */
-#bottom{
-  display:flex;flex-direction:column;
-  background:var(--card);border-top:1px solid var(--border);
-  overflow:hidden;
-  flex-shrink:0;
-}
-#bottom>*{min-width:0}
-
-#tick-tape{
-  padding:6px 14px;overflow:hidden;position:relative;
-  border-bottom:1px solid var(--border-soft);
-}
-#tick-tape-inner{
-  position:absolute;right:14px;top:50%;transform:translateY(-50%);
-  white-space:nowrap;
-}
-.tape-price{display:inline-block;margin-right:16px;font-family:var(--mono);font-size:12px}
-.tape-price.up{color:var(--green)}
-.tape-price.down{color:var(--red)}
-.tape-price.flat{color:var(--text-dim)}
-.tape-arrow{font-size:10px;margin-right:2px}
-
-#accuracy-bar{
-  display:flex;align-items:center;gap:8px;
-  padding:4px 14px 6px;font-size:11px;color:var(--text-dim);
-  background:rgba(0,0,0,.2);border-bottom:1px solid var(--border-soft);
-}
-#accuracy-bar .pct{font-family:var(--mono);font-weight:700;color:var(--green)}
-
-#history-panel{
-  padding:8px 10px 6px;
-  display:flex;flex-direction:column;
-  min-height:0;max-height:38vh;
-}
-#history-panel .section-title{
-  font-size:10px;color:var(--text-dim);padding:0 4px 4px;
-  font-weight:700;text-transform:uppercase;letter-spacing:.5px;
-  display:flex;justify-content:space-between;align-items:center;gap:8px;
-  flex:0 0 auto;
-}
-#history-panel .section-title .hint{
-  font-size:10px;color:var(--text-dim);font-weight:400;
-  text-transform:none;letter-spacing:0;
-}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-07): A-09 PROBLEMS 77 / 83 / 84 —
+   REMOVED ~50 lines of dead CSS: #bottom, #tick-tape, #tick-tape-inner,
+   .tape-price, .tape-arrow, #accuracy-bar, #history-panel, and
+   #history-panel .section-title children. NONE of these elements exist in
+   any HTML file (verified by grep). The #history-list block immediately
+   below IS still used (#tab-history contains #history-list) and is retained.
+   The tick-tape / accuracy-bar / collapsible history-panel features were
+   removed during the 'CLEAN LAYOUT OVERRIDES' refactor (2026-07-22) but the
+   CSS was not pruned at that time. */
 #history-list{
   display:flex;flex-direction:column;gap:3px;
   overflow-y:auto;overflow-x:hidden;
@@ -1053,7 +1008,15 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
      to fit between the payout label and the connection status group. */
   position:static;
   font-family:var(--sans);font-size:13px;font-weight:700;letter-spacing:.5px;
-  color:#fff;background:rgba(33,150,243,.85);
+  color:#fff;
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-22): A-09 PROBLEM 74 — consolidated the
+     triplicated background declarations (originally at lines ~1011, ~1349,
+     ~1457) into one. Solid blue + border for legibility. The previous
+     semi-transparent rgba(33,150,243,.85) was harder to read against chart
+     gridlines, hence the UI-P1-14 override; merging it here removes the
+     maintenance hazard of three competing rules. */
+  background:rgba(33,150,243,1);
+  border:1px solid rgba(255,255,255,.15);
   padding:4px 10px;border-radius:6px;
   box-shadow:0 2px 8px rgba(0,0,0,.4);
   font-variant-numeric:tabular-nums;
@@ -1065,7 +1028,9 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 #candle-countdown.critical{
   background:rgba(255,23,68,.95);color:#fff;animation:flash-red .6s infinite;
 }
-#candle-countdown.idle{background:rgba(48,54,61,.7);color:var(--text-dim)}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-22): .idle background consolidated here
+   — was previously redefined at the (now-removed) duplicate rule block. */
+#candle-countdown.idle{background:rgba(48,54,61,.95);color:var(--text-dim)}
 
 #stale-overlay{
   display:none;position:absolute;top:0;left:0;right:0;bottom:0;
@@ -1104,15 +1069,22 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 @media (max-width:1200px){
   #main{grid-template-columns:1fr 300px}
   .topbar-stats{gap:10px}
-  /* Slightly shrink the brand title to save space */
-  .brand-title .brand-name{font-size:13px}
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-09): A-09 PROBLEM 81 — REMOVED
+     `.brand-title .brand-name{font-size:13px}` (dead — .brand-title
+     wrapper does not exist in HTML; .brand-name is restyled in
+     CLEAN LAYOUT OVERRIDES section below). */
 }
 
 /* ── Desktop → tablet landscape (992px) ──────────────────────────────────── */
 @media (max-width:992px){
   #main{grid-template-columns:1fr 280px}
   /* Compact the topbar — hide some labels */
-  .brand-title .brand-sub{display:none}
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-10): A-09 PROBLEM 79 — REMOVED
+     `.brand-title .brand-sub{display:none}` (dead — .brand-title does
+     not exist in HTML). The .live-price-label / .pairs-count-badge rules
+     below are also dead (these elements are removed in the CLEAN LAYOUT
+     OVERRIDES section) but are retained here as harmless no-ops; see
+     F-18-19 below for the global !important suppression. */
   .live-price-label{display:none}
   .live-price-wrap{min-width:auto;padding:6px 10px}
   .pairs-count-badge{display:none}
@@ -1140,9 +1112,11 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   #sound-btn{order:9;flex:0 0 auto}
   #market-switch-btn{order:2;margin-left:auto}
 
-  #topbar-row2{
-    flex-wrap:wrap;padding:4px 10px;gap:6px;
-  }
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-11): A-09 PROBLEM 75 — REMOVED
+     `#topbar-row2{flex-wrap:wrap;padding:4px 10px;gap:6px}` (dead — element
+     does not exist in HTML). The .topbar-stats rule below is retained
+     harmlessly because the .topbar-stats element may still be present in
+     some layout variants (verified: grep finds no #topbar-row2 in HTML). */
   .topbar-stats{gap:10px;margin-left:0;flex:1 1 100%;justify-content:space-between}
 
   /* Switch to single-column main area: tab content on top, panel below */
@@ -1166,8 +1140,9 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   .tab-btn{padding:10px 12px;font-size:11px}
   .tab-btn-text{display:inline}
 
-  /* Bottom history panel: more compact (legacy selector — kept as dead code) */
-  #history-panel{max-height:30vh}
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-12): A-09 PROBLEM 78 — REMOVED
+     `#history-panel{max-height:30vh}` (dead — element does not exist in
+     HTML; history now lives inside #tab-history as a tab pane). */
 }
 
 /* ── Tablet portrait → phone (576px) ─────────────────────────────────────── */
@@ -1176,7 +1151,9 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 
   #topbar-row1{padding:6px 8px;gap:6px}
   .brand{padding-right:4px}
-  .brand-title .brand-name{font-size:12px}
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-13): A-09 PROBLEM 82 — REMOVED
+     `.brand-title .brand-name{font-size:12px}` (dead — .brand-title wrapper
+     does not exist; .brand-name is restyled in CLEAN LAYOUT OVERRIDES). */
   .brand-dot{width:8px;height:8px}
 
   /* Hide tick rate badge on phones — not enough room */
@@ -1236,7 +1213,10 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   html,body{font-size:12px}
 
   /* Even more compact topbar */
-  .brand-title .brand-name{font-size:11px;letter-spacing:.3px}
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-14): A-09 PROBLEM 82 — REMOVED
+     `.brand-title .brand-name{font-size:11px;letter-spacing:.3px}` (dead —
+     .brand-title wrapper does not exist; .brand-name is restyled in
+     CLEAN LAYOUT OVERRIDES). */
   .live-price-val{font-size:13px}
   .live-price-arrow{font-size:12px}
 
@@ -1257,8 +1237,9 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 
   #signal-label{font-size:18px}
 
-  /* Hide accuracy-bar details on tiny phones */
-  #accuracy-bar{padding:3px 8px;font-size:10px}
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-15): A-09 PROBLEM 84 — REMOVED
+     `#accuracy-bar{padding:3px 8px;font-size:10px}` (dead — #accuracy-bar
+     element does not exist in HTML). */
 
   /* History rows: keep icon (just emoji) but drop the label to save space */
   .history-row{grid-template-columns:30px 1fr auto auto 20px;gap:4px;padding:5px 6px}
@@ -1276,15 +1257,24 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   #tab-content-wrap{min-height:200px}
   #chart-wrap{min-height:200px}
   #tab-history,#tab-accuracy{min-height:200px}
-  #history-panel{max-height:25vh}
-  .brand-title .brand-sub{display:none}
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-16): A-09 PROBLEMS 78 / 80 — REMOVED
+     `#history-panel{max-height:25vh}` and `.brand-title .brand-sub{display:none}`
+     (both dead — neither #history-panel nor .brand-title exist in HTML). */
 }
 
 /* ============================================================================
    PRINT STYLES — hide all interactive chrome, show only chart + signal
    ============================================================================ */
 @media print{
-  #topbar, #tab-bar, #bottom, #candle-countdown, #stale-overlay, #chart-loading-overlay,
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-17): A-09 PROBLEM 85 — REMOVED #bottom
+     from the print-hidden selector list (element does not exist in HTML).
+     FIX (DEEP-AUDIT-2026-07-26 / F-18-18): A-09 PROBLEM 89 — REMOVED
+     #candle-countdown from the print-hidden selector list so the countdown
+     timer remains visible in printed screenshots (provides candle context).
+     The `display:none !important` here is acceptable in @media print context
+     because print CSS has fewer specificity concerns and we explicitly want
+     these interactive elements suppressed regardless of state classes. */
+  #topbar, #tab-bar, #stale-overlay, #chart-loading-overlay,
   #signal-detail-overlay, #sound-btn, #market-switch-btn{
     display:none !important;
   }
@@ -1300,10 +1290,17 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
    Respect users with vestibular disorders / motion sensitivity.
    ============================================================================ */
 @media (prefers-reduced-motion: reduce){
+  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-19): A-09 PROBLEM 72 — previously the
+     universal selector `*` was used with `!important` to nuke ALL
+     animation AND transition durations, which also suppressed legitimate
+     state-change transitions (e.g. confidence-bar fill, conn-dot colour
+     shift on connect/disconnect). Be more selective: kill ANIMATION only
+     (movement), keep transition for state changes by leaving
+     transition-duration alone (transition cannot trigger vestibular
+     distress — only animation/movement does). */
   *,*::before,*::after{
     animation-duration:0.01ms !important;
     animation-iteration-count:1 !important;
-    transition-duration:0.01ms !important;
     scroll-behavior:auto !important;
   }
   .brand-dot, #conn-dot.connected, #signal-box.pending, #stale-msg,
@@ -1322,11 +1319,10 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   padding-left:env(safe-area-inset-left, 0);
   padding-right:env(safe-area-inset-right, 0);
 }
-#bottom{
-  padding-bottom:env(safe-area-inset-bottom, 0);
-  padding-left:env(safe-area-inset-left, 0);
-  padding-right:env(safe-area-inset-right, 0);
-}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-20): A-09 PROBLEM 85 — REMOVED the
+   `#bottom{ padding-bottom:env(safe-area-inset-bottom,0); ... }` rule
+   (dead — #bottom element does not exist in HTML). The safe-area-inset-bottom
+   padding for the page is handled by #app (set on body via overflow). */
 #topbar-row1{
   padding-left:max(14px, env(safe-area-inset-left));
   padding-right:max(14px, env(safe-area-inset-right));
@@ -1342,42 +1338,16 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
    into a 50vh bottom sheet. Frees up the main viewport for the chart +
    side panel (which contains the actual signal).
    ============================================================================ */
-#history-drawer-toggle{
-  display:none;
-  background:transparent;
-  border:1px solid var(--border);
-  color:var(--text-dim);
-  font-size:14px;
-  padding:2px 8px;
-  border-radius:4px;
-  cursor:pointer;
-  line-height:1;
-  min-height:24px;
-  min-width:32px;
-}
-#history-drawer-toggle:hover{ color:var(--text); border-color:var(--text-dim); }
-
-@media (max-width:768px){
-  /* Show the drawer toggle on mobile */
-  #history-drawer-toggle{ display:inline-block; }
-  /* Collapsed state: slim 36px header only */
-  #history-panel.collapsed{
-    max-height:40px;
-    overflow:hidden;
-  }
-  #history-panel.collapsed #history-list{
-    opacity:0;
-    pointer-events:none;
-  }
-  /* Expanded state: 50vh bottom sheet */
-  #history-panel:not(.collapsed){
-    max-height:50vh;
-  }
-  /* The tick tape is non-essential on mobile — hide it */
-  #tick-tape{ display:none; }
-  /* Accuracy bar moves inline with the history header */
-  #accuracy-bar{ font-size:10px; padding:2px 8px; }
-}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-21): A-09 PROBLEM 78 — REMOVED the entire
+   `#history-drawer-toggle{...}` rule, the `#history-drawer-toggle:hover{...}`
+   rule, and the `@media (max-width:768px){ #history-drawer-toggle{...},
+   #history-panel.collapsed{...}, #history-panel.collapsed #history-list{...},
+   #history-panel:not(.collapsed){...}, #tick-tape{display:none},
+   #accuracy-bar{...} }` block (40 lines dead CSS) — none of these elements
+   (#history-drawer-toggle, #history-panel, #tick-tape, #accuracy-bar) exist
+   in any HTML file. The collapsible-drawer feature was removed during the
+   'CLEAN LAYOUT OVERRIDES' refactor (2026-07-22) when history became a tab
+   pane. */
 
 /* ============================================================================
    FIX (UI-P0-5, 2026-07-21): extract inline styles to classes so media
@@ -1451,14 +1421,12 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
    FIX (UI-P1-14, 2026-07-21): countdown badge moved away from chart's
    price-axis labels. Solid background for legibility.
    ============================================================================ */
-#candle-countdown{
-  /* Override the semi-transparent blue with a solid, more legible style */
-  background:rgba(33,150,243,1);
-  border:1px solid rgba(255,255,255,.15);
-}
-#candle-countdown.idle{
-  background:rgba(48,54,61,.95);
-}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-22): A-09 PROBLEM 74 — REMOVED the
+   duplicate `#candle-countdown{ background:rgba(33,150,243,1); border:... }`
+   and `#candle-countdown.idle{ background:rgba(48,54,61,.95) }` rules that
+   were here. They have been merged into the primary #candle-countdown rule
+   at the top of the "CHART OVERLAYS" section above to eliminate the
+   triplicated background hazard. */
 
 /* ============================================================================
    FIX (UI-P1-19, 2026-07-21): when stale-overlay is visible, block chart
@@ -1503,7 +1471,15 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 /* Topbar: single compact row */
 #topbar{padding:env(safe-area-inset-top,0) 0 0 0}
 #topbar-row1{padding:6px 12px;gap:8px;min-height:44px}
-.live-price-label,.pairs-count-badge,.tick-rate-badge{display:none!important}
+/* FIX (DEEP-AUDIT-2026-07-26 / F-18-23): A-09 PROBLEM 73 — REMOVED the
+   `.live-price-label,.pairs-count-badge,.tick-rate-badge{display:none!important}`
+   rule. None of these elements exist in any HTML file (verified by grep
+   across real.html / otc.html / alltime_otc.html — the simplified CLEAN
+   LAYOUT OVERRIDES removed them). The earlier per-breakpoint `display:none`
+   rules at 992px/576px media queries were already dead and are documented
+   inline (see F-18-10). The `!important` was specifically problematic because
+   it would have overridden any future use of these classes — even though
+   they're unused now, removing it eliminates the abuse per audit A-09. */
 
 /* Tab bar: clean */
 #tab-bar{

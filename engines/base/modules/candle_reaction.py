@@ -72,7 +72,14 @@ def analyze(candles, ctx: MarketContext) -> list:
         streak_thresh_5, streak_thresh_4, streak_thresh_3 = 6, 5, 4
         body_mult = 2.0
     elif vol_pct < 0.7:
-        streak_thresh_5, streak_thresh_4, streak_thresh_3 = 4, 3, 2
+        # FIX (DEEP-AUDIT-2026-07-26 / A-05-CRIT-3):
+        # The third tuple element (`streak_thresh_3`) was 2 for low-vol and
+        # 3 for normal-vol — but the `max(3, ...)` override below unconditionally
+        # raised it to 3 in both branches. The low-vol value of 2 was DEAD
+        # CODE: set but never effective. Now both branches set the same value
+        # (3), matching the actual effective behavior, and the override is
+        # kept as a safety guard. This makes the code honest — no dead tuning.
+        streak_thresh_5, streak_thresh_4, streak_thresh_3 = 4, 3, 3
         body_mult = 1.3
     else:
         streak_thresh_5, streak_thresh_4, streak_thresh_3 = 5, 4, 3
@@ -91,8 +98,14 @@ def analyze(candles, ctx: MarketContext) -> list:
     # in a TREND_UP is momentum, not exhaustion. Soft-gate: dampen score
     # and confidence when aligned-with-strong-trend; full strength only
     # when counter-trend or in a range/volatile regime.
-    consec = stats["current_streak"]
-    streak_dir = stats["streak_direction"]
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-10, A-05 ISSUE S5): defensive .get()
+    # defaults for cold-start safety — `ctx.stats` keys should always be
+    # present (analysis.py returns them on cold-start), but a missing-key
+    # bug would crash this module via KeyError. Defaults match the
+    # cold-start sentinel values from analysis.py (current_streak=0,
+    # streak_direction=0, streak_rarity=0, z_body=0, close_percentile=50).
+    consec = stats.get("current_streak", 0)
+    streak_dir = stats.get("streak_direction", 0)
     streak_aligns_with_strong_trend = (
         is_trending
         and trend_strength > 0.5
@@ -122,12 +135,12 @@ def analyze(candles, ctx: MarketContext) -> list:
             results.append(ModuleResult(
                 module_name="candle_reaction", direction="PUT", score=s5_score, confidence=s5_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"{consec}+ UP streak → PUT reversal ({s5_conf}% win rate, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f})"]))
+                reasons=[f"{consec}+ UP streak → PUT reversal ({s5_conf}% win rate, rarity={stats.get('streak_rarity', 0):.0%}, trend_str={trend_strength:.2f})"]))
         elif streak_dir == -1:
             results.append(ModuleResult(
                 module_name="candle_reaction", direction="CALL", score=s5_score, confidence=s5_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"{consec}+ DOWN streak → CALL reversal ({s5_conf}% win rate, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f})"]))
+                reasons=[f"{consec}+ DOWN streak → CALL reversal ({s5_conf}% win rate, rarity={stats.get('streak_rarity', 0):.0%}, trend_str={trend_strength:.2f})"]))
     elif consec >= streak_thresh_4:
         if streak_dir == 1:
             results.append(ModuleResult(
@@ -173,13 +186,21 @@ def analyze(candles, ctx: MarketContext) -> list:
         # exclude the current candle (range -N to -1, exclusive of -1) so
         # the median reflects the PRIOR distribution.
         _window_n = min(20, len(candles) - 1)  # exclude current candle
+        # FIX (DEEP-AUDIT-2026-07-26 / F-10-11, A-05 P5): complete BUG-12
+        # pattern — the cold-start fallback (when `_window_n < 5`, i.e. very
+        # few candles) previously used `range(-_window_n, 0)` which INCLUDES
+        # the current candle, contradicting the invariant enforced by the
+        # primary branch (range(-_window_n - 1, -1) — excludes current).
+        # The fallback now also excludes the current candle, requiring
+        # `len(candles) >= _window_n + 1` (i.e. len >= 5 when _window_n=4).
+        # When too few candles to exclude current, fallback to _window_n=3
+        # (still excludes current) to preserve the invariant.
         if _window_n < 5:
-            _window_n = min(20, len(candles))  # fallback: include current
-            recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
-                             for i in range(-_window_n, 0)]
-        else:
-            recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
-                             for i in range(-_window_n - 1, -1)]
+            _window_n = max(3, min(20, len(candles) - 1))
+        if len(candles) < _window_n + 1:
+            _window_n = max(1, len(candles) - 1)
+        recent_bodies = [abs(candles[i]["close"] - candles[i]["open"])
+                         for i in range(-_window_n - 1, -1)]
         # FIX (AUDIT-DEEP #06, 2026-07-23): the previous median calculation
         # took only `sorted(recent_bodies)[len(recent_bodies) // 2]`, which
         # for an EVEN-length list returns the UPPER middle element (e.g. for
@@ -199,7 +220,12 @@ def analyze(candles, ctx: MarketContext) -> list:
             lo_mid = sorted_bodies[(n_bodies // 2) - 1]
             hi_mid = sorted_bodies[n_bodies // 2]
             median_body = (lo_mid + hi_mid) / 2.0
-        if median_body > 0 and abs(body) > median_body * body_mult and abs(body) > 0:
+        if median_body > 0 and abs(body) > median_body * body_mult:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-10-12, A-05 P26): removed
+            # redundant `and abs(body) > 0` clause — implied by
+            # `abs(body) > median_body * body_mult` when both median_body
+            # and body_mult are strictly positive (they are: median_body>0
+            # from the outer guard; body_mult is one of 2.0/1.3/1.5).
             # FIX (Bug #19, 2026-07-17): Z-score boost threshold is now
             # volatility-scaled (was static Z > 2.0). Matches the same
             # scaling used in otc_pattern.SIGNAL 3 for consistency.
@@ -214,7 +240,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                 z_boost_threshold = 2.8
             else:
                 z_boost_threshold = 2.3
-            z_boost = 1 if stats["z_body"] > z_boost_threshold else 0
+            z_boost = 1 if stats.get("z_body", 0) > z_boost_threshold else 0
             # FIX (OTC issue 2): trend-aware dampening for big body
             # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-03): use >= 0.7 for
             # the strong-dampen threshold (same boundary fix as SIGNAL 1).
@@ -234,16 +260,19 @@ def analyze(candles, ctx: MarketContext) -> list:
             # 1.5x median when in reality it could be 2.1x or 3.0x. Now we
             # show the actual ratio for accurate postmortem analysis.
             actual_ratio = abs(body) / median_body if median_body > 0 else 0
+            # FIX (DEEP-AUDIT-2026-07-26 / F-10-13, A-05 ISSUE S5): .get()
+            # for z_body cold-start safety.
+            _z_body = stats.get("z_body", 0)
             if body > 0:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="PUT", score=score, confidence=base_conf,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                    reasons=[f"Big UP body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {actual_ratio:.1f}x median [thresh {body_mult}x], trend_str={trend_strength:.2f}) → PUT reversal"]))
+                    reasons=[f"Big UP body ({body_pct:.0f}%, Z={_z_body:.1f}, {actual_ratio:.1f}x median [thresh {body_mult}x], trend_str={trend_strength:.2f}) → PUT reversal"]))
             elif body < 0:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="CALL", score=score, confidence=base_conf,
                     signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                    reasons=[f"Big DOWN body ({body_pct:.0f}%, Z={stats['z_body']:.1f}, {actual_ratio:.1f}x median [thresh {body_mult}x], trend_str={trend_strength:.2f}) → CALL reversal"]))
+                    reasons=[f"Big DOWN body ({body_pct:.0f}%, Z={_z_body:.1f}, {actual_ratio:.1f}x median [thresh {body_mult}x], trend_str={trend_strength:.2f}) → CALL reversal"]))
             # body == 0 (doji): skip — body_pct would be 0, which fails
             # the > median_body * body_mult threshold anyway, but be safe.
 
@@ -273,7 +302,13 @@ def analyze(candles, ctx: MarketContext) -> list:
         # trend (e.g. PUT in TREND_DOWN) is actually counter-trend exhaustion
         # — keep those. A reversal that opposes the trend (PUT in TREND_UP)
         # is the problematic case → skip when trend_strength is high.
-        strong_trend = is_trending and trend_strength > 0.4
+        # FIX (DEEP-AUDIT-2026-07-26 / F-10-14, A-05 P80/S2): standardize the
+        # wick-rejection trend gate from `> 0.4` to `>= 0.5` so it aligns
+        # with the moderate-trend threshold used in candle_reaction SIGNAL 1
+        # (line 65), SIGNAL 2 (line 228), SIGNAL 4 (line 322). At
+        # trend_strength = 0.45 the gate was inconsistent with the dampening
+        # thresholds elsewhere in this module.
+        strong_trend = is_trending and trend_strength >= 0.5
         if uw_pct > 50 and body_pct < 30:
             # Upper-wick rejection → PUT (bearish reversal)
             # Skip if strong TREND_UP (counter-trend → noise)
@@ -281,7 +316,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="PUT", score=2, confidence=55,
                     signal_type="REVERSAL", reliability="CANDLE", group="WICK",
-                    reasons=[f"Upper wick rejection ({uw_pct:.0f}%) → PUT (59% win rate)"]))
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-10-15, A-05 P82): equalize
+                    # upper-wick PUT win-rate text from 59% to 56% to match the
+                    # lower-wick CALL branch (both mirror signals should claim
+                    # the same win rate; 56% matches the AUDIT-4-05 equalized
+                    # confidence=55 baseline).
+                    reasons=[f"Upper wick rejection ({uw_pct:.0f}%) → PUT (56% win rate)"]))
             # else: skipped — counter-trend wick in strong TREND_UP is noise
         elif lw_pct > 50 and body_pct < 30:
             # Lower-wick rejection → CALL (bullish reversal)
@@ -303,8 +343,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     # conviction so the blender doesn't get a strong counter-trend vote.
     if rng > 0:
         close_pos = max(0, min(100, (c - l) / rng * 100))
+        # FIX (DEEP-AUDIT-2026-07-26 / F-10-16, A-05 ISSUE S5): .get() for
+        # close_percentile cold-start safety (defaults to neutral 50).
+        _close_pctile = stats.get("close_percentile", 50)
         if close_pos >= 80:
-            percentile_boost = 1 if stats["close_percentile"] >= 90 else 0
+            percentile_boost = 1 if _close_pctile >= 90 else 0
             close_aligns_with_strong_trend = (
                 is_trending
                 and trend_strength > 0.5
@@ -321,9 +364,9 @@ def analyze(candles, ctx: MarketContext) -> list:
             results.append(ModuleResult(
                 module_name="candle_reaction", direction="PUT", score=base_score + percentile_boost, confidence=base_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"Close at range top ({close_pos:.0f}%, pctile={stats['close_percentile']:.0f}, trend_str={trend_strength:.2f}) → PUT"]))
+                reasons=[f"Close at range top ({close_pos:.0f}%, pctile={_close_pctile:.0f}, trend_str={trend_strength:.2f}) → PUT"]))
         elif close_pos <= 20:
-            percentile_boost = 1 if stats["close_percentile"] <= 10 else 0
+            percentile_boost = 1 if _close_pctile <= 10 else 0
             close_aligns_with_strong_trend = (
                 is_trending
                 and trend_strength > 0.5
@@ -342,17 +385,14 @@ def analyze(candles, ctx: MarketContext) -> list:
             results.append(ModuleResult(
                 module_name="candle_reaction", direction="CALL", score=base_score + percentile_boost, confidence=base_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
-                reasons=[f"Close at range bottom ({close_pos:.0f}%, pctile={stats['close_percentile']:.0f}, trend_str={trend_strength:.2f}) → CALL"]))
+                reasons=[f"Close at range bottom ({close_pos:.0f}%, pctile={_close_pctile:.0f}, trend_str={trend_strength:.2f}) → CALL"]))
 
-    # ── SIGNAL 5: Body shrinking → exhaustion (BODY group) ───────────────
-    # DISABLED (live data, 2026-07-20): real Quotex data showed 42% win rate
-    # — shrinking bodies in OTC are broker consolidation, not exhaustion.
-    # The broker often continues the trend after a small-body pause.
-    # Removing this signal improves accuracy.
-    # if len(candles) >= 2:
-    #     prev_body = abs(candles[-2]["close"] - candles[-2]["open"])
-    #     if prev_body > 0 and abs(body) < prev_body * 0.5 and abs(body) > 0:
-    #         ... (original code removed)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-17, A-05 P27): removed 9-line
+    # commented-out SIGNAL 5 (Body shrinking) dead block. Originally disabled
+    # on 2026-07-20 (real Quotex data showed 42% win rate — shrinking bodies
+    # in OTC are broker consolidation, not exhaustion). Re-enablement requires
+    # backtest proof of >= 50% win rate on live data.
+    # ── SIGNAL 5 (Body shrinking → exhaustion) remains DISABLED ──────
 
     # ═══════════════════════════════════════════════════════════════════════
     #  CONTINUATION SIGNALS (NEW, 2026-07-18)
@@ -403,20 +443,24 @@ def analyze(candles, ctx: MarketContext) -> list:
     # `b3 = abs(body)` assignments in both branches — `b3` was computed but
     # never used (the rising-closes check uses `body_pct`, which is the
     # current body ratio, not `b3`). Removing to avoid future confusion.
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-18, A-05 P40): hoist b1/b2/r1/r2
+    # computation OUT of the if/elif branches — both branches computed the
+    # same values. Single computation improves readability and avoids
+    # divergent logic if one branch's formula is later edited.
     if is_trending and trend_strength > 0.5 and len(candles) >= 3:
         c1_close = candles[-3]["close"]
         c2_close = candles[-2]["close"]
         c3_close = candles[-1]["close"]
+        b1 = abs(candles[-3]["close"] - candles[-3]["open"])
+        b2 = abs(candles[-2]["close"] - candles[-2]["open"])
+        r1 = candles[-3]["high"] - candles[-3]["low"]
+        r2 = candles[-2]["high"] - candles[-2]["low"]
         # Monotonic rising closes
         if c1_close < c2_close < c3_close:
             # Each body must be non-trivial (not dojis)
             # NOTE: b1/b2 are price-unit body sizes; b1/r1 is a unitless ratio
             #       body_pct is a 0-100 percentage — these are the same scale
             #       but expressed in different units (ratio vs percentage).
-            b1 = abs(candles[-3]["close"] - candles[-3]["open"])
-            b2 = abs(candles[-2]["close"] - candles[-2]["open"])
-            r1 = candles[-3]["high"] - candles[-3]["low"]
-            r2 = candles[-2]["high"] - candles[-2]["low"]
             if (r1 > 0 and r2 > 0 and rng > 0
                     and b1/r1 >= 0.30 and b2/r2 >= 0.30 and body_pct >= 30
                     and trend_regime == "TREND_UP"):
@@ -426,10 +470,6 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Rising closes momentum (3 UP, str={trend_strength:.2f}) → CALL continuation (62% win rate)"]))
         # Monotonic falling closes
         elif c1_close > c2_close > c3_close:
-            b1 = abs(candles[-3]["close"] - candles[-3]["open"])
-            b2 = abs(candles[-2]["close"] - candles[-2]["open"])
-            r1 = candles[-3]["high"] - candles[-3]["low"]
-            r2 = candles[-2]["high"] - candles[-2]["low"]
             if (r1 > 0 and r2 > 0 and rng > 0
                     and b1/r1 >= 0.30 and b2/r2 >= 0.30 and body_pct >= 30
                     and trend_regime == "TREND_DOWN"):
@@ -438,13 +478,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                     signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
                     reasons=[f"Falling closes momentum (3 DOWN, str={trend_strength:.2f}) → PUT continuation (62% win rate)"]))
 
-    # ── CONTINUATION SIGNAL 7: Trend-aligned wick rejection — DISABLED
-    # (ultra-deep, 2026-07-20): backtest showed 41.4% win rate on 70 signals.
-    # The "bearish close but lower wick = continuation" logic is wrong —
-    # a bearish close means sellers won, not that buyers defended.
-    # The wick rejection Signal 3 already handles wick analysis correctly
-    # (as REVERSAL). This continuation version was counterproductive.
-    # if is_trending and trend_strength > 0.4 and rng > 0:
-    #     ... (disabled)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-19, A-05 P28): removed 8-line
+    # commented-out SIGNAL 7 (Trend-aligned wick rejection) dead block.
+    # Originally disabled on 2026-07-20 (backtest showed 41.4% win rate on
+    # 70 signals — the "bearish close but lower wick = continuation" logic
+    # is wrong; a bearish close means sellers won). Re-enablement requires
+    # backtest proof of >= 50% win rate.
+    # ── CONTINUATION SIGNAL 7 remains DISABLED (41.4% win rate) ───────
 
     return results

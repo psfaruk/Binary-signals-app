@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+# TODO (DEEP-AUDIT-2026-07-26 / F-20 / cross-file cleanup):
+#   (1) Line 26 — `def test(name, cond, detail=""):` is DUPLICATED in
+#       `scripts/backtest_fixes.py:29` and `scripts/backtest_remaining.py:14`.
+#       Consider extracting to `scripts/_helpers.py`. Audit ref: A-10 dup table.
+#   (2) Line 34 — `def build_candles(patterns, base_price=1.0, base_t=1700000000):`
+#       is DUPLICATED verbatim in `scripts/backtest_fixes.py:37`. Consider
+#       extracting to `scripts/_helpers.py`. Audit ref: A-10 dup table.
+#   (3) Line 97 — `from sim_feed import QuotexFeed, _AssetStream` is BROKEN:
+#       sim_feed.py.DISABLED was DELETED by orchestrator (worklog FINAL stage).
+#       Script raises ModuleNotFoundError at runtime. Replace with
+#       `from feed import QuotexFeed, _AssetStream` (the real feed) OR
+#       delete the Option A simulation block. Audit ref: A-10 PROBLEM 2.
 """
 Deep backtest for the WEAK→NEUTRAL fixes (Options A + B).
 
@@ -94,7 +106,7 @@ def main():
     from core.time_patterns import init_patterns
     init_patterns()
 
-    from sim_feed import QuotexFeed, _AssetStream
+    from feed import QuotexFeed, _AssetStream  # FIX (DEEP-AUDIT-2026-07-26 / F-19-09): removed `from sim_feed import ...` — sim_feed.py is .DISABLED (A-10 PROBLEM 2).
     feed_obj = QuotexFeed()
 
     # Manually construct a stream with a WEAK prediction

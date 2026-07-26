@@ -1,7 +1,8 @@
-"""Stub — Buy channel was removed (dead code, app is read-only signal analysis)."""
+"""Stub removed (DEEP-AUDIT-2026-07-26 / F-16-23).
 
-
-class Buy:
-    """Stub — original removed 2026-07-13 (dead code, app never places trades)."""
-    def __init__(self, api):
-        self.api = api
+The Buy class was a stub (`__init__` only, no `__call__` method) — dead
+code, the Binary-signals-app is read-only signal analysis and never
+places trades. The matching `QuotexAPI.buy` property in api.py has also
+been removed. This file is kept as an empty marker so any lingering
+imports elsewhere don't crash with ModuleNotFoundError.
+"""

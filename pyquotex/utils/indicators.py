@@ -1,6 +1,7 @@
-"""Stub — TechnicalIndicators was removed (dead code, never used by feed.py)."""
+"""Stub removed (DEEP-AUDIT-2026-07-26 / F-16-25).
 
-
-class TechnicalIndicators:
-    """Stub — original removed 2026-07-13 (dead code, never called)."""
-    pass
+The TechnicalIndicators class was reduced to `pass` — dead code never
+called by feed.py (which has its own indicators in core/analysis.py).
+This file is kept as an empty marker for the utils package's
+importability.
+"""

@@ -17,35 +17,67 @@ derived, not price-action patterns, but in OTC they can be noisy)
 import math
 from engines.base.types import ModuleResult, MarketContext
 
+# FIX (DEEP-AUDIT-2026-07-26 / F-09-10): reuse `core.analysis._ema` instead of
+# duplicating it verbatim (PROBLEM 11 / CRITICAL). The local `_ema` copy was a
+# near-identical twin of the canonical implementation; fixes to the canonical
+# version now propagate automatically. Local definition removed below.
+from core.analysis import _ema
+
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-09-11): module-level constants replacing
+# ~25 magic numbers throughout this module (audit PROBLEMS 56-65, 106, 107).
+# Centralized here for tunability and documentation. Note on the trend
+# threshold: the original code used `> 0.6` which was inconsistent with the
+# other engine modules (candle_reaction used 0.4/0.5/0.7; trend_follow used
+# 0.4/0.5; otc_pattern used 0.5/0.7; pattern used 0.7). Per audit ISSUE S2
+# we standardize on `>= 0.7` for "strong" — matching pattern.py and the
+# >=0.7 callsites in candle_reaction.py. Cross-module standardization to
+# core/constants.py is recommended but out of scope here (other modules are
+# other agents' assignments).
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+RSI_FLAT_EPS = 1e-10           # below this, both avg_gain/avg_loss considered 0
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+MACD_MAG_THRESHOLD_ATR = 0.1   # post-crossover histogram magnitude floor
+MACD_ATR_FALLBACK = 0.001      # used when ctx.atr is non-positive
+EMA_SEPARATION_PCT = 0.15      # |EMA9 - EMA21| / EMA21 threshold (%)
+BB_PERIOD = 20
+BB_NUM_STD = 2
+BB_DEGENERATE_WIDTH = 0.0001   # skip BB signals when band width < this
+STOCH_K_PERIOD = 14
+STOCH_D_PERIOD = 3
+STOCH_OVERBOUGHT = 70
+STOCH_OVERBOUGHT_RELAXED = 75  # max(k, k_prev) fallback for bearish cross
+STOCH_OVERSOLD = 30
+STOCH_OVERSOLD_RELAXED = 25    # min(k, k_prev) fallback for bullish cross
+STRONG_TREND_THRESHOLD = 0.7  # standardized across modules (was > 0.6)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  INDICATOR CALCULATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _ema(values, period):
-    """Exponential Moving Average.
+def _rsi(closes, period=RSI_PERIOD):
+    """Relative Strength Index (Wilder's).
 
-    FIX (Bug 9, deep audit 2026-07-19): previously required
-    `len(values) >= period` and returned 0 otherwise. This silently failed
-    EMA checks when len < period (cold-start, short lookback). Now adapts
-    the seed to whatever length is available — same logic as
-    core.analysis._ema. With fewer values than `period`, the EMA is mostly
-    an SMA of all available values, which is still a useful (if noisier)
-    trend direction indicator.
+    FIX (DEEP-AUDIT-2026-07-26 / F-09-12): use RSI_FLAT_EPS (1e-10) instead
+    of exact-zero comparison on `avg_loss == 0` (PROBLEM 2 / CRITICAL).
+    Previously, even a floating-point dust `avg_gain = 1e-12` would trigger
+    RSI=100, producing a false overbought signal. Now requires avg_gain
+    above the same epsilon to count as a real gain.
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-09-13): RSI thresholds (PROBLEM 58) and
+    period (PROBLEM 107) moved to module-level constants RSI_PERIOD,
+    RSI_OVERBOUGHT, RSI_OVERSOLD. Returning 50 for `len < period + 1` is a
+    conservative choice (Wilder smoothing needs full period). Returning
+    None would force every caller to handle None defensively — too invasive.
     """
-    if not values:
-        return 0
-    k = 2 / (period + 1)
-    seed_n = min(period, len(values))
-    ema = sum(values[:seed_n]) / seed_n
-    for v in values[seed_n:]:
-        ema = v * k + ema * (1 - k)
-    return ema
-
-
-def _rsi(closes, period=14):
-    """Relative Strength Index (Wilder's)."""
     if len(closes) < period + 1:
+        # Cold-start: insufficient data for Wilder smoothing. Return the
+        # conventionally-neutral 50.
         return 50
     gains, losses = [], []
     for i in range(1, len(closes)):
@@ -62,19 +94,28 @@ def _rsi(closes, period=14):
     # `if avg_loss == 0: return 100` fired even when avg_gain == 0 too,
     # producing a false overbought signal in flat markets (rare but possible
     # during low-volume sessions). RSI 50 is the conventionally neutral value.
-    if avg_loss == 0:
-        return 100 if avg_gain > 0 else 50
+    #
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-12): use RSI_FLAT_EPS instead of
+    # exact-zero comparisons so floating-point dust doesn't trigger RSI=100.
+    if avg_loss < RSI_FLAT_EPS:
+        return 100 if avg_gain > RSI_FLAT_EPS else 50
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
 
-def _macd(closes, fast=12, slow=26, signal=9):
+def _macd(closes, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
     """MACD line, signal line, histogram.
 
     FIX (BUG-AC, 2026-07-20): the previous version recomputed EMA-fast and
     EMA-slow for every historical position (O(N²)). Now we compute the
     EMA arrays ONCE in a single forward pass, then derive MACD values
     from the arrays. Same result, ~50× faster for 200 closes.
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-09-14): use module-level MACD_FAST/SLOW/
+    SIGNAL constants (PROBLEM 59). Remove the unreachable `else` branch
+    in signal_line computation (PROBLEM 17): the early return at top
+    ensures `len(closes) >= slow + signal`, so `len(macd_values) >=
+    signal + 1 > signal` — the else branch never executed.
     """
     if len(closes) < slow + signal:
         return 0, 0, 0
@@ -97,7 +138,14 @@ def _macd(closes, fast=12, slow=26, signal=9):
                 # None makes the invalidity explicit. MACD consumers only read
                 # indices >= slow-1 (where both EMAs are valid), so this is
                 # safe for current callers.
-                ema_arr.append(None)
+                #
+                # FIX (DEEP-AUDIT-2026-07-26 / F-09-15): use float('nan')
+                # instead of None (PROBLEM 106). Mixing types in a list forces
+                # consumers to handle None defensively; NaN propagates
+                # through arithmetic and is the standard signal for "no value"
+                # in numeric arrays. (NaN-safe: never read by callers — they
+                # only access indices >= slow-1 where the array is float.)
+                ema_arr.append(float('nan'))
             elif i == seed_n - 1:
                 ema_arr.append(seed_sma)
             else:
@@ -113,33 +161,40 @@ def _macd(closes, fast=12, slow=26, signal=9):
         ema_fast_arr[i] - ema_slow_arr[i]
         for i in range(slow - 1, len(closes))
     ]
-    if len(macd_values) >= signal:
-        signal_line = _ema(macd_values, signal)
-    else:
-        signal_line = macd_values[-1] if macd_values else 0
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-14): the early return above guarantees
+    # `len(closes) >= slow + signal`, hence `len(macd_values) >= signal + 1`.
+    # The previous `else` branch (signal_line = macd_values[-1] if macd_values
+    # else 0) was unreachable dead code (PROBLEM 17) — removed.
+    signal_line = _ema(macd_values, signal)
     histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
 
 
-def _bollinger(closes, period=20, num_std=2):
+def _bollinger(closes, period=BB_PERIOD, num_std=BB_NUM_STD):
     """Bollinger Bands: middle (SMA), upper, lower.
 
     FIX (BUG-AE, 2026-07-20): use sample std (/(period-1)) instead of
     population std (/period). For period=20, this corrects a ~2.5%
     understatement of std, making the bands slightly wider and more
     accurate.
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-09-16): magic numbers 20/2 → BB_PERIOD
+    / BB_NUM_STD constants (PROBLEM 63 partial). Remove the defensive
+    `max(period - 1, 1)` in the variance divisor (PROBLEM 37): callers
+    always pass BB_PERIOD=20, so `period - 1 = 19` is always positive;
+    the max() never fired.
     """
     if len(closes) < period:
         return 0, 0, 0
     recent = closes[-period:]
     sma = sum(recent) / period
-    # Sample variance (Bessel's correction)
-    variance = sum((x - sma) ** 2 for x in recent) / max(period - 1, 1)
+    # Sample variance (Bessel's correction). period > 1 guaranteed by callers.
+    variance = sum((x - sma) ** 2 for x in recent) / (period - 1)
     std = math.sqrt(variance) if variance > 0 else 0
     return sma, sma + num_std * std, sma - num_std * std
 
 
-def _stochastic(candles, k_period=14, d_period=3):
+def _stochastic(candles, k_period=STOCH_K_PERIOD, d_period=STOCH_D_PERIOD):
     """Stochastic Oscillator: %K and %D for the last closed candle, plus
     the PREVIOUS candle's %K and %D so callers can detect true crossovers.
 
@@ -151,6 +206,27 @@ def _stochastic(candles, k_period=14, d_period=3):
     the actual sign change of `(k - d)` between the prior candle and now.
 
     Returns: (k, d, k_prev, d_prev)
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-09-17 / CRITICAL): the previous
+    `if len(candles) >= k_period + 1` guard was too weak (PROBLEM 3). The
+    `k_values_prev` list calls `_k_at(len(candles) - 2 - i)` for `i in
+    range(d_period)` — for `d_period=3`, this needs indices `len-2, len-3,
+    len-4`. Each `_k_at(idx)` requires `idx >= k_period - 1`. So the
+    minimum `len(candles)` needed for clean prev values is
+    `k_period + d_period`. The previous guard let `len < k_period +
+    d_period` through, and the resulting 50.0 placeholders in
+    `k_values_prev` (returned by `_k_at` for `idx < k_period - 1`)
+    corrupted `d_prev`, creating/destroying false %K/%D crossovers.
+    Strengthened guard: `>= k_period + d_period`. (When the guard fails,
+    we still return current k/d as the "prev" values — same fallback as
+    before, but now the fallback is correctly applied whenever real prev
+    values would be contaminated by placeholders.)
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-09-18): remove the dead `else k` /
+    `else k_prev` branches (PROBLEM 36) in `%D` computation. `k_values`
+    is built from `range(d_period)` which yields `d_period` (default 3)
+    elements — never empty. The `if k_values else k` fallback never fired.
+    Same fix for `k_values_prev`.
     """
     if len(candles) < k_period:
         return 50, 50, 50, 50
@@ -172,14 +248,26 @@ def _stochastic(candles, k_period=14, d_period=3):
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-12): removed the pointless
     # `k_values.reverse()` call — sum() is order-independent, so reversing
     # the list has no effect on the SMA. Same fix below for k_values_prev.
-    d = sum(k_values) / len(k_values) if k_values else k
+    #
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-18): removed `else k` dead branch
+    # (PROBLEM 36). `k_values` is always non-empty (built from range).
+    d = sum(k_values) / len(k_values)
 
-    # Previous %K and %D (one candle earlier)
-    if len(candles) >= k_period + 1:
+    # Previous %K and %D (one candle earlier).
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-17 / CRITICAL): strengthened guard
+    # from `>= k_period + 1` to `>= k_period + d_period` (PROBLEM 3). The
+    # previous guard allowed `len(candles) < k_period + d_period` through,
+    # causing `_k_at` to return 50.0 placeholders for indices `len-3, len-4`
+    # (with d_period=3), corrupting `k_values_prev` and creating/destroying
+    # false %K/%D crossovers. See function docstring for full analysis.
+    if len(candles) >= k_period + d_period:
         k_prev = _k_at(len(candles) - 2)
         k_values_prev = [_k_at(len(candles) - 2 - i) for i in range(d_period)]
-        d_prev = sum(k_values_prev) / len(k_values_prev) if k_values_prev else k_prev
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-18): removed `else k_prev` dead
+        # branch (PROBLEM 36).
+        d_prev = sum(k_values_prev) / len(k_values_prev)
     else:
+        # Insufficient data for clean prev values — fall back to current.
         k_prev, d_prev = k, d
 
     return k, d, k_prev, d_prev
@@ -214,7 +302,12 @@ def analyze(candles, ctx: MarketContext) -> list:
     is_trending = regime.get("is_trending", False)
     trend_regime = regime.get("regime", "RANGE")
     trend_strength = regime.get("trend_strength", 0.0)
-    strong_trend = is_trending and trend_strength > 0.6
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-19): standardized strong-trend threshold
+    # from magic `> 0.6` to `>= STRONG_TREND_THRESHOLD` (0.7) (PROBLEM 56 /
+    # ISSUE S2). Aligns indicator.py with pattern.py and candle_reaction.py's
+    # `>= 0.7` callsites. Behavioral change: trend_strength in [0.6, 0.7) now
+    # falls through to the reversal branch instead of continuation.
+    strong_trend = is_trending and trend_strength >= STRONG_TREND_THRESHOLD
 
     # ── INDICATOR 1: RSI (14) ────────────────────────────────────────────
     # FIX (Bug #7, 2026-07-17): removed the "mild momentum" branches that
@@ -226,8 +319,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     # or RSI < 30 (downtrend) is momentum confirmation, NOT a reversal
     # signal. Fire as CONTINUATION in that case. RSI > 70 in a DOWNTREND
     # (rare but possible — a counter-trend spike) is still reversal.
-    rsi = _rsi(closes, 14)
-    if rsi > 70:
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-20): RSI period + thresholds now
+    # module-level constants (PROBLEMS 58, 107): RSI_PERIOD, RSI_OVERBOUGHT,
+    # RSI_OVERSOLD.
+    rsi = _rsi(closes, RSI_PERIOD)
+    if rsi > RSI_OVERBOUGHT:
         if strong_trend and trend_regime == "TREND_UP":
             # RSI > 70 in a strong uptrend = momentum, not reversal.
             results.append(ModuleResult(
@@ -239,7 +335,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                 module_name="indicator", direction="PUT", score=3, confidence=62,
                 signal_type="REVERSAL", reliability="INDICATOR", group="IND_RSI",
                 reasons=[f"RSI overbought ({rsi:.0f}) → PUT reversal (62% win rate)"]))
-    elif rsi < 30:
+    elif rsi < RSI_OVERSOLD:
         if strong_trend and trend_regime == "TREND_DOWN":
             # RSI < 30 in a strong downtrend = momentum.
             results.append(ModuleResult(
@@ -249,10 +345,13 @@ def analyze(candles, ctx: MarketContext) -> list:
         else:
             # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-10): equalize conf to
             # 62 to match the overbought-PUT branch (was 60 — 2-point PUT bias).
+            # FIX (DEEP-AUDIT-2026-07-26 / F-09-21): align reason text from
+            # "(60% win rate)" to "(62% win rate)" to match confidence=62
+            # (PROBLEM 57).
             results.append(ModuleResult(
                 module_name="indicator", direction="CALL", score=3, confidence=62,
                 signal_type="REVERSAL", reliability="INDICATOR", group="IND_RSI",
-                reasons=[f"RSI oversold ({rsi:.0f}) → CALL reversal (60% win rate)"]))
+                reasons=[f"RSI oversold ({rsi:.0f}) → CALL reversal (62% win rate)"]))
 
     # ── INDICATOR 2: MACD (crossover detection) ─────────────────────────
     # FIX (Bug #8, 2026-07-17): the old version checked STATE (macd_line vs
@@ -268,11 +367,16 @@ def analyze(candles, ctx: MarketContext) -> list:
     # crossover signals that contributed to false confluence. Now the
     # post-crossover histogram magnitude must exceed a small price-relative
     # threshold (0.0001 * close = ~1 pip on EURUSD, ~1.5 pip on USDJPY).
-    MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-22): MACD_FAST/SLOW/SIGNAL are now
+    # module-level constants (PROBLEM 59). Removed the local re-definition
+    # `MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9` — the module-level
+    # constants are used directly.
     macd_line, signal_line, histogram = _macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
     # Detect sign change in histogram by recomputing on truncated closes.
     if len(closes) >= MACD_SLOW + MACD_SIGNAL + 1:
-        _ml_prev, _sl_prev, hist_prev = _macd(closes[:-1], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-23): drop unused `_ml_prev, _sl_prev`
+        # variables (PROBLEM 18) — only `hist_prev` is used downstream.
+        _, _, hist_prev = _macd(closes[:-1], MACD_FAST, MACD_SLOW, MACD_SIGNAL)
         # Magnitude filter: post-crossover histogram must be meaningful
         # (>0.01% of close). Filters noise-level sign flips.
         # FIX (deep diagnostic, 2026-07-20): MACD crossover had 39% win rate.
@@ -288,8 +392,15 @@ def analyze(candles, ctx: MarketContext) -> list:
         # ~1.08) got a 0.0011 threshold (~1 pip, too loose for their typical
         # 0.0005-0.001 swings). ATR captures each pair's own volatility, so
         # the threshold adapts. ctx.atr is already computed in MarketContext.
-        _atr_val = ctx.atr if ctx.atr > 0 else (abs(last_close) * 0.001 if last_close > 0 else 0.001)
-        mag_threshold = _atr_val * 0.1
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-24): simplify the `_atr_val`
+        # fallback (PROBLEM 60). The previous expression
+        # `abs(last_close) * 0.001 if last_close > 0 else 0.001` had two
+        # magic-number paths that collapsed to the same value for any
+        # positive price (which all forex pairs have). Single constant
+        # MACD_ATR_FALLBACK replaces both. `mag_threshold` also uses the
+        # MACD_MAG_THRESHOLD_ATR constant (PROBLEM 61).
+        _atr_val = ctx.atr if ctx.atr > 0 else MACD_ATR_FALLBACK
+        mag_threshold = _atr_val * MACD_MAG_THRESHOLD_ATR
         fresh_bull_cross = (hist_prev <= 0 and histogram > 0
                             and abs(histogram) > mag_threshold)
         fresh_bear_cross = (hist_prev >= 0 and histogram < 0
@@ -315,12 +426,14 @@ def analyze(candles, ctx: MarketContext) -> list:
     ema21 = ctx.ema21
     if ema9 > 0 and ema21 > 0:
         ema_diff_pct = (ema9 - ema21) / ema21 * 100 if ema21 > 0 else 0
-        if ema9 > ema21 and ema_diff_pct > 0.15:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-25): magic number `0.15` →
+        # EMA_SEPARATION_PCT constant (PROBLEM 62).
+        if ema9 > ema21 and ema_diff_pct > EMA_SEPARATION_PCT:
             results.append(ModuleResult(
                 module_name="indicator", direction="CALL", score=1, confidence=52,
                 signal_type="CONTINUATION", reliability="INDICATOR", group="IND_EMA",
                 reasons=[f"EMA9 > EMA21 ({ema_diff_pct:.2f}%) → CALL uptrend"]))
-        elif ema9 < ema21 and ema_diff_pct < -0.15:
+        elif ema9 < ema21 and ema_diff_pct < -EMA_SEPARATION_PCT:
             results.append(ModuleResult(
                 module_name="indicator", direction="PUT", score=1, confidence=52,
                 signal_type="CONTINUATION", reliability="INDICATOR", group="IND_EMA",
@@ -332,7 +445,9 @@ def analyze(candles, ctx: MarketContext) -> list:
     # downtrend) — calling these "reversal" was the same structural bias
     # as RSI. Now: in a strong trend aligned with the band touch, fire as
     # CONTINUATION (weaker score). Otherwise fire as REVERSAL (mean reversion).
-    bb_mid, bb_upper, bb_lower = _bollinger(closes, 20, 2)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-26): magic numbers `20, 2` →
+    # BB_PERIOD, BB_NUM_STD constants (PROBLEM 63 partial).
+    bb_mid, bb_upper, bb_lower = _bollinger(closes, BB_PERIOD, BB_NUM_STD)
     if bb_upper > 0 and bb_lower > 0:
         bb_width = (bb_upper - bb_lower) / bb_mid if bb_mid > 0 else 0
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-14): skip Bollinger signals
@@ -340,7 +455,10 @@ def analyze(candles, ctx: MarketContext) -> list:
         # Without this guard, last_close >= bb_upper fires for any close at
         # or above the SMA when std == 0 (since bb_upper == bb_lower == sma),
         # producing false reversal signals in low-volatility consolidation.
-        if bb_width < 0.0001:
+        #
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-26): magic number `0.0001` →
+        # BB_DEGENERATE_WIDTH constant (PROBLEM 63).
+        if bb_width < BB_DEGENERATE_WIDTH:
             # Degenerate bands — skip Bollinger signals for this candle.
             pass
         elif last_close >= bb_upper:
@@ -406,7 +524,9 @@ def analyze(candles, ctx: MarketContext) -> list:
     # %K turns — strict >80 would miss the very signal we're trying to
     # detect. The crossover requirement (sign change of k-d) is the
     # critical part that prevents stale repeat signals.
-    k, d, k_prev, d_prev = _stochastic(candles, 14, 3)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-27): stochastic periods `14, 3` →
+    # STOCH_K_PERIOD, STOCH_D_PERIOD constants (PROBLEM 64).
+    k, d, k_prev, d_prev = _stochastic(candles, STOCH_K_PERIOD, STOCH_D_PERIOD)
     fresh_bear_cross = (k_prev >= d_prev) and (k < d)
     fresh_bull_cross = (k_prev <= d_prev) and (k > d)
     # FIX (Bug 14, deep audit 2026-07-19): the previous zone check used
@@ -423,13 +543,17 @@ def analyze(candles, ctx: MarketContext) -> list:
     # primary zone check so a bearish cross at k_prev = 70 (exactly at the
     # relaxed overbought boundary) fires, and a bullish cross at k_prev = 30
     # fires. The strict > / < missed these boundary cases.
-    if fresh_bear_cross and (k_prev >= 70 or max(k, k_prev) > 75):
+    #
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-28): magic numbers `70, 75, 30, 25` →
+    # STOCH_OVERBOUGHT, STOCH_OVERBOUGHT_RELAXED, STOCH_OVERSOLD,
+    # STOCH_OVERSOLD_RELAXED constants (PROBLEM 65).
+    if fresh_bear_cross and (k_prev >= STOCH_OVERBOUGHT or max(k, k_prev) > STOCH_OVERBOUGHT_RELAXED):
         # %K crossed below %D from overbought zone → bearish reversal
         results.append(ModuleResult(
             module_name="indicator", direction="PUT", score=2, confidence=57,
             signal_type="REVERSAL", reliability="INDICATOR", group="IND_STOCH",
             reasons=[f"Stochastic fresh bearish cross (%K={k:.0f}, %D={d:.0f}, was {k_prev:.0f}/{d_prev:.0f}) → PUT"]))
-    elif fresh_bull_cross and (k_prev <= 30 or min(k, k_prev) < 25):
+    elif fresh_bull_cross and (k_prev <= STOCH_OVERSOLD or min(k, k_prev) < STOCH_OVERSOLD_RELAXED):
         # %K crossed above %D from oversold zone → bullish reversal
         results.append(ModuleResult(
             module_name="indicator", direction="CALL", score=2, confidence=57,

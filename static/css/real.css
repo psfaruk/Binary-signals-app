@@ -1,4 +1,14 @@
-/* real.css — Real Market page. Green accent. */
+/* real.css — Real Market page. Green accent.
+
+   FIX (DEEP-AUDIT-2026-07-26 / F-18-04): A-09 PROBLEM 86 — this file is one
+   of THREE near-identical 10-line accent-CSS files (real.css / otc.css /
+   alltime_otc.css). Only --accent / --accent-bg / --accent-border differ.
+   The audit recommends consolidating via `<body class="theme-real">` +
+   `:root.theme-real{--accent:...}` overrides in common.css. However,
+   since each HTML page references its own accent file via <link>, consolidation
+   would require HTML changes which are out of scope for this fix-batch.
+   The duplication is therefore DOCUMENTED: if you change the rule structure
+   here, change it identically in otc.css and alltime_otc.css. */
 :root{
   --accent:#00c853;
   --accent-bg:rgba(0,200,83,.12);

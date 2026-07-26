@@ -6,7 +6,7 @@
   "deploy": {
     "startCommand": "uvicorn server:app --host 0.0.0.0 --port $PORT",
     "healthcheckPath": "/healthz",
-    "healthcheckTimeout": 30,
+    "healthcheckTimeout": 60,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   },
@@ -23,5 +23,6 @@
       "required": true,
       "example": "quotex-token.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
     }
-  }
+  },
+  "_notes_FIX_DEEP_AUDIT_2026_07_26_F_19_40": "Increased healthcheckTimeout 30→60s. Cold start imports brain.py + time_patterns.py + algorithm_monitor.py (each opens SQLite tables); 30s was too tight on Railway cold start and caused spurious deploy failures. A-10 PROBLEM 34."
 }

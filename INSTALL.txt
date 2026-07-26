@@ -1,6 +1,27 @@
 ═══════════════════════════════════════════════════════════════════════
+   Binary Signals App — Installation Guide (English summary)
+═══════════════════════════════════════════════════════════════════════
+
+QUICK START (English):
+  1. Install Python 3.10–3.12 from https://www.python.org/downloads/
+     (Check "Add Python to PATH" during install.)
+  2. Install Git from https://git-scm.com/download/win (default options).
+  3. Double-click install.bat  (one-time — downloads the app + deps).
+  4. Double-click start.bat     (daily use — starts the server).
+
+On first run, the script asks for your Quotex email + password and saves
+them to .env. After that, the app auto-connects and opens the browser.
+
+NOTE: Simulation mode (USE_SIM=1) was permanently disabled on 2026-07-25.
+QX_TOKEN is required for live data — see RAILWAY_TOKEN_SETUP.md.
+
+═══════════════════════════════════════════════════════════════════════
    Binary Signals App — ইনস্টলেশন গাইড (বাংলা)
 ═══════════════════════════════════════════════════════════════════════
+
+<!-- FIX (DEEP-AUDIT-2026-07-26 / F-19-33): added English summary at top
+     so non-Bengali speakers can follow the install steps (A-10 PROBLEM 41).
+     The full Bengali guide is preserved below. -->
 
 নিয়ম খুব সহজ — শুধু ২টি কাজ করতে হবে:
 

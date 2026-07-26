@@ -6,24 +6,25 @@ from ._api.account import AccountMixin
 from ._api.assets import AssetsMixin
 from ._api.history import HistoryMixin
 from ._api.realtime import RealtimeMixin
-from ._api.trading import TradingMixin
 from .api import QuotexAPI
 from .config import load_session, resource_path, update_session
 from .global_value import AuthStatus
 from .types import ReconnectPolicy
 from .utils.account_type import AccountType
-from .utils.optimization import OptimizedQuotexMixin
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-16-25): removed `TradingMixin` and
+# `OptimizedQuotexMixin` from the inheritance chain — both classes were
+# reduced to `pass` after the 2026-07-13 trading-cleanup. The classes
+# themselves have been removed and the modules kept as empty markers.
 
 logger = logging.getLogger(__name__)
 
 
 class Quotex(
     AccountMixin,
-    TradingMixin,
     HistoryMixin,
     RealtimeMixin,
     AssetsMixin,
-    OptimizedQuotexMixin,
 ):
 
     def __init__(
@@ -64,10 +65,17 @@ class Quotex(
                 exponential backoff. Pass ``ReconnectPolicy(enabled=False)``
                 to opt out.
         """
-        self.size = [
-            5, 10, 15, 30, 60, 120, 300, 600, 900, 1800,
-            3600, 7200, 14400, 86400
-        ]
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-26): removed dead attributes
+        # `size`, `subscribe_candle`, `subscribe_candle_all_size`,
+        # `subscribe_mood`, `suspend`, `websocket_thread`,
+        # `debug_ws_enable`. These were only consumed by the now-deleted
+        # `re_subscribe_stream` method (also removed below) and the
+        # removed trading/realtime one_stream/all_size/mood helpers.
+        # Kept: email, password, host, lang, proxies, resource_path,
+        # user_data_dir, asset_default, period_default, account_is_demo,
+        # codes_asset (still populated by AssetsMixin.get_all_assets),
+        # api, duration, websocket_client, session_data, on_otp_callback,
+        # reconnect_policy, wss_url_override.
         self.email = email
         self.password = password
         self.host = host
@@ -77,17 +85,15 @@ class Quotex(
         self.user_data_dir = user_data_dir
         self.asset_default = asset_default
         self.period_default = period_default
-        self.subscribe_candle: list[str] = []
-        self.subscribe_candle_all_size: list[str] = []
-        self.subscribe_mood: list[str] = []
         self.account_is_demo: int = AccountType.DEMO
-        self.suspend: float = 0.2
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-26): `codes_asset` is still
+        # populated by AssetsMixin.get_all_assets; keep it. (Note: the
+        # broken `get_history_line` method that wrongly indexed this is
+        # deleted — see history.py.)
         self.codes_asset: dict[str, str] = {}
         self.api: QuotexAPI | None = None
         self.duration: int | None = None
         self.websocket_client: Any = None
-        self.websocket_thread: Any = None
-        self.debug_ws_enable: bool = False
         self.resource_path = resource_path(root_path)
         session = load_session(self.email, user_agent)
         self.session_data = session
@@ -147,25 +153,20 @@ class Quotex(
             "user_agent": user_agent
         }
         self.session_data = update_session(self.email, session)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-16-27): propagate session_data
+        # to the live QuotexAPI instance too. Old code only updated
+        # `self.session_data`; the api's `session_data` attribute was
+        # a separate reference and went stale, so callers using
+        # `set_session` after `connect()` saw the api ignore the new
+        # cookies/token.
+        if self.api is not None:
+            self.api.session_data = self.session_data
 
-    async def re_subscribe_stream(self) -> None:
-        """Re-subscribes to all active candle and mood streams."""
-        try:
-            for ac in self.subscribe_candle:
-                sp = ac.split(",")
-                await self.start_candles_one_stream(sp[0], int(sp[1]))
-        except Exception as e:
-            logger.warning("Failed to re-subscribe candle stream: %s", e)
-        try:
-            for ac in self.subscribe_candle_all_size:
-                await self.start_candles_all_size_stream(ac)
-        except Exception as e:
-            logger.warning("Failed to re-subscribe all_size stream: %s", e)
-        try:
-            for ac in self.subscribe_mood:
-                await self.start_mood_stream(ac)
-        except Exception as e:
-            logger.warning("Failed to re-subscribe mood stream: %s", e)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-16-28): removed dead
+    # `re_subscribe_stream` method — it was only called by the now-deleted
+    # trading/realtime one_stream/all_size/mood helpers. The
+    # WebsocketClient's `_replay_subscriptions` (event-driven via
+    # `_subscriptions` dict on QuotexAPI) replaces this functionality.
 
     async def close(self) -> bool:
         """Closes the API connection and stops all tasks."""

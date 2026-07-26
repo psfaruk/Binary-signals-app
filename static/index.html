@@ -1,13 +1,32 @@
 <!DOCTYPE html>
-<html lang="en">
+<!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-51, MEDIUM): `.no-js` class on <html> is
+     removed by the inline script below once JS runs. CSS uses it to hide the
+     spinner when JS is disabled (otherwise it spins forever implying
+     "loading" when nothing is loading). -->
+<html lang="en" class="no-js">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0d1117">
   <title>Binary Signal Terminal</title>
+  <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-50, MEDIUM): no-JS fallback redirect.
+       If JS is disabled (or fails to load), the inline <script> at the
+       bottom never runs — the user sees the spinner forever. This meta
+       refresh redirects to the OTC default page (24/7) after 0 seconds,
+       but only if JS hasn't already redirected via location.replace().
+       The inline script's setTimeout(200) fires before the meta refresh
+       in practice, so JS-enabled users see the intended localStorage-based
+       redirect; JS-disabled users get the meta refresh fallback. -->
+  <meta http-equiv="refresh" content="0; url=/static/otc.html">
   <style>
     /* Minimal router page styling — dark theme to match the destination
        pages so there's no flash of white when the redirect lands. */
+    /* FIX (DEEP-AUDIT-2026-07-26 / F-17-51, MEDIUM): hide the spinner when JS
+       is disabled. The `.no-js` class is on <html> by default; the inline
+       script at the bottom removes it. When JS is off, the spinner stays
+       spinning forever (CSS animation) which implies "loading" but nothing
+       is loading — confusing. Now: `.no-js .router-spinner{display:none}`. */
+    html.no-js .router-spinner{display:none}
     html,body{
       margin:0;padding:0;height:100%;width:100%;
       background:#0d1117;color:#e6edf3;
@@ -61,6 +80,10 @@
    the safer default). Uses location.replace() so this router page doesn't
    pollute the browser history (back button goes to the previous site, not
    back here). */
+/* FIX (DEEP-AUDIT-2026-07-26 / F-17-51, MEDIUM): remove the .no-js class so
+   the spinner becomes visible (the CSS rule `.no-js .router-spinner{display:none}`
+   only hides it when JS is OFF). */
+document.documentElement.classList.remove('no-js');
 (function(){
   'use strict';
   var category = 'otc';   // default — OTC is always open (24/7)

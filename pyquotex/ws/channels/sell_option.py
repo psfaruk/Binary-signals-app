@@ -1,7 +1,8 @@
-"""Stub — SellOption channel was removed (dead code, app is read-only)."""
+"""Stub removed (DEEP-AUDIT-2026-07-26 / F-16-23).
 
-
-class SellOption:
-    """Stub — original removed 2026-07-13 (dead code, app never places trades)."""
-    def __init__(self, api):
-        self.api = api
+The SellOption class was a stub (`__init__` only, no `__call__` method)
+— dead code, the Binary-signals-app never places or sells trades. The
+matching `QuotexAPI.sell_option` property in api.py has also been
+removed. This file is kept as an empty marker so any lingering imports
+elsewhere don't crash with ModuleNotFoundError.
+"""

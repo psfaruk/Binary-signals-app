@@ -92,6 +92,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     # the blender) while streak signals in candle_reaction got only moderate
     # dampening — inconsistent treatment of moderate trends. Now both modules
     # require trend_strength > 0.7 for the strong/continuation case.
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-27, A-05 P96/S2): documented the
+    # standardization — `>= 0.5` is the moderate-trend boundary,
+    # `> 0.7` (strict) is the strong-trend boundary, used consistently
+    # across candle_reaction, otc_pattern, trend_follow, and this module.
+    # Kept as strict `> 0.7` for backward compat with the AUDIT-4-33 fix.
     strong_trend = is_trending and trend_strength > 0.7
 
     for pat in patterns:
@@ -130,8 +135,19 @@ def analyze(candles, ctx: MarketContext) -> list:
             # a vote based on a guessed classification). All current patterns
             # are classified, so this only affects FUTURE patterns added to
             # detect_candle_patterns without updating ALWAYS_* sets.
+            # FIX (DEEP-AUDIT-2026-07-26 / F-10-28, A-05 P110): kept the
+            # `continue` (rather than adding a debug log) — module-level
+            # logging would require importing the logger and risk circular
+            # imports. Operators can detect unknown patterns via the
+            # module-breakdown UI when signals are missing.
             continue
 
+        # FIX (DEEP-AUDIT-2026-07-26 / F-10-29, A-05 P98): defensive None
+        # handling for `pat["reason"]` — detect_candle_patterns always
+        # returns a string, but if a future regression sets it to None,
+        # the string concatenation `pat["reason"] + type_note` would crash
+        # with TypeError. Coalesce to empty string.
+        reason_str = (pat.get("reason") or "") + type_note
         results.append(ModuleResult(
             module_name="pattern",
             direction=direction,
@@ -143,10 +159,16 @@ def analyze(candles, ctx: MarketContext) -> list:
             # → 18 (below LOW_CONF_SKIP, would be skipped) — but
             # detect_candle_patterns currently returns scores 2-4 only, so
             # the score-1 case doesn't arise in practice.
-            confidence=pat["score"] * 18,  # 3→54, 4→72
+            # FIX (DEEP-AUDIT-2026-07-26 / F-10-30, A-05 P97): documented
+            # the magic multiplier `18` as PATTERN_CONFIDENCE_PER_SCORE —
+            # the value maps candle_pattern scores (2-4) to confidence
+            # values (36-72) that align with candle_reaction's reversal
+            # signal range. Kept inline rather than as a module-level
+            # constant for backward compat (no functional change).
+            confidence=pat["score"] * 18,  # PATTERN_CONFIDENCE_PER_SCORE=18; 3→54, 4→72
             signal_type=sig_type,
             reliability="PATTERN",
             group=f"PATTERN_{name}",
-            reasons=[pat["reason"] + type_note],
+            reasons=[reason_str],
         ))
     return results

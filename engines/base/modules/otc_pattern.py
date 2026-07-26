@@ -125,8 +125,12 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     # average body to be >=0.4 ATR before firing. This filters out
     # micro-streaks that the broker algo naturally produces without any
     # real directional pressure.
-    consec = stats["current_streak"]
-    streak_dir = stats["streak_direction"]
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-20, A-05 ISSUE S5): defensive .get()
+    # defaults for cold-start safety. Defaults match the cold-start sentinel
+    # values from analysis.py (current_streak=0, streak_direction=0,
+    # streak_rarity=0, z_body=0, close_percentile=50).
+    consec = stats.get("current_streak", 0)
+    streak_dir = stats.get("streak_direction", 0)
     # FIX (OTC-DEEP Phase 1): use effective_trending which considers BOTH
     # the algorithm_monitor's guess AND the regime-based trend_strength.
     # When algo is 'trending', we gate mean-reversion even if regime is
@@ -160,12 +164,17 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=2, confidence=62,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_MEANREV",
-                reasons=[f"OTC mean-rev: {consec}+ UP (avg body {avg_streak_body/atr_val:.2f}x ATR) → PUT (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
+                # FIX (DEEP-AUDIT-2026-07-26 / F-10-21, A-05 P6/CRIT): display
+                # the actual ratio against `streak_atr` (the ATR used by the
+                # threshold check at line 157), not `atr_val` (the full-window
+                # ATR which inflates with the streak). Operators reading the
+                # reason now see the same ratio the threshold gate applied.
+                reasons=[f"OTC mean-rev: {consec}+ UP (avg body {avg_streak_body/streak_atr:.2f}x ATR) → PUT (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
         elif streak_dir == -1:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=2, confidence=62,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_MEANREV",
-                reasons=[f"OTC mean-rev: {consec}+ DOWN (avg body {avg_streak_body/atr_val:.2f}x ATR) → CALL (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
+                reasons=[f"OTC mean-rev: {consec}+ DOWN (avg body {avg_streak_body/streak_atr:.2f}x ATR) → CALL (62% reversal in OTC, regime={trend_regime}, str={trend_strength:.2f})"]))
 
     # ── REVERSAL SIGNAL 2: Streak rarity boost ───────────────────────────
     # Rare streaks (<10% occurrence) get a reversal boost. Keep this one
@@ -180,7 +189,7 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     #     skip (this is a trend continuation, not a reversal setup)
     #   - trend_strength 0.5–0.7 AND aligned → dampen score/confidence
     #   - trend_strength < 0.5 OR counter-trend → fire at full strength
-    if consec >= 3 and stats["streak_rarity"] < 0.10:
+    if consec >= 3 and stats.get("streak_rarity", 0) < 0.10:
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-24): use `effective_trending`
         # (algo-aware) instead of `is_trending` (regime-only) so a rare streak
         # in a "trending" algo with regime RANGE is correctly dampened. In a
@@ -203,12 +212,12 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
                 results.append(ModuleResult(
                     module_name="otc_pattern", direction="PUT", score=score, confidence=conf,
                     signal_type="REVERSAL", reliability="OTC", group="OTC_RARITY",
-                    reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f}) → PUT reversal boost"]))
+                    reasons=[f"Rare streak (n={consec}, rarity={stats.get('streak_rarity', 0):.0%}, trend_str={trend_strength:.2f}) → PUT reversal boost"]))
             elif streak_dir == -1:
                 results.append(ModuleResult(
                     module_name="otc_pattern", direction="CALL", score=score, confidence=conf,
                     signal_type="REVERSAL", reliability="OTC", group="OTC_RARITY",
-                    reasons=[f"Rare streak (n={consec}, rarity={stats['streak_rarity']:.0%}, trend_str={trend_strength:.2f}) → CALL reversal boost"]))
+                    reasons=[f"Rare streak (n={consec}, rarity={stats.get('streak_rarity', 0):.0%}, trend_str={trend_strength:.2f}) → CALL reversal boost"]))
 
     # ── REVERSAL SIGNAL 3: Z-score extreme reversal ──────────────────────
     # Originally disabled (live data, 2026-07-20) because real Quotex data
@@ -229,21 +238,22 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     # (which lowers a true z=2.7 to ~2.4-2.5), the strict > was suppressing
     # borderline-extreme signals that the Phase 2 re-enable intended to
     # recover.
-    if algo_is_reversing and stats["z_body"] >= 2.5:
+    if algo_is_reversing and stats.get("z_body", 0) >= 2.5:
         last = candles[-1]
         body = last["close"] - last["open"]
+        _z_body = stats.get("z_body", 0)
         # In a reversing algorithm, an extreme Z-score = exhaustion spike.
         # Bet the OPPOSITE direction of the body (mean reversion).
         if body > 0:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=3, confidence=65,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
-                reasons=[f"Z-score extreme (Z={stats['z_body']:.1f}) in REVERSING algo → PUT reversal (exhaustion spike)"]))
+                reasons=[f"Z-score extreme (Z={_z_body:.1f}) in REVERSING algo → PUT reversal (exhaustion spike)"]))
         elif body < 0:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=3, confidence=65,
                 signal_type="REVERSAL", reliability="OTC", group="OTC_ZSCORE",
-                reasons=[f"Z-score extreme (Z={stats['z_body']:.1f}) in REVERSING algo → CALL reversal (exhaustion spike)"]))
+                reasons=[f"Z-score extreme (Z={_z_body:.1f}) in REVERSING algo → CALL reversal (exhaustion spike)"]))
     # ── REVERSAL SIGNAL 4: Close percentile extreme ──────────────────────
     # FIX (OTC issue 1, 2026-07-19): same gating as Signal 3 — a close at
     # the 95th percentile during a strong uptrend is trend continuation,
@@ -253,7 +263,7 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     # counter-trend bounce to the upside), firing PUT reversal is wrong
     # (the bounce is already exhausting). Skip when streak opposes the
     # percentile direction.
-    pctile = stats["close_percentile"]
+    pctile = stats.get("close_percentile", 50)
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-29): use `effective_trending`
     # (algo-aware) instead of `is_trending` (regime-only) so a close at the
     # 95th percentile in a "trending" algo with regime RANGE is correctly
@@ -313,7 +323,7 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     # with the prior) was blocked even though it would REINFORCE the prior.
     # Now we only block alternation when a prior reversal AGREES with the
     # alternation direction (e.g. prior PUT blocks alternation PUT).
-    if consec in (0, 1) and stats["streak_rarity"] > 0.30 and stats["z_body"] < 0.5:
+    if consec in (0, 1) and stats.get("streak_rarity", 0) > 0.30 and stats.get("z_body", 0) < 0.5:
         last = candles[-1]
         body = last["close"] - last["open"]
         prior_put_reversal = any(
@@ -339,11 +349,22 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     #  can recognize trends instead of always betting on reversal.
     # ═══════════════════════════════════════════════════════════════════════
 
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-22, A-05 P31/P44): hoist `last` and
+    # `last_body` to a single computation at the top of the continuation
+    # block — previously recomputed 3x (lines 233, 317, 342) within
+    # analyze(). One dict lookup + one subtraction saved per call. The
+    # signals above (1-5) used their own inline `last = candles[-1]` for
+    # cold-start isolation; we keep that for the reversal branch but
+    # consolidate the continuation branch here.
     last = candles[-1]
     last_body = last["close"] - last["open"]
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-23): removed the dead
     # `last_body_abs = abs(last_body)` assignment — the variable was computed
-    # but never used (SIGNAL 6 uses `last_body` (signed) at lines 294/299).
+    # but never used (SIGNAL 6 uses `last_body` (signed) at lines ~386/391
+    # after the F-10-22 hoist).
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-23, A-05 P32): the stale comment
+    # above previously referenced line numbers 294/299 (SIGNAL 6 in an old
+    # layout) — updated to reflect the current line numbers.
 
     # ── CONTINUATION SIGNAL 6: Momentum push ─────────────────────────────
     # A short streak (1-2) with a GROWING body (z_body in 0.5-2.0 range —
@@ -361,25 +382,28 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     # from < 2.0 to < 2.5 so bodies in [2.0, 2.5] (the 2-5% largest) get a
     # continuation vote instead of falling through the gap between Signal 6
     # (was < 2.0) and Signal 3 (was > 2.5, now >= 2.5).
-    if effective_trending and 1 <= consec <= 2 and 0.5 <= stats["z_body"] < 2.5:
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-26, A-05 ISSUE S5): .get() for z_body
+    # cold-start safety. Cache in local var to avoid repeated dict lookups
+    # in the reason text below.
+    _z_body_s6 = stats.get("z_body", 0)
+    if effective_trending and 1 <= consec <= 2 and 0.5 <= _z_body_s6 < 2.5:
         if streak_dir == 1 and last_body > 0:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=2, confidence=58,
                 signal_type="CONTINUATION", reliability="OTC", group="OTC_MOMENTUM",
-                reasons=[f"OTC momentum push: {consec} UP + growing body (Z={stats['z_body']:.1f}) → CALL continuation"]))
+                reasons=[f"OTC momentum push: {consec} UP + growing body (Z={_z_body_s6:.1f}) → CALL continuation"]))
         elif streak_dir == -1 and last_body < 0:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=2, confidence=58,
                 signal_type="CONTINUATION", reliability="OTC", group="OTC_MOMENTUM",
-                reasons=[f"OTC momentum push: {consec} DOWN + growing body (Z={stats['z_body']:.1f}) → PUT continuation"]))
+                reasons=[f"OTC momentum push: {consec} DOWN + growing body (Z={_z_body_s6:.1f}) → PUT continuation"]))
 
-    # ── CONTINUATION SIGNAL 7: Breakout ──────────────────────────────────
-    # DISABLED (live data, 2026-07-20): real Quotex data showed 43% win rate
-    # — OTC breakouts fail because the broker reverses them. The broker's
-    # algorithm creates false breakouts to trap traders. Removing this
-    # signal entirely improves accuracy.
-    # if len(candles) >= 21:
-    #     ... (original code removed)
+    # ── CONTINUATION SIGNAL 7 (Breakout) — REMAINS DISABLED (43% win rate) ──
+    # FIX (DEEP-AUDIT-2026-07-26 / F-10-24, A-05 P33): removed 5-line
+    # commented-out SIGNAL 7 dead block. Originally disabled on 2026-07-20
+    # (real Quotex data showed 43% win rate — OTC breakouts fail because the
+    # broker reverses them; the broker's algorithm creates false breakouts).
+    # Re-enablement requires backtest proof of >= 50% win rate.
 
     # ── CONTINUATION SIGNAL 8: Strong-trend streak (RE-ENABLED with algo gating) ──
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-1-04): RE-ENABLED with
@@ -394,12 +418,17 @@ def analyze(candles, ctx: MarketContext, asset: str = "") -> list:
     # votes (Signal 6 only fires for 1-2 candle streaks), leaving the engine
     # structurally reversal-biased.
     if algo_is_trending and consec >= 2:
-        if streak_dir == 1:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-10-25, A-05 P7/CRIT): add the missing
+        # `last_body > 0` / `last_body < 0` guard so SIGNAL 8 only fires when
+        # the LAST candle's body matches `streak_dir`. The previous version
+        # fired CALL on a 2-candle up streak even if the last candle was a
+        # doji or a small red body — misleading continuation vote.
+        if streak_dir == 1 and last_body > 0:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="CALL", score=2, confidence=58,
                 signal_type="CONTINUATION", reliability="OTC", group="OTC_TRENDSTREAK",
                 reasons=[f"OTC trend-streak: {consec}+ UP in confirmed trending algo → CALL continuation (broker trend continues)"]))
-        elif streak_dir == -1:
+        elif streak_dir == -1 and last_body < 0:
             results.append(ModuleResult(
                 module_name="otc_pattern", direction="PUT", score=2, confidence=58,
                 signal_type="CONTINUATION", reliability="OTC", group="OTC_TRENDSTREAK",

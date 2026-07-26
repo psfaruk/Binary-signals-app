@@ -5,8 +5,8 @@ pairs (no "_otc" suffix).
 This is a SEPARATE engine from engines.otc — it has its own:
   - PAIR_CONFIGS (per-pair static weight priors, keyed by BARE symbol)
   - DEFAULT_WEIGHTS (favor continuation/trend modules)
-  - RELIABILITY tier multipliers (Real tuning: boost INDICATOR to 1.3,
-    add TREND tier at 1.3, boost MICRO to 0.7)
+  - RELIABILITY tier multipliers (Real tuning: INDICATOR=1.2, TREND=1.0
+    (dampened — was 1.3), MICRO=0.7)
   - Module 6: trend_follow (momentum continuation detector)
 
 But it SHARES the blender algorithm, the context computer, the types,
@@ -27,13 +27,30 @@ Architecture:
     Module 6: trend_follow     — momentum continuation, EMA alignment, breakouts
 
     Tuned for real-market behavior:
-      - Indicators (RSI/MACD/EMA) are MORE reliable (boosted to ×1.3)
+      - Indicators (RSI/MACD/EMA) are MORE reliable (boosted to ×1.2)
       - Tick microstructure is more meaningful (real volume) — ×0.7
       - Per-pair configs favor trend-following (continuation bias)
       - Mean-reversion logic is NOT used (real markets trend harder)
+
+FIX (DEEP-AUDIT-2026-07-26 / F-11-15): corrected stale docstring at lines
+8-9 — prior version claimed "boost INDICATOR to 1.3, add TREND tier at
+1.3, boost MICRO to 0.7" but actual values are INDICATOR=1.2 (not 1.3),
+TREND=1.0 (not 1.3), MICRO=0.7. (Audit A-06 #15.)
+FIX (DEEP-AUDIT-2026-07-26 / F-11-52): corrected stale docstring at line
+30 — prior version claimed "boosted to ×1.3" for indicators but actual
+multiplier is 1.2 (see real/config.py RELIABILITY map). (Audit A-06 #52.)
 """
 from engines.base.blender import predict as _base_predict
-from engines.real.config import CONFIG as _REAL_CONFIG, CONFIG
+# FIX (DEEP-AUDIT-2026-07-26 / F-11-50): removed redundant double import
+# `CONFIG as _REAL_CONFIG, CONFIG` (same object under two names). Now
+# imports `CONFIG` once and re-exports via `__all__`; the internal
+# `_REAL_CONFIG` alias is kept for the predict() call site for clarity.
+# (Audit A-06 #50.)
+from engines.real.config import CONFIG as _REAL_CONFIG
+
+# Public alias — kept so existing `from engines.real import CONFIG` calls
+# continue to work without behavior change.
+CONFIG = _REAL_CONFIG
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",

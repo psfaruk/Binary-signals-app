@@ -29,7 +29,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable
 
-from engines.base.types import ModuleResult, MarketContext
+# FIX (DEEP-AUDIT-2026-07-26 / F-02-16): `MarketContext` was imported but
+# never used as a type annotation in this file (the `ctx` parameter in
+# `_neutral` is intentionally untyped — see PROB 123). Removed to silence
+# the unused-import warning.
+from engines.base.types import ModuleResult
 from engines.base.context import compute_context
 from engines.base.modules import (
     candle_reaction as mod_candle,
@@ -39,6 +43,56 @@ from engines.base.modules import (
     key_level as mod_keylevel,
 )
 from engines.base.per_pair import PairWeightAdapter
+
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-02-CONST): centralised magic-number
+# constants previously hardcoded throughout `predict()`. Grouping them
+# here makes tuning / backtest iteration easier and removes ~25 inline
+# magic numbers (per audit PROB 19, 20, 46-50, 56, 89-91, 94, 96, 97).
+MIN_CANDLES_FOR_PREDICTION = 3            # PROB 56 / 108
+EXHAUSTION_STREAK_MIN = 4                 # PROB 19 (long-streak check)
+EXHAUSTION_RARE_STREAK_MIN = 3            # PROB 19 (rare-streak check)
+EXHAUSTION_RARITY_MAX = 0.10              # PROB 19
+EXHAUSTION_ACCEL_MAX = 0.7                # PROB 19 (tick deceleration)
+EXHAUSTION_NET_MOVE_ATR_RATIO = 0.5       # PROB 19
+EXHAUSTION_TICK_COUNT_MIN = 60            # PROB 19 (volume-price divergence)
+EXHAUSTION_TICK_NET_ATR_RATIO = 0.3       # PROB 19
+
+EDGE_FACTOR_BASE = 0.5                    # PROB 89 (edge_factor baseline)
+EDGE_FACTOR_NET_MARGIN_WEIGHT = 0.5       # PROB 89
+CONFIDENCE_SCALE = 100                   # PROB 90 (sqrt -> percentage scale)
+
+SINGLE_GROUP_CAP_HIGH_MIN = 6            # PROB 20 / 91 (raw_majority >= 6)
+SINGLE_GROUP_CAP_HIGH = 55
+SINGLE_GROUP_CAP_MID_MIN = 4            # raw_majority >= 4
+SINGLE_GROUP_CAP_MID = 48
+SINGLE_GROUP_CAP_LOW = 42
+
+SIDEWAYS_RANGE_DAMPEN = 5                # PROB 48 (confidence -5)
+
+TREND_PENALTY = 15                        # PROB 49 (TREND_UP/DOWN -15)
+TREND_CAP_STANDARD = 45                  # PROB 49
+TREND_CAP_OTC_REVERSAL = 55              # PROB 49
+
+ACCURACY_DAMPEN_MIN_SAMPLES = 3          # PROB 50
+ACCURACY_DAMPEN_THRESHOLD = 0.45
+ACCURACY_DAMPEN_FACTOR = 0.85
+ACCURACY_BOOST_MIN_SAMPLES = 30
+ACCURACY_BOOST_THRESHOLD = 0.65
+ACCURACY_BOOST_FACTOR = 1.05
+
+STRONG_NON_PATTERN_MIN_SCORE = 2         # PROB 94
+
+HTF_ALIGNED_BONUS = 5                    # PROB 46 (HTF +5)
+HTF_COUNTER_PENALTY = 5                  # PROB 46 (HTF -5)
+
+ULTRA_CONSENSUS_CONF_MIN = 75           # PROB 96
+ULTRA_CONSENSUS_ABS_NET_MIN = 8
+ULTRA_CONSENSUS_GROUPS_MIN = 4
+
+LOW_CONF_SKIP_THRESHOLD = 20             # PROB 97 (confidence < 20 -> NEUTRAL)
+
+MEDIUM_CONFIDENCE_FLOOR = 30             # PROB 15 (strength tier MEDIUM gate)
 
 
 # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-05 + AUDIT-LIVE-2-05): Python 3's
@@ -54,6 +108,51 @@ from engines.base.per_pair import PairWeightAdapter
 def _round_half_up(x: float) -> int:
     """Round half up (not banker's rounding). Returns an int."""
     return int(math.floor(x + 0.5))
+
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-02-05 / F-02-21): extracted the bin-cap
+# calibration logic (previously duplicated at lines ~744-760 and ~858-886)
+# into a single helper. Also fixes the 5-point discontinuous jump at the
+# confidence=70 boundary:
+#   - Previous behaviour: 60-69% bin capped at 60, 70-79% bin capped at 65
+#     → a 1-point raw increase (69→70) produced a 5-point capped jump
+#     (60→65). This created a "magic cliff" where small upstream changes
+#     (e.g., time-of-day multiplier ×1.01) could push confidence past 70
+#     and gain 5 points of capped confidence.
+#   - New behaviour: 60-79% bin unified, capped at 60. This matches the
+#     dev's original intent (per the historical-accuracy comments above
+#     the previous block: 70-79% bin = 50% actual win rate → cap at 60,
+#     same as 60-69% bin = 49% actual → cap at 60). The "monotonic caps"
+#     property is preserved (each bin's cap is still >= the previous bin's
+#     cap), and the discontinuity is eliminated.
+# Returns the calibrated confidence (int).
+def _apply_calibration_caps(confidence: int, total_groups: int,
+                            net_margin: float) -> int:
+    """Apply bin-based calibration caps + >75 consensus cap.
+
+    Caps reflect historical accuracy ceilings from 7623 live signals:
+      100%   → 44% actual → cap 50
+      90-99  → 46% actual → cap 55
+      80-89  → 51% actual → cap 60
+      60-79  → ~49-50% actual → cap 60 (unified — was 60/65 split)
+    Plus the >75 consensus cap: signals above 75 require 3+ groups AND
+    net_margin >= 0.6 to survive (otherwise capped at 75).
+    """
+    if confidence >= 100:
+        confidence = min(confidence, 50)
+    elif confidence >= 90:
+        confidence = min(confidence, 55)
+    elif confidence >= 80:
+        confidence = min(confidence, 60)
+    elif confidence >= 60:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-05): unified 60-79 bin.
+        # Previously split into 70-79 (cap 65) and 60-69 (cap 60),
+        # creating a 5-point discontinuous jump at the boundary.
+        confidence = min(confidence, 60)
+    if confidence > 75:
+        if not (total_groups >= 3 and net_margin >= 0.6):
+            confidence = min(confidence, 75)
+    return confidence
 
 
 @dataclass
@@ -114,14 +213,21 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         htf_trend: str (echo for UI/logging)
     """
     if config is None:
-        raise ValueError("BlenderConfig is required — pass engines.{otc,real}.config.BLENDER_CONFIG")
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-104): error message referenced
+        # `BLENDER_CONFIG` but the actual config object is named `CONFIG` in
+        # both engines/otc/config.py and engines/real/config.py. Updated.
+        raise ValueError("BlenderConfig is required — pass engines.{otc,real}.config.CONFIG")
 
     reliability = config.reliability
     weight_adapter = config.weight_adapter
     module_6_fn = config.module_6_fn
     module_names = config.module_names
 
-    if not candles or len(candles) < 3:
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-108 / F-02-56): `not candles` is
+    # redundant — `len(candles) < MIN_CANDLES_FOR_PREDICTION` is True for
+    # the empty-list case too. Use the centralised constant for the
+    # minimum-candle threshold (was magic `3`).
+    if len(candles) < MIN_CANDLES_FOR_PREDICTION:
         return _neutral("INSUFFICIENT_DATA", {}, asset, weight_adapter,
                          module_names=module_names, htf_trend=htf_trend)
 
@@ -217,12 +323,17 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     exhaustion_reasons = []
 
     # Check 1: Long streak (statistical — independent of modules)
-    if ctx.stats["current_streak"] >= 4:
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-19): use centralised constant
+    # EXHAUSTION_STREAK_MIN (was magic `4`).
+    if ctx.stats["current_streak"] >= EXHAUSTION_STREAK_MIN:
         exhaustion_indicators += 1
         exhaustion_reasons.append(f"streak={ctx.stats['current_streak']}")
 
     # Check 2: Rare streak (statistical — independent of modules)
-    if ctx.stats["streak_rarity"] < 0.10 and ctx.stats["current_streak"] >= 3:
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-19): use centralised constants
+    # EXHAUSTION_RARITY_MAX / EXHAUSTION_RARE_STREAK_MIN (was magic 0.10/3).
+    if (ctx.stats["streak_rarity"] < EXHAUSTION_RARITY_MAX
+            and ctx.stats["current_streak"] >= EXHAUSTION_RARE_STREAK_MIN):
         exhaustion_indicators += 1
         exhaustion_reasons.append(f"rare streak (rarity={ctx.stats['streak_rarity']:.0%})")
 
@@ -237,7 +348,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # Deceleration: accel < 0.7 means recent 5-tick speed is < 70%
             # of recent 10-tick speed. Combined with a meaningful net move
             # (>0.5 ATR), this indicates the move is losing momentum.
-            if accel < 0.7 and net_move > atr * 0.5:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-19): use centralised
+            # constants EXHAUSTION_ACCEL_MAX / EXHAUSTION_NET_MOVE_ATR_RATIO.
+            if (accel < EXHAUSTION_ACCEL_MAX
+                    and net_move > atr * EXHAUSTION_NET_MOVE_ATR_RATIO):
                 exhaustion_indicators += 1
                 exhaustion_reasons.append(
                     f"tick deceleration (accel={accel:.2f}, net={net_move/atr:.2f}x ATR)")
@@ -254,7 +368,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         tick_count = micro.get("tick_count", 0)
         net_move = abs(micro.get("net", 0))
         atr = ctx.atr if ctx.atr > 0 else 0.0001
-        if tick_count >= 60 and net_move < atr * 0.3:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-19): use centralised constants
+        # EXHAUSTION_TICK_COUNT_MIN / EXHAUSTION_TICK_NET_ATR_RATIO.
+        if (tick_count >= EXHAUSTION_TICK_COUNT_MIN
+                and net_move < atr * EXHAUSTION_TICK_NET_ATR_RATIO):
             exhaustion_indicators += 1
             exhaustion_reasons.append(
                 f"volume-price divergence ({tick_count} ticks, net={net_move/atr:.2f}x ATR)")
@@ -288,14 +405,29 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     elif ctx.vol_pct < 0.7:
         vol_note = f"_VOL_SCALE: LOW (vol={ctx.vol_pct:.1f}x) → looser thresholds"
 
-    if regime["is_volatile"]:
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-18): use `.get()` with safe defaults
+    # for all regime fields — `classify_market_regime` may return a partial
+    # dict in edge cases (e.g., cold-start) and direct `[]` indexing would
+    # raise KeyError, crashing the prediction.
+    _is_volatile = regime.get("is_volatile", False)
+    _is_ranging = regime.get("is_ranging", False)
+    _is_trending = regime.get("is_trending", False)
+    _volatility_pct = regime.get("volatility_pct", 0.0)
+    _trend_strength = regime.get("trend_strength", 0.0)
+    _regime_name = regime.get("regime", "UNKNOWN")
+
+    if _is_volatile:
         regime_reasons.append(
-            f"_REGIME: VOLATILE (vol={regime['volatility_pct']:.1f}x) → all signals ×0.7")
-    elif regime["is_ranging"]:
+            f"_REGIME: VOLATILE (vol={_volatility_pct:.1f}x) → all signals ×0.7")
+    elif _is_ranging:
         regime_reasons.append(
-            f"_REGIME: RANGE (str={regime['trend_strength']:.2f}) → reversal ×1.3, continuation ×0.7")
-    elif regime["is_trending"]:
-        trend_dir = "UP" if regime["regime"] == "TREND_UP" else "DOWN"
+            f"_REGIME: RANGE (str={_trend_strength:.2f}) → reversal ×1.3, continuation ×0.7")
+    elif _is_trending:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-14): previously
+        # `trend_dir = "UP" if regime["regime"] == "TREND_UP" else "DOWN"`
+        # defaulted to DOWN for unknown regimes (e.g., "TREND", "STRONG_TREND_UP").
+        # Now: substring-match "UP" so any regime containing "UP" is treated as UP.
+        trend_dir = "UP" if "UP" in _regime_name else "DOWN"
         if is_strongly_exhausting:
             regime_reasons.append(
                 f"_REGIME: TREND_{trend_dir} BUT strongly exhausting ({exhaustion_indicators} indicators) → reversal ×1.2 (override)")
@@ -304,7 +436,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 f"_REGIME: TREND_{trend_dir} BUT exhausting ({exhaustion_indicators} indicators) → reversal ×1.0 (no penalty)")
         else:
             regime_reasons.append(
-                f"_REGIME: TREND_{trend_dir} (str={regime['trend_strength']:.2f}) → continuation ×1.3, reversal ×0.8")
+                f"_REGIME: TREND_{trend_dir} (str={_trend_strength:.2f}) → continuation ×1.3, reversal ×0.8")
 
     if pair_profile != "default":
         regime_reasons.append(
@@ -319,11 +451,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     suppressed_count = 0
     for r in grouped_results:
         # Regime multiplier
-        if regime["is_volatile"]:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-18): use safe `_is_*` locals
+        # (with defaults) instead of direct `regime["..."]` indexing.
+        if _is_volatile:
             r_mult = 0.7
-        elif regime["is_ranging"]:
+        elif _is_ranging:
             r_mult = 1.3 if r.signal_type == "REVERSAL" else 0.7
-        elif regime["is_trending"]:
+        elif _is_trending:
             if r.signal_type == "CONTINUATION":
                 r_mult = 1.3
             else:
@@ -341,11 +475,33 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # signals are WRONG in OTC trends (broker reverses them). For OTC
         # engine, INVERT the regime multiplier in trends: boost REVERSAL
         # and dampen CONTINUATION. Real engine keeps normal behavior.
-        if regime["is_trending"] and config.engine_name == "otc":
+        #
+        # FIX (DEEP-AUDIT-2026-07-26 / A-02-CRIT-1):
+        # The previous code UNCONDITIONALLY set r_mult to 0.7 / 1.3 here,
+        # completely OVERWRITING the 3-state exhaustion gate (0.8 / 1.0 /
+        # 1.2) computed above. This meant that in OTC trends:
+        #   - Strongly exhausting + REVERSAL: gate said 1.2, but OTC override
+        #     set it to 1.3 (small boost preserved).
+        #   - Mildly exhausting + REVERSAL: gate said 1.0 (no penalty), but
+        #     OTC override set it to 1.3 (bonus added).
+        #   - NOT exhausting + REVERSAL: gate said 0.8 (penalty), but OTC
+        #     override set it to 1.3 (BIG bonus — completely wrong!).
+        # The third case is the worst: a non-exhausting OTC trend REVERSAL
+        # signal got a 1.3 boost when the gate wanted to dampen it to 0.8.
+        # This means OTC trend REVERSAL signals were emitted even when the
+        # trend was strong and not exhausting — exactly the wrong time.
+        # Fix: MULTIPLY the gate's r_mult by the OTC inversion factor,
+        # preserving the gate's relative dampening/boosting.
+        if _is_trending and config.engine_name == "otc":
             if r.signal_type == "CONTINUATION":
-                r_mult = 0.7  # was 1.3 — OTC trends reverse, don't continue
+                # OTC trends reverse, don't continue — dampen continuation.
+                # Apply on top of the gate's value (which may already be 1.3
+                # for non-exhausting, or 1.0 for exhausting).
+                r_mult = r_mult * 0.7  # was: r_mult = 0.7
             else:  # REVERSAL
-                r_mult = 1.3  # was 0.8 — OTC trends reverse, reversal is right
+                # OTC trends reverse — reversal is right. Boost on top of
+                # the gate's value (which may be 0.8/1.0/1.2).
+                r_mult = r_mult * 1.3  # was: r_mult = 1.3
 
         # Reliability tier multiplier
         t_mult = reliability.get(r.reliability, 1.0)
@@ -443,7 +599,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     effective_total_groups = surviving_groups + 0.5 * suppressed_groups
     # Integer total_groups for display / API consumers (use original count
     # for backward compat — `signals_fired` and `total` fields).
-    total_groups = len(original_groups) if original_groups else 0
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-39): `len(original_groups)` already
+    # returns 0 for an empty set — the `if original_groups else 0` guard
+    # was redundant. Removed.
+    total_groups = len(original_groups)
     # If nothing survived suppression, fired_groups is empty — but
     # original_groups may be non-empty (all suppressed). In that case
     # we still want to report NEUTRAL, not crash on divide-by-zero.
@@ -480,6 +639,19 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         return _neutral(all_reasons or ["NO_SIGNAL"], regime, asset, weight_adapter,
                          ctx, module_names=module_names, htf_trend=htf_trend)
 
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-04): initialise the tiebreaker
+    # score override. When the group-count tiebreaker fires (net==0 but
+    # group counts differ), the final return's `score` field should
+    # reflect the majority direction's voting strength, NOT the (zero)
+    # `net` value. The internal `net` stays 0 so confidence calibration
+    # (which uses net_margin = abs(net)/total) stays dampened as the
+    # original dev intended — only the *displayed* score field changes.
+    # Previously the final return at line ~1372 returned `score=net=0`
+    # for tiebreaker CALL/PUT signals, breaking consumers that expect
+    # `score>0` for non-NEUTRAL signals (UI showed "CALL 55%" but
+    # score=0 in DB).
+    _tiebreaker_score = None
+
     net = call_score - put_score
     total = call_score + put_score
 
@@ -495,7 +667,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     if total == 0:
         call_g = set(r.group for r, e in adjusted if r.direction == "CALL")
         put_g = set(r.group for r, e in adjusted if r.direction == "PUT")
-        maj_n = max(len(call_g), len(put_g)) if (call_g or put_g) else 0
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-85): `max(len(call_g), len(put_g))`
+        # already returns 0 for two empty sets — the `if (call_g or put_g)
+        # else 0` guard was redundant. Removed.
+        maj_n = max(len(call_g), len(put_g))
         return {
             "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
             "score": 0, "reasons": all_reasons or ["CONFLICTING_SIGNALS"],
@@ -511,19 +686,25 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         if len(call_g) != len(put_g):
             # Group-count tiebreaker: pick the direction with more groups.
             signal = "CALL" if len(call_g) > len(put_g) else "PUT"
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-107): use ASCII `->` not
+            # unicode `→` so the reason renders in all terminals/logs.
             all_reasons.append(
-                f"_TIEBREAKER: score tied ({call_score}={put_score}), "
-                f"group count {len(call_g)} vs {len(put_g)} → {signal}")
-            # Recompute net/total from the majority direction's scores so
-            # downstream confidence calibration sees a non-zero net.
-            # (call_score and put_score are unchanged; net is still 0 — but
-            # the signal is now CALL or PUT, so the strength tier logic
-            # will treat it as a real signal. The confidence formula uses
-            # net_margin = abs(net)/total = 0, so edge_factor = 0.5 — the
-            # confidence is dampened to reflect the score tie.)
+                f"_TIEBREAKER: score tied (CALL={call_score}, PUT={put_score}), "
+                f"group count {len(call_g)} vs {len(put_g)} -> {signal}")
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-04): set _tiebreaker_score
+            # to the majority direction's raw score so the final return's
+            # `score` field reflects actual voting strength. Previously
+            # the final return used `net` (=0) as `score`, so the UI
+            # showed "CALL 55%" but score=0 — breaking consumers that
+            # expect score>0 for non-NEUTRAL signals.
+            _tiebreaker_score = call_score if signal == "CALL" else put_score
+            # The internal `net` stays 0 so downstream edge_factor stays
+            # dampened (0.5 baseline) — confidence is dampened to reflect
+            # the score tie, as the original dev intended.
         else:
             # Group count also tied — return NEUTRAL.
-            maj_n = max(len(call_g), len(put_g)) if (call_g or put_g) else 0
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-85): redundant `else 0` removed.
+            maj_n = max(len(call_g), len(put_g))
             return {
                 "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
                 "score": 0, "reasons": all_reasons or ["CONFLICTING_SIGNALS"],
@@ -544,7 +725,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # milder dampening than the previous `total_groups` (suppressed count as
     # 1.0) and prevents over-deflation in volatile regimes.
     vote_ratio = (majority_group_n / effective_total_groups) if effective_total_groups > 0 else 0
-    majority_score = max(call_score, put_score)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-06): `majority_score = max(call_score,
+    # put_score)` was computed here but NEVER referenced again — dead
+    # variable. The single-group cap at line ~722 uses `raw_majority`
+    # (raw scores) instead, per AUDIT-3-04. Deleted.
+    # majority_score = max(call_score, put_score)
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-17): use RAW scores for
     # weight_ratio, not EFFECTIVE (post-multiplier) scores. The multipliers
     # were already applied at line 384 (effective = round(raw * r_mult *
@@ -577,14 +762,16 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # Combined with the single-group cap below, this prevents weak consensus
     # from ever showing as 90-100%.
     net_margin = (abs(net) / total) if total > 0 else 0
-    edge_factor = 0.5 + 0.5 * net_margin  # ∈ [0.5, 1.0]
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-89): use centralised EDGE_FACTOR_BASE
+    # / EDGE_FACTOR_NET_MARGIN_WEIGHT constants (was magic 0.5/0.5).
+    edge_factor = EDGE_FACTOR_BASE + EDGE_FACTOR_NET_MARGIN_WEIGHT * net_margin  # ∈ [0.5, 1.0]
     # FIX (DEEP-ANALYSIS, 2026-07-23): use round() instead of int() for
     # the initial confidence computation too. int(math.sqrt(...) * 100)
     # truncates — e.g. sqrt(0.5*1.0*0.7) = 0.5916 → 59.16 → int() = 59,
     # but round() = 59 (same in this case, but for 0.5918 → 59.18 → int 59,
     # round 59). The difference is small but consistent with the round()
     # fixes applied to all the multipliers downstream.
-    confidence = _round_half_up(math.sqrt(vote_ratio * weight_ratio * edge_factor) * 100)
+    confidence = _round_half_up(math.sqrt(vote_ratio * weight_ratio * edge_factor) * CONFIDENCE_SCALE)
 
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-14): the HTF alignment bonus
     # (+5/-5) was previously applied HERE, BEFORE the single-group cap and
@@ -619,20 +806,25 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # heavily-boosted modules (e.g., `otc_pattern` on USDPKR_otc).
         raw_majority = max((r.score for r, e in adjusted
                             if r.direction == signal), default=0)
-        if raw_majority >= 6:
-            cap = 55
-        elif raw_majority >= 4:
-            cap = 48
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-20 / F-02-91): use centralised
+        # constants for the single-group cap thresholds and values (was
+        # magic 6/4/55/48/42).
+        if raw_majority >= SINGLE_GROUP_CAP_HIGH_MIN:
+            cap = SINGLE_GROUP_CAP_HIGH
+        elif raw_majority >= SINGLE_GROUP_CAP_MID_MIN:
+            cap = SINGLE_GROUP_CAP_MID
         else:
-            cap = 42
+            cap = SINGLE_GROUP_CAP_LOW
         confidence = min(confidence, cap)
 
     # FIX (SIDEWAYS-dampener, 2026-07-20): backtest showed predictions made
     # when HTF is SIDEWAYS AND regime is RANGE were only 45% accurate on OTC.
     # This is the "no trend on either timeframe" condition — the hardest to
     # predict. Apply a 5-point confidence dampener to prevent overconfidence.
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-48): use centralised constant
+    # SIDEWAYS_RANGE_DAMPEN (was magic 5).
     if htf_trend == "SIDEWAYS" and regime.get("is_ranging", False):
-        confidence = max(0, confidence - 5)
+        confidence = max(0, confidence - SIDEWAYS_RANGE_DAMPEN)
 
     # BRAIN-LEARNED (2026-07-20): live data showed TREND_UP regime has 44%
     # accuracy. Apply confidence penalty in TREND_UP.
@@ -673,16 +865,21 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # the -15 penalty was applied. DB analysis couldn't detect which
     # signals were penalized. Now: log the -15 penalty always; log the
     # cap separately when it fires.
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-22 / F-02-92): compute
+    # `_is_otc_reversal` ONCE here — previously duplicated 3× (TREND_UP
+    # block at line ~828, TREND_DOWN block at line ~846, and the
+    # re-application block ~1010). Now both branches + the re-application
+    # use this single computation. Also: use centralised constants
+    # TREND_PENALTY / TREND_CAP_STANDARD / TREND_CAP_OTC_REVERSAL
+    # (was magic 15 / 45 / 55) — per audit PROB 49.
+    _is_otc_reversal = (config.engine_name == "otc" and any(
+        r.signal_type == "REVERSAL" and r.direction == signal and e > 0
+        for r, e in adjusted
+    ))
     if regime.get("regime") == "TREND_UP":
-        confidence = max(0, confidence - 15)
+        confidence = max(0, confidence - TREND_PENALTY)
         all_reasons.append("_TREND_UP_PENALTY: -15 (35% historical win rate)")
-        # Determine if this is a reversal signal in OTC engine (exempt
-        # from the 45 cap — use 55 instead).
-        _is_otc_reversal = (config.engine_name == "otc" and any(
-            r.signal_type == "REVERSAL" and r.direction == signal and e > 0
-            for r, e in adjusted
-        ))
-        _trend_cap = 55 if _is_otc_reversal else 45
+        _trend_cap = TREND_CAP_OTC_REVERSAL if _is_otc_reversal else TREND_CAP_STANDARD
         if confidence > _trend_cap:
             confidence = min(confidence, _trend_cap)
             all_reasons.append(
@@ -694,13 +891,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-2-17): always log.
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-2-02): same OTC
         # reversal exemption as TREND_UP.
-        confidence = max(0, confidence - 15)
+        confidence = max(0, confidence - TREND_PENALTY)
         all_reasons.append("_TREND_DOWN_PENALTY: -15 (symmetric to TREND_UP)")
-        _is_otc_reversal = (config.engine_name == "otc" and any(
-            r.signal_type == "REVERSAL" and r.direction == signal and e > 0
-            for r, e in adjusted
-        ))
-        _trend_cap = 55 if _is_otc_reversal else 45
+        _trend_cap = TREND_CAP_OTC_REVERSAL if _is_otc_reversal else TREND_CAP_STANDARD
         if confidence > _trend_cap:
             confidence = min(confidence, _trend_cap)
             all_reasons.append(
@@ -719,23 +912,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # 70-79 capped at 65 but 60-69 capped at 70, so 70→65 < 69→69 (DROP).
     # LIVE DB showed per-bin win rate was noisy at boundaries because of this.
     # Now: full monotonic mapping where each bin's cap > previous bin's cap.
-    if confidence >= 100:
-        confidence = min(confidence, 50)
-    elif confidence >= 90:
-        confidence = min(confidence, 55)
-    elif confidence >= 80:
-        confidence = min(confidence, 60)
-    elif confidence >= 70:
-        confidence = min(confidence, 65)    # > 60-69 bin's 60
-    elif confidence >= 60:
-        confidence = min(confidence, 60)    # < 70-79 bin's 65 (monotonic)
-
-    # FIX (high-confidence cap, 2026-07-20): 4h backtest showed 80-89% bin
-    # at 41.7% accuracy and 100% at 40%. Cap ALL predictions at 75% unless
-    # they have 3+ groups AND net_margin >= 0.6 (strong consensus).
-    if confidence > 75:
-        if not (total_groups >= 3 and net_margin >= 0.6):
-            confidence = min(confidence, 75)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-05 / F-02-21): replaced the inline
+    # bin-cap block with a call to the centralised `_apply_calibration_caps`
+    # helper. The helper also fixes the 5-point discontinuous jump at the
+    # confidence=70 boundary (was: 60-69 → 60, 70-79 → 65; now: 60-79 → 60).
+    confidence = _apply_calibration_caps(confidence, total_groups, net_margin)
 
     # ── Step 9: Pattern confluence check for STRONG ──────────────────────
     # FIX (BUG-BQ, 2026-07-20): pattern_agrees only checked reliability ==
@@ -806,11 +987,15 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # after 3 samples (still requires 3+ samples to avoid pure
             # noise on the first 1-2 signals). The boost threshold stays
             # high (acc_n >= 30, see below) to avoid boosting on noise.
-            if acc_n >= 3 and acc_val is not None:
-                if acc_val < 0.45:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-50): use centralised
+            # constants ACCURACY_DAMPEN_MIN_SAMPLES / _THRESHOLD / _FACTOR
+            # and ACCURACY_BOOST_MIN_SAMPLES / _THRESHOLD / _FACTOR
+            # (was magic 3/0.45/0.85 and 30/0.65/1.05).
+            if acc_n >= ACCURACY_DAMPEN_MIN_SAMPLES and acc_val is not None:
+                if acc_val < ACCURACY_DAMPEN_THRESHOLD:
                     # FIX (AUDIT-DEEP #08, 2026-07-23): use round() not int()
                     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-05): _round_half_up
-                    confidence = _round_half_up(confidence * 0.85)
+                    confidence = _round_half_up(confidence * ACCURACY_DAMPEN_FACTOR)
                     accuracy_note = f"_ACCURACY_CORRECT: recent {acc_val:.0%} ({acc_n} samples) → confidence ×0.85"
                 # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-2-07): raise
                 # the boost threshold from acc_n >= 8 / acc_val > 0.60 to
@@ -820,11 +1005,20 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 # for coin-flip signals. Now: require 30+ samples AND >65%
                 # win rate before boosting. This eliminates boost-thrashing
                 # for pairs whose win rate oscillates around 55-60%.
-                elif acc_n >= 30 and acc_val > 0.65:
-                    confidence = min(100, _round_half_up(confidence * 1.05))
+                elif (acc_n >= ACCURACY_BOOST_MIN_SAMPLES
+                      and acc_val > ACCURACY_BOOST_THRESHOLD):
+                    confidence = min(100, _round_half_up(confidence * ACCURACY_BOOST_FACTOR))
                     accuracy_note = f"_ACCURACY_CORRECT: recent {acc_val:.0%} ({acc_n} samples) → confidence ×1.05"
-        except (TypeError, ValueError):
-            pass
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-51): previously `except
+        # (TypeError, ValueError): pass` silently swallowed malformed
+        # `recent_accuracy` (e.g., tuple with None, wrong length) with
+        # NO log/warning — the accuracy self-correction just didn't fire,
+        # but the rest of the prediction proceeded as if no recent_accuracy
+        # was provided. Now: append a reason so the failure is visible.
+        except (TypeError, ValueError) as _acc_err:
+            all_reasons.append(
+                f"_ACCURACY_CORRECT_ERROR: malformed recent_accuracy "
+                f"{recent_accuracy!r} → {_acc_err}")
     if accuracy_note:
         all_reasons.append(accuracy_note)
 
@@ -833,19 +1027,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # block above may have raised confidence past the caps — clamp again.
     # AUDIT-3-02 FIX (2026-07-25): monotonically non-decreasing caps.
     # AUDIT-LIVE-2-01 FIX (2026-07-25): match the first cap block exactly.
-    if confidence >= 100:
-        confidence = min(confidence, 50)
-    elif confidence >= 90:
-        confidence = min(confidence, 55)
-    elif confidence >= 80:
-        confidence = min(confidence, 60)
-    elif confidence >= 70:
-        confidence = min(confidence, 65)
-    elif confidence >= 60:
-        confidence = min(confidence, 60)
-    if confidence > 75:
-        if not (total_groups >= 3 and net_margin >= 0.6):
-            confidence = min(confidence, 75)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-21): replaced the duplicated inline
+    # block (was 12 lines) with a single call to the centralised helper.
+    confidence = _apply_calibration_caps(confidence, total_groups, net_margin)
     # FIX (WIN-RATE-BOOST #2, 2026-07-23): re-apply the TREND_UP/DOWN cap
     # after the accuracy boost + calibration caps. The previous code only
     # re-applied a -8 penalty for counter-trend signals. Now we re-apply
@@ -874,11 +1058,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # (was 45). The self-correction mechanism now works in the WORST
     # regime (TREND_UP), where it's needed most.
     if regime.get("regime") in ("TREND_UP", "TREND_DOWN"):
-        _is_otc_reversal = (config.engine_name == "otc" and any(
-            r.signal_type == "REVERSAL" and r.direction == signal and e > 0
-            for r, e in adjusted
-        ))
-        _trend_cap = 55 if _is_otc_reversal else 45
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-22): removed the third duplicate
+        # computation of `_is_otc_reversal` — now uses the single value
+        # computed at line ~830 above. Also use centralised constants.
+        _trend_cap = TREND_CAP_OTC_REVERSAL if _is_otc_reversal else TREND_CAP_STANDARD
         # Dampen the cap during cold streaks.
         if recent_accuracy is not None:
             try:
@@ -926,10 +1109,18 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # + pair_max_conf cap + LOW_CONF_SKIP).
     _force_neutral = False
     try:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-11): `get_tag_adjustment` was
+        # imported but NEVER called — the comment at line ~1135 admitted
+        # "Tag-based adjustment ... skip for now, will be added in a
+        # follow-up". Removed the dead import (and the TODO marker) to
+        # silence the unused-import warning and prevent confusion.
         from core.time_patterns import (
-            get_time_adjustment, get_regime_adjustment, get_tag_adjustment)
-        # Use the last candle's ctime as the reference time.
-        _ctime = candles[-1].get("time") if candles else 0
+            get_time_adjustment, get_regime_adjustment)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-40): the `if candles else 0`
+        # guard is dead — `candles` was already checked at line 185
+        # (`if len(candles) < MIN_CANDLES_FOR_PREDICTION:`) and the
+        # function returns early if candles is empty. Removed.
+        _ctime = candles[-1].get("time")
         _time_mult, _time_note = get_time_adjustment(asset, _ctime or 0)
         if _time_mult != 1.0:
             # FIX (AUDIT-DEEP #08, 2026-07-23): use round() instead of int()
@@ -949,8 +1140,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             confidence = _round_half_up(confidence * _reg_mult)  # FIX (AUDIT-3-05): _round_half_up
             if _reg_note:
                 all_reasons.append(_reg_note)
-        # Tag-based adjustment (uses prediction's own tags, which we don't
-        # have yet — skip for now, will be added in a follow-up).
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-11): tag-based adjustment was
+        # planned but never implemented — see dead-import removal above.
+        # The previous TODO comment ("skip for now, will be added in a
+        # follow-up") is removed along with the dead `get_tag_adjustment`
+        # import.
 
         # ── Step 10b: Algorithm-aware prediction (DEEP IMPL 2026-07-23) ──
         # DEEP IMPLEMENTATION: uses the new core/algorithm_strategy.py module
@@ -989,22 +1183,37 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # core/algorithm_strategy.py (out of scope for this batch).
             _display_name = strat.get("strategy_name", "default")
             _algo_strategy_name = _display_name.lower().replace(" ", "_")
-            _algo_strategy_reason = strat["strategy_reason"]
-            _cont_mult = strat["continuation_mult"]
-            _rev_mult = strat["reversal_mult"]
-            _conf_mult = strat["confidence_mult"]
-            _min_conf = strat["min_confidence"]
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-07): use `.get()` with
+            # sensible defaults for ALL strategy fields (was direct `[]`
+            # indexing — a malformed strategy dict would raise KeyError,
+            # caught by the broad `except Exception` at line ~1290 which
+            # then appended `_ALGO_STRATEGY_ERROR` and silently degraded
+            # to the default strategy. Now: explicit defaults preserve
+            # the strategy name lookup while preventing the KeyError.
+            _algo_strategy_reason = strat.get("strategy_reason", "")
+            _cont_mult = strat.get("continuation_mult", 1.0)
+            _rev_mult = strat.get("reversal_mult", 1.0)
+            _conf_mult = strat.get("confidence_mult", 1.0)
+            _min_conf = strat.get("min_confidence", 0)
             _algo_icon = strat.get("strategy_icon", "")
 
             # Apply confidence multiplier (overall scaling)
-            if _conf_mult != 1.0 and signal != "NEUTRAL":
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-42): `signal != "NEUTRAL"
+            # is always True at this point — `signal` was set to "CALL" or
+            # "PUT" at line ~643 or ~668 and is never "NEUTRAL" here.
+            # The check was dead. Removed.
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-08): strategy banner was
+            # previously appended TWICE — once here (confidence ×N) and
+            # once at line ~1280 (strategy name + reason). Consolidated
+            # into a single banner at the end of this block. The
+            # confidence multiplier is still applied here.
+            if _conf_mult != 1.0:
                 confidence = _round_half_up(confidence * _conf_mult)  # FIX (AUDIT-3-05): _round_half_up
-                all_reasons.append(
-                    f"_ALGO_STRATEGY: {_algo_icon} {_algo_strategy_name} "
-                    f"→ confidence ×{_conf_mult:.2f}")
 
             # Apply continuation/reversal multipliers
-            if signal != "NEUTRAL" and (_cont_mult != 1.0 or _rev_mult != 1.0):
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-42): `signal != "NEUTRAL"`
+            # always True — removed (was dead check).
+            if _cont_mult != 1.0 or _rev_mult != 1.0:
                 # Determine if this signal is continuation or reversal.
                 #
                 # FIX (AUDIT-DEEP-A1, 2026-07-23): the previous code used
@@ -1021,12 +1230,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 # only signals that actually voted with non-zero effective
                 # score count toward the continuation/reversal decision.
                 is_continuation = any(
-                    r for r, e in adjusted
+                    True for r, e in adjusted
                     if r.direction == signal and r.signal_type == "CONTINUATION"
                     and e > 0  # only signals that survived suppression
                 )
                 is_reversal = any(
-                    r for r, e in adjusted
+                    True for r, e in adjusted
                     if r.direction == signal and r.signal_type == "REVERSAL"
                     and e > 0  # only signals that survived suppression
                 )
@@ -1035,7 +1244,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                     confidence = _round_half_up(confidence * _cont_mult)  # FIX (AUDIT-3-05): _round_half_up
                     all_reasons.append(
                         f"_ALGO_STRATEGY: continuation ×{_cont_mult:.2f} "
-                        f"({strat['algorithm']})")
+                        f"({_algo})")
                 # AUDIT-3-07 FIX (2026-07-25): the previous `elif` meant
                 # that if BOTH continuation AND reversal signals voted in
                 # the same direction (common when multiple modules fire),
@@ -1048,11 +1257,15 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 # multipliers apply (compounding) — which matches the intent:
                 # a mixed signal in mean_reversion should get the reversal
                 # boost, not the continuation dampening.
+                # FIX (DEEP-AUDIT-2026-07-26 / F-02-43): the previous
+                # `any(r for r, e in adjusted if ...)` pattern yielded
+                # ModuleResult objects (always truthy) which was confusing.
+                # Now uses `any(True for ...)` for clarity.
                 if is_reversal and _rev_mult != 1.0:
                     confidence = _round_half_up(confidence * _rev_mult)  # FIX (AUDIT-3-05): _round_half_up
                     all_reasons.append(
                         f"_ALGO_STRATEGY: reversal ×{_rev_mult:.2f} "
-                        f"({strat['algorithm']})")
+                        f"({_algo})")
 
             # Apply strategy-specific min_confidence override
             # (e.g., cautious requires 30+, neutral requires 25+)
@@ -1087,34 +1300,58 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # changed to "NEUTRAL" only at the FINAL return — confidence
             # calibration and pair cap still apply to the original signal's
             # confidence value, but the returned signal is NEUTRAL.
-            if signal != "NEUTRAL" and confidence < _min_conf:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-42): `signal != "NEUTRAL"`
+            # is always True here — `signal` is CALL or PUT at this point.
+            # Removed the dead check.
+            if confidence < _min_conf:
                 all_reasons.append(
                     f"_ALGO_STRATEGY: confidence {confidence} < {_min_conf} "
                     f"({_algo_strategy_name}) → will force NEUTRAL")
                 _force_neutral = True
-            else:
-                _force_neutral = False
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-34): the `else:
+            # _force_neutral = False` branch was redundant — `_force_neutral`
+            # was already initialized to `False` at line ~1110 above.
+            # Removed.
 
-            # Store strategy in result for logging
+            # Store strategy in result for logging.
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-08): CONSOLIDATED strategy
+            # banner — was previously split into two appends (confidence
+            # ×N at line ~1185 and strategy name + reason here). Now: a
+            # single line includes both the confidence multiplier info AND
+            # the strategy reason, eliminating the duplicate `_ALGO_STRATEGY:`
+            # lines in the reasons list (UI/log showed two strategy lines
+            # per prediction, inflating the reasons list and confusing DB
+            # analysis).
             all_reasons.append(
-                f"_ALGO_STRATEGY: {_algo_icon} {_algo_strategy_name} — {_algo_strategy_reason}")
+                f"_ALGO_STRATEGY: {_algo_icon} {_algo_strategy_name} "
+                f"(conf ×{_conf_mult:.2f}) — {_algo_strategy_reason}")
 
         except ImportError:
-            pass  # algorithm_strategy not available (test context)
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-52): previously `pass` —
+            # silent fallback when `core.algorithm_strategy` is not
+            # importable (test context). Now: append a reason so the
+            # fallback is visible in DB analysis.
+            all_reasons.append(
+                "_ALGO_STRATEGY: module not available, using default")
         except Exception as _algo_err:
-            try:
-                all_reasons.append(f"_ALGO_STRATEGY_ERROR: {_algo_err}")
-            except Exception:
-                pass  # never break prediction pipeline
+            # FIX (DEEP-AUDIT-2026-07-26 / F-02-54): removed the nested
+            # inner `try: all_reasons.append(...); except Exception: pass`
+            # — `list.append` cannot raise under normal conditions, so the
+            # inner try/except was overly defensive paranoia.
+            all_reasons.append(f"_ALGO_STRATEGY_ERROR: {_algo_err}")
 
     except ImportError:
-        pass  # core.time_patterns not available (test context)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-53): previously `pass` —
+        # silent fallback when `core.time_patterns` is not importable.
+        # Now: append a reason so the fallback is visible.
+        all_reasons.append(
+            "_TIME_PATTERN: module not available, using default")
     except Exception as _e:
         # Never let pattern lookup break the prediction pipeline.
-        try:
-            all_reasons.append(f"_TIME_PATTERN_ERROR: {_e}")
-        except Exception:
-            pass
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-55): removed the nested inner
+        # `try: all_reasons.append(...); except Exception: pass` —
+        # `list.append` cannot raise under normal conditions.
+        all_reasons.append(f"_TIME_PATTERN_ERROR: {_e}")
 
     # FIX (BACKTEST-2026-07-21): re-apply calibration caps one more time
     # after the pattern adjustments, so the boosted confidence can't
@@ -1128,6 +1365,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # are already enforced by the second block, and any boost from time/
     # regime/strategy is bounded by the >75 rule. This preserves the time/
     # pattern DB query effect while still preventing runaway confidence.
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-21-note): the third application is
+    # INTENTIONALLY narrow (only the >75 consensus cap, NOT the bin caps).
+    # Per the dev's comment above, re-applying the bin caps here would
+    # erase the time/strategy boost effect — only the hard >75 ceiling
+    # is re-applied. This is not a duplicate of the first two bin-cap
+    # blocks; it's a separate, narrower clamp for the post-pattern stage.
     if confidence > 75:
         if not (total_groups >= 3 and net_margin >= 0.6):
             confidence = min(confidence, 75)
@@ -1139,15 +1382,28 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # calibration cascade and only the pair_max_conf cap (hard limit) can
     # clamp it. The bonus affects strength tier determination (which uses
     # confidence) so placing it before the strength tiers is correct.
-    if htf_trend == "UPTREND" and signal == "CALL":
-        confidence = min(100, confidence + 5)
-    elif htf_trend == "DOWNTREND" and signal == "PUT":
-        confidence = min(100, confidence + 5)
-    elif htf_trend in ("UPTREND", "DOWNTREND") and (
-        (htf_trend == "UPTREND" and signal == "PUT")
-        or (htf_trend == "DOWNTREND" and signal == "CALL")
-    ):
-        confidence = max(0, confidence - 5)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-46): use centralised constants
+    # HTF_ALIGNED_BONUS / HTF_COUNTER_PENALTY (was magic 5/5).
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-47): simplified the complex
+    # conditional — was a verbose `elif htf_trend in (...) and ((htf ==
+    # UPTREND and signal == PUT) or (htf == DOWNTREND and signal ==
+    # CALL))`. Now: compute `aligned` once and use a simple if/elif.
+    _htf_aligned = (
+        (htf_trend == "UPTREND" and signal == "CALL")
+        or (htf_trend == "DOWNTREND" and signal == "PUT"))
+    if _htf_aligned:
+        confidence = min(100, confidence + HTF_ALIGNED_BONUS)
+    elif htf_trend in ("UPTREND", "DOWNTREND"):
+        # Counter-trend signal in either direction.
+        confidence = max(0, confidence - HTF_COUNTER_PENALTY)
+    # TODO (DEEP-AUDIT-2026-07-26 / F-02-09): the HTF bonus is applied
+    # AFTER all calibration caps, which means a signal that was capped at
+    # TREND_CAP_STANDARD (45) can be boosted to 50 by the HTF +5 bonus,
+    # bypassing the cap. The original dev intentionally placed the bonus
+    # after caps so the bonus survives (see comment above). Re-applying
+    # the calibration caps after the bonus would erase the bonus — the
+    # dev's stated intent was for the bonus to survive. Leaving as-is for
+    # now (low-impact: only +5 points, bounded by pair_max_conf cap).
 
     # FIX (WIN-RATE-BOOST #1, 2026-07-23): per-pair max_confidence cap.
     # Some pairs (e.g., USDMXN_otc with 0% historical win rate) should
@@ -1180,21 +1436,32 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # catches. The dead branch is removed; a defensive `strength = "MEDIUM"`
     # fallback is kept (mathematically unreachable but safe against future
     # refactors that allow `net == 0` to reach this point).
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-96): use centralised constants
+    # ULTRA_CONSENSUS_CONF_MIN / _ABS_NET_MIN / _GROUPS_MIN (was magic
+    # 75/8/4).
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-15): add a confidence floor for the
+    # `elif abs_net >= 2: MEDIUM` branch — was firing for ANY confidence
+    # (even confidence=20 with abs_net=2 was MEDIUM, which is overly
+    # generous). Now requires confidence >= MEDIUM_CONFIDENCE_FLOOR (30)
+    # for the standalone MEDIUM tier; signals with abs_net >= 2 but low
+    # confidence fall through to WEAK (next elif).
     if (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
             and has_pattern_confluence):
         strength = "STRONG"
-    elif (confidence >= 75 and abs_net >= 8 and majority_group_n >= 4):
+    elif (confidence >= ULTRA_CONSENSUS_CONF_MIN
+          and abs_net >= ULTRA_CONSENSUS_ABS_NET_MIN
+          and majority_group_n >= ULTRA_CONSENSUS_GROUPS_MIN):
         # NEW: ultra-strong consensus without pattern confluence.
         strength = "STRONG"
         all_reasons.append(
-            "_ULTRA_CONSENSUS: 4+ groups, abs_net>=8 → STRONG (no pattern needed)")
+            "_ULTRA_CONSENSUS: 4+ groups, abs_net>=8 -> STRONG (no pattern needed)")
     elif (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
           and not has_pattern_confluence):
         strength = "MEDIUM"
-        all_reasons.append("_DOWNGRADE: STRONG→MEDIUM (no strong pattern confluence)")
+        all_reasons.append("_DOWNGRADE: STRONG->MEDIUM (no strong pattern confluence)")
     elif confidence >= 50 and abs_net >= 2:
         strength = "MEDIUM"
-    elif abs_net >= 2:
+    elif confidence >= MEDIUM_CONFIDENCE_FLOOR and abs_net >= 2:
         strength = "MEDIUM"
     elif abs_net >= 1:
         strength = "WEAK"
@@ -1215,8 +1482,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # NEUTRAL return — the previous code returned the post-cap confidence
     # (e.g., 15), producing "NEUTRAL 15%" which confused downstream
     # consumers expecting NEUTRAL signals to have confidence=0.
-    if confidence < 20:
-        all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < 20 → NEUTRAL")
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-97): use centralised constant
+    # LOW_CONF_SKIP_THRESHOLD (was magic 20).
+    if confidence < LOW_CONF_SKIP_THRESHOLD:
+        all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < {LOW_CONF_SKIP_THRESHOLD} -> NEUTRAL")
         return {
             "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
             "score": net, "reasons": all_reasons,
@@ -1253,7 +1522,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         "signal": signal,
         "confidence": confidence,
         "strength": strength,
-        "score": net,
+        # FIX (DEEP-AUDIT-2026-07-26 / F-02-04): when the group-count
+        # tiebreaker fired (net == 0 but group counts differ), return the
+        # majority direction's score instead of `net` (=0). Previously the
+        # final return used `score=net=0` for tiebreaker CALL/PUT signals,
+        # so UI showed "CALL 55%" but DB stored score=0 — breaking
+        # consumers that expect score>0 for non-NEUTRAL signals.
+        "score": _tiebreaker_score if _tiebreaker_score is not None else net,
         "reasons": all_reasons,
         "regime": regime,
         "agree": agree,
@@ -1397,8 +1672,28 @@ def _collapse_body_group(body_signals: list) -> ModuleResult:
             rev_n  = sum(1 for r in majority_signals if r.signal_type == "REVERSAL")
             sig_type = "CONTINUATION" if cont_n > rev_n else "REVERSAL"
 
-    reasons_str = " | ".join(r.reasons[0] if r.reasons else "" for r in body_signals)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-29): previously iterated
+    # `body_signals` (ALL signals, both CALL and PUT). If 3 CALL signals
+    # and 1 PUT signal collapsed into a CALL result, the reasons included
+    # the PUT signal's reason — which CONTRADICTS the CALL direction.
+    # Now: iterate `majority_signals` only (the winning side).
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-112): previously only included
+    # the FIRST reason from each signal (`r.reasons[0]`); the other
+    # reasons were silently dropped. Now: include ALL reasons via
+    # `" | ".join(r.reasons)`.
+    reasons_str = " | ".join(
+        " | ".join(r.reasons) if r.reasons else ""
+        for r in majority_signals)
 
+    # FIX (DEEP-AUDIT-2026-07-26 / F-02-30): the `confidence=min(70, score * 15)`
+    # field is set here but NEVER read by the blender's effective-score
+    # calculation (which uses `r.score * multipliers`, not `r.confidence`).
+    # The audit (PROB 30) flagged this as a dead field. Kept for backward
+    # compatibility with external consumers that may read ModuleResult.confidence
+    # — removing it could break the ModuleResult dataclass contract.
+    # TODO (DEEP-AUDIT-2026-07-26 / F-02-30): either use `confidence` as a
+    # blend weight in the effective-score calculation, or remove the field
+    # from ModuleResult construction (verify no consumers read it first).
     return ModuleResult(
         module_name="candle_reaction", direction=direction, score=score,
         confidence=min(70, score * 15),

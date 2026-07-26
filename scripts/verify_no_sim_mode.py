@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# TODO (DEEP-AUDIT-2026-07-26 / F-20 / cross-file cleanup):
+#   Line 30 — `def check(name: str, condition: bool, detail: str = "") -> bool:`
+#   is DUPLICATED in `scripts/verify_live_audit_fixes.py:19` with a DIFFERENT
+#   signature (the latter returns nothing, no type hints). Inconsistent API.
+#   Consider extracting to `scripts/_helpers.py` with a single canonical
+#   signature. Audit ref: A-10 dup table.
 """
 Startup verification test — verifies that sim mode is disabled and the
 app correctly requires live credentials.
@@ -23,8 +29,23 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).parent.parent
-FAIL = "\033[91m❌ FAIL\033[0m"
-PASS = "\033[92m✅ PASS\033[0m"
+# FIX (DEEP-AUDIT-2026-07-26 / F-19-23): add Windows-safe ANSI fallback.
+# A-10 PROBLEM 108 — emojis + ANSI escapes may render as `?` boxes on
+# Windows cmd (default font). Use colorama if available, else strip.
+_IS_WINDOWS = sys.platform.startswith("win")
+if _IS_WINDOWS:
+    try:
+        import colorama  # type: ignore
+        colorama.init()
+    except ImportError:
+        FAIL = "FAIL"
+        PASS = "PASS"
+    else:
+        FAIL = "\033[91m✗ FAIL\033[0m"
+        PASS = "\033[92m✓ PASS\033[0m"
+else:
+    FAIL = "\033[91m❌ FAIL\033[0m"
+    PASS = "\033[92m✅ PASS\033[0m"
 
 
 def check(name: str, condition: bool, detail: str = "") -> bool:
@@ -47,7 +68,9 @@ def main():
     )
 
     # Check 2: server.py should NOT import sim_feed
-    server_py = (REPO_ROOT / "server.py").read_text()
+    # FIX (DEEP-AUDIT-2026-07-26 / F-19-24): add encoding="utf-8" to all
+    # .read_text() calls so Windows doesn't choke on emojis (A-10 PROBLEM 19).
+    server_py = (REPO_ROOT / "server.py").read_text(encoding="utf-8")
     has_sim_import = bool(re.search(r"^\s*from\s+sim_feed\s+import", server_py, re.MULTILINE))
     has_sim_import |= bool(re.search(r"^\s*import\s+sim_feed", server_py, re.MULTILINE))
     all_pass &= check(
@@ -74,7 +97,7 @@ def main():
     )
 
     # Check 6: feed.py should have _warn_if_stuck (replaces _fallback_to_sim_if_stuck)
-    feed_py = (REPO_ROOT / "feed.py").read_text()
+    feed_py = (REPO_ROOT / "feed.py").read_text(encoding="utf-8")
     all_pass &= check(
         "feed.py has _warn_if_stuck method",
         "async def _warn_if_stuck" in feed_py,
@@ -96,7 +119,7 @@ def main():
     )
 
     # Check 9: railway.json should have QX_TOKEN in env_required
-    railway_json = (REPO_ROOT / "railway.json").read_text()
+    railway_json = (REPO_ROOT / "railway.json").read_text(encoding="utf-8")
     all_pass &= check(
         "railway.json has QX_TOKEN in env_required",
         "QX_TOKEN" in railway_json and "env_required" in railway_json,
@@ -110,14 +133,25 @@ def main():
     )
 
     # Check 11: .env.example should mention sim mode disabled
-    env_example = (REPO_ROOT / ".env.example").read_text()
+    # FIX (DEEP-AUDIT-2026-07-26 / F-19-25): guard against missing
+    # .env.example — FileNotFoundError would abort the script mid-check
+    # (A-10 PROBLEM 63).
+    env_example_path = REPO_ROOT / ".env.example"
+    if env_example_path.exists():
+        env_example = env_example_path.read_text(encoding="utf-8")
+        env_has_disabled = "PERMANENTLY DISABLED" in env_example
+        env_detail = "found" if env_has_disabled else "missing PERMANENTLY DISABLED marker"
+    else:
+        env_has_disabled = False
+        env_detail = ".env.example file not found"
     all_pass &= check(
         ".env.example mentions sim mode disabled",
-        "PERMANENTLY DISABLED" in env_example,
+        env_has_disabled,
+        env_detail,
     )
 
     # Check 12: RAILWAY_TOKEN_SETUP.md should mention auto-setup script
-    setup_md = (REPO_ROOT / "RAILWAY_TOKEN_SETUP.md").read_text()
+    setup_md = (REPO_ROOT / "RAILWAY_TOKEN_SETUP.md").read_text(encoding="utf-8")
     all_pass &= check(
         "RAILWAY_TOKEN_SETUP.md documents auto-setup script",
         "setup_railway_token.py" in setup_md,

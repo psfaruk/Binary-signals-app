@@ -20,9 +20,27 @@ Original signals kept:
 
 Reliability: LEVEL ×1.3 (key levels are structurally important in real markets)
 """
-import math
 from engines.base.types import ModuleResult, MarketContext
-from core.analysis import _round_level, _atr, find_key_levels
+
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-09-01): removed dead `import math` and
+# `from core.analysis import _round_level, _atr, find_key_levels` — none
+# were used (the module reads ctx.atr, ctx.key_levels, ctx.level_confluence
+# instead). `_round_level` was only referenced by the now-deleted SIGNAL 2.
+#
+# FIX (DEEP-AUDIT-2026-07-26 / F-09-02): module-level constants replacing
+# ~12 magic numbers throughout this module (audit PROBLEMS 46-53).
+# Centralized for tunability and documentation.
+JPY_PRICE_THRESHOLD = 50        # abs(close) > 50 ⇒ JPY-pair granularity
+EPS_PRICE_SCALE = 1e-7          # relative eps floor for breakout checks
+EPS_GRANULARITY_SCALE = 0.1      # fraction of pair granularity for eps floor
+MICRO_SR_PROXIMITY_ATR = 0.10    # tol for "close near prev high/low"
+MIN_SWING_RANGE_ATR = 2.0        # Fib requires range > 2×ATR
+FIB_PROXIMITY_ATR = 0.15         # |close - fib_price| < 0.15×ATR
+FIB_WINDOW_SIZE = 20            # candles scanned for swing high/low
+MAX_SR_FLIP_LEVELS = 4           # recent levels to check for S/R flip
+SR_FLIP_PROXIMITY_ATR = 0.20     # |close - lvl_price| < 0.20×ATR
+TRENDLINE_WINDOW = 6             # candles for descending-highs / ascending-lows
 
 
 def analyze(candles, ctx: MarketContext) -> list:
@@ -42,51 +60,56 @@ def analyze(candles, ctx: MarketContext) -> list:
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 1: Swing level confluence (ORIGINAL — kept)
     # ═══════════════════════════════════════════════════════════════════════
-    if level_conf["near_level"]:
-        lvl_type = level_conf["level_type"]
-        action = level_conf["action"]
-        dist = level_conf["distance_atr"]
-        lvl_price = level_conf["level_price"]
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-03): `level_conf["near_level"]` and
+    # friends are direct dict accesses — KeyError risk on cold-start when
+    # `check_level_confluence` returns an empty/partial dict. Switched to
+    # `.get()` defaults (Audit ISSUE S5).
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-04): restructure the `if lvl_type
+    # is None: pass` (PROBLEM 45) into an inverted `if lvl_type is not
+    # None:` wrapper so the dead branch is gone and the live branches are
+    # visibly guarded.
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-05): remove the entire `elif
+    # action == "breakout": pass` block (PROBLEM 14) — it was intentionally
+    # disabled and contained only a `pass` + 6-line comment. Breakouts on
+    # 1m candles had 47.3% win rate (ultra-deep backtest); no behavior change.
+    if level_conf.get("near_level", False):
+        lvl_type = level_conf.get("level_type")
+        action = level_conf.get("action")
+        dist = level_conf.get("distance_atr", 0.0)
+        lvl_price = level_conf.get("level_price", 0.0)
 
-        if lvl_type is None:
-            pass
-        elif action == "wick_rejection":
-            if lvl_type == "support":
-                results.append(ModuleResult(
-                    module_name="key_level", direction="CALL", score=4, confidence=70,
-                    signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                    reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → CALL (failed breakdown, 70% win rate)"]))
-            else:
-                results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=4, confidence=70,
-                    signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                    reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → PUT (failed breakout, 70% win rate)"]))
-        elif action == "bounce":
-            if lvl_type == "support":
-                results.append(ModuleResult(
-                    module_name="key_level", direction="CALL", score=3, confidence=65,
-                    signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                    reasons=[f"Key support bounce ({lvl_price:.5f}, {dist:.2f} ATR) → CALL boost"]))
-            else:
-                results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=3, confidence=65,
-                    signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                    reasons=[f"Key resistance bounce ({lvl_price:.5f}, {dist:.2f} ATR) → PUT boost"]))
-        elif action == "breakout":
-            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-21): removed the dead
-            # `if lvl_type == "resistance": pass / else: pass` branch —
-            # both sub-branches did nothing, so the entire elif was dead code.
-            # Now we skip directly. Breakout signals are intentionally disabled
-            # (ultra-deep: 47.3% win rate — breakouts on 1m candles are mostly
-            # false breakouts).
-            pass
+        if lvl_type is not None:
+            if action == "wick_rejection":
+                if lvl_type == "support":
+                    results.append(ModuleResult(
+                        module_name="key_level", direction="CALL", score=4, confidence=70,
+                        signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                        reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → CALL (failed breakdown, 70% win rate)"]))
+                else:
+                    results.append(ModuleResult(
+                        module_name="key_level", direction="PUT", score=4, confidence=70,
+                        signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                        reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → PUT (failed breakout, 70% win rate)"]))
+            elif action == "bounce":
+                if lvl_type == "support":
+                    results.append(ModuleResult(
+                        module_name="key_level", direction="CALL", score=3, confidence=65,
+                        signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                        reasons=[f"Key support bounce ({lvl_price:.5f}, {dist:.2f} ATR) → CALL boost"]))
+                else:
+                    results.append(ModuleResult(
+                        module_name="key_level", direction="PUT", score=3, confidence=65,
+                        signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                        reasons=[f"Key resistance bounce ({lvl_price:.5f}, {dist:.2f} ATR) → PUT boost"]))
+            # FIX (F-09-05): breakout action branch removed (was dead `pass`
+            # block). Breakouts on 1m candles had 47.3% win rate
+            # (ultra-deep backtest) — intentionally disabled.
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SIGNAL 2: Round number proximity — DISABLED (ultra-deep, 2026-07-20)
-    # Backtest showed 44.1% win rate — round number proximity is noise on
-    # 1m candles. Real market doesn't respect round numbers at this timeframe.
-    # lvl, dist, strength = _round_level(close)
-    # ... (disabled)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-06): removed SIGNAL 2 (Round Number
+    # Proximity) commented-out block (PROBLEM 15) — 6 lines of dead code
+    # referencing the now-removed `_round_level` import. Backtest had 44.1%
+    # win rate on 1m candles. Archival note: real-market 1m candles do not
+    # respect round-number proximity.
 
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 3: Previous candle high/low as micro-S/R (ORIGINAL — kept)
@@ -95,7 +118,9 @@ def analyze(candles, ctx: MarketContext) -> list:
         prev = candles[-2]
         prev_high = prev["high"]
         prev_low = prev["low"]
-        tol = atr * 0.10
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-02): magic number `atr * 0.10`
+        # → MICRO_SR_PROXIMITY_ATR constant (PROBLEM 47).
+        tol = atr * MICRO_SR_PROXIMITY_ATR
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-20): use a pair-granularity-
         # aware eps floor so JPY pairs (price ~150) get an eps of at least
         # 0.001 (0.1 pip) instead of the price-scaled 1.5e-5 (which is far
@@ -104,8 +129,13 @@ def analyze(candles, ctx: MarketContext) -> list:
         # JPY pairs, causing the `close > prev_high + eps` check to fire for
         # any close above prev_high even when they were effectively equal at
         # the pair's granularity (over-firing breakout signals).
-        _granularity = 0.01 if abs(close) > 50 else 0.0001
-        eps = max(abs(close) * 1e-7, _granularity * 0.1)
+        #
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-02): magic numbers `abs(close)
+        # > 50`, `1e-7`, and `0.1` (PROBLEMS 46-47) replaced with module-level
+        # constants JPY_PRICE_THRESHOLD / EPS_PRICE_SCALE /
+        # EPS_GRANULARITY_SCALE.
+        _granularity = 0.01 if abs(close) > JPY_PRICE_THRESHOLD else 0.0001
+        eps = max(abs(close) * EPS_PRICE_SCALE, _granularity * EPS_GRANULARITY_SCALE)
 
         if abs(close - prev_high) < tol:
             if close < prev_high - eps:
@@ -136,13 +166,15 @@ def analyze(candles, ctx: MarketContext) -> list:
     # Find recent swing high → low (or low → high), check if price is at
     # 38.2%, 50%, or 61.8% retracement level.
     # ═══════════════════════════════════════════════════════════════════════
-    if len(candles) >= 20 and atr > 0:
-        window = candles[-20:]
+    if len(candles) >= FIB_WINDOW_SIZE and atr > 0:
+        window = candles[-FIB_WINDOW_SIZE:]
         swing_high = max(c["high"] for c in window)
         swing_low = min(c["low"] for c in window)
         swing_range = swing_high - swing_low
 
-        if swing_range > atr * 2:  # meaningful swing
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-02): magic number `atr * 2` →
+        # MIN_SWING_RANGE_ATR constant (PROBLEM 48).
+        if swing_range > atr * MIN_SWING_RANGE_ATR:  # meaningful swing
             # Determine trend direction: if swing_high is more recent → uptrend
             # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-17): add index `i` as a
             # tiebreaker in the max() key so that when two candles share the
@@ -150,8 +182,18 @@ def analyze(candles, ctx: MarketContext) -> list:
             # is returned. The previous key returned the FIRST occurrence, which
             # could flip the trend direction (high_idx > low_idx is uptrend).
             # Common in OTC pairs that hover at round numbers.
+            # FIX (DEEP-AUDIT-2026-07-26 / A-05-CRIT-1):
+            # `low_idx` was using `max(...)` — which finds the candle with the
+            # HIGHEST low, not the LOWEST low. This corrupted Fibonacci trend
+            # classification: `high_idx > low_idx` was almost always true
+            # (because the highest-low candle is usually more recent than the
+            # actual swing-low candle), so almost all swings were classified
+            # as UPTREND → CALL-biased Fibonacci signals.
+            # Correct: most-recent occurrence of the LOWEST low. Use min() with
+            # negated low (so largest -low = lowest low), and `i` as tiebreaker
+            # so most-recent wins.
             high_idx = max(range(len(window)), key=lambda i: (window[i]["high"], i))
-            low_idx = max(range(len(window)), key=lambda i: (window[i]["low"], i))
+            low_idx = max(range(len(window)), key=lambda i: (-window[i]["low"], i))
 
             fib_levels = {}
             # FIX (AUDIT-DEEP-A5, 2026-07-23): when high_idx == low_idx
@@ -177,7 +219,9 @@ def analyze(candles, ctx: MarketContext) -> list:
                     fib_levels[level] = swing_low + swing_range * pct
 
             for fib_name, fib_price in fib_levels.items():
-                if abs(close - fib_price) < atr * 0.15:
+                # FIX (DEEP-AUDIT-2026-07-26 / F-09-02): magic number
+                # `atr * 0.15` → FIB_PROXIMITY_ATR constant (PROBLEM 49).
+                if abs(close - fib_price) < atr * FIB_PROXIMITY_ATR:
                     if high_idx > low_idx:
                         # Uptrend retracement → bounce up = CALL
                         results.append(ModuleResult(
@@ -192,14 +236,10 @@ def analyze(candles, ctx: MarketContext) -> list:
                             reasons=[f"Fibonacci {fib_name}% retracement ({fib_price:.5f}) in downtrend → PUT bounce"]))
                     break  # only one fib signal per candle
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SIGNAL 5: Double Top / Double Bottom — DISABLED (ultra-deep, 2026-07-20)
-    # Backtest showed 44.5% win rate — double top/bottom on 1m candles is
-    # noise. Real double tops need 30+ candle spacing, not 10.
-    # if len(candles) >= 15 and atr > 0:
-    #     ... (disabled)
-    # window = candles[-15:]
-    # (double top/bottom code removed — was 44.5% win rate)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-09-07): removed SIGNAL 5 (Double
+    # Top/Bottom) commented-out block (PROBLEM 16) — 7 lines of dead code.
+    # Backtest showed 44.5% win rate on 1m candles. Real double tops need
+    # 30+ candle spacing, not 10. Archival note retained for context.
 
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 6: Support/Resistance Flip (NEW — classic)
@@ -219,16 +259,23 @@ def analyze(candles, ctx: MarketContext) -> list:
         levels = ctx.key_levels
         # Sort by candle index descending, take the 4 most recent levels
         # of either type (resistance or support).
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-02): magic number `[:4]` →
+        # MAX_SR_FLIP_LEVELS constant (PROBLEM 51).
         recent_levels = sorted(levels, key=lambda lv: lv.get("idx", 0),
-                               reverse=True)[:4]
+                               reverse=True)[:MAX_SR_FLIP_LEVELS]
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-08): hoist `prev = candles[-2]`
+        # out of the for-loop (PROBLEM 41) — it's the same value every
+        # iteration; recomputing it inside the loop was wasted work.
+        prev = candles[-2]
         for level in recent_levels:
             lvl_price = level["price"]
             lvl_type = level["type"]
             # Check if price recently broke through this level
-            prev = candles[-2]
             if lvl_type == "resistance" and prev["close"] > lvl_price and close > lvl_price:
                 # Broken resistance — now acts as support
-                if abs(close - lvl_price) < atr * 0.2:
+                # FIX (DEEP-AUDIT-2026-07-26 / F-09-02): magic number
+                # `atr * 0.2` → SR_FLIP_PROXIMITY_ATR constant (PROBLEM 52).
+                if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:
                     results.append(ModuleResult(
                         module_name="key_level", direction="CALL", score=2, confidence=57,
                         signal_type="REVERSAL", reliability="LEVEL", group="SR_FLIP",
@@ -242,7 +289,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                     break
             elif lvl_type == "support" and prev["close"] < lvl_price and close < lvl_price:
                 # Broken support — now acts as resistance
-                if abs(close - lvl_price) < atr * 0.2:
+                if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:
                     results.append(ModuleResult(
                         module_name="key_level", direction="PUT", score=2, confidence=57,
                         signal_type="REVERSAL", reliability="LEVEL", group="SR_FLIP",
@@ -258,9 +305,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     # ═══════════════════════════════════════════════════════════════════════
     if len(candles) >= 12 and atr > 0:
         window = candles[-12:]
-        # Simple: check if last 3 highs are descending (downtrend resistance)
-        highs = [c["high"] for c in window[-6:]]
-        lows = [c["low"] for c in window[-6:]]
+        # Simple: check if last TRENDLINE_WINDOW highs are descending (downtrend resistance)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-02): magic number `[-6:]` →
+        # TRENDLINE_WINDOW constant (PROBLEM 53).
+        highs = [c["high"] for c in window[-TRENDLINE_WINDOW:]]
+        lows = [c["low"] for c in window[-TRENDLINE_WINDOW:]]
 
         # Descending highs = bearish trendline
         # AUDIT-4-18 FIX (2026-07-25): changed `if` → `elif` so a triangle
@@ -278,6 +327,14 @@ def analyze(candles, ctx: MarketContext) -> list:
         # prior, so a strictly-ascending sequence with small steps qualified
         # as "descending". Now requires strictly descending highs (each high
         # >= next high, no upticks allowed).
+        #
+        # FIX (DEEP-AUDIT-2026-07-26 / F-09-09): clarify the seemingly
+        # redundant `highs[0] > highs[-1] and all(...)` check (PROBLEM 42).
+        # `all(highs[i] >= highs[i+1])` already implies `highs[0] >=
+        # highs[-1]`; the strict `>` adds the "not all equal" requirement
+        # so a flat horizontal series (which technically satisfies the
+        # `all()` chain via `>=`) does NOT fire a trendline breakout.
+        # Same logic mirrored below for lows.
         if highs[0] > highs[-1] and all(highs[i] >= highs[i+1]
                                         for i in range(len(highs)-1)):
             if close > max(highs[-2], highs[-1]):

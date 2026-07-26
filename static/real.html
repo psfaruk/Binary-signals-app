@@ -4,9 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0d1117">
-  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
-  <meta http-equiv="Pragma" content="no-cache">
-  <meta http-equiv="Expires" content="0">
+  <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-52, MEDIUM): removed the 3 cache-control
+       meta tags (Cache-Control / Pragma / Expires). These are widely ignored by
+       modern browsers — cache headers must be set by the server in HTTP response
+       headers, not HTML meta. The server (server.py) should send
+       `Cache-Control: no-store` instead. -->
   <title>Real Market — Binary Signal Terminal</title>
   <link rel="stylesheet" href="/static/css/common.css">
   <link rel="stylesheet" href="/static/css/real.css">
@@ -39,7 +41,10 @@
         <span id="conn-label">—</span>
       </div>
       <span class="spacer"></span>
-      <button id="sound-btn" type="button" aria-pressed="false" aria-label="Sound">🔇</button>
+      <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): initial aria-label is
+           'Unmute sounds' to match the initial sound-enabled=false state.
+           common.js updates this dynamically on toggle. -->
+      <button id="sound-btn" type="button" aria-pressed="false" aria-label="Unmute sounds">🔇</button>
       <button id="market-switch-btn" type="button" aria-label="Switch market">
         <!-- FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-21): set the correct
              initial switch-button label per page. The Real page's next
@@ -52,18 +57,25 @@
   </header>
 
   <!-- ══ TAB BAR ══ -->
+  <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-91, MEDIUM): added id attributes to
+       tab buttons so tabpanels can reference them via aria-labelledby. -->
   <nav id="tab-bar" role="tablist">
-    <button class="tab-btn active" data-tab="chart" role="tab" aria-selected="true">📈 Chart</button>
-    <button class="tab-btn" data-tab="history" role="tab" aria-selected="false">📜 History</button>
-    <button class="tab-btn" data-tab="accuracy" role="tab" aria-selected="false">📊 Stats</button>
+    <button class="tab-btn active" data-tab="chart" role="tab" id="tab-chart-btn" aria-selected="true" aria-controls="tab-chart">📈 Chart</button>
+    <button class="tab-btn" data-tab="history" role="tab" id="tab-history-btn" aria-selected="false" aria-controls="tab-history">📜 History</button>
+    <button class="tab-btn" data-tab="accuracy" role="tab" id="tab-accuracy-btn" aria-selected="false" aria-controls="tab-accuracy">📊 Stats</button>
   </nav>
 
   <!-- ══ MAIN: tab content + side panel ══ -->
-  <main id="main">
+  <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-90, MEDIUM): added tabindex="-1" so the
+       skip-link target (#main) is focusable. Without it, clicking "Skip to
+       content" moves focus to the document body, not #main — keyboard users
+       couldn't tab into the content from #main. -->
+  <main id="main" tabindex="-1">
     <div id="tab-content-wrap">
 
       <!-- TAB: Chart -->
-      <div id="tab-chart" class="tab-pane active" role="tabpanel">
+      <!-- FIX (F-17-91): aria-labelledby references the tab button id. -->
+      <div id="tab-chart" class="tab-pane active" role="tabpanel" aria-labelledby="tab-chart-btn">
         <section id="chart-wrap">
           <div id="chart-container"></div>
           <!-- FIX (UI-TIMER-MOVE, 2026-07-23): countdown removed from chart,
@@ -77,16 +89,17 @@
       </div>
 
       <!-- TAB: History -->
-      <div id="tab-history" class="tab-pane" role="tabpanel">
+      <!-- FIX (F-17-91): aria-labelledby + default option for #history-pair-select. -->
+      <div id="tab-history" class="tab-pane" role="tabpanel" aria-labelledby="tab-history-btn">
         <div class="tab-history-header">
-          <select id="history-pair-select" aria-label="Select pair"></select>
+          <select id="history-pair-select" aria-label="Select pair"><option value="">Loading...</option></select>
           <span class="hint">Last 1 hour · click for detail</span>
         </div>
         <div id="history-list"></div>
       </div>
 
       <!-- TAB: Accuracy -->
-      <div id="tab-accuracy" class="tab-pane" role="tabpanel">
+      <div id="tab-accuracy" class="tab-pane" role="tabpanel" aria-labelledby="tab-accuracy-btn">
         <div class="accuracy-hero">
           <div class="accuracy-hero-pct" id="acc-hero-pct">—</div>
           <div class="accuracy-hero-detail" id="acc-hero-detail">No data</div>
@@ -186,13 +199,36 @@
 </div>
 
 <!-- Signal detail modal -->
-<div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+<!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-35, HIGH): added tabindex="-1" to modal
+     container so it can receive focus programmatically; the JS already moves
+     focus to #detail-close on open. A full focus-trap (Tab/Shift+Tab cycling
+     between sentinel elements) is TODO — the #app `inert` attribute (set by
+     JS on modal open) prevents Tab from escaping into the background, which
+     is the most important part of the trap. -->
+<!-- FIX (F-17-92, MEDIUM): added aria-describedby="detail-body" so screen
+     readers announce the dialog's body content as well as the title. -->
+<div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title" aria-describedby="detail-body" tabindex="-1">
   <div id="signal-detail-modal">
     <h3><span id="detail-title">Signal Detail</span><button type="button" class="detail-close" id="detail-close" aria-label="Close">×</button></h3>
     <div id="detail-body"></div>
   </div>
 </div>
 
+<!--
+FIX (DEEP-AUDIT-2026-07-26 / F-17-88, MEDIUM): DRY refactor TODO.
+real.html / otc.html / alltime_otc.html are ~95% identical (only title, brand
+name, CSS/JS file refs differ). A server-side template (e.g. Jinja2 with a
+{{category}} variable) or a client-side build step (handlebars / lit-html)
+would consolidate these 3 × 200-line files into 1 template + 3 stubs.
+Not done in this batch to avoid breaking the static-file server.
+-->
+<!--
+FIX (DEEP-AUDIT-2026-07-26 / F-17-53, MEDIUM): SRI (Subresource Integrity) TODO.
+Add `integrity="sha384-..."` and `crossorigin="anonymous"` to the script
+tags below to prevent tampering if the static file server is compromised.
+Requires computing the hash of each file at build time. Not done here because
+the hashes must be regenerated after every code change.
+-->
 <script defer src="/static/lightweight-charts.js"></script>
 <script defer src="/static/js/common.js"></script>
 <script defer src="/static/js/real.js"></script>

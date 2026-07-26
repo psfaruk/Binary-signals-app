@@ -1,7 +1,8 @@
-"""Stub — OptimizedQuotexMixin was removed (module self-described as deprecated)."""
+"""Stub removed (DEEP-AUDIT-2026-07-26 / F-16-25).
 
-
-class OptimizedQuotexMixin:
-    """Stub — original removed 2026-07-13 (module docstring said 'deprecated').
-    Empty mixin so stable_api.py's import + inheritance doesn't break."""
-    pass
+The OptimizedQuotexMixin class was reduced to `pass` (the module
+docstring self-described it as deprecated). It was mixed into the
+`Quotex` class in stable_api.py via multiple inheritance, but added no
+methods. The inheritance link has been removed from stable_api.py. This
+file is kept as an empty marker for the utils package's importability.
+"""

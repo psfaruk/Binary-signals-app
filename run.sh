@@ -1,6 +1,15 @@
 #!/bin/bash
 # Binary Signals App — startup script
 # ব্যবহার: ./run.sh
+#
+# FIX (DEEP-AUDIT-2026-07-26 / F-19-41): removed USE_SIM=1 acceptance —
+#   sim mode is permanently disabled (A-10 PROBLEM 28). Now requires
+#   QX_TOKEN or QX_EMAIL+QX_PASSWORD.
+# FIX (DEEP-AUDIT-2026-07-26 / F-19-42): broadened dependency check from
+#   3 imports (fastapi, uvicorn, websockets) to all 8 required packages
+#   (A-10 PROBLEM 29).
+# FIX (DEEP-AUDIT-2026-07-26 / F-19-43): use `python3 -m pip` instead of
+#   bare `pip3` (A-10 PROBLEM 30).
 
 set -e
 cd "$(dirname "$0")"
@@ -30,12 +39,10 @@ if [ ! -f .env ]; then
 fi
 
 # ── Credentials চেক ─────────────────────────────────────────────────────────
-# FIX (BUG-5, 2026-07-18): .env.example now exists with empty fields, so
-# we check if QX_TOKEN / QX_EMAIL / QX_PASSWORD are still empty rather
-# than looking for a placeholder email string. Also accept USE_SIM=1 as
-# a valid config (no creds needed in sim mode).
-if ! grep -qE "^(QX_TOKEN|QX_EMAIL|QX_PASSWORD)=.+" .env && \
-   ! grep -qE "^USE_SIM=1" .env; then
+# FIX (DEEP-AUDIT-2026-07-26 / F-19-41): USE_SIM=1 is no longer accepted.
+# Sim mode was permanently disabled on 2026-07-25 — QX_TOKEN (or
+# QX_EMAIL+QX_PASSWORD) is REQUIRED.
+if ! grep -qE "^(QX_TOKEN|QX_EMAIL|QX_PASSWORD)=.+" .env; then
     echo ""
     echo "❌ .env ফাইলে কোনো Quotex credentials নেই!"
     echo ""
@@ -45,17 +52,24 @@ if ! grep -qE "^(QX_TOKEN|QX_EMAIL|QX_PASSWORD)=.+" .env && \
     echo "   অথবা যদি আপনার কাছে session token থাকে (browser থেকে কপি করা):"
     echo "   QX_TOKEN=abc123... লাইনটি uncomment করে token দিন"
     echo ""
-    echo "   অথবা simulation mode এ চালাতে (credentials ছাড়া):"
-    echo "   USE_SIM=1 লাইনটি uncomment করুন"
+    echo "   ⚠️  USE_SIM=1 আর কাজ করে না — sim mode স্থায়ীভাবে disabled করা হয়েছে।"
+    echo "   QX_TOKEN বা QX_EMAIL+QX_PASSWORD দিতেই হবে।"
     exit 1
 fi
 
 # ── Python dependencies চেক ─────────────────────────────────────────────────
+# FIX (DEEP-AUDIT-2026-07-26 / F-19-42): broadened import check to cover
+# all 8 required runtime packages (A-10 PROBLEM 29).
 echo ""
 echo "📦 Python dependencies চেক হচ্ছে..."
-python3 -c "import fastapi, uvicorn, websockets" 2>/dev/null || {
+python3 -c "
+import fastapi, uvicorn, websockets, httpx, bs4, certifi, fake_useragent, typing_extensions
+" 2>/dev/null || {
     echo "❌ কিছু dependency missing। ইনস্টল করা হচ্ছে..."
-    pip3 install -r requirements.txt
+    # FIX (DEEP-AUDIT-2026-07-26 / F-19-43): use `python3 -m pip` instead of
+    # bare `pip3` — `pip3` is deprecated on Debian/Ubuntu with Python 3.11+
+    # and may not exist on macOS without explicit install (A-10 PROBLEM 30).
+    python3 -m pip install -r requirements.txt
 }
 
 # ── সার্ভার শুরু ─────────────────────────────────────────────────────────

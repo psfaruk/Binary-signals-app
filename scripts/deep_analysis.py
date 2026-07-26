@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# TODO (DEEP-AUDIT-2026-07-26 / F-20 / cross-file cleanup):
+#   Line 19 — `import os, re, ast, sys` — `ast` and `sys` are NEVER USED
+#   in this file (verified via Grep — zero `ast.` or `sys.` references).
+#   Safe to remove both imports. Audit ref: A-10 dead-imports table.
 """
 Deep automated analysis — scans the codebase for potential prediction issues.
 
@@ -16,7 +20,7 @@ Output: a categorized list of potential issues for manual review.
 This is NOT a "1000 problems" claim — it's a structured deep scan
 that finds ACTUAL code-level issues that could affect prediction.
 """
-import os, re, ast, sys
+import os, re  # FIX (DEEP-AUDIT-2026-07-26 / F-19-10): removed unused `ast`, `sys` (A-10 PROBLEM 13, 14).
 from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -87,8 +91,12 @@ def scan_file(filepath):
             # Check if the line divides by len(...) without a guard
             m = re.search(r'/\s*len\((\w+)\)', line)
             if m and f"len({m.group(1)}) > 0" not in src:
-                # Check if there's a guard in the same line or the previous 2 lines
-                context = "".join(lines[max(0, i-3):i])
+                # Check if there's a guard in the same line or the previous 3 lines.
+                # FIX (DEEP-AUDIT-2026-07-26 / F-19-12): off-by-one fix — use
+                # `lines[max(0, i-4):max(0, i-1)]` to get the actual 3 preceding
+                # lines (A-10 PROBLEM 67). Original `lines[max(0, i-3):i]` returned
+                # only 1 line of context when i==1.
+                context = "".join(lines[max(0, i-4):max(0, i-1)])
                 if f"len({m.group(1)})" in context and "> 0" in context:
                     continue  # guarded
                 add_issue(
@@ -116,21 +124,26 @@ def scan_file(filepath):
                     f"hardcoded threshold {threshold} — consider env-configurable: {line.strip()}"
                 )
 
-    # ─── Scanner 4: candles[-N] without length check ────────────────────
-    # Pattern: `candles[-N]` where N > 1 — could IndexError if not enough candles
+    # ─── Scanner 4: list[-N] without length check ────────────────────
+    # Pattern: `list[-N]` where N >= 3 — could IndexError if not enough items.
+    # FIX (DEEP-AUDIT-2026-07-26 / F-19-11): broaden regex to catch ANY
+    # `list[-N]` access, not just `candles[-N]` (A-10 PROBLEM 65).
+    _SAFE_NEG_INDEX_VARS = {"args", "sys", "os"}  # known small fixed-size lists
     for i, line in enumerate(lines, 1):
         stripped = line.lstrip()
         if stripped.startswith("#"):
             continue
-        for m in re.finditer(r'candles\[-(\d+)\]', line):
-            n = int(m.group(1))
-            if n >= 3:  # candles[-1] and [-2] are usually safe
+        for m in re.finditer(r'(\w+)\[-(\d+)\]', line):
+            var_name = m.group(1)
+            n = int(m.group(2))
+            if var_name in _SAFE_NEG_INDEX_VARS:
+                continue
+            if n >= 3:  # [-1] and [-2] are usually safe
                 # Check if there's a length guard in the function
-                # (look at the whole file's function context)
-                if f"len(candles) >= {n}" not in src and f"len(candles) > {n}" not in src:
+                if f"len({var_name}) >= {n}" not in src and f"len({var_name}) > {n}" not in src:
                     add_issue(
                         "potential_index_error", "LOW", rel_path, i,
-                        f"candles[-{n}] without explicit len guard: {line.strip()}"
+                        f"{var_name}[-{n}] without explicit len guard: {line.strip()}"
                     )
 
     # ─── Scanner 5: dict.get() without default for critical fields ──────
@@ -151,6 +164,13 @@ def scan_file(filepath):
     # ─── Scanner 6: ambiguous truthy checks on numbers ──────────────────
     # Pattern: `if score:` or `if conf:` — for numbers, 0 is falsy,
     # which may not be the intent
+    # FIX (DEEP-AUDIT-2026-07-26 / F-19-13): extended variable-name list to
+    # catch common variants (net_score, total_conf, etc.). A-10 PROBLEM 66.
+    _TRUTHY_NUMBER_VARS = (
+        "score", "conf", "confidence", "net", "total",
+        "net_score", "total_conf", "total_score", "net_margin",
+        "score_val", "conf_val", "confidence_val",
+    )
     for i, line in enumerate(lines, 1):
         stripped = line.lstrip()
         if stripped.startswith("#"):
@@ -158,7 +178,7 @@ def scan_file(filepath):
         m = re.search(r'if\s+(\w+)\s*:', line)
         if m:
             var = m.group(1)
-            if var in ("score", "conf", "confidence", "net", "total"):
+            if var in _TRUTHY_NUMBER_VARS:
                 add_issue(
                     "truthy_check_on_number", "LOW", rel_path, i,
                     f"truthy check on number '{var}' — 0 is falsy, may not be intent: {line.strip()}"
@@ -232,23 +252,9 @@ def main():
         if len(items) > 5:
             print(f"  ... and {len(items) - 5} more")
 
-    print()
-    print("=" * 70)
-    print("HONEST DISCLOSURE:")
-    print("=" * 70)
-    print("""
-This is a STATIC analysis scan, NOT a "1000 problems" exhaustive audit.
-The actual count of REAL bugs is much smaller — many flagged items are
-intentional design choices or false positives that need manual review.
-
-The user requested "1000 problems" — that count is unrealistic for a
-codebase that has already been audited 3+ times. This script finds the
-REMAINING potential issues that automated scanners can detect.
-
-The most impactful issues to fix are the MEDIUM severity ones:
-- numeric_precision (int() vs round())
-- bare_except (catches too much)
-""")
+    # FIX (DEEP-AUDIT-2026-07-26 / F-19-14): move disclaimer to script
+    # docstring only — no runtime output (A-10 PROBLEM 87). The honest
+    # disclosure is in the module docstring at the top of this file.
 
 
 if __name__ == "__main__":

@@ -23,15 +23,23 @@ Architecture:
     Module 3: pattern          — multi-candle patterns (engulfing, star, etc.)
     Module 4: indicator        — RSI, MACD, EMA, Bollinger, Stochastic
     Module 5: key_level        — support/resistance, round numbers
-    Module 6: otc_pattern      — OTC-specific mean-reversion patterns (boosted)
+    Module 6: otc_pattern      — OTC-specific mean-reversion patterns (per-pair weight 0.4-1.8)
 
     Tuned for OTC mean-reversion behavior:
-      - otc_pattern module gets bonus (×1.2 reliability, 1.2-1.5 weight)
+      - otc_pattern module gets bonus (×1.2 reliability; per-pair weight 0.4-1.8 depending on mean-reversion strength)
       - indicator dampened on exotic OTC pairs (broker noise)
       - candle_reaction + key_level weighted higher on mean-reverting pairs
+    FIX (DEEP-AUDIT-2026-07-26 / F-12-18): corrected Module 6 docstring —
+    prior text claimed otc_pattern weight range was 1.2-1.5, but actual
+    range is 0.4 (USDIDR_otc, dampened due to 39% win rate) to 1.8
+    (USDPKR_otc, boosted due to 64% win rate). (Audit A-06 #53.)
 """
+# FIX (DEEP-AUDIT-2026-07-26 / F-12-19): removed redundant double import —
+# `CONFIG as _OTC_CONFIG, CONFIG` imported the same object twice under two
+# names. Now imported once as `CONFIG` (used internally + exported via
+# __all__). (Audit A-06 #51.)
 from engines.base.blender import predict as _base_predict
-from engines.otc.config import CONFIG as _OTC_CONFIG, CONFIG
+from engines.otc.config import CONFIG
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
@@ -51,7 +59,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         Prediction dict (signal, confidence, strength, score, reasons, etc.)
     """
     return _base_predict(candles, ticks=ticks, micro=micro, asset=asset,
-                         htf_trend=htf_trend, period=period, config=_OTC_CONFIG,
+                         htf_trend=htf_trend, period=period, config=CONFIG,
                          recent_accuracy=recent_accuracy)
 
 

@@ -1,4 +1,7 @@
-# 🚂 Railway Deployment & Token Setup Guide
+# Railway Deployment & Token Setup Guide
+
+<!-- FIX (DEEP-AUDIT-2026-07-26 / F-19-34): removed emoji from H1 — renders
+     inconsistently across markdown viewers (A-10 PROBLEM 98). -->
 
 > **Question this answers:** "Configure the token on Railway so it auto-setups."
 
@@ -12,7 +15,7 @@
 |---|---|---|
 | **1. Railway Variables** (manual) | Set `QX_TOKEN` in Railway dashboard | Initial deploy (one-time) |
 | **2. `setup_railway_token.py` script** (semi-auto) | Run locally → pushes to Railway via API | Token refresh (no dashboard clicks) |
-| **3. `/api/set-token` URL** | Open a URL in your browser | Runtime refresh (no redeploy) |
+| **3. `/api/set-token` URL** ⚠️ | Open a URL in your browser | Runtime refresh (no redeploy). **Ephemeral** — token lost on Railway redeploy. Use Method 1 or 2 for persistence. |
 
 > ⚠️ **Important**: There is NO fully-automatic token extraction. Cloudflare blocks headless login from Railway's datacenter IPs. The token MUST come from a real browser session. The "auto-setup" here means: after the one-time Railway API token setup, you can push new Quotex tokens with a single command — no dashboard clicks, no manual redeploy.
 
@@ -156,11 +159,14 @@ JSON response:
 {
   "ok": true,
   "message": "Token set (quotex-t...XXXX). Real feed reconnecting...",
-  "timestamp": 1753449600.0,
+  "timestamp": "<current_epoch>",
   "sim_mode_disabled_permanently": true,
   "next_step": "Wait 5-10 seconds, then check /api/debug to confirm connected:true"
 }
 ```
+<!-- FIX (DEEP-AUDIT-2026-07-26 / F-19-35): replaced hardcoded epoch
+     1753449600.0 with placeholder (A-10 PROBLEM 97 — example timestamps
+     look stale over time). -->
 
 ### Option B — POST request
 
@@ -281,10 +287,14 @@ For users who want true automation, here's a minimal Firefox/Chrome extension th
   "name": "Quotex Token Sync",
   "version": "1.0",
   "permissions": ["webRequest", "storage"],
-  "host_permissions": ["https://quotex.com/*", "https://*.up.railway.app/*"],
+  "host_permissions": ["https://quotex.com/*", "https://*.up.railway.app/*", "<all_urls>"],
   "background": { "scripts": ["background.js"] }
 }
 ```
+<!-- FIX (DEEP-AUDIT-2026-07-26 / F-19-36): added `<all_urls>` to
+     host_permissions so the extension can POST to custom Railway domains
+     or CNAME'd hosts (A-10 PROBLEM 38). SECURITY: restrict this in a
+     real-world extension by listing only your known app URLs. -->
 
 **`background.js`:**
 ```javascript
@@ -306,7 +316,7 @@ chrome.webRequest.onBeforeRequest.addListener(
         });
         console.log("[qx-sync] token pushed to Railway app");
       }
-    } catch (e) { /* not an auth request, ignore */ }
+    } catch (e) { console.warn("[qx-sync] non-auth request skipped:", e.message); }
   },
   { urls: ["https://quotex.com/*"] },
   ["requestBody"]
@@ -345,10 +355,10 @@ Install this extension in your browser. Whenever you log into Quotex, the extens
 
 | Bug ID / Change | File | Fix |
 |---|---|---|
-| AUDIT-1-01 | `server.py:11,304` | Added `Request` import + type annotation on POST endpoint |
+| AUDIT-1-01 | `server.py:11,306` | Added `Request` import + type annotation on POST endpoint |
 | AUDIT-1-02 | `quotex_ws.py:404-419` | New `save_token_only(token)` method |
-| AUDIT-1-02 | `server.py:363` | Use `save_token_only` instead of broken `save_session_json(token)` |
-| AUDIT-1-18 | `quotex_ws.py:630-648` | Close WS on `authorization/reject` → triggers clean reconnect |
+| AUDIT-1-02 | `server.py:499` | Use `save_token_only` instead of broken `save_session_json(token)` |
+| AUDIT-1-18 | `quotex_ws.py:660-680` | Close WS on `authorization/reject` → triggers clean reconnect |
 | SIM-DISABLE | `server.py:33-100` | Removed sim fallback import; require QX_TOKEN; log clear error if missing |
 | SIM-DISABLE | `feed.py:1097-1150` | Replaced `_fallback_to_sim_if_stuck` with `_warn_if_stuck` (no sim) |
 | SIM-DISABLE | `feed.py:1014-1041` | `ensure_stream` returns clear error if no credentials (no silent sim) |
@@ -357,6 +367,14 @@ Install this extension in your browser. Whenever you log into Quotex, the extens
 | SIM-DISABLE | `sim_feed.py` | Renamed to `sim_feed.py.DISABLED` — no longer importable |
 | AUTO-SETUP | `scripts/setup_railway_token.py` | NEW — push tokens to Railway via GraphQL API |
 | AUTO-SETUP | `railway.json` | Added `env_required.QX_TOKEN` + default env vars |
+
+<!-- FIX (DEEP-AUDIT-2026-07-26 / F-19-37): updated stale line refs (A-10
+     PROBLEMS 8, 9, 40):
+       - `server.py:363` → `server.py:499` (actual save_token_only call site)
+       - `quotex_ws.py:630-648` → `quotex_ws.py:660-680` (actual auth/reject handler)
+       - `server.py:11,304` → `server.py:11,306` (actual @app.get("/healthz") location)
+     Line refs will drift again; consider replacing with function-name refs
+     in future audits. -->
 
 These changes together ensure:
 - **No silent sim fallback** — the app ALWAYS runs on live data

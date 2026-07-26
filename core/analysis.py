@@ -1,3 +1,20 @@
+# TODO (DEEP-AUDIT-2026-07-26 / F-20 / cross-file cleanup):
+#   `_atr()` (line 34) is a DUPLICATE of `feed._atr` (line ~247). Both compute
+#   True Range ATR but diverge on edge cases:
+#     - core/analysis.py returns flat 0.0001 for len<2 and has no price-relative
+#       fallback (assumes forex-like scaling).
+#     - feed.py handles single-candle case (len<2) and adds a price-relative
+#       fallback (`ref * 0.0001` when avg <= 0) — richer impl.
+#   Possible divergence bug for JPY pairs (price ~150) and high-priced assets
+#   where the flat 0.0001 floor understates volatility by 100x. Consolidate:
+#   port the feed.py edge-case handling into this canonical implementation,
+#   then replace `feed._atr` with `from core.analysis import _atr`.
+#   Audit ref: A-10 cross-file duplicate definitions table.
+#
+#   `_ema()` (line 55) was ALSO duplicated in `engines/base/modules/indicator.py`
+#   — but F-09 has already deduplicated it (indicator.py now imports _ema
+#   from core.analysis). Verified via Grep: `engines/base/modules/indicator.py:24`
+#   contains `from core.analysis import _ema`. No further action needed on _ema.
 """
 core/analysis.py — Pure-function technical analysis library.
 
@@ -116,21 +133,18 @@ def detect_candle_patterns(candles):
     b3 = _body(c3)
     r1, r2, r3 = _range(c1), _range(c2), _range(c3)
 
-    # Compute vol_pct for vol-scaled thresholds (BUG-Q fix).
-    # NOTE: BUG-Q fix was tuned for OTC. Real engine backtest showed it
-    # hurt accuracy, so we keep the original flat 0.65 for real markets.
-    # The detect_candle_patterns function doesn't know which engine is
-    # calling it, so we use a heuristic: if the price magnitude suggests
-    # JPY pairs or the typical OTC price range, apply vol-scaled; else
-    # use flat 0.65. This is imperfect — a proper fix would pass the
-    # engine category as an argument.
-    atr_now = _atr(candles[-10:] if len(candles) >= 10 else candles, 10)
+    # Compute vol_pct for vol-scaled exhaust thresholds (used below at the
+    # 3-Soldiers / 3-Crows exhaustion check).
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-03): removed stale 14-line comment block
+    # that described an unimplemented JPY-vs-forex heuristic ("use flat 0.65 for
+    # real markets") — the actual code always vol-scales exhaust_ratio via
+    # the conditional below (high/low/normal vol → 0.75 / 0.55 / 0.65). Also
+    # removed the dead `exhaust_ratio = 0.65` default that was always
+    # overwritten by that conditional, and removed redundant pre-slicing of
+    # `candles[-10:]` (the `_atr` helper already slices internally).
+    atr_now = _atr(candles, 10)
     atr_hist = _atr(candles, 20)
     vol_pct = (atr_now / atr_hist) if atr_hist > 0 else 1.0
-    # Heuristic: OTC pairs often have 5-digit prices (1.0850); real JPY
-    # pairs have 3-digit (161.25). This is unreliable — better to pass
-    # category explicitly. For now, use flat 0.65 (safe default).
-    exhaust_ratio = 0.65
 
     # ── 1. Engulfing (2-candle) — TIGHTENED (ultra-deep, 2026-07-20)
     # Backtest showed 48.1% win rate on 4367 signals — too loose.
@@ -301,16 +315,10 @@ def detect_candle_patterns(candles):
             })
 
     # ── 7. Inside Bar Breakout (3-candle) — DISABLED (ultra-deep, 2026-07-20)
-    # Backtest showed 47% win rate — inside bar breakouts on 1m candles are
-    # mostly false breakouts. Real market needs larger timeframe for this.
-    # if len(candles) >= 4:
-    #     c0 = candles[-4] if len(candles) >= 4 else candles[-3]
-    #     if (c2["high"] <= c1["high"] and c2["low"] >= c1["low"]
-    #             and _range(c2) < _range(c1) * 0.7):
-    #         if c3["close"] > c1["high"]:
-    #             patterns.append({"name": "INSIDE_BREAK_UP", "direction": "CALL", "score": 2, "reason": "Inside Bar breakout up → CALL"})
-    #         elif c3["close"] < c1["low"]:
-    #             patterns.append({"name": "INSIDE_BREAK_DN", "direction": "PUT", "score": 2, "reason": "Inside Bar breakout down → PUT"})
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-04): removed 8 lines of commented-out
+    # Inside Bar Breakout pattern code (backtest showed 47% win rate on 1m
+    # candles — mostly false breakouts). See git history if resurrection
+    # is needed; kept the section header so the numbering (1..8) stays stable.
 
     # ── 8. Enhanced Hammer / Shooting Star ───────────────────────────────
     # Single candle with very long wick (more extreme than wick_rejection)
@@ -460,8 +468,11 @@ def classify_market_regime(candles, lookback=30):
             prev_swing_low = c["low"]
 
     # Volatility: current short-term ATR vs longer-term ATR
-    atr_now = _atr(candles[-10:] if len(candles) >= 10 else candles, 10)
-    atr_hist = _atr(candles, 20)
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-16): removed redundant `_atr(candles, 20)`
+    # call (already computed as `atr_val` at line 395 above) and removed the
+    # pre-slicing of `candles[-10:]` (the `_atr` helper handles it internally).
+    atr_now = _atr(candles, 10)
+    atr_hist = atr_val
     vol_pct = (atr_now / atr_hist) if atr_hist > 0 else 1.0
 
     # Determine regime — VOLATILE takes priority (noise dominates everything)
@@ -550,7 +561,8 @@ def check_level_confluence(candles, levels, atr):
     A level is "near" if the close is within 30% of ATR from it.
     The action is classified as:
       - "bounce": price approached the level but didn't break through
-      - "breakout": price closed beyond the level (true breakout)
+      - "breakout": price closed ABOVE a resistance level (true bullish breakout)
+      - "breakdown": price closed BELOW a support level (true bearish breakdown)
       - "wick_rejection": intrabar wick crossed the level but close pulled
         back — a fakeout / rejection (NOT a real breakout)
 
@@ -575,7 +587,7 @@ def check_level_confluence(candles, levels, atr):
         near_level: bool
         level_type: "support" | "resistance" | None
         level_price: float | None
-        action: "bounce" | "breakout" | "wick_rejection" | None
+        action: "bounce" | "breakout" | "breakdown" | "wick_rejection" | None
         distance_atr: float (how far from the level, in ATR units)
     """
     if not levels or not candles or len(candles) < 2 or atr <= 0:
@@ -621,8 +633,15 @@ def check_level_confluence(candles, levels, atr):
             action = "bounce"
     else:  # support
         # True breakdown: close pushed BELOW the support level.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-06-06): use distinct "breakdown" for
+        # support breakdown (was conflated with "breakout" for resistance
+        # breakout, making downstream direction-switching logic ambiguous —
+        # both looked like "breakout" even though one is bullish and the other
+        # bearish). Downstream consumer key_level.py:75 currently no-ops both
+        # (breakouts intentionally disabled at 1m), so behavior is unchanged;
+        # the API now correctly distinguishes the two directions.
         if close < level_price:
-            action = "breakout"  # "breakout" here means breakdown
+            action = "breakdown"
         # Wick rejection: intrabar low poked below the level but close
         # pulled back above — a failed breakdown (bullish rejection).
         elif low < level_price and close > level_price:
@@ -688,6 +707,9 @@ def compute_statistical_edge(candles, lookback=50):
     # signals from otc_pattern Signal 3. Sample variance is the correct
     # estimator for a finite sample drawn from an unknown distribution.
     _n_body = len(bodies)
+    # The `if _n_body > 1 else 1` guard is unreachable in practice (function
+    # early-returns when len(candles) < 10, so prior_for_stats has >= 9 elems),
+    # but kept as a defensive fallback for safety against future refactors.
     var_body = (sum((b - mean_body) ** 2 for b in bodies) / (_n_body - 1)
                 if _n_body > 1 else 1)
     std_body = math.sqrt(var_body) if var_body > 0 else 1
@@ -702,8 +724,12 @@ def compute_statistical_edge(candles, lookback=50):
     last_body = _abs_body(last)
     last_range = _range(last)
 
-    z_body = (last_body - mean_body) / std_body if std_body > 0 else 0
-    z_range = (last_range - mean_range) / std_range if std_range > 0 else 0
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-05): removed dead `if std_body > 0
+    # else 0` / `if std_range > 0 else 0` branches — the fallback `else 1`
+    # above guarantees std_body / std_range >= 1, so the branches were always
+    # True. Equivalent behavior (z_body / z_range computed unconditionally).
+    z_body = (last_body - mean_body) / std_body
+    z_range = (last_range - mean_range) / std_range
 
     # Close percentile: where does the close sit relative to recent closes?
     # FIX (Bug 24, deep audit 2026-07-19): previously included the current
@@ -736,9 +762,16 @@ def compute_statistical_edge(candles, lookback=50):
     else:
         # Measure the CURRENT streak (looking backward from the last candle).
         # This is the streak whose rarity we want to assess.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-06-02): the streak loop was walking
+        # the FULL candle list (`candles`) instead of `recent`, ignoring the
+        # `lookback` parameter. Same bug in the historical streaks window
+        # (`candles[:cutoff]` instead of `recent[:cutoff]`). Both now use
+        # `recent`, so streak rarity is computed only over the requested
+        # lookback — consistent with z_body / close_percentile which already
+        # restrict to `recent`.
         streak = 1
-        for i in range(len(candles) - 2, -1, -1):
-            b = _body(candles[i])
+        for i in range(len(recent) - 2, -1, -1):
+            b = _body(recent[i])
             d = 1 if b > 0 else (-1 if b < 0 else 0)
             if d == direction:
                 streak += 1
@@ -754,13 +787,13 @@ def compute_statistical_edge(candles, lookback=50):
         # rarity that suppresses the reversal boost even though the
         # streak IS historically rare.
         #
-        # Now we compute historical streaks from `candles[:-len_of_current_streak]`
+        # Now we compute historical streaks from `recent[:-len_of_current_streak]`
         # — the window BEFORE the current streak started. The current streak
         # is no longer self-influencing. If the current streak is the
         # longest on record, rarity will be 0 (no historical streak >= it),
         # which is the correct "this is unprecedented" signal.
-        cutoff = len(candles) - streak  # index where current streak started
-        historical = candles[:max(0, cutoff)]
+        cutoff = len(recent) - streak  # index where current streak started
+        historical = recent[:max(0, cutoff)]
         all_streaks = []
         cur_dir = 0
         cur_len = 0
@@ -815,7 +848,9 @@ def round_level(price):
     """
     if price <= 0:
         return None, 0, "NONE"
-    magnitude = math.floor(math.log10(abs(price)))  # 0 for 1.05, 2 for 150
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-09): removed redundant `abs(price)` —
+    # the early-return above guarantees `price > 0`, so `abs(price) == price`.
+    magnitude = math.floor(math.log10(price))  # 0 for 1.05, 2 for 150
     big_step = 10 ** (magnitude - 1)   # 0.1 for forex, 10 for JPY, 1000 for BTC
     mid_step = 10 ** (magnitude - 2)   # one digit finer
     big = round(price / big_step) * big_step
@@ -828,6 +863,14 @@ def round_level(price):
         return big, d_big, "BIG"
     if d_mid < tol_mid:
         return mid, d_mid, "MID"
+    # FIX (DEEP-AUDIT-2026-07-26 / F-06-08): added independent BIG check — the
+    # original `if d_big < d_mid and d_big < tol_big` test required BIG to be
+    # CLOSER than MID, so when BIG was within its tolerance but FARTHER than
+    # MID (and MID was outside its own tolerance), the function returned NONE,
+    # dropping a legitimate BIG round-level detection. Now BIG is returned
+    # whenever it is within `tol_big`, regardless of MID distance.
+    if d_big < tol_big:
+        return big, d_big, "BIG"
     return None, 0, "NONE"
 
 

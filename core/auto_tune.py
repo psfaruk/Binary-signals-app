@@ -7,35 +7,66 @@ This module reads per-module win rates from signal_log and adjusts
 the engine's DEFAULT_WEIGHTS accordingly. It runs periodically
 (every 100 graded signals) and updates weights in real-time.
 
-TUNING RULES:
-  - Win rate >= 55%  → weight × 1.3 (BOOST)
-  - Win rate 50-54%  → weight × 1.0 (KEEP)
-  - Win rate 45-49%  → weight × 0.8 (DAMPEN)
-  - Win rate < 45%   → weight × 0.5 (SEVERE DAMPEN)
-  - Win rate < 35%   → weight × 0.1 (EFFECTIVELY DISABLED)
+TUNING RULES (display bucketing only — actual weight is continuous):
+  - Win rate >= 55%  → status BOOST  (continuous weight ≈ ×1.3)
+  - Win rate 50-54%  → status KEEP   (continuous weight ≈ ×1.0)
+  - Win rate 45-49%  → status DAMPEN (continuous weight ≈ ×0.8)
+  - Win rate < 45%   → status SEVERE (continuous weight ≈ ×0.5)
+  - Win rate < 35%   → status DISABLE (continuous weight ≈ ×0.1)
 
-The tuning is CONSERVATIVE — it blends the tuned weight with the
-static weight using a 70/30 prior (70% static, 30% tuned) to avoid
-overreacting to small sample sizes. As sample count grows, the blend
-shifts toward the tuned weight.
+The tuning is sample-size-adaptive — the tuned weight is blended with
+the static weight using a blend factor that grows from 0.3 at
+MIN_SAMPLES (20) to 0.9 at 200+ samples. Small samples preserve the
+static prior; large samples let the live win rate dominate.
 
 MINIMUM SAMPLES: 20 graded signals per module before tuning kicks in.
 Below that, the static weight is used unchanged.
+
+FIX (DEEP-AUDIT-2026-07-26 / F-08-18): the docstring previously claimed
+a fixed 70/30 prior — that was stale (the code switched to adaptive
+blend on 2026-07-25). Updated to reflect the current behaviour
+(A-04 problem 58).
 """
-import json
-import os
 import sqlite3
-import time
-from collections import defaultdict
+import threading
 
-DB_PATH = os.environ.get("DB_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "signals.db"))
+from core.constants import (
+    AUTO_TUNE_MAX_ROWS,
+    AUTO_TUNE_MAX_WEIGHT,
+    AUTO_TUNE_MIN_SAMPLES,
+    AUTO_TUNE_MIN_WEIGHT,
+    AUTO_TUNE_WEIGHT_CHANGE_THRESHOLD,
+    DB_PATH,
+    MODULE_NAMES,
+)
+from core.stats import parse_module_direction, parse_reasons
 
-# FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-24): make the win-rate query LIMIT
-# env-configurable so operators can widen the sample window on large DBs.
-# The old hardcoded 2000 over-weighted recent performance after the DB
-# grew past ~100k signals (only the latest 2% was sampled).
-_AUTO_TUNE_MAX_ROWS = int(os.environ.get("AUTO_TUNE_MAX_ROWS", "5000"))
+# FIX (DEEP-AUDIT-2026-07-26 / F-08-19): remove dead imports `time`,
+# `defaultdict`, `json`, and `os` — none of these names are referenced
+# anywhere in this file after switching to the shared `parse_reasons`
+# helper from `core.stats` (A-04 problems 48, 49, plus two newly-dead
+# imports exposed by extracting the JSON parsing).
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-08-20): `MIN_SAMPLES`, `_MAX_WEIGHT`,
+# `_MIN_WEIGHT`, and the change-detection threshold are now sourced from
+# `core.constants` (env-configurable, A-04 problems 50 + 62). The
+# local aliases below preserve backward compatibility for any caller
+# that imports them by name.
+MIN_SAMPLES = AUTO_TUNE_MIN_SAMPLES
+_MAX_WEIGHT = AUTO_TUNE_MAX_WEIGHT
+_MIN_WEIGHT = AUTO_TUNE_MIN_WEIGHT
+_WEIGHT_CHANGE_THRESHOLD = AUTO_TUNE_WEIGHT_CHANGE_THRESHOLD
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-08-21): serialise the in-place mutation
+# of the engine `DEFAULT_WEIGHTS` dicts. The previous code had no lock
+# — two concurrent `apply_tuned_weights_to_engines` calls (e.g. from
+# the feed loop + a manual `/api/auto-tune/apply` POST) could interleave
+# reads and writes of the same dict, leaving it in a half-updated state
+# (A-04 problem 8 / cross-cutting thread-safety theme).
+_apply_lock = threading.Lock()
+
+# Sample window (rows read from signal_log). Env-configurable via constants.
+_AUTO_TUNE_MAX_ROWS = AUTO_TUNE_MAX_ROWS
 
 # Static (baseline) weights — the starting point. Auto-tune adjusts from here.
 STATIC_WEIGHTS_OTC = {
@@ -56,23 +87,20 @@ STATIC_WEIGHTS_REAL = {
     "trend_follow":    0.1,
 }
 
-MIN_SAMPLES = 20  # need at least 20 graded signals per module to tune
-_MAX_WEIGHT = 1.5  # never boost above this
-_MIN_WEIGHT = 0.1  # never dampen below this (keep module alive for display)
-
 
 def _get_module_win_rates() -> dict:
     """Read per-module win rates from signal_log across all pairs.
 
     Returns: {module_name: {correct, total, win_rate}}
     """
-    try:
-        from core.constants import MODULE_NAMES
-    except ImportError:
-        MODULE_NAMES = (
-            "candle_reaction", "running_tick", "pattern",
-            "indicator", "key_level", "otc_pattern", "trend_follow",
-        )
+    # FIX (DEEP-AUDIT-2026-07-26 / F-08-22): drop the duplicate
+    # `MODULE_NAMES` fallback tuple. The constants module is already
+    # imported at module load (top of file) — if that import succeeded,
+    # the local try/except was dead code (it always hit the `from core.
+    # constants import MODULE_NAMES` branch). If the import failed, the
+    # module would have crashed at load time, never reaching this
+    # function. The hardcoded tuple was a verbatim copy that could drift
+    # out of sync with `core.constants.MODULE_NAMES` (A-04 problem 51).
 
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-23): use db._conn() to inherit
     # WAL mode + synchronous=NORMAL. A raw non-WAL reader on a WAL-mode DB
@@ -80,10 +108,16 @@ def _get_module_win_rates() -> dict:
     # apply_tuned_weights_to_engines call (every ~100 graded signals) blocks
     # writes for 100ms+ on slow disks. Falls back to raw connect if db
     # module isn't importable.
+    #
+    # FIX (DEEP-AUDIT-2026-07-26 / F-08-23): catch ImportError only — the
+    # old broad `except Exception` swallowed genuine failures from
+    # `db._conn()` (e.g.OperationalError on a locked DB) and silently
+    # fell back to a non-WAL connection, causing lock contention with
+    # the feed's WAL writers (A-04 problem 52).
     try:
         import db as _db
         conn = _db._conn()
-    except Exception:
+    except ImportError:
         conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     try:
@@ -108,53 +142,31 @@ def _get_module_win_rates() -> dict:
     for row in rows:
         final_signal = row["signal"]
         accuracy = row["accuracy"]
-        reasons_raw = row["reasons"] or "[]"
-        try:
-            reasons = json.loads(reasons_raw) if isinstance(reasons_raw, str) else reasons_raw
-        except (ValueError, TypeError):
-            reasons = []
-        if not isinstance(reasons, list):
-            reasons = []
+        # FIX (DEEP-AUDIT-2026-07-26 / F-08-24): use the shared
+        # `parse_reasons` + `parse_module_direction` helpers from
+        # `core.stats`. The old code had a verbatim copy of the same
+        # parsing logic — including the same LIVE-FIX-2-25 comment block
+        # — and both files drifted in lockstep (A-04 problem 53). The
+        # shared helper also normalises ASCII arrows (`->`, `=>`) so
+        # reasons emitted by older engines go through the same
+        # tail-based detection path (A-04 problem 54), drops the
+        # redundant `tail == "CALL"` / `tail == "PUT"` clauses
+        # (A-04 problem 55), and updates the stale "PUT-first scan"
+        # comment that contradicted the CALL-first code path
+        # (A-04 problem 56).
+        reasons = parse_reasons(row["reasons"] or "[]")
 
         for reason in reasons:
             reason_str = str(reason)
-            if not reason_str.startswith("["):
+            module, module_dir = parse_module_direction(reason_str, MODULE_NAMES)
+            if module is None or module_dir is None:
                 continue
-            end_bracket = reason_str.find("]")
-            if end_bracket == -1:
-                continue
-            module = reason_str[1:end_bracket].strip()
-            if module not in MODULE_NAMES:
-                continue
-            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-25): parse direction
-            # from the END of the reason (after the final "→") rather than
-            # substring-scanning the whole string. The old logic checked
-            # PUT/BEAR/SELLER BEFORE CALL/BULL/BUYER, so a reason mentioning
-            # BOTH (e.g. "[running_tick] seller pressure easing, buyer taking
-            # over → CALL") was misclassified as PUT. This corrupted per-
-            # module win rates for modules whose reasons naturally mention
-            # both directions.
-            #
-            # Strategy: find the final arrow in the reason and look at the
-            # trailing token. If neither matches, fall back to the legacy
-            # scan (still PUT-first, but only for reasons with no arrow).
-            tail = reason_str.rsplit("→", 1)[-1].strip().upper() if "→" in reason_str else ""
-            if tail.endswith("CALL") or " CALL" in tail or tail == "CALL":
-                module_dir = "CALL"
-            elif tail.endswith("PUT") or " PUT" in tail or tail == "PUT":
-                module_dir = "PUT"
-            else:
-                # Legacy fallback: PUT-first scan (only used when no arrow present).
-                upper = reason_str.upper()
-                if "CALL" in upper or "BULL" in upper or "BUYER" in upper:
-                    module_dir = "CALL"
-                elif "PUT" in upper or "BEAR" in upper or "SELLER" in upper:
-                    module_dir = "PUT"
-                else:
-                    continue
 
-            if accuracy not in ("correct", "wrong"):
-                continue
+            # FIX (DEEP-AUDIT-2026-07-26 / F-08-25): drop the dead
+            # `if accuracy not in ("correct", "wrong"): continue` check
+            # — the SQL WHERE clause already filters by
+            # `accuracy IN ('correct','wrong')`, so the check never fires
+            # (A-04 problem 57).
 
             stats[module]["total"] += 1
             if module_dir == final_signal and accuracy == "correct":
@@ -196,32 +208,43 @@ def _win_rate_to_weight(win_rate: float, static_weight: float,
     """
     # FIX (AUDIT-LIVE-2-15): continuous linear mapping.
     if win_rate <= 0.30:
-        tuned = 0.1
+        tuned = _MIN_WEIGHT
     elif win_rate >= 0.70:
-        tuned = 1.5
+        tuned = _MAX_WEIGHT
     else:
-        tuned = 0.1 + (win_rate - 0.30) / 0.40 * (1.5 - 0.1)
+        tuned = _MIN_WEIGHT + (win_rate - 0.30) / 0.40 * (_MAX_WEIGHT - _MIN_WEIGHT)
 
     # FIX (AUDIT-2-21): adaptive blend. tuned_weight_blend goes from 0.3 at
     # MIN_SAMPLES (20) to 0.9 at 200+ samples. A 0% win-rate module with
     # 200+ samples now gets blended = 0.1*static + 0.9*0.1 = ~0.22 (clamped to
     # _MIN_WEIGHT 0.1) instead of the old 0.94.
-    if total is None or total <= 0:
-        tuned_weight_blend = 0.3
-    else:
-        _N_REF_MAX = 200  # sample count at which tuned weight dominates (90%).
-        tuned_weight_blend = min(0.9, 0.3 + 0.6 * max(0, total - MIN_SAMPLES) / max(1, _N_REF_MAX - MIN_SAMPLES))
+    #
+    # FIX (DEEP-AUDIT-2026-07-26 / F-08-26): drop the dead `total is None or
+    # total <= 0` branch — `compute_tuned_weights` only calls this helper
+    # when `total >= MIN_SAMPLES` (>= 20), so the branch was unreachable
+    # (A-04 problem 59).
+    _N_REF_MAX = 200  # sample count at which tuned weight dominates (90%).
+    tuned_weight_blend = min(
+        0.9,
+        0.3 + 0.6 * max(0, total - MIN_SAMPLES) / max(1, _N_REF_MAX - MIN_SAMPLES),
+    )
     blended = (1 - tuned_weight_blend) * static_weight + tuned_weight_blend * tuned
 
     # Clamp
     return max(_MIN_WEIGHT, min(_MAX_WEIGHT, blended))
 
 
-def compute_tuned_weights(engine: str = "otc") -> dict:
+def compute_tuned_weights(engine: str = "otc", win_rates: dict = None) -> dict:
     """Compute auto-tuned weights for an engine.
 
     Args:
         engine: "otc" or "real"
+        win_rates: optional pre-computed win-rate dict (output of
+            `_get_module_win_rates`). When provided, skips the DB read —
+            `get_tuning_report` and `apply_tuned_weights_to_engines` both
+            need win rates for BOTH engines, so computing them once and
+            passing them in avoids 2 redundant DB round-trips per call
+            (A-04 problem 60).
 
     Returns:
         {module_name: tuned_weight}
@@ -231,7 +254,11 @@ def compute_tuned_weights(engine: str = "otc") -> dict:
     else:
         static = STATIC_WEIGHTS_OTC
 
-    win_rates = _get_module_win_rates()
+    # FIX (DEEP-AUDIT-2026-07-26 / F-08-27): accept a pre-computed
+    # `win_rates` dict so callers that need both engines' tuned weights
+    # in one go don't trigger 3 DB round-trips (A-04 problem 60).
+    if win_rates is None:
+        win_rates = _get_module_win_rates()
 
     tuned = {}
     for module, static_w in static.items():
@@ -251,9 +278,14 @@ def compute_tuned_weights(engine: str = "otc") -> dict:
 
 def get_tuning_report() -> dict:
     """Generate a human-readable tuning report for /api/auto-tune endpoint."""
+    # FIX (DEEP-AUDIT-2026-07-26 / F-08-28): compute `win_rates` ONCE and
+    # pass it into both `compute_tuned_weights` calls. The old code
+    # called `_get_module_win_rates` 3 times per report (once here, once
+    # inside each `compute_tuned_weights` call), causing 3 DB round-trips
+    # per `/api/auto-tune` request (A-04 problem 60).
     win_rates = _get_module_win_rates()
-    tuned_otc = compute_tuned_weights("otc")
-    tuned_real = compute_tuned_weights("real")
+    tuned_otc = compute_tuned_weights("otc", win_rates=win_rates)
+    tuned_real = compute_tuned_weights("real", win_rates=win_rates)
 
     report = {
         "win_rates": {},
@@ -282,11 +314,20 @@ def get_tuning_report() -> dict:
         else:
             status = "NO_DATA"
             wr_display = None
+        # FIX (DEEP-AUDIT-2026-07-26 / F-08-29): expose the continuous
+        # tuned weight per module so operators can see the actual value
+        # being applied, not just the discrete status bucket. The status
+        # label is misleading without the underlying number — e.g. a 54.9%
+        # module shows "KEEP" but its weight is computed at 54.9% (not
+        # bucketed to 50%). Showing both lets operators reconcile the two
+        # (A-04 problem 61).
         report["win_rates"][module] = {
             "correct": stats.get("correct", 0),
             "total": wr_total,
             "win_rate": wr_display,
             "status": status,
+            "tuned_weight_otc": tuned_otc.get(module),
+            "tuned_weight_real": tuned_real.get(module),
         }
 
     return report
@@ -298,53 +339,92 @@ def apply_tuned_weights_to_engines():
     Called periodically (every 100 graded signals) from feed.py.
     Updates engines.otc.config.DEFAULT_WEIGHTS and
     engines.real.config.DEFAULT_WEIGHTS in-place.
+
+    Returns a dict ``{"otc": ..., "real": ..., "cache_invalidated": bool}``
+    on success, or ``None`` on unexpected failure.
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-08-30): wrap the in-place mutation
+    of the engine `DEFAULT_WEIGHTS` dicts in `_apply_lock` so concurrent
+    invocations (e.g. feed loop + manual `/api/auto-tune/apply` POST)
+    can't interleave reads and writes of the same dict (A-04 problem 8).
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-08-31): use the env-configurable
+    `_WEIGHT_CHANGE_THRESHOLD` constant (sourced from
+    `core.constants`) instead of the hardcoded `0.01` (A-04 problem 62).
+
+    FIX (DEEP-AUDIT-2026-07-26 / F-08-32): surface the cache-invalidation
+    outcome in the return value. Previously the function returned
+    ``{"otc": ..., "real": ...}`` regardless of whether the per-pair
+    adapter cache was actually cleared — a silent failure left stale
+    cached weights for up to 60s while the API reported success
+    (A-04 problem 63).
     """
     try:
-        tuned_otc = compute_tuned_weights("otc")
-        tuned_real = compute_tuned_weights("real")
+        # FIX (F-08-28-style): single DB round-trip for both engines.
+        win_rates = _get_module_win_rates()
+        tuned_otc = compute_tuned_weights("otc", win_rates=win_rates)
+        tuned_real = compute_tuned_weights("real", win_rates=win_rates)
 
         from engines.otc.config import DEFAULT_WEIGHTS as _otc_w
         from engines.real.config import DEFAULT_WEIGHTS as _real_w
 
-        changed_otc = False
-        for m, w in tuned_otc.items():
-            if m in _otc_w and abs(_otc_w[m] - w) > 0.01:
-                _otc_w[m] = w
-                changed_otc = True
+        cache_invalidated = True
+        cache_error = None
 
-        changed_real = False
-        for m, w in tuned_real.items():
-            if m in _real_w and abs(_real_w[m] - w) > 0.01:
-                _real_w[m] = w
-                changed_real = True
+        # FIX (F-08-30): serialise the mutation so concurrent callers
+        # can't half-update either dict.
+        with _apply_lock:
+            changed_otc = False
+            for m, w in tuned_otc.items():
+                # FIX (F-08-31): use the env-configurable threshold.
+                if m in _otc_w and abs(_otc_w[m] - w) > _WEIGHT_CHANGE_THRESHOLD:
+                    _otc_w[m] = w
+                    changed_otc = True
 
-        if changed_otc or changed_real:
-            print(f"[auto_tune] weights updated — OTC: {tuned_otc}, Real: {tuned_real}")
-            # Also invalidate the per_pair adapter cache so new weights take effect.
-            #
-            # FIX (AUDIT-DEEP #09, 2026-07-23): the previous code called
-            # `_otc_adapter.invalidate_cache_all()` and
-            # `_real_adapter.invalidate_cache_all()` — but `PairWeightAdapter`
-            # only defines `invalidate_cache(asset=None, period=None)`, NOT
-            # `invalidate_cache_all()`. This raised AttributeError, which was
-            # swallowed by the surrounding `except Exception: pass`. The
-            # result: DEFAULT_WEIGHTS was updated in-place (line 252/258) but
-            # the per_pair adapter's `_adapt_cache` was NEVER cleared. The
-            # cache has a 60-second TTL (`_ADAPT_CACHE_TTL = 60`), so old
-            # weights persisted for up to 1 minute after auto-tune ran —
-            # during which predictions still used the STALE (pre-tune) weights.
-            # Now we call `invalidate_cache()` with no args, which clears the
-            # entire cache (the method already handles `asset=None` as
-            # "clear all" — see per_pair.py line 141-142).
-            try:
-                from engines.otc.config import weight_adapter as _otc_adapter
-                from engines.real.config import weight_adapter as _real_adapter
-                _otc_adapter.invalidate_cache()  # FIX: was invalidate_cache_all()
-                _real_adapter.invalidate_cache()  # FIX: was invalidate_cache_all()
-            except Exception as _cache_err:
-                print(f"[auto_tune] cache invalidation failed: {_cache_err}")
+            changed_real = False
+            for m, w in tuned_real.items():
+                if m in _real_w and abs(_real_w[m] - w) > _WEIGHT_CHANGE_THRESHOLD:
+                    _real_w[m] = w
+                    changed_real = True
 
-        return {"otc": tuned_otc, "real": tuned_real}
+            if changed_otc or changed_real:
+                print(f"[auto_tune] weights updated — OTC: {tuned_otc}, Real: {tuned_real}")
+                # Also invalidate the per_pair adapter cache so new weights take effect.
+                #
+                # FIX (AUDIT-DEEP #09, 2026-07-23): the previous code called
+                # `_otc_adapter.invalidate_cache_all()` and
+                # `_real_adapter.invalidate_cache_all()` — but `PairWeightAdapter`
+                # only defines `invalidate_cache(asset=None, period=None)`, NOT
+                # `invalidate_cache_all()`. This raised AttributeError, which was
+                # swallowed by the surrounding `except Exception: pass`. The
+                # result: DEFAULT_WEIGHTS was updated in-place (line 252/258) but
+                # the per_pair adapter's `_adapt_cache` was NEVER cleared. The
+                # cache has a 60-second TTL (`_ADAPT_CACHE_TTL = 60`), so old
+                # weights persisted for up to 1 minute after auto-tune ran —
+                # during which predictions still used the STALE (pre-tune) weights.
+                # Now we call `invalidate_cache()` with no args, which clears the
+                # entire cache (the method already handles `asset=None` as
+                # "clear all" — see per_pair.py line 141-142).
+                #
+                # FIX (F-08-32): record the cache-invalidation outcome so the
+                # caller knows whether the new weights will actually take
+                # effect on the next prediction.
+                try:
+                    from engines.otc.config import weight_adapter as _otc_adapter
+                    from engines.real.config import weight_adapter as _real_adapter
+                    _otc_adapter.invalidate_cache()  # FIX: was invalidate_cache_all()
+                    _real_adapter.invalidate_cache()  # FIX: was invalidate_cache_all()
+                except Exception as _cache_err:
+                    cache_invalidated = False
+                    cache_error = str(_cache_err)
+                    print(f"[auto_tune] cache invalidation failed: {_cache_err}")
+
+        return {
+            "otc": tuned_otc,
+            "real": tuned_real,
+            "cache_invalidated": cache_invalidated,
+            "cache_error": cache_error,
+        }
     except Exception as e:
         print(f"[auto_tune] error: {e}")
         return None

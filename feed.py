@@ -1,3 +1,19 @@
+# TODO (DEEP-AUDIT-2026-07-26 / F-20 / cross-file cleanup):
+#   `_atr()` at line ~247 is a DUPLICATE of `core/analysis._atr` (line 34).
+#   Both use the same True Range formula `max(high-low, |high-prev_close|,
+#   |low-prev_close|)` BUT diverge on edge cases:
+#     - feed.py handles single-candle case (len<2) and adds a price-relative
+#       fallback (`ref * 0.0001` when avg <= 0).
+#     - core/analysis.py returns flat 0.0001 immediately for len<2 and has
+#       no price-relative fallback (assumes forex-like scaling).
+#   Possible divergence bug for JPY pairs and high-priced assets where the
+#   flat 0.0001 floor understates volatility by 100x. Consolidate to a
+#   single shared helper in `core/analysis.py` (the richer feed.py impl
+#   should win). Audit ref: A-10 cross-file duplicate definitions table.
+#
+#   Also: `_AssetStream` (line ~522) and `QuotexFeed` (line ~651) are no
+#   longer duplicated — sim_feed.py.DISABLED was DELETED by orchestrator
+#   (worklog FINAL stage). Their twin definitions are gone.
 """
 Quotex live data feed — multi-asset concurrent version.
 
@@ -21,14 +37,30 @@ capacity/cooldown/staggering logic below, which exists specifically so many
 viewers sharing one personal Quotex account can't accidentally hammer Quotex
 into looking like a bot/signal-service and risking the account.
 """
-import asyncio
-import os
-import re
-import time
-from collections import deque
-from dataclasses import dataclass, field
-from core.analysis import _round_level, _key_levels
-import db as _db
+# FIX (DEEP-AUDIT-2026-07-26 / F-01-74): import Callable at module top
+# so the type annotation resolves. Was a string annotation that mypy
+# couldn't resolve.
+from collections.abc import Callable  # noqa: E402 — used in @dataclass below
+# FIX (DEEP-AUDIT-2026-07-26 / ORCHESTRATOR): re-add the standard-library
+# imports that F-01 agent inadvertently removed while consolidating other
+# imports. Without these, `os.environ`, `re.compile`, `json.dumps`,
+# `time.time`, `threading.Lock`, etc. all raise NameError at module import.
+from collections import deque  # noqa: E402
+from collections.abc import Callable  # noqa: E402 — used in @dataclass below
+# FIX (DEEP-AUDIT-2026-07-26 / ORCHESTRATOR): re-add the standard-library
+# imports that F-01 agent inadvertently removed while consolidating other
+# imports. Without these, `os.environ`, `re.compile`, `json.dumps`,
+# `time.time`, `threading.Lock`, etc. all raise NameError at module import.
+import os      # noqa: E402
+import re      # noqa: E402
+import json    # noqa: E402
+import time    # noqa: E402
+import threading  # noqa: E402
+import asyncio  # noqa: E402
+import logging  # noqa: E402
+import math     # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
+from typing import Any, Dict, List, Optional, Tuple  # noqa: E402
 
 # Minimum live 1-minute payout % for a forex pair to be tradeable in this
 # app — pairs below this are blocked from streaming outright (not just from
@@ -50,6 +82,10 @@ PAYOUT_FLOOR_OTC  = int(os.environ.get("QX_PAYOUT_FLOOR_OTC",
                                        os.environ.get("QX_PAYOUT_FLOOR", "85")))
 # FIX (DEAD-CODE-2026-07-21): removed `PAYOUT_FLOOR = PAYOUT_FLOOR_OTC`
 # legacy alias — no code reads it.
+# FIX (DEEP-AUDIT-2026-07-26 / F-01-61): documented that the env var
+# `QX_PAYOUT_FLOOR` (read above as the fallback default for
+# PAYOUT_FLOOR_OTC) is an alias for `QX_PAYOUT_FLOOR_OTC`. Operators
+# setting `QX_PAYOUT_FLOOR` are silently configuring the OTC floor.
 
 
 def _payout_floor_for(asset: str) -> int:
@@ -118,6 +154,46 @@ TRUNCATE_TO = int(os.environ.get("TRUNCATE_TO", "400"))
 # /api/subscribe snapshot and the on-join snapshot handed to a viewer joining
 # an already-running stream. Frontend charts render off this.
 SNAPSHOT_CANDLES = int(os.environ.get("SNAPSHOT_CANDLES", "300"))
+
+# FIX (DEEP-AUDIT-2026-07-26 / F-01-71..79, F-01-80..87): module-level
+# tunables for previously-hardcoded magic numbers in the EOC / stream loop /
+# microstructure paths. Centralized here so env overrides actually take
+# effect across ALL call sites (the in-loop os.environ reads were also
+# wasted I/O — 38 streams × N reads/min).
+RECENT_ACCURACY_N = int(os.environ.get("RECENT_ACCURACY_N", "50"))
+TIMER_GRACE = float(os.environ.get("TIMER_GRACE", "7.0"))
+PER_STREAM_STALE_SECS = int(os.environ.get("PER_STREAM_STALE_SECS", "60"))
+HOUSEKEEP_SECS = int(os.environ.get("HOUSEKEEP_SECS", "5"))
+WATCHDOG_INTERVAL = float(os.environ.get("WATCHDOG_INTERVAL", "30.0"))
+GLOBAL_STALE_SECS = int(os.environ.get("GLOBAL_STALE_SECS", "180"))
+# Loss-cluster cooldown: 5 wrong in a row → 30-min cooldown.
+LOSS_COOLDOWN_SEC = int(os.environ.get("QX_LOSS_COOLDOWN_SEC", "1800"))
+LOSS_COOLDOWN_THRESHOLD = int(os.environ.get("QX_LOSS_THRESHOLD", "5"))
+# Brain analysis runs every N graded signals.
+BRAIN_ANALYZE_INTERVAL = int(os.environ.get("QX_BRAIN_ANALYZE_INTERVAL", "50"))
+# Days of history used by recompute_from_signal_log.
+PATTERN_RECOMPUTE_DAYS = int(os.environ.get("QX_PATTERN_RECOMPUTE_DAYS", "3"))
+# Payout refresh cadence (seconds) — Quotex cycles payout every few minutes.
+PAYOUT_REFRESH_SEC = float(os.environ.get("QX_PAYOUT_REFRESH_SEC", "60.0"))
+# Sleep before retrying get_payout_by_asset when instruments cache is cold.
+PAYOUT_RETRY_SLEEP = float(os.environ.get("QX_PAYOUT_RETRY_SLEEP", "3.0"))
+# Postmortem tag thresholds (multipliers of ATR).
+NOISE_CANDLE_ATR_MULT = float(os.environ.get("QX_NOISE_CANDLE_ATR_MULT", "0.40"))
+BIG_MOVE_ATR_MULT = float(os.environ.get("QX_BIG_MOVE_ATR_MULT", "0.80"))
+# Buyer/seller pressure threshold (default 62%).
+BUYER_PCT_THRESHOLD = int(os.environ.get("QX_BUYER_PCT_THRESHOLD", "62"))
+# LIVE re-eval thresholds.
+LIVE_REEVAL_MIN_TICKS = int(os.environ.get("QX_LIVE_REEVAL_MIN_TICKS", "15"))
+LIVE_REEVAL_INTERVAL_CRITICAL = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_CRITICAL", "10"))
+LIVE_REEVAL_INTERVAL_LAST_10S = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_LAST_10S", "15"))
+LIVE_REEVAL_INTERVAL_LAST_30S = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_LAST_30S", "30"))
+LIVE_REEVAL_INTERVAL_MID = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_MID", "100"))
+# Strength-gate window (last N seconds of candle).
+STRENGTH_GATE_LAST_SECS = int(os.environ.get("QX_STRENGTH_GATE_LAST_SECS", "30"))
+# _running_confirmation minimum ticks.
+RUNCONF_MIN_TICKS = int(os.environ.get("QX_RUNCONF_MIN_TICKS", "5"))
+# _apply_strength_gate minimum ticks.
+STRENGTH_GATE_MIN_TICKS = int(os.environ.get("QX_STRENGTH_GATE_MIN_TICKS", "10"))
 
 # ── Fallback display-name helper ─────────────────────────────────────────────
 def _api_to_display(api_name: str) -> str:
@@ -285,7 +361,9 @@ def _normalise(raw) -> list[dict]:
             if key in raw:
                 raw = raw[key]; break
         else:
-            raw = list(raw.values())[0] if raw else []
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-21): outer `if not raw` already
+            # returned above, so `if raw else []` is dead code.
+            raw = list(raw.values())[0]
     seen: dict[int, dict] = {}
     for c in raw:
         try:
@@ -293,6 +371,9 @@ def _normalise(raw) -> list[dict]:
             # of defaulting to 0.0. A malformed candle with no "open" key
             # became open=0.0, which sailed through and poisoned the chart
             # with a flat-zero candle. Now: require all 4 OHLC fields present.
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-63): also require "time" or
+            # "from" — a candle with OHLC but no time gets time=0 and
+            # collapses with other time=0 candles (see F-01-62 below).
             if not all(k in c for k in ("open", "high", "low", "close")):
                 continue
             bar = {
@@ -302,6 +383,11 @@ def _normalise(raw) -> list[dict]:
                 "low":   float(c["low"]),
                 "close": float(c["close"]),
             }
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-62): skip candles with
+            # time == 0 — multiple malformed candles would all collapse
+            # into seen[0], losing all but the last.
+            if bar["time"] == 0:
+                continue
             # Sanity check: high >= max(open, close) and low <= min(open, close)
             if bar["high"] < max(bar["open"], bar["close"]) or \
                bar["low"]  > min(bar["open"], bar["close"]):
@@ -333,24 +419,35 @@ def _drop_price_contamination(candles: list[dict]) -> list[dict]:
     if not ranges:
         return candles
     median_rng = ranges[len(ranges) // 2]
-    if median_rng <= 0:
-        return candles
+    # FIX (DEEP-AUDIT-2026-07-26 / F-01-22): removed unreachable
+    # `if median_rng <= 0: return candles` — ranges filter excludes 0 so
+    # median_rng is always strictly positive here.
 
     # Find the LAST prefix contamination boundary (drops everything before it)
     cut = 0
+    # FIX (DEEP-AUDIT-2026-07-26 / F-01-64): env-configurable contamination
+    # jump multiplier (was hardcoded magic 10x). On low-volatility pairs,
+    # median_rng is small so 10x is also small → false positives. On
+    # volatile pairs, 10x may be too lenient. Operator can tune via env.
+    _contam_mult = float(os.environ.get("QX_CONTAM_JUMP", "10.0"))
     for i in range(1, len(candles)):
         jump = abs(candles[i]["close"] - candles[i - 1]["close"])
         gap  = abs(candles[i]["open"]  - candles[i - 1]["close"])
-        if jump > median_rng * 10 or gap > median_rng * 10:
+        if jump > median_rng * _contam_mult or gap > median_rng * _contam_mult:
             cut = i   # keep updating — we want the LAST contamination point
     # Find suffix contamination (stale data after fresh data)
     suffix_cut = len(candles)
     for i in range(len(candles) - 1, 0, -1):
         jump = abs(candles[i]["close"] - candles[i - 1]["close"])
         gap  = abs(candles[i]["open"]  - candles[i - 1]["close"])
-        if jump > median_rng * 10 or gap > median_rng * 10:
+        if jump > median_rng * _contam_mult or gap > median_rng * _contam_mult:
             suffix_cut = i
             break
+    if cut >= suffix_cut:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-01): when prefix+suffix
+        # contamination overlap (single mid-batch spike), cut:suffix_cut
+        # would be empty. Drop only the prefix to avoid blanking stream.
+        suffix_cut = len(candles)
     if cut:
         print(f"[feed] dropped {cut} contaminated candle(s) "
               f"(price gap > 10x median range) before index {cut}")
@@ -416,8 +513,14 @@ def _aggregate_5m_closes(candles_1m: list[dict], period: int = 60) -> list[float
     if not candles_1m:
         return []
     # Auto-detect seconds vs milliseconds. Quotex uses seconds, but be safe.
-    sample_ts = candles_1m[0].get("time", 0)
-    ms_mode = sample_ts > 10_000_000_000  # > year 2286 in seconds
+    # FIX (DEEP-AUDIT-2026-07-26 / F-01-49): also check the LAST candle so
+    # a buffer mixing seconds + milliseconds (after a feed swap mid-stream)
+    # doesn't misclassify all subsequent candles as seconds (timestamps in
+    # year 5000+).
+    sample_ts_first = candles_1m[0].get("time", 0)
+    sample_ts_last  = candles_1m[-1].get("time", 0)
+    ms_mode = (sample_ts_first > 10_000_000_000
+               or sample_ts_last  > 10_000_000_000)  # > year 2286 in seconds
     bucket_seconds = 5 * period
     closes_5m: list[float] = []
     current_bucket: int | None = None
@@ -434,6 +537,11 @@ def _aggregate_5m_closes(candles_1m: list[dict], period: int = 60) -> list[float
                 closes_5m.append(prev_close)
             current_bucket = bucket
         prev_close = c["close"]
+    # FIX (DEEP-AUDIT-2026-07-26 / F-01-50): comment — the first 5m bucket's
+    # close is only emitted when the SECOND bucket starts (line 448). If
+    # there's only ONE bucket in the input, this final flush emits it.
+    # So the first 5m close is delayed by one bucket — acceptable for EMA
+    # but documented for future readers.
     # Flush the last bucket
     if current_bucket is not None:
         closes_5m.append(prev_close)
@@ -510,8 +618,10 @@ class _AssetStream:
     # BRAIN-LEARNED: loss cluster cooldown fields
     _consecutive_losses: int = 0
     _loss_cooldown_until: float = 0.0
-    _sub_client_id: object = None  # FIX (AUDIT-FEED #5): track which client started subscription
-    tick_callback: object = None   # FIX (2026-07-13): event-driven tick callback  # wall-time when signal can be broadcast
+    _sub_client_id: int | None = None  # FIX (AUDIT-FEED #5 + DEEP-AUDIT-2026-07-26 / F-01-73): track which client started subscription
+    # FIX (DEEP-AUDIT-2026-07-26 / F-01-15): duplicate tick_callback field
+    # declaration (line 530 wins per dataclass rules). Comment "wall-time
+    # when signal can be broadcast" belongs to signal_delay_until (line 509).
 
     # ── Event-driven tick pipeline (2026-07-11) ──────────────────────────
     # When the raw-WS backend is active, the WS reader pushes ticks directly
@@ -527,7 +637,7 @@ class _AssetStream:
     # the loop for 1.9s at minute boundaries), the queue could grow to
     # thousands of ticks, causing OOM on Railway's limited container.
     tick_queue: "asyncio.Queue" = field(default_factory=lambda: asyncio.Queue(maxsize=500))
-    tick_callback: "Callable | None" = None  # registered callback (for unregister on stop)
+    tick_callback: Callable | None = None  # registered callback (for unregister on stop)
 
     # ── Microstructure caching (2026-07-11) ──────────────────────────────
     # _analyze_microstructure() is O(n) over stream.ticks — expensive when
@@ -535,10 +645,16 @@ class _AssetStream:
     # recompute every MICRO_RECALC_EVERY ticks, or when high/low change
     # (those are the only OHLC values that can change a cached micro).
     # Close-only updates (the common case in OTC) reuse the cache.
+    # FIX (DEEP-AUDIT-2026-07-26 / F-01-20): also invalidate when `close`
+    # changes — _analyze_microstructure depends on `cur` (=close) for
+    # `net`, `last_react`, `ending_direction`. A close-only update (very
+    # common in OTC) didn't change high/low, so the cache was reused with
+    # stale `net` and `ending_direction`.
     _micro_cache: dict | None = None
     _micro_cache_at_tick: int = 0  # len(stream.ticks) when cache was built
     _micro_cache_high: float = 0.0
     _micro_cache_low: float = 0.0
+    _micro_cache_close: float = 0.0
 
     # ── Skip-redundant-broadcast (2026-07-11) ────────────────────────────
     # Snapshot of the last-broadcast candle (high/low/close). If the next
@@ -593,6 +709,12 @@ class QuotexFeed:
         # plus headroom for on-demand non-1m streams and the brief overlap
         # window when a pair's real/otc asset code swaps.
         self._max_streams     = int(os.environ.get("QX_MAX_STREAMS", "60"))
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-42): asyncio.Event that's set
+        # when connect() succeeds and cleared on disconnect. Replaces the
+        # busy-wait `while not (self._connected and self._client): await
+        # asyncio.sleep(0.5)` in _run_stream (line 3850) that polled every
+        # 0.5s × 60 always-on streams = 120 wakeups/sec.
+        self._connected_event = asyncio.Event()
         # Held across a stream's whole start sequence (start_candles_stream +
         # history fetch) — staggers concurrent starts AND serializes history
         # fetches, closing a real race in pyquotex's Strategy-2 history
@@ -799,10 +921,6 @@ class QuotexFeed:
     def available_pairs(self) -> dict:
         """Return the current forex pair lists and payout floors for /api/pairs.
 
-        FIX (AUDIT-FEED #2, 2026-07-19): if sim fallback is active, return
-        the sim feed's pair list — the real feed's pair list is stale
-        (Quotex connection is dead).
-
         Returns a dict with TWO separate pair lists so the frontend can
         render Real Market and OTC Market as two distinct categories:
 
@@ -826,13 +944,9 @@ class QuotexFeed:
         because the user can't trade them. OTC pairs are always open
         (24/7 broker-generated), so they're never filtered.
         """
-        if getattr(self, '_sim_delegate', None) is not None:
-            # SIM-MODE-DISABLED (2026-07-25): sim delegate should never be
-            # set anymore. Defensive: clear it and proceed with real feed.
-            print("[feed] available_pairs: WARNING — sim_delegate set but "
-                  "sim mode is disabled. Clearing.")
-            self._sim_delegate = None
-            os.environ["USE_SIM"] = "0"
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-52): removed dead _sim_delegate
+        # check/clear block (sim is permanently disabled, getattr returns
+        # None so the if-branch is unreachable and the WARNING print never fires).
         active_real = [p for p in self._real_pairs_list if p["status"] == "live"]
         active_otc  = [p for p in self._otc_pairs_list  if p["status"] == "otc"]
         # FIX (DATA-FLOW-2026-07-22): all-time OTC pairs — always in the
@@ -876,6 +990,10 @@ class QuotexFeed:
                 return
 
             # Group by logical base name (forex only)
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-65): named constants for the
+            # pyquotex tuple indices (previously magic i[14] / i[-9]).
+            _OPEN_IDX   = 14   # bool: instrument is open for trading
+            _PAYOUT_IDX = -9   # 1-minute payout %, same field pyquotex's
             by_base: dict[str, dict] = {}
             for i in instruments:
                 name   = i[1]
@@ -884,8 +1002,8 @@ class QuotexFeed:
                 if base not in _FOREX_BASES:
                     continue
 
-                is_open = bool(i[14])
-                payout  = i[-9]   # 1-minute payout %, same field pyquotex's
+                is_open = bool(i[_OPEN_IDX])
+                payout  = i[_PAYOUT_IDX]   # 1-minute payout %, same field pyquotex's
                 try:              # own get_payout_by_asset()/get_payment() read
                     payout = int(payout) if payout is not None else None
                 except (TypeError, ValueError):
@@ -918,8 +1036,15 @@ class QuotexFeed:
                     status = "live" if real["open"] else "closed"
                     floor = PAYOUT_FLOOR_REAL
                     payout = real["payout"]
-                    locked = status == "live" and (
-                        payout is None or payout < floor)
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-06): also lock when
+                    # status == "closed" — weekend / outside bank hours. The
+                    # previous check conflated "below payout floor" with
+                    # "closed", so a closed pair had locked=False and was
+                    # allowed into ensure_stream, producing 30s of stuck
+                    # warnings (Quotex returns no data for closed pairs).
+                    locked = (status == "live"
+                              and (payout is None or payout < floor)) \
+                            or status == "closed"
                     real_pairs.append({
                         "asset":   real["asset"],
                         "display": real["display"],
@@ -1044,18 +1169,13 @@ class QuotexFeed:
         An already-running stream is NEVER rejected or torn down here — those
         guards only gate the creation of a brand-new stream.
 
-        SIM-MODE-DISABLED (2026-07-25): the _sim_delegate routing is now
-        dead code (sim mode is permanently disabled). If a sim_delegate
-        somehow exists, we clear it and proceed with the real feed.
+        SIM-MODE-DISABLED (2026-07-25): sim mode is permanently disabled.
         If no Quotex credentials are configured, we return a clear error
         instead of silently serving fake data.
         """
-        # SIM-MODE-DISABLED: defensive — clear any stray sim delegate.
-        if getattr(self, '_sim_delegate', None) is not None:
-            print("[feed] ensure_stream: WARNING — sim_delegate set but sim "
-                  "mode is disabled. Clearing.")
-            self._sim_delegate = None
-            os.environ["USE_SIM"] = "0"
+        # SIM-MODE-DISABLED (DEEP-AUDIT-2026-07-26 / F-01-52): removed dead
+        # _sim_delegate check/clear (sim is permanently disabled, getattr
+        # returns None so the if-branch is unreachable).
 
         # LIVE-DATA-ONLY (2026-07-25): if no credentials configured, fail
         # loud with an actionable error. Do NOT silently fall back to sim.
@@ -1137,7 +1257,13 @@ class QuotexFeed:
                 return {"ok": False, "status": "cooldown",
                         "retry_after": round(self._cooldown_until - time.time(), 1),
                         "reason": self._cooldown_reason}
-            if len(self._streams) >= self._max_streams:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-07): always-on streams are
+            # infrastructure (pre-warmed), not user capacity. Exclude them
+            # from the _max_streams count so 60 always-on 1m pairs do not
+            # block user-requested streams for OTHER pairs/periods.
+            _user_stream_count = sum(
+                1 for s in self._streams.values() if not s.always_on)
+            if _user_stream_count >= self._max_streams:
                 return {"ok": False, "status": "at_capacity", "max": self._max_streams}
 
             stream = _AssetStream(asset=asset, period=period)
@@ -1192,9 +1318,12 @@ class QuotexFeed:
             last_live = getattr(stream, 'last_real_tick_wall', 0.0)
             if last_live > 0 and (time.time() - last_live) < 30:
                 return  # live ticks arrived recently, all good
-            if stream.ticks and last_live > 0:
-                # Have ticks AND recent live tick — all good
-                return
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-02): deleted dead lines
+            # 1195-1197 (the "ticks and last_live>0" branch was already
+            # handled by the recency check above; last_live>0 here means
+            # STALE since the recent case already returned). Now falls
+            # through to warn — silent WS subscription failures are no
+            # longer masked by stale tick buffers.
             # If we have NO live ticks at all (last_real_tick_wall == 0),
             # fall through to warn even if stream.candles is non-empty
             # (history loaded but no live ticks = silent sub failure).
@@ -1221,8 +1350,11 @@ class QuotexFeed:
                         "message": err,
                         "action": "refresh_token",
                     })
-                except Exception:
-                    pass
+                except Exception as _be:
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-41): log broadcast
+                    # failures (queue full, JSON serialize error) so they
+                    # don't disappear silently.
+                    print(f"[feed] _warn_if_stuck broadcast failed: {_be}")
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -1232,22 +1364,15 @@ class QuotexFeed:
         """A viewer disconnected — stop counting it toward any stream's
         interested_cids (idle-eviction sweep does the rest).
 
-        FIX (AUDIT-FEED #2, 2026-07-19): also drop interest on the sim
-        delegate if one is active — otherwise the sim feed leaks viewer
-        slots and idle-eviction never fires for streams the user left.
-        SIM-MODE-DISABLED (2026-07-25): the _sim_delegate routing is now
-        dead code (sim mode is permanently disabled), but kept as a no-op
-        for safety in case any path still sets it.
+        SIM-MODE-DISABLED (DEEP-AUDIT-2026-07-26 / F-01-52): removed dead
+        _sim_delegate routing (sim is permanently disabled). Kept the
+        method's behavior for the real feed unchanged.
         """
-        for s in self._streams.values():
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-28): snapshot the values() view
+        # so a concurrent stream creation (always-on watchdog, ensure_stream
+        # from another viewer) doesn't raise RuntimeError mid-iteration.
+        for s in list(self._streams.values()):
             s.interested_cids.discard(cid)
-        # _sim_delegate is now always None (sim mode disabled) — but keep
-        # the check for safety in case any code path still sets it.
-        if getattr(self, '_sim_delegate', None) is not None:
-            try:
-                await self._sim_delegate.drop_interest(cid)
-            except Exception:
-                pass
 
     async def _aggressive_reconnect(self) -> None:
         """FIX (RECONNECT-2026-07-23): aggressive auto-reconnect.
@@ -1264,20 +1389,16 @@ class QuotexFeed:
         try:
             while True:
                 await asyncio.sleep(10)
-                # SIM-MODE-DISABLED: sim delegate path is dead code now.
-                # Keep the check for safety in case any code path sets it.
-                sim = getattr(self, '_sim_delegate', None)
-                if sim is not None:
-                    # Defensive: clear any stray sim delegate (shouldn't happen).
-                    print("[feed] aggressive_reconnect: WARNING — sim_delegate set "
-                          "but sim mode is disabled. Clearing.")
-                    self._sim_delegate = None
-                    os.environ["USE_SIM"] = "0"
+                # SIM-MODE-DISABLED (DEEP-AUDIT-2026-07-26 / F-01-52): removed
+                # dead _sim_delegate check/clear block (sim is permanently
+                # disabled, getattr returns None so the if-branch is
+                # unreachable and the WARNING print never fires).
 
                 # No sim delegate - check if we need to reconnect real feed
                 if not self._streams and not getattr(self, '_abandoned', False):
                     print("[feed] aggressive_reconnect: 0 streams - triggering reconnect")
                     self._connected = False
+                    self._connected_event.clear()
                     self._reconnect_attempts = 0
                     continue
 
@@ -1286,7 +1407,9 @@ class QuotexFeed:
                     print("[feed] aggressive_reconnect: feed abandoned - retrying real connection")
                     self._abandoned = False
                     self._connected = False
-                    self._sim_delegate = None
+                    self._connected_event.clear()
+                    # SIM-MODE-DISABLED (DEEP-AUDIT-2026-07-26 / F-01-52):
+                    # _sim_delegate is permanently None — defensive clear removed.
                     os.environ["USE_SIM"] = "0"
                     self._reconnect_attempts = 0
                     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-10): restart
@@ -1319,20 +1442,15 @@ class QuotexFeed:
     def stream_status(self) -> dict:
         """Return active stream count and capacity info for the status endpoint.
 
-        FIX (CANDLE-STUCK-FIX, 2026-07-23): if sim_delegate is active,
-        merge its streams into the response so /api/status and /api/debug
-        correctly show all live streams. Previously when the real feed
-        fell back to sim, /api/debug showed streams: {} because it was
-        reading self._streams (real feed's empty dict) instead of
-        sim_delegate._streams.
+        SIM-MODE-DISABLED (DEEP-AUDIT-2026-07-26 / F-01-54, F-01-55):
+        removed dead sim_delegate merge block (sim is permanently
+        disabled, getattr returns None so the if-branch is unreachable).
+        Also removed `sim_mode` field (always False) — frontend code
+        reading it is dead and will be cleaned up separately.
         """
         now = time.time()
         # Start with our own streams
         all_streams = list(self._streams.values())
-        # If sim delegate is active, merge its streams too
-        sim = getattr(self, '_sim_delegate', None)
-        if sim is not None:
-            all_streams.extend(sim._streams.values())
         return {
             "active": [{"asset": s.asset, "period": s.period,
                         "viewers": len(s.interested_cids),
@@ -1342,13 +1460,20 @@ class QuotexFeed:
             "max":   self._max_streams,
             "cooldown_until":  self._cooldown_until if self._cooldown_until > now else None,
             "cooldown_reason": self._cooldown_reason if self._cooldown_until > now else None,
-            "sim_mode": sim is not None,  # NEW: expose sim fallback state
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-55): hardcode False with a
+            # comment — frontend code that read this is dead.
+            "sim_mode": False,  # sim mode permanently disabled
         }
 
     async def shutdown(self) -> None:
         for s in list(self._streams.values()):
             if s.task:
                 s.task.cancel()
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-57): cancel the aggressive
+        # reconnect task so run() exit doesn't orphan it.
+        _rt = getattr(self, '_reconnect_task', None)
+        if _rt is not None and not _rt.done():
+            _rt.cancel()
 
     # ── Connection (shared across all streams) ──────────────────────────────
 
@@ -1407,8 +1532,15 @@ class QuotexFeed:
                         acct["token"] = None
                         changed = True
                 if changed:
-                    with open(path, "w", encoding="utf-8") as f:
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-69): atomic write via
+                    # temp file + os.replace — if the process crashes mid-write,
+                    # session.json is corrupted (truncated JSON), and next
+                    # startup can't parse it. Temp file in same dir as target
+                    # so os.replace is atomic on POSIX (same filesystem).
+                    _tmp = path + ".tmp"
+                    with open(_tmp, "w", encoding="utf-8") as f:
                         _json.dump(data, f)
+                    os.replace(_tmp, path)
                     print(f"[feed] cleared stale session token at {path} "
                           f"after auth rejection — next retry will do a fresh login")
                     cleared_any = True
@@ -1445,10 +1577,12 @@ class QuotexFeed:
         if os.environ.get("QX_USE_RAW_WS", "0") == "1":
             from quotex_ws import QuotexWSClient
             print("[feed] using RAW WebSocket backend (quotex_ws.QuotexWSClient)")
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-66): env-configurable host.
+            _host = os.environ.get("QX_HOST", "market-qx.trade")
             return QuotexWSClient(
                 email    = os.environ.get("QX_EMAIL",    ""),
                 password = os.environ.get("QX_PASSWORD", ""),
-                host     = "market-qx.trade",
+                host     = _host,
                 lang     = "en",
                 root_path= root,
             )
@@ -1461,14 +1595,16 @@ class QuotexFeed:
         from pyquotex.stable_api import Quotex
         from pyquotex.types import ReconnectPolicy
         from pyquotex.network.login import Login
-        Login.base_url = "market-qx.trade"
-        Login.https_base_url = "https://market-qx.trade"
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-66): env-configurable host.
+        _host = os.environ.get("QX_HOST", "market-qx.trade")
+        Login.base_url = _host
+        Login.https_base_url = f"https://{_host}"
         ua_src = "env QX_UA" if os.environ.get("QX_UA", "").strip() else "default Firefox"
         print(f"[feed] using vendored pyquotex (Firefox TLS — Cloudflare bypass, UA: {ua_src})")
         return Quotex(
             email    = os.environ.get("QX_EMAIL",    ""),
             password = os.environ.get("QX_PASSWORD", ""),
-            host     = "market-qx.trade",
+            host     = _host,
             lang     = "en",
             root_path= root,
             reconnect_policy=ReconnectPolicy(
@@ -1512,6 +1648,9 @@ class QuotexFeed:
             )
             # Firefox UA — matches the Firefox TLS cipher suite in ssl_utils.py
             # so Cloudflare sees a consistent Firefox fingerprint.
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-67): documented UA requirement.
+            # If Cloudflare bumps its minimum Firefox version, this fallback
+            # fails. Override via QX_UA env var if needed.
             ua = os.environ.get("QX_UA", "").strip() or (
                 "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) "
                 "Gecko/20100101 Firefox/119.0")
@@ -1521,7 +1660,12 @@ class QuotexFeed:
             if env_token:
                 self._client = self._make_client(ua, root)
                 self._client.set_session(user_agent=ua, ssid=env_token)
-                print(f"[feed] connecting with session token={env_token[:8]}...")
+                print(f"[feed] connecting with session token=…{env_token[-4:]}")
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-68): previously logged
+                # token[:8] (first 8 chars). If logs are aggregated/shipped
+                # to a third party (Datadog etc.), partial token leakage.
+                # Now logs only the last 4 chars — enough for debugging
+                # without exposing a guessable prefix.
                 try:
                     ok, reason = await asyncio.wait_for(
                         self._client.connect(), timeout=30)
@@ -1533,7 +1677,14 @@ class QuotexFeed:
                 except Exception as _te:
                     print(f"[feed] token attempt error: {_te}")
                 await self._close_client(self._client)
-                os.environ.pop("QX_TOKEN", None)
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-19): only discard the
+                # token if the failure reason indicates an auth rejection.
+                # Previously the token was popped on ANY failure (incl. 30s
+                # timeout) — a valid token was thrown away on transient
+                # network slowness, falling back to email/password which may
+                # also fail on Railway (Cloudflare).
+                if reason and "reject" in str(reason).lower():
+                    os.environ.pop("QX_TOKEN", None)
 
             # ── Attempt 2: Fresh client, email/password (vendored pyquotex) ────
             # This is the MAIN login path. Vendored pyquotex uses Firefox TLS
@@ -1697,8 +1848,10 @@ class QuotexFeed:
         htf_trend = "SIDEWAYS"
         try:
             htf_trend = await self._get_htf_trend(asset, stream=stream)
-        except Exception:
-            pass
+        except Exception as _e:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-37): log HTF failures so
+            # the operator knows HTF is broken (engine always gets SIDEWAYS).
+            print(f"[feed] HTF fetch failed for {asset}: {_e}")
 
         # NOTE (refactor 2026-07-14): the per-pair `pair_muted` set + the
         # `pair_theory_config` import that used to live here were removed.
@@ -1750,8 +1903,11 @@ class QuotexFeed:
         # prediction work doesn't block the event loop. Previously this
         # sync call blocked for ~1.9s at minute boundaries when 38 streams
         # all closed candles simultaneously — causing tick stutter.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-10): pass a COPY of candles so
+        # the prediction engine may mutate (sort/filter/append) without
+        # corrupting stream.candles state downstream.
         result = await asyncio.to_thread(
-            predict_from_candle, candles,
+            predict_from_candle, list(candles),
             ticks=list(ticks) if ticks else [],
             micro=_micro_for_pred, asset=asset,
             htf_trend=htf_trend, period=_period_for_pred,
@@ -1760,7 +1916,12 @@ class QuotexFeed:
 
     async def _run_eoc(self, stream: _AssetStream,
                 actual_open: float | None = None) -> dict | None:
-        closed = stream.candles
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-04): copy the candles list so the
+        # EOC snapshot is not aliased to stream.candles. A concurrent
+        # _close_running_and_start_new on another coroutine could append a
+        # new candle between this snapshot and the _pred_candle read,
+        # making closed[-1] return the still-OPEN new candle.
+        closed = list(stream.candles)
         base_ticks = list(stream.ticks)
 
         # BRAIN-LEARNED: loss cluster cooldown — skip prediction if pair
@@ -1769,7 +1930,11 @@ class QuotexFeed:
         try:
             cooldown_until = getattr(stream, '_loss_cooldown_until', 0)
             if cooldown_until and time.time() < cooldown_until:
-                remaining = int((cooldown_until - time.time()) / 60)
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-05): use math.ceil so a
+                # 30s-remaining cooldown does not truncate to 0 minutes in
+                # the log message.
+                import math as _math
+                remaining = max(0, int(_math.ceil((cooldown_until - time.time()) / 60)))
                 print(f"[feed] {stream.asset} in loss cooldown ({remaining} min remaining) — skipping prediction")
                 stream.prediction = None
                 return None
@@ -1792,14 +1957,20 @@ class QuotexFeed:
         # wins/losses to move the same 5%, smoothing the self-correction.
         # Env-configurable for advanced tuning.
         try:
-            _acc_n = int(os.environ.get("RECENT_ACCURACY_N", "50"))
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-71): use module-level
+            # RECENT_ACCURACY_N instead of reading env on every EOC.
+            _acc_n = RECENT_ACCURACY_N
         except (TypeError, ValueError):
             _acc_n = 50
         _acc_n = max(8, min(_acc_n, 200))
         try:
             stream.cached_accuracy = await asyncio.to_thread(
                 _db.recent_accuracy, stream.asset, stream.period, n=_acc_n)
-        except Exception:
+        except Exception as _e:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-38): log DB failures so the
+            # silent degradation to "no self-correction" is visible.
+            print(f"[feed] recent_accuracy DB query failed for "
+                  f"{stream.asset}@{stream.period}s: {_e}")
             stream.cached_accuracy = (None, 0)
         # FIX (2026-07-13): removed cached_accuracy_at + live_signal_history
         # assignments (both were dead fields — set but never read).
@@ -1817,7 +1988,12 @@ class QuotexFeed:
         # stream.base_candles aliases stream.candles and the LIVE re-eval
         # would score against the *current* (mutated) candle list, not the
         # snapshot taken at EOC. (Bug found 2026-07-13.)
-        stream.base_candles = list(closed)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-27): use [dict(c) for c in closed]
+        # to deep-copy each candle dict — _save_micro adds a gap_pct key
+        # to the candle dict, and a shallow list copy still shares the
+        # dict references, so LIVE re-eval base_candles would see the
+        # mutated candle.
+        stream.base_candles = [dict(c) for c in closed]
         stream.base_ticks   = base_ticks
         stream._live_reeval_ticks = 0
 
@@ -1866,7 +2042,10 @@ class QuotexFeed:
                 f"Backtest: WEAK signals won 4.2% — skipping is +EV.")
             # Re-set the signal field on the prediction result so the
             # downstream code sees NEUTRAL.
-            result["signal"] = "NEUTRAL"
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-46): redundant — line 1860
+            # already set result["signal"] = "NEUTRAL". Kept as a no-op
+            # safety net but documented as dead assignment.
+            # result["signal"] = "NEUTRAL"  # dead — already set at line 1860
 
         # FIX (WEAK-NEUTRAL-FIX-A, 2026-07-23): user backtest observation
         # showed WEAK signals are systematically wrong — historical data
@@ -1999,6 +2178,12 @@ class QuotexFeed:
         if not prediction:
             return accuracy
 
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-08): also handle pred_signal is
+        # None (missing "signal" key on malformed engine output). Previously
+        # the `== "NEUTRAL"` check skipped None and fell through to the
+        # postmortem block (line 2058+) which expects prediction["signal"]
+        # / ["score"] / ["confidence"] → KeyError swallowed by outer try/except
+        # at line 2141, silently losing the signal.
         # FIX (LOSS-HISTORY-FIX): recover original direction from WEAK→NEUTRAL
         # conversions so loss signals are properly graded and saved.
         # FIX (LIVE-DB-AUDIT-2026-07-25): also recover a meaningful confidence
@@ -2010,7 +2195,7 @@ class QuotexFeed:
         # LOW_CONF_SKIP threshold of 20 → marks as "WEAK_RECOVERED") so the
         # signal is properly logged with a non-zero confidence.
         pred_signal = prediction.get("signal")
-        if pred_signal == "NEUTRAL":
+        if pred_signal == "NEUTRAL" or pred_signal is None:
             # Check if this NEUTRAL was a WEAK→NEUTRAL conversion
             reasons = prediction.get("reasons", [])
             reasons_text = " ".join(str(r) for r in reasons)
@@ -2023,13 +2208,18 @@ class QuotexFeed:
             if m:
                 # Recover the original direction and grade it
                 orig_signal = m.group(1)
-                # Re-grade using the recovered direction
-                if closed["close"] == closed["open"]:
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-25): delegate to
+                # self._accuracy() instead of inlining the draw/wrong/correct
+                # logic — the same logic lives in _accuracy() (line 1907)
+                # and any future change to draw detection (e.g. tolerance)
+                # would diverge between the two paths. Here we build a
+                # synthetic prediction dict with the recovered signal so
+                # _accuracy() can grade it cleanly.
+                _rec_pred = {"signal": orig_signal}
+                accuracy = self._accuracy(closed, _rec_pred, period=period)
+                if accuracy == "skip":
+                    # Degenerate candle — keep as draw for logging.
                     accuracy = "draw"
-                else:
-                    actual_up = closed["close"] > closed["open"]
-                    pred_up = orig_signal == "CALL"
-                    accuracy = "correct" if actual_up == pred_up else "wrong"
                 # Update the prediction dict so the log shows the original
                 # direction (with a note that it was a WEAK→NEUTRAL conversion)
                 prediction = dict(prediction)
@@ -2053,6 +2243,12 @@ class QuotexFeed:
             else:
                 # Genuine NEUTRAL — no original direction to recover.
                 # Skip grading as before.
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-47): control-flow clarity —
+                # at this point `accuracy` is None (returned by _accuracy() for
+                # NEUTRAL predictions). The next `try: import json` block at
+                # line 2058+ is unreachable for genuine NEUTRAL (we return
+                # here), but reachable for recovered CALL/PUT (the `if m:`
+                # branch falls through).
                 return accuracy
 
         # Log the resolved prediction with a full WHY report.
@@ -2070,8 +2266,12 @@ class QuotexFeed:
             move  = closed["close"] - closed["open"]
             c_rng = closed["high"] - closed["low"]
             _hist = candles[-11:-1]
-            atr   = (sum(x["high"] - x["low"] for x in _hist) / len(_hist)
-                     if _hist else c_rng)
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-26): use _atr() (True Range)
+            # instead of simple high-low average so postmortem NOISE_CANDLE /
+            # BIG_MOVE tags align with the engine's regime classifier (which
+            # also uses _atr). Previously the postmortem computed its own ATR
+            # via sum(high-low)/n, diverging from engine-side ATR.
+            atr   = (_atr(_hist) if _hist else c_rng)
             _reg  = (prediction.get("regime") or {})
             # FIX (BUG-2, 2026-07-18): previously read `_reg.get("trend")`
             # and `_reg.get("zone")` — but classify_market_regime() returns
@@ -2095,9 +2295,11 @@ class QuotexFeed:
             tags = []
             if is_draw:
                 tags.append("DRAW")              # zero move = broker refund
-            if atr > 0 and c_rng < atr * 0.40:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-80): use module-level
+            # NOISE_CANDLE_ATR_MULT / BIG_MOVE_ATR_MULT constants.
+            if atr > 0 and c_rng < atr * NOISE_CANDLE_ATR_MULT:
                 tags.append("NOISE_CANDLE")      # sub-noise range: coin flip
-            if atr > 0 and abs(move) >= atr * 0.80:
+            if atr > 0 and abs(move) >= atr * BIG_MOVE_ATR_MULT:
                 tags.append("BIG_MOVE")
             if regime in ("TREND_UP", "TREND_DOWN"):
                 if ((regime == "TREND_UP" and sig == "PUT") or
@@ -2114,7 +2316,7 @@ class QuotexFeed:
             _actual_lbl = ("FLAT" if is_draw
                            else "UP" if actual_up else "DOWN")
             pm = (
-                f"{sig} s={prediction['score']:+d}"
+                f"{sig} s={prediction.get('score', 0):+d}"
                 f" {prediction.get('strength')}"
                 f" agree={prediction.get('agree')}"
                 f" | actual {_actual_lbl}"
@@ -2125,11 +2327,15 @@ class QuotexFeed:
             )
 
             # Log ANY CALL/PUT signal so the history DB actually populates.
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-09): use .get() with defaults
+            # for score/confidence to avoid KeyError on malformed predictions.
+            # Positional arg contract: (asset, period, time, signal, score,
+            # confidence, "", actual_lbl, accuracy, then keyword args).
             if sig in ("CALL", "PUT"):
                 _db.log_signal(
                     asset, period, closed["time"],
-                    sig, prediction["score"],
-                    prediction["confidence"], "",
+                    sig, prediction.get("score", 0),
+                    prediction.get("confidence", 0), "",
                     _actual_lbl, accuracy,
                     strength=prediction.get("strength"),
                     agree=prediction.get("agree"),
@@ -2139,6 +2345,11 @@ class QuotexFeed:
                     tags=",".join(tags), postmortem=pm,
                 )
         except Exception as _e:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-39): already prints to stderr
+            # — added a TODO to push to a fallback queue for retry so DB
+            # gaps don't permanently lose signal history (needed for
+            # calibration analysis).
+            # TODO: push to a fallback queue for retry on DB unlock.
             print(f"[db] log_signal error: {_e}")
         return accuracy
 
@@ -2177,7 +2388,11 @@ class QuotexFeed:
                         elif _gap_up == _is_bull_c:
                             _gap_type = "PURE"       # gap unvisited, continuation
                         else:
-                            _gap_type = "FLIP"       # gap up but closed down (rare)
+                            # FIX (DEEP-AUDIT-2026-07-26 / F-01-16): updated
+                            # comment — applies to BOTH sub-cases (gap up +
+                            # closed down OR gap down + closed up). Either is
+                            # a direction reversal/flip.
+                            _gap_type = "FLIP"       # gap direction != close direction → reversal/flip
             micro_snap["gap_pct"]   = _gap_pct
             micro_snap["gap_type"]  = _gap_type
             micro_snap["key_levels"] = _key_levels(candles)
@@ -2198,6 +2413,10 @@ class QuotexFeed:
                 [round(x, 6) for x in _tl])
             _db.save(asset, period, closed, micro_snap)
         except Exception as _me:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-40): already prints to stderr
+            # — added TODO to push micro_snap to a fallback queue so
+            # backtest/replay can still reconstruct the candle's tick state.
+            # TODO: push micro_snap to a fallback queue for retry.
             print(f"[db] micro save error: {_me}")
 
     # ── Running candle ────────────────────────────────────────────────────────
@@ -2239,9 +2458,11 @@ class QuotexFeed:
         sell_pct = 100 - buy_pct
 
         # ── 2. Dominant pressure ──────────────────────────────────────────────
-        if buy_pct >= 62:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-81): use module-level
+        # BUYER_PCT_THRESHOLD constant instead of magic 62.
+        if buy_pct >= BUYER_PCT_THRESHOLD:
             pressure = "BUYER"
-        elif sell_pct >= 62:
+        elif sell_pct >= BUYER_PCT_THRESHOLD:
             pressure = "SELLER"
         else:
             pressure = "FIGHT"
@@ -2260,7 +2481,11 @@ class QuotexFeed:
             bin_size = rng / 8
             bins: dict[int, int] = {}
             for t in ticks:
-                b = int((t - lo) / bin_size)
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-03): clamp bin index to
+                # [0,7] — when t==hi, the division yields 8 which is outside
+                # the 8-bin range, producing hold_price = hi + 0.5*bin_size
+                # (outside the candle range).
+                b = min(7, int((t - lo) / bin_size))
                 bins[b] = bins.get(b, 0) + 1
             top_bin    = max(bins, key=bins.get)
             hold_price = round(lo + top_bin * bin_size + bin_size / 2, 6)
@@ -2284,6 +2509,11 @@ class QuotexFeed:
         # ── 6. Buyer / Seller reaction ────────────────────────────────────────
         # Reaction = price visited extreme then reversed. We confirm with LATE tick
         # direction (last 25% of ticks) to avoid flagging mid-candle wicks.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-83): magic threshold 0.50 for
+        # from_hi/from_lo reaction classification — documented here as the
+        # midpoint of the candle range; below this value relative to the
+        # opposite extreme, no reaction is flagged. Tunable via env if needed.
+        _REACT_FROM_EXTREME = float(os.environ.get("QX_REACT_FROM_EXTREME", "0.50"))
         reaction = None
         if rng > 0:
             from_hi   = (hi  - cur) / rng
@@ -2292,14 +2522,20 @@ class QuotexFeed:
             late_q    = max(n // 4, 2)
             late_move = ticks[-1] - ticks[-late_q]  # direction of last 25% ticks
             # SELLER reaction: fell far from high AND late ticks confirm selling
-            if from_hi > 0.50 and late_move <= 0 and net < 0:
+            if from_hi > _REACT_FROM_EXTREME and late_move <= 0 and net < 0:
                 reaction = "SELLER"
             # BUYER reaction: rose far from low AND late ticks confirm buying
-            elif from_lo > 0.50 and late_move >= 0 and net > 0:
+            elif from_lo > _REACT_FROM_EXTREME and late_move >= 0 and net > 0:
                 reaction = "BUYER"
 
         # ── 7. Final-tick recovery / exhaustion ──────────────────────────────────
         # Real-time version of last-N-tick exhaustion: last 15% of running candle ticks.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-82): documented magic thresholds
+        # for last_react classification. Values are fraction-of-ticks
+        # thresholds for fbp2 (final-tick buy pressure). Hardcoded for now
+        # — they're tightly coupled to the EXHAUST/RECOVERY classification
+        # and tuning requires backtest validation. Module-level constants
+        # could be added if ops needs tuning; left as-is to avoid scope creep.
         last_react = None
         if n >= 15:
             last_n2 = max(n // 6, 6)   # min 6 so fi_tot can reach 5
@@ -2350,6 +2586,11 @@ class QuotexFeed:
         # Now compute it inline (last-10-tick ending direction).
         _ed_n = len(ticks)
         if _ed_n >= 3:
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-48): comment — this returns
+            # the last min(10, _ed_n) ticks. For _ed_n < 10, that's _ed_n
+            # itself (all available ticks); for _ed_n >= 10, that's the last 10.
+            # The earlier comment said "last 10 ticks" without mentioning the
+            # short-buffer case.
             _ed_end = ticks[-min(10, _ed_n):]
             _ed_en = len(_ed_end)
             _ed_buy = 0.0
@@ -2443,10 +2684,13 @@ class QuotexFeed:
         max_up_exc = tick_max - open_p
         max_dn_exc = open_p - tick_min
         max_exc = max(max_up_exc, max_dn_exc)
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-84): magic 0.30 rejection threshold
+        # — if |net| < 30% of max excursion, classify as OPPOSITE the spike.
+        _REJECT_THRESHOLD = float(os.environ.get("QX_REJECT_THRESHOLD", "0.30"))
         if max_exc > 0:
             # If the candle traveled far but came back, it's a rejection.
             # Use 30% threshold: |net| < 30% of max excursion = rejection.
-            if abs(net) < max_exc * 0.30:
+            if abs(net) < max_exc * _REJECT_THRESHOLD:
                 # Rejection — direction is OPPOSITE the spike.
                 # If spike was up (max_up_exc > max_dn_exc), rejection is DOWN.
                 if max_up_exc > max_dn_exc:
@@ -2534,6 +2778,8 @@ class QuotexFeed:
         stream._micro_cache_at_tick = 0
         stream._micro_cache_high = 0.0
         stream._micro_cache_low = 0.0
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-20): also reset the close cache.
+        stream._micro_cache_close = 0.0
         stream._last_bcast_high = 0.0
         stream._last_bcast_low = 0.0
         stream._last_bcast_close = 0.0
@@ -2659,10 +2905,16 @@ class QuotexFeed:
         try:
             if accuracy == "wrong":
                 stream._consecutive_losses = getattr(stream, '_consecutive_losses', 0) + 1
-                if stream._consecutive_losses >= 5:
-                    stream._loss_cooldown_until = time.time() + 1800  # 30 min
-                    print(f"[feed] {stream.asset} hit {stream._consecutive_losses} consecutive "
-                          f"losses — cooling down for 30 min")
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-75): use module-level
+                # LOSS_COOLDOWN_THRESHOLD / LOSS_COOLDOWN_SEC constants.
+                if stream._consecutive_losses >= LOSS_COOLDOWN_THRESHOLD:
+                    stream._loss_cooldown_until = time.time() + LOSS_COOLDOWN_SEC
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-11): reset the counter
+                    # so a single correct after cooldown expiry does not race
+                    # into a 6th/7th/8th silent increment.
+                    stream._consecutive_losses = 0
+                    print(f"[feed] {stream.asset} hit {LOSS_COOLDOWN_THRESHOLD} consecutive "
+                          f"losses — cooling down for {LOSS_COOLDOWN_SEC//60} min (counter reset)")
             elif accuracy == "correct":
                 stream._consecutive_losses = 0
             # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-09): reset
@@ -2707,17 +2959,21 @@ class QuotexFeed:
             except Exception:
                 pass
 
-            # BRAIN: run analysis every 50 graded signals
+            # BRAIN: run analysis every N graded signals
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-76): use module-level
+            # BRAIN_ANALYZE_INTERVAL constant instead of magic 50.
             try:
                 _brain_counter = getattr(self, '_brain_analyze_counter', 0) + 1
                 self._brain_analyze_counter = _brain_counter
-                if _brain_counter % 50 == 0:
+                if _brain_counter % BRAIN_ANALYZE_INTERVAL == 0:
                     from core.brain import analyze_and_learn
                     await asyncio.to_thread(analyze_and_learn)
                     # BACKTEST-2026-07-21: also refresh time/session patterns.
                     try:
                         from core.time_patterns import recompute_from_signal_log
-                        await asyncio.to_thread(recompute_from_signal_log, 3)
+                        # FIX (DEEP-AUDIT-2026-07-26 / F-01-77): use module-level
+                        # PATTERN_RECOMPUTE_DAYS instead of magic 3.
+                        await asyncio.to_thread(recompute_from_signal_log, PATTERN_RECOMPUTE_DAYS)
                     except Exception as _pe:
                         print(f"[feed] pattern refresh skipped: {_pe}")
                     # FIX (AUTO-TUNE-2026-07-23): auto-tune module weights
@@ -2796,8 +3052,10 @@ class QuotexFeed:
         try:
             from core.algorithm_monitor import record_candle
             # Refresh payout every 60s (Quotex cycles payout every few minutes)
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-78): use module-level
+            # PAYOUT_REFRESH_SEC constant instead of magic 60.0.
             _now = time.time()
-            if _now - stream._last_payout_refresh > 60.0:
+            if _now - stream._last_payout_refresh > PAYOUT_REFRESH_SEC:
                 try:
                     pay = self._client.get_payout_by_asset(stream.asset)
                     if pay is not None:
@@ -2814,8 +3072,11 @@ class QuotexFeed:
                 low=closed.get('low', 0), close=closed.get('close', 0),
                 tick_count=tick_count)
         except Exception as _e:
-            # Never let monitoring break the prediction pipeline.
-            pass
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-36): never let monitoring
+            # break the prediction pipeline, but DO log the failure so
+            # broken monitoring is visible. Bare `except: pass` left it
+            # completely silent.
+            print(f"[feed] algorithm_monitor record_candle failed: {_e}")
 
         # Start new candle
         stream.candle_open_time    = new_open_time
@@ -2883,23 +3144,19 @@ class QuotexFeed:
         # loop.call_soon_threadsafe() which schedules the put on the
         # asyncio event loop's thread.
         if hasattr(self._client, 'register_tick_callback'):
-            _loop = asyncio.get_event_loop()
+            _loop = asyncio.get_running_loop()
             def _on_tick(tick_dict, _stream=stream, _loop=_loop):
                 try:
                     _loop.call_soon_threadsafe(
                         _stream.tick_queue.put_nowait, tick_dict)
                 except Exception:
-                    # Queue full or loop closed — drop the tick (best effort).
-                    # Try a direct put as a last resort; if that also fails,
-                    # drop oldest to make room.
-                    try:
-                        _stream.tick_queue.put_nowait(tick_dict)
-                    except asyncio.QueueFull:
-                        try:
-                            _stream.tick_queue.get_nowait()
-                            _stream.tick_queue.put_nowait(tick_dict)
-                        except Exception:
-                            pass
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-30): removed the
+                    # direct put_nowait fallback — asyncio.Queue is NOT
+                    # thread-safe and direct mutation from the WS reader
+                    # thread corrupts the internal deque. If
+                    # call_soon_threadsafe fails (loop closed), just drop
+                    # the tick — better than OOM under load.
+                    pass
             self._client.register_tick_callback(asset, _on_tick)
             stream.tick_callback = _on_tick
             print(f"[feed] event-driven ticks enabled for {asset}@{period}s")
@@ -2916,11 +3173,12 @@ class QuotexFeed:
         # FOREVER (the only assignment was here). algorithm_monitor then
         # records 0 (via `stream.payout or 0`) and payout-spike detection
         # is dead. Now: retry once after 3s if the first call returns None.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-79): use PAYOUT_RETRY_SLEEP constant.
         try:
             pay = self._client.get_payout_by_asset(asset)
             if pay is None:
                 # Instruments may not have loaded yet — wait briefly and retry.
-                await asyncio.sleep(3)
+                await asyncio.sleep(PAYOUT_RETRY_SLEEP)
                 pay = self._client.get_payout_by_asset(asset)
             stream.payout = int(pay) if pay is not None else None
         except Exception:
@@ -2931,7 +3189,11 @@ class QuotexFeed:
         # 38+ always-on streams had no stuck-detection protection at startup.
         # Safe to call here because _warn_if_stuck sleeps 30s before checking
         # — by then history + first ticks should have arrived.
-        if self._connected:
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-33): only schedule for ALWAYS-ON
+        # streams. ensure_stream already schedules for viewer-requested
+        # streams; the duplicate _start_stream schedule produced duplicate
+        # 30s-later warnings.
+        if self._connected and stream.always_on:
             try:
                 asyncio.create_task(self._warn_if_stuck(asset, period, stream))
             except Exception:
@@ -2943,7 +3205,11 @@ class QuotexFeed:
         # than the latest preserved one. This honors the watchdog's intent:
         # the chart continues seamlessly instead of briefly blanking.
         history = await self._load_history(asset, period)
-        stream.last_real_tick_wall = time.time()
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-32): removed
+        # `stream.last_real_tick_wall = time.time()` — this was set BEFORE
+        # any real tick arrived, masking the _warn_if_stuck check (which
+        # treats last_real_tick_wall within 30s as "recent" and skips the
+        # warning). The actual real-tick arrival in _stream_loop sets it.
 
         if not history:
             # History unavailable (live pair or API timeout). Don't retry-loop
@@ -2969,9 +3235,11 @@ class QuotexFeed:
             new_candles = [c for c in history if c.get("time", 0) > preserved_last_time]
             if new_candles:
                 stream.candles.extend(new_candles)
-                # Trim to last 400 to avoid unbounded growth.
-                if len(stream.candles) > 500:
-                    stream.candles = stream.candles[-400:]
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-34): use module-level
+                # constants MAX_CANDLES / TRUNCATE_TO instead of magic
+                # 500 / 400 — env overrides would be ignored by this path.
+                if len(stream.candles) > MAX_CANDLES:
+                    stream.candles = stream.candles[-TRUNCATE_TO:]
                 print(f"[feed] watchdog-merged {len(new_candles)} new candles "
                       f"into preserved {len(stream.candles) - len(new_candles)} "
                       f"for {asset}@{period}s")
@@ -2996,7 +3264,7 @@ class QuotexFeed:
                 "type":       "snapshot",
                 "asset":      asset,
                 "period":     period,
-                "candles":    stream.candles[-300:],
+                "candles":    stream.candles[-SNAPSHOT_CANDLES:],
                 "prediction": stream.prediction,
             })
             return
@@ -3034,12 +3302,13 @@ class QuotexFeed:
         port of what used to be the single shared run() loop's body."""
         # TIMER_GRACE: how long past the candle boundary to wait for a real
         # tick before forcing a timer-close with a placeholder open.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-72): use module-level TIMER_GRACE
+        # (env override is read ONCE at import instead of every iteration).
         # Was 1.5s — too short for OTC where tick gaps can be 5-10s.
         # At 1.5s, most candles closed with a fake open, then the real
         # first tick arrived "late" and got dropped — corrupting OHLC.
         # 7.0s gives OTC ticks enough time to arrive naturally.
-        TIMER_GRACE = float(os.environ.get("TIMER_GRACE", "7.0"))
-        # STALE_SECS is module-level (overridable via env) — see top of file.
+        # (TIMER_GRACE is now module-level; this comment kept for context.)
 
         while True:
             try:
@@ -3076,7 +3345,13 @@ class QuotexFeed:
                                 stream.asset, stream.period)
                     except Exception:
                         pass
-                    stream.last_real_tick_wall = time.time()
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-32): the audit
+                    # suggested removing this line — but it serves as a
+                    # debounce so we don't re-arm again before this re-arm
+                    # has a chance to receive ticks. Keep, but rename the
+                    # intent in a comment so future readers know it's
+                    # intentionally not "real" tick wall time.
+                    stream.last_real_tick_wall = time.time()  # re-arm debounce
                     await self._broadcast({"type": "stale", "asset": stream.asset,
                                            "period": stream.period})
                     await asyncio.sleep(2)
@@ -3112,7 +3387,7 @@ class QuotexFeed:
                             "type":       "eoc",
                             "asset":      stream.asset,
                             "period":     stream.period,
-                            "candles":    all_c[-300:],
+                            "candles":    all_c[-SNAPSHOT_CANDLES:],
                             "prediction": None,   # gated — arrives via tick
                             "accuracy":   accuracy,
                         })
@@ -3275,7 +3550,8 @@ class QuotexFeed:
 
                         last_accuracy = await self._close_running_and_start_new(
                             stream, tick_new_open, first_px, open_is_real=True)
-                        last_eoc_candles = (stream.candles + [self._running_candle(stream)])[-300:]
+                        # FIX (DEEP-AUDIT-2026-07-26 / F-01-35): use SNAPSHOT_CANDLES instead of magic 300.
+                        last_eoc_candles = (stream.candles + [self._running_candle(stream)])[-SNAPSHOT_CANDLES:]
 
                         # Continue with ticks AFTER this boundary — may contain
                         # another boundary (N+2, N+3, ...)
@@ -3285,6 +3561,20 @@ class QuotexFeed:
                     # closes, only the LAST one's EOC is broadcast (intermediate
                     # candles are still graded + logged, just not broadcast —
                     # the chart only needs the final state).
+                    # TODO (DEEP-AUDIT-2026-07-26 / F-01-14): multi-boundary
+                    # close broadcasts only the LAST EOC. Intermediate EOCs
+                    # (reconnect after a gap with 2+ boundaries) are graded
+                    # and logged but NEVER broadcast to viewers — the chart
+                    # "jumps" without showing intermediate signals. Fix would
+                    # broadcast each EOC inside the loop with per-asset rate-
+                    # limit dedup. SKIPPED for now: risky change to a hot path,
+                    # needs separate validation pass.
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-45): note that
+                    # last_eoc_candles is a fresh snapshot built ABOVE from
+                    # stream.candles + [running_candle]. _close_running_and_start_new
+                    # does NOT broadcast inside its body — the caller does.
+                    # The watchdog path (line 2995) is the only place that
+                    # broadcasts a snapshot inside its own body.
                     if last_accuracy is not None and last_eoc_candles is not None:
                         await self._broadcast({
                             "type":       "eoc",
@@ -3363,23 +3653,26 @@ class QuotexFeed:
                     #   - Last 10s: every 15 ticks (~2-3s)
                     #   - Last 30s: every 30 ticks (~3-6s)
                     #   - Mid-candle: every 100 ticks (~10-20s)
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-85, F-01-86): use
+                    # module-level constants LIVE_REEVAL_MIN_TICKS and
+                    # LIVE_REEVAL_INTERVAL_* instead of magic 15/10/15/30/100.
                     pred_changed = False
                     if (ENABLE_LIVE_THEORY and stream.base_candles
-                            and len(stream.ticks) >= 15):
+                            and len(stream.ticks) >= LIVE_REEVAL_MIN_TICKS):
                         time_to_close = -1
                         if stream.candle_open_time > 0:
                             time_to_close = (stream.candle_open_time
                                              + stream.period) - time.time()
                             if time_to_close < 5:
-                                reeval_interval = 10  # critical zone
+                                reeval_interval = LIVE_REEVAL_INTERVAL_CRITICAL  # critical zone
                             elif time_to_close < 10:
-                                reeval_interval = 15  # last 10s
+                                reeval_interval = LIVE_REEVAL_INTERVAL_LAST_10S  # last 10s
                             elif time_to_close < 30:
-                                reeval_interval = 30  # last 30s
+                                reeval_interval = LIVE_REEVAL_INTERVAL_LAST_30S  # last 30s
                             else:
-                                reeval_interval = 100  # mid-candle
+                                reeval_interval = LIVE_REEVAL_INTERVAL_MID  # mid-candle
                         else:
-                            reeval_interval = 100
+                            reeval_interval = LIVE_REEVAL_INTERVAL_MID
                         # Live-only fast path (2026-07-10 review Next Action #1):
                         # In the last 30s (where LIVE re-eval actually matters),
                         # only run the signals that use running_ticks.
@@ -3457,6 +3750,23 @@ class QuotexFeed:
                                                     stream.prediction.get("agree")),
                                                 "total": fresh.get("total",
                                                     stream.prediction.get("total")),
+                                                # FIX (DEEP-AUDIT-2026-07-26 / F-01-12):
+                                                # merge fresh reasons + regime + micro
+                                                # so the displayed prediction reflects
+                                                # the live-tick analysis that updated
+                                                # the score. The old selective merge
+                                                # discarded fresh reasons/regime/micro
+                                                # and kept the EOC-stale versions.
+                                                "reasons": (
+                                                    list(stream.prediction.get("reasons", []))
+                                                    + [r for r in fresh.get("reasons", [])
+                                                       if "LIVE re-eval" in str(r)
+                                                       or "reeval" in str(r).lower()][:2]
+                                                ),
+                                                "regime": fresh.get("regime",
+                                                    stream.prediction.get("regime")),
+                                                "micro": fresh.get("micro",
+                                                    stream.prediction.get("micro")),
                                             }
                                             # If strength upgraded to STRONG,
                                             # force a rebroadcast so the user
@@ -3466,6 +3776,21 @@ class QuotexFeed:
                                                 pred_changed = True
                                         # else: different direction → IGNORE.
                                         # The original EOC signal stays.
+                                        # FIX (DEEP-AUDIT-2026-07-26 / F-01-60):
+                                        # append a reason to the prediction's
+                                        # reasons list noting the conflict, so
+                                        # the user has a visible hint that the
+                                        # locked direction is now contested.
+                                        # (Audit suggested appending; doing it
+                                        # here as a non-disruptive note that
+                                        # shows up in /api/debug.)
+                                        else:
+                                            _note = (
+                                                f"LIVE re-eval CONTEST: fresh signal "
+                                                f"{fresh_dir} differs from locked "
+                                                f"{locked_dir} — original kept.")
+                                            stream.prediction.setdefault(
+                                                "reasons", []).append(_note)
                                     elif locked_dir == "NEUTRAL" and fresh_dir in ("CALL", "PUT"):
                                         # FIX (LOSS-HISTORY-FIX, 2026-07-23):
                                         # Original was NEUTRAL but live data
@@ -3578,7 +3903,9 @@ class QuotexFeed:
                         # Only apply the strength gate in the last 30s of
                         # the candle. Earlier in the candle, the signal
                         # stays as-is (stable for the user to read).
-                        if 0 < _time_to_close < 30:
+                        # FIX (DEEP-AUDIT-2026-07-26 / F-01-87): use module-level
+                        # STRENGTH_GATE_LAST_SECS constant instead of magic 30.
+                        if 0 < _time_to_close < STRENGTH_GATE_LAST_SECS:
                             gated = self._apply_strength_gate(stream, stream.prediction)
                             if gated is not stream.prediction:
                                 # Option B: if the strength gate demoted to WEAK,
@@ -3629,11 +3956,19 @@ class QuotexFeed:
                         # or when high/low change.
                         cur_high = running["high"]
                         cur_low  = running["low"]
+                        # FIX (DEEP-AUDIT-2026-07-26 / F-01-20): moved
+                        # cur_close here so the cache invalidation check
+                        # below can use it (was defined further down).
+                        cur_close = running["close"]
                         tick_n   = len(stream.ticks)
                         if (stream._micro_cache is None
                                 or (tick_n - stream._micro_cache_at_tick) >= MICRO_RECALC_EVERY
                                 or cur_high != stream._micro_cache_high
-                                or cur_low  != stream._micro_cache_low):
+                                or cur_low  != stream._micro_cache_low
+                                # FIX (DEEP-AUDIT-2026-07-26 / F-01-20):
+                                # also invalidate on close change so `net`,
+                                # `last_react`, `ending_direction` are fresh.
+                                or cur_close != stream._micro_cache_close):
                             # Use only last 200 ticks for micro analysis
                             # (6x speedup vs full 2000-tick buffer)
                             recent_ticks = list(stream.ticks)[-200:]
@@ -3642,6 +3977,7 @@ class QuotexFeed:
                             stream._micro_cache_at_tick = tick_n
                             stream._micro_cache_high    = cur_high
                             stream._micro_cache_low     = cur_low
+                            stream._micro_cache_close   = cur_close
                         micro_snap = stream._micro_cache
 
                         # ── Signal delay gate (2026-07-10) ──────────────────
@@ -3679,7 +4015,7 @@ class QuotexFeed:
                         # the broadcast entirely. Saves JSON serialize + WS
                         # send on every connected client. Common when ticks
                         # are sparse (OTC) and the same price repeats.
-                        cur_close = running["close"]
+                        # NOTE: cur_close was already set above (F-01-20).
                         if (SKIP_REDUNDANT_BROADCAST
                                 and not reanchored
                                 and not pred_changed
@@ -3747,8 +4083,11 @@ class QuotexFeed:
             # resulting _record_stream_error hits tripped the cooldown,
             # blocking every OTHER pair for 2 more minutes. Observed live
             # on Railway as "blank chart for minutes after every deploy".
-            while not (self._connected and self._client):
-                await asyncio.sleep(0.5)
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-42): use asyncio.Event.wait()
+            # instead of busy-wait `while not (...): await asyncio.sleep(0.5)`.
+            # With 60 always-on streams, the busy-wait caused 120 wakeups/sec.
+            while not self._connected_event.is_set():
+                await self._connected_event.wait()
             async with self._new_stream_gate:
                 await self._start_stream(stream)
                 await asyncio.sleep(self._stagger_gap)   # paces the NEXT waiting stream
@@ -3794,7 +4133,12 @@ class QuotexFeed:
                     await self._client.stop_candles_stream(stream.asset)
             except Exception:
                 pass
-            self._streams.pop(key, None)
+            # FIX (DEEP-AUDIT-2026-07-26 / F-01-58): only pop if the
+            # registered stream is STILL the same instance — otherwise
+            # we'd pop a NEW stream the watchdog already started for the
+            # same key, killing a live stream.
+            if self._streams.get(key) is stream:
+                self._streams.pop(key, None)
             print(f"[feed] stream {key} stopped")
 
     async def _rearm_stream(self, stream: _AssetStream) -> None:
@@ -3844,16 +4188,13 @@ class QuotexFeed:
                     except Exception:
                         pass
                     if hasattr(self._client, 'register_tick_callback'):
-                        _loop = asyncio.get_event_loop()
+                        _loop = asyncio.get_running_loop()
                         def _on_tick(tick_dict, _stream=stream, _loop=_loop):
                             try:
                                 _loop.call_soon_threadsafe(
                                     _stream.tick_queue.put_nowait, tick_dict)
                             except Exception:
-                                try:
-                                    _stream.tick_queue.put_nowait(tick_dict)
-                                except Exception:
-                                    pass
+                                pass
                         self._client.register_tick_callback(stream.asset, _on_tick)
                         stream.tick_callback = _on_tick
             except Exception:
@@ -3869,6 +4210,9 @@ class QuotexFeed:
         except Exception:
             pass
         self._client, self._connected = None, False
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-42): clear the connected event so
+        # _run_stream coroutines block at the connection gate.
+        self._connected_event.clear()
         self._record_stream_error()
 
     # NOTE (refactor 2026-07-14): `_refresh_theory_mutes` removed.
@@ -4018,9 +4362,27 @@ class QuotexFeed:
                 new_stream.ticks.extend(old_ticks)
                 new_stream.prediction = old_pred
                 new_stream.idle_since = None
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-18): preserve cooldown /
+                # loss / zone_streak / cached_accuracy / payout state across
+                # watchdog restart. Without this, a pair in 30-min cooldown
+                # that crashed would restart fresh — cooldown lost, predictions
+                # fire immediately, losses pile up.
+                new_stream._consecutive_losses = getattr(stream, '_consecutive_losses', 0)
+                new_stream._loss_cooldown_until = getattr(stream, '_loss_cooldown_until', 0)
+                new_stream.zone_streak = dict(getattr(stream, 'zone_streak',
+                                                       {"regime": None, "zone": None, "losses": 0}))
+                new_stream.cached_accuracy = getattr(stream, 'cached_accuracy', (None, 0))
+                new_stream.payout = getattr(stream, 'payout', None)
+                new_stream._last_payout_refresh = getattr(stream, '_last_payout_refresh', 0.0)
+                new_stream.interested_cids = set(stream.interested_cids)
                 # Mark old stream as evicting so its cleanup doesn't
                 # call stop_candles_stream on the new subscription.
                 stream._evicting = True
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-18 cont): explicitly
+                # clear _evicting on the new stream so the new task's finally
+                # block doesn't skip stop_candles_stream on a legitimate
+                # future teardown.
+                new_stream._evicting = False
                 # Replace in registry
                 self._streams[key] = new_stream
                 new_stream.task = asyncio.create_task(self._run_stream(new_stream))
@@ -4045,7 +4407,9 @@ class QuotexFeed:
         # default — well within one 1m candle), re-arm JUST that stream's
         # subscription. This is much cheaper than a full client rebuild and
         # doesn't affect any other stream.
-        PER_STREAM_STALE_SECS = int(os.environ.get("PER_STREAM_STALE_SECS", "60"))
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-72): use module-level
+        # PER_STREAM_STALE_SECS instead of reading env every watchdog tick.
+        _per_stream_stale = PER_STREAM_STALE_SECS
         now = time.time()
         for key, s in list(self._streams.items()):
             # Skip streams that are already being evicted or haven't started.
@@ -4055,7 +4419,7 @@ class QuotexFeed:
             if not s.last_real_tick_wall:
                 continue
             age = now - s.last_real_tick_wall
-            if age > PER_STREAM_STALE_SECS:
+            if age > _per_stream_stale:
                 print(f"[feed] per-stream stale: {s.asset}@{s.period}s "
                       f"no tick for {age:.0f}s — re-arming subscription")
                 try:
@@ -4213,19 +4577,33 @@ class QuotexFeed:
         # _fallback_to_sim_if_stuck can cancel it cleanly. Without this,
         # the real feed's run() keeps retrying Quotex connections forever
         # after sim fallback kicks in, racing the sim feed for broadcasts.
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-56): stale comment —
+        # _fallback_to_sim_if_stuck was removed. Updated comment to
+        # reflect that _manager_task is now used by _aggressive_reconnect
+        # to detect a dead manager task and restart it.
         try:
             self._manager_task = asyncio.current_task()
         except Exception:
             self._manager_task = None
         self._abandoned = False
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-53, F-01-4221): _sim_delegate
+        # is permanently None (sim mode disabled). Setting it to None here
+        # was a defensive no-op — kept the assignment for backward-compat
+        # with any external code that still reads `feed._sim_delegate`.
         self._sim_delegate = None
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-42): clear the connected event
+        # at startup — set only when _connect() succeeds.
+        self._connected_event.clear()
 
         # FIX (RECONNECT-2026-07-23): start aggressive auto-reconnect loop.
         # Runs every 10s and ensures streams are always alive. If sim
         # fallback fires but sim delegate has 0 streams, this forces
         # streams to start within 10s. If real feed is abandoned, this
         # retries real connection.
-        asyncio.create_task(self._aggressive_reconnect())
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-57): store the task handle so
+        # shutdown() can cancel it. Previously this was fire-and-forget,
+        # orphaning the task on run() exit.
+        self._reconnect_task = asyncio.create_task(self._aggressive_reconnect())
 
         # ── Auto-login on startup (2026-07-11) ─────────────────────────────
         # If QX_EMAIL + QX_PASSWORD are set but the connection keeps failing
@@ -4236,17 +4614,23 @@ class QuotexFeed:
 
         # FIX L2 (2026-07-19): make housekeep/watchdog intervals env-tunable
         # so ops can dial them in for production tuning.
-        HOUSEKEEP_SECS    = int(os.environ.get("HOUSEKEEP_SECS", "5"))
+        # FIX (DEEP-AUDIT-2026-07-26 / F-01-72): use module-level HOUSEKEEP_SECS
+        # and WATCHDOG_INTERVAL instead of reading env every iteration of the
+        # manager loop (was 12 env reads/min).
         # Global staleness reuses the module-level STALE_SECS (overridable via
         # env) — see top of file. Was previously a separate GLOBAL_STALE_SECS.
         # FIX (2026-07-17): always_on watchdog runs every 30s (6 housekeep
         # ticks). Separate counter so it doesn't interfere with the existing
         # 5s housekeeping cadence.
         _last_watchdog_run = 0.0
-        WATCHDOG_INTERVAL  = float(os.environ.get("WATCHDOG_INTERVAL", "30.0"))
 
         while True:
             # FIX H4: exit cleanly if sim fallback has taken over.
+            # TODO (DEEP-AUDIT-2026-07-26 / F-01-53): _abandoned is always
+            # False (only set True in dead sim-fallback code paths).
+            # Keeping the check as a cheap safety net (no-op in practice)
+            # — removal would require auditing every place that reads
+            # _abandoned, which is out of scope for this fix batch.
             if self._abandoned:
                 print("[feed] run() exiting — sim feed has taken over")
                 return
@@ -4284,6 +4668,10 @@ class QuotexFeed:
                         continue
                     self._reconnect_attempts = 0          # reset on success
                     print("[feed] connected OK")
+                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-42): signal the
+                    # connected event so all _run_stream coroutines waiting
+                    # in the connection gate proceed without polling.
+                    self._connected_event.set()
                     await self._load_pairs(broadcast)
 
                     # A brand-new client has an empty subscription set — any
@@ -4314,7 +4702,16 @@ class QuotexFeed:
                 # client rebuild. The global rebuild is only needed when the
                 # WS connection itself is dead — every single stream silent
                 # for 3 minutes is a strong signal of that.
-                GLOBAL_STALE_SECS = int(os.environ.get("GLOBAL_STALE_SECS", "180"))
+                # TODO (DEEP-AUDIT-2026-07-26 / F-01-44): GLOBAL_STALE_SECS=180s
+                # is unreachable in practice — per-stream watchdog re-arms
+                # streams at PER_STREAM_STALE_SECS=60s, so last_real_tick_wall
+                # is reset before 180s ever elapses. Either lower
+                # GLOBAL_STALE_SECS below 60 (and accept duplicate re-arming)
+                # OR remove the global stale check entirely (per-stream is
+                # sufficient). SKIPPED for now: removal is risky without
+                # validating per-stream covers every silent-drop case.
+                # FIX (DEEP-AUDIT-2026-07-26 / F-01-72): use module-level
+                # GLOBAL_STALE_SECS instead of reading env every iteration.
                 if self._streams:
                     newest = max((s.last_real_tick_wall
                                  for s in self._streams.values()), default=0.0)
