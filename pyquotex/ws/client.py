@@ -136,8 +136,14 @@ class WebsocketClient:
         # immediately even though the new socket had not been authorized
         # by the server. After a reconnect, no SSID had been sent, so all
         # replayed subscriptions silently failed.
+        # FIX (CRASH-FIX-2-2026-07-26 / LOG-FEEDBACK): the previous fix
+        # imported from `pyquotex.types` but AuthStatus is actually
+        # defined in `pyquotex.global_value`. The ImportError caused
+        # every connect attempt to silently fall through the except,
+        # so the auth reset NEVER happened — defeating the fix.
+        # Now: import from the correct module.
         try:
-            from pyquotex.types import AuthStatus
+            from pyquotex.global_value import AuthStatus
             self.api.state.auth_status = AuthStatus.NOT_AUTHENTICATED
         except Exception as _e:
             print(f"[silent-except] pyquotex/ws/client.py:142 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
