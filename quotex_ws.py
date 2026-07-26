@@ -409,6 +409,14 @@ class QuotexWSClient:
         # attachment pops the next asset.
         self._binary_history_queue: deque[str] = deque()
 
+        # FIX (DEEP-AUDIT-2026-07-26 / LIVE-DATA-FIX): FIFO queue for
+        # live tick stream binary attachments. Quotex sends live ticks
+        # under event names like "quotes/stream" — the JSON header has
+        # the asset name and a {"_placeholder":true,"num":0} body; the
+        # actual tick data follows in the next binary frame. Each header
+        # pushes {"event", "asset"} here; each binary frame pops.
+        self._binary_tick_queue: deque = deque()
+
         # Subscribed assets (so stop_candles_stream only sends unfollow for
         # assets we actually subscribed)
         self._subscribed: set[str] = set()
@@ -1098,6 +1106,45 @@ class QuotexWSClient:
         # If payload is bytes, it's a binary attachment — append to the
         # asset at the front of the FIFO queue.
         if isinstance(payload, (bytes, bytearray)):
+            # FIX (DEEP-AUDIT-2026-07-26 / LIVE-DATA-FIX):
+            # Live tick streams arrive as binary attachments following
+            # a "quotes/stream" or "depth/change" JSON header. The header
+            # pushed a {"event", "asset"} dict to _binary_tick_queue. Now
+            # we pop it and parse the bytes as a tick list.
+            if self._binary_tick_queue:
+                tick_meta = self._binary_tick_queue.popleft()
+                try:
+                    # Decode the binary payload. Format observed:
+                    # 04 5b 5b 22 45 55 52 55 53 44 5f 6f 74 63 22 2c ...
+                    # First byte (04) is the Socket.IO binary-attachment marker.
+                    # After that: JSON array [[asset, ts, price, dir], ...]
+                    raw_bytes = bytes(payload)
+                    # Skip the leading 0x04 marker byte if present.
+                    if raw_bytes and raw_bytes[0] == 0x04:
+                        json_bytes = raw_bytes[1:]
+                    else:
+                        json_bytes = raw_bytes
+                    import json as _json
+                    decoded = _json.loads(json_bytes.decode("utf-8", errors="replace"))
+                    # decoded is a list of ticks: [[asset, ts, price, dir], ...]
+                    # or a single tick: [asset, ts, price, dir].
+                    if isinstance(decoded, list):
+                        if decoded and isinstance(decoded[0], (list, tuple)):
+                            # Multi-tick frame
+                            for tick in decoded:
+                                self._ingest_tick(tick)
+                        elif len(decoded) >= 3 and isinstance(decoded[0], str):
+                            # Single-tick frame
+                            self._ingest_tick(decoded)
+                    return
+                except Exception as exc:
+                    # Don't crash the reader loop on a malformed tick frame.
+                    # Just log and continue.
+                    if not getattr(self, "_suppress_tick_decode_warnings", False):
+                        print(f"[quotex_ws] tick decode failed: {exc}")
+                    return
+
+            # Otherwise, it's a history/load binary attachment.
             target = None
             # FIX (F-15-07): pop next asset from the FIFO queue.
             if self._binary_history_queue:
@@ -1126,6 +1173,45 @@ class QuotexWSClient:
         # payload is the parsed JSON head: [event_name, body, ...]
         if isinstance(payload, list) and payload:
             event = payload[0]
+            # FIX (DEEP-AUDIT-2026-07-26 / LIVE-DATA-FIX):
+            # Quotex sends live tick streams under event names like
+            # "quotes/stream" and "depth/change" — with the actual tick
+            # data delivered in the BINARY attachment that follows the
+            # JSON header (Socket.IO v3 binary-attachment pattern:
+            # {"_placeholder":true,"num":0} → next binary frame).
+            #
+            # Previously, _handle_binary only handled "history/load"
+            # events and silently DROPPED everything else. So:
+            #   - WebSocket was connected ✓
+            #   - Authorization succeeded ✓
+            #   - Quotex was actively sending ticks ✓
+            #   - But the app saw ZERO ticks because the binary frames
+            #     were dropped here.
+            #
+            # This was the root cause of "no live data" reported by the
+            # user after the deep-audit fix-batch.
+            #
+            # Fix: detect the placeholder pattern (header has body with
+            # {"_placeholder":true,"num":N}) and queue the asset/event
+            # so the binary attachment can be routed to _ingest_tick
+            # instead of being misrouted to _pending_history.
+            if event in ("quotes/stream", "depth/change", "quotes/update",
+                         "candleStream", "candle/update", "stream/update"):
+                # Live tick stream — the binary attachment will follow.
+                # Parse asset from the header body if available.
+                body = payload[1] if len(payload) >= 2 else {}
+                asset = None
+                if isinstance(body, dict):
+                    asset = body.get("asset") or body.get("instrument")
+                elif isinstance(body, str):
+                    asset = body
+                # Push to the binary-tick queue (separate from history queue
+                # so history responses don't get misrouted as ticks).
+                self._binary_tick_queue.append({
+                    "event": event,
+                    "asset": asset,
+                })
+                return
             if event == "history/load" and len(payload) >= 2:
                 body = payload[1] or {}
                 asset = body.get("asset") or body.get("instrument")
