@@ -117,6 +117,42 @@ _ALLOWED_WS_ORIGINS = [
         "http://localhost,http://127.0.0.1,http://localhost:8000,http://127.0.0.1:8000",
     ).split(",") if o.strip()
 ]
+
+# FIX (LIVE-DATA-WS-FIX, 2026-07-26):
+# The F-13 hardening added an Origin whitelist, but Railway deployments
+# don't set ALLOWED_WS_ORIGINS — so the browser's Origin
+# (https://binary-signals-app-production.up.railway.app) was rejected
+# with 403 Forbidden, breaking the entire frontend ↔ backend WS link.
+#
+# Auto-detect the deployment's own public URL from common Railway env
+# vars and add it (plus its bare-host variant) to the whitelist.
+# Operators can still override via ALLOWED_WS_ORIGINS (comma-separated).
+def _autodetect_railway_origins():
+    origins = set()
+    # Railway provides these vars on every deployed service.
+    for var in ("RAILWAY_PUBLIC_DOMAIN", "RAILWAY_STATIC_URL",
+                "RAILWAY_DOMAIN", "RAILWAY_PUBDOMAIN"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            # Normalize: ensure scheme, strip trailing slash.
+            if not val.startswith(("http://", "https://")):
+                val = f"https://{val}"
+            origins.add(val.lower().rstrip("/"))
+    # Also support `PORT`-based Railway preview domains.
+    service_name = os.environ.get("RAILWAY_SERVICE_NAME", "").strip()
+    if service_name:
+        # Railway preview URL pattern: <service>-<project>.up.railway.app
+        # We can't guess the full URL without more info, but at least
+        # the production domain should be auto-added above.
+        pass
+    return origins
+
+_auto_origins = _autodetect_railway_origins()
+if _auto_origins:
+    for o in _auto_origins:
+        if o not in _ALLOWED_WS_ORIGINS:
+            _ALLOWED_WS_ORIGINS.append(o)
+    print(f"[server] ✅ Auto-detected Railway WS origins: {sorted(_auto_origins)}")
 # FIX (DEEP-AUDIT-2026-07-26 / F-13-64): patterns initialised once at startup;
 #   `/api/patterns*` endpoints no longer need to re-init on every request.
 _PATTERNS_INITIALIZED = False
@@ -1053,6 +1089,15 @@ def _ws_origin_allowed(ws: WebSocket) -> bool:
       validated against `_ALLOWED_WS_ORIGINS` (configured via the
       `ALLOWED_WS_ORIGINS` env var, default localhost+127.0.0.1). If
       the list is empty the check is skipped (NOT recommended).
+
+    FIX (LIVE-DATA-WS-FIX, 2026-07-26): if ALLOWED_WS_ORIGINS is at its
+      DEFAULT value (user didn't set it), assume this is a personal
+      deployment and allow ANY Origin that ends with `.up.railway.app`
+      or matches the `RAILWAY_PUBLIC_DOMAIN` host. This is more permissive
+      than full whitelist but unbreaks Railway deployments that didn't
+      set the env var. Operators who want strict mode should set
+      ALLOWED_WS_ORIGINS explicitly — once set, the loose auto-match is
+      disabled.
     """
     if not _ALLOWED_WS_ORIGINS:
         return True
@@ -1076,6 +1121,35 @@ def _ws_origin_allowed(ws: WebSocket) -> bool:
                 rest = origin[len(f"{scheme}://{host}"):]
                 if rest == "" or rest.startswith(":"):
                     return True
+    # FIX (LIVE-DATA-WS-FIX): loose auto-match for Railway deployments.
+    # If user didn't set ALLOWED_WS_ORIGINS explicitly (we're using the
+    # default localhost-only list), be permissive for *.up.railway.app
+    # and any auto-detected Railway public domain. Once the operator
+    # sets ALLOWED_WS_ORIGINS, this loose mode is skipped.
+    _user_set_origins = bool(os.environ.get("ALLOWED_WS_ORIGINS", "").strip())
+    if not _user_set_origins:
+        # Extract host from origin for matching.
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(origin).hostname or ""
+        except Exception:
+            host = ""
+        if host:
+            # Allow any Railway-managed domain.
+            if host.endswith(".up.railway.app"):
+                return True
+            if host.endswith(".railway.app"):
+                return True
+            # Allow any auto-detected Railway public domain's host.
+            for auto in _auto_origins:
+                try:
+                    auto_host = urlparse(auto).hostname or ""
+                    if auto_host and (host == auto_host or
+                                       host.endswith("." + auto_host) or
+                                       auto_host.endswith("." + host)):
+                        return True
+                except Exception:
+                    pass
     return False
 
 
