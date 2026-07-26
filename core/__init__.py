@@ -7,4 +7,3 @@ algorithm_*) are imported lazily by their callers to avoid import-time
 side effects (e.g. stats.py opening a DB connection at import time would
 crash unit tests that don't have signals.db on disk).
 """
-from core import constants  # noqa: F401

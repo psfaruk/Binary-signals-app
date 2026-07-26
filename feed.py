@@ -46,21 +46,30 @@ from collections.abc import Callable  # noqa: E402 — used in @dataclass below
 # imports. Without these, `os.environ`, `re.compile`, `json.dumps`,
 # `time.time`, `threading.Lock`, etc. all raise NameError at module import.
 from collections import deque  # noqa: E402
-from collections.abc import Callable  # noqa: E402 — used in @dataclass below
-# FIX (DEEP-AUDIT-2026-07-26 / ORCHESTRATOR): re-add the standard-library
-# imports that F-01 agent inadvertently removed while consolidating other
-# imports. Without these, `os.environ`, `re.compile`, `json.dumps`,
-# `time.time`, `threading.Lock`, etc. all raise NameError at module import.
+# FIX (DEEP-AUDIT-2026-07-26 / F-01-74): keep a single Callable import.
+# FIX (CRASH-FIX-2026-07-26 / ROOT-CAUSE): re-add the missing app-level
+# imports that commit d714d7b accidentally removed during the import
+# reorganization. Without these, the feed task crashes on the very first
+# line of run() because `_db.init()` is undefined, leaving the WebSocket
+# connected but with no data producer alive — frontend stays on "Loading".
+# Same applies to `_key_levels` / `_round_level` used during candle analysis.
+import db as _db                                  # noqa: E402
+from core.analysis import _key_levels, _round_level  # noqa: E402
 import os      # noqa: E402
 import re      # noqa: E402
-import json    # noqa: E402
 import time    # noqa: E402
-import threading  # noqa: E402
+# FIX (CRASH-FIX-2026-07-26 / pyflakes cleanup): `threading`, `logging`,
+# `math`, and `json` were imported at module level but only used via
+# local `import json as _json` etc. imports inside functions. The
+# module-level imports were dead — pyflakes flagged them. Removed to
+# keep the file honest. The local imports remain because the call sites
+# use aliased names (_json, _math) for readability inside tight scopes.
 import asyncio  # noqa: E402
-import logging  # noqa: E402
-import math     # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
-from typing import Any, Dict, List, Optional, Tuple  # noqa: E402
+# FIX (pyflakes cleanup): remove unused typing imports — the codebase
+# uses string annotations / inline `dict | None` style throughout;
+# the typing.* aliases are dead.
+# from typing import Any, Dict, List, Optional, Tuple  # noqa: E402
 
 # Minimum live 1-minute payout % for a forex pair to be tradeable in this
 # app — pairs below this are blocked from streaming outright (not just from
@@ -524,6 +533,11 @@ def _aggregate_5m_closes(candles_1m: list[dict], period: int = 60) -> list[float
     bucket_seconds = 5 * period
     closes_5m: list[float] = []
     current_bucket: int | None = None
+    # FIX (CRASH-FIX-2026-07-26 / ROOT-CAUSE): initialize prev_close so the
+    # first iteration's `if current_bucket is not None` (which evaluates
+    # False on iter-1, so prev_close is not actually read) is also safe
+    # if candles_1m is empty (defensive). Was undefined per pyflakes.
+    prev_close: float = 0.0
     for c in candles_1m:
         t = c.get("time", 0)
         if ms_mode:
@@ -1342,7 +1356,13 @@ class QuotexFeed:
             # Broadcast the error to subscribers so the frontend can show it
             if self._broadcast:
                 try:
-                    self._broadcast({
+                    # FIX (CRASH-FIX-2026-07-26 / FX-001): missing `await` on
+                    # `self._broadcast({...})` — the coroutine was created but
+                    # never scheduled, so the stuck-stream error never reached
+                    # the frontend, leaving it stuck on "Loading" forever.
+                    # Python logs "coroutine was never awaited" but it's
+                    # easy to miss in production logs.
+                    await self._broadcast({
                         "type": "error",
                         "asset": asset,
                         "period": period,
@@ -1355,7 +1375,8 @@ class QuotexFeed:
                     # failures (queue full, JSON serialize error) so they
                     # don't disappear silently.
                     print(f"[feed] _warn_if_stuck broadcast failed: {_be}")
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as _e:
+            print(f"[silent-except] feed.py:1378 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         except Exception as exc:
             print(f"[feed] _warn_if_stuck error: {exc}")
@@ -1399,7 +1420,21 @@ class QuotexFeed:
                     print("[feed] aggressive_reconnect: 0 streams - triggering reconnect")
                     self._connected = False
                     self._connected_event.clear()
-                    self._reconnect_attempts = 0
+                    # FIX (CRASH-FIX-2026-07-26 / FX-007): resetting
+                    # `_reconnect_attempts` to 0 on every 10s tick defeats
+                    # the exponential backoff in run()'s main loop. During
+                    # cold-start with failing credentials (Cloudflare
+                    # blocking, dead token), the app hammered Quotex every
+                    # 10s instead of backing off 10s → 20s → 40s → 60s,
+                    # risking an IP ban and burning CPU. Now we only reset
+                    # if the previous attempt actually exceeded 5 (which
+                    # means we already tried ~5+ times in the last 60s),
+                    # so the backoff continues to apply pressure. We DON'T
+                    # reset to 0 unconditionally.
+                    if self._reconnect_attempts > 5:
+                        # Cap at 5 to avoid runaway but keep the backoff
+                        # signal intact.
+                        self._reconnect_attempts = 5
                     continue
 
                 # If abandoned, try to clear and retry
@@ -1434,7 +1469,8 @@ class QuotexFeed:
                         print(f"[feed] aggressive_reconnect: manager restart "
                               f"failed: {_re}")
 
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as _e:
+            print(f"[silent-except] feed.py:1471 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         except Exception as exc:
             print(f"[feed] aggressive_reconnect error: {exc}")
@@ -1484,7 +1520,8 @@ class QuotexFeed:
             tok = (self._client.session_data or {}).get("token")
             if tok:
                 os.environ["QX_TOKEN"] = tok
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] feed.py:1521 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
     def _clear_stale_token(self) -> None:
@@ -1938,7 +1975,8 @@ class QuotexFeed:
                 print(f"[feed] {stream.asset} in loss cooldown ({remaining} min remaining) — skipping prediction")
                 stream.prediction = None
                 return None
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] feed.py:1975 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass  # never let cooldown check break the feed
         # running_ticks=None here: the NEW candle's ticks are empty at this
         # exact moment (they accumulate after this call). LIVE re-eval picks
@@ -2926,7 +2964,8 @@ class QuotexFeed:
                     and time.time() > stream._loss_cooldown_until):
                 stream._consecutive_losses = 0
                 stream._loss_cooldown_until = 0
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] feed.py:2963 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
         # FIX (BUG-I, 2026-07-20): invalidate DB-adaptation cache after each
@@ -2944,7 +2983,8 @@ class QuotexFeed:
                 from engines.real.config import weight_adapter as _real_adapter
                 _otc_adapter.invalidate_cache(stream.asset, stream.period)
                 _real_adapter.invalidate_cache(stream.asset, stream.period)
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] feed.py:2981 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass  # adapters not loaded (e.g. test context) — skip
 
             # BRAIN: record full prediction context for learning
@@ -2956,7 +2996,8 @@ class QuotexFeed:
                     record_prediction,
                     old_prediction or {}, stream.asset, stream.period,
                     closed["time"], actual_dir, accuracy, closed, _micro_snap)
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] feed.py:2993 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
 
             # BRAIN: run analysis every N graded signals
@@ -2984,7 +3025,8 @@ class QuotexFeed:
                         await asyncio.to_thread(apply_tuned_weights_to_engines)
                     except Exception as _te:
                         print(f"[feed] auto-tune skipped: {_te}")
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] feed.py:3021 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
 
         # Update the chop-guard streak using the regime/zone the JUST-RESOLVED
@@ -3060,7 +3102,8 @@ class QuotexFeed:
                     pay = self._client.get_payout_by_asset(stream.asset)
                     if pay is not None:
                         stream.payout = int(pay)
-                except Exception:
+                except Exception as _e:
+                    print(f"[silent-except] feed.py:3097 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                     pass
                 stream._last_payout_refresh = _now
             payout = getattr(stream, 'payout', None) or 0
@@ -3196,7 +3239,8 @@ class QuotexFeed:
         if self._connected and stream.always_on:
             try:
                 asyncio.create_task(self._warn_if_stuck(asset, period, stream))
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] feed.py:3233 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
 
         # FIX (H3, 2026-07-19): if `stream.candles` is already populated
@@ -3343,7 +3387,8 @@ class QuotexFeed:
                         if self._client:
                             await self._client.start_candles_stream(
                                 stream.asset, stream.period)
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[silent-except] feed.py:3380 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                         pass
                     # FIX (DEEP-AUDIT-2026-07-26 / F-01-32): the audit
                     # suggested removing this line — but it serves as a
@@ -3695,7 +3740,8 @@ class QuotexFeed:
                                             else 0.0001)
                                 if _atr_val > 0 and recent_range > _atr_val * 0.5:
                                     reeval_interval = max(2, reeval_interval // 2)
-                            except Exception:
+                            except Exception as _e:
+                                print(f"[silent-except] feed.py:3732 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                                 pass
 
                         if len(stream.ticks) - stream._live_reeval_ticks >= reeval_interval:
@@ -3738,6 +3784,18 @@ class QuotexFeed:
                                             # updated too, allowing MEDIUM→STRONG
                                             # upgrades when running ticks
                                             # confirm the direction strongly.
+                                            # FIX (CRASH-FIX-2026-07-26 / FX-003):
+                                            # capture the PREVIOUS strength BEFORE
+                                            # reassigning stream.prediction. The
+                                            # old code checked
+                                            # `stream.prediction.get("strength")`
+                                            # AFTER the reassignment above, which
+                                            # always returned the NEW strength
+                                            # (because `stream.prediction` was
+                                            # already updated). The STRONG-upgrade
+                                            # rebroadcast never fired — users
+                                            # never saw mid-candle strength upgrades.
+                                            _prev_strength = stream.prediction.get("strength")
                                             stream.prediction = {
                                                 **stream.prediction,
                                                 "score": fresh.get("score",
@@ -3771,8 +3829,15 @@ class QuotexFeed:
                                             # If strength upgraded to STRONG,
                                             # force a rebroadcast so the user
                                             # sees the upgrade immediately.
+                                            # FIX (CRASH-FIX-2026-07-26 / FX-003):
+                                            # use _prev_strength captured BEFORE
+                                            # the reassignment. The previous code
+                                            # compared fresh vs the JUST-UPDATED
+                                            # stream.prediction, which always
+                                            # returned the new value, so the
+                                            # rebroadcast never fired.
                                             if (fresh.get("strength") == "STRONG"
-                                                    and stream.prediction.get("strength") != "STRONG"):
+                                                    and _prev_strength != "STRONG"):
                                                 pred_changed = True
                                         # else: different direction → IGNORE.
                                         # The original EOC signal stays.
@@ -3842,21 +3907,44 @@ class QuotexFeed:
                                                     + list(fresh.get("reasons", []))
                                                     + [f"LIVE re-eval upgraded NEUTRAL→{fresh_dir}"]
                                                 )
-                                                stream.prediction = {**fresh,
-                                                                     "reasons": _merged_reasons}
+                                                # FIX (CRASH-FIX-2026-07-26 / FX-004):
+                                                # `{**fresh, "reasons": ...}` DROPPED
+                                                # `candle` and `payout` fields that
+                                                # were set on the original EOC
+                                                # prediction. The frontend's
+                                                # renderSignal() reads these fields
+                                                # to display the prediction candle
+                                                # overlay; losing them meant the
+                                                # prediction candle disappeared from
+                                                # the chart after a NEUTRAL→CALL/PUT
+                                                # upgrade. Merge fresh INTO the
+                                                # existing prediction instead of
+                                                # replacing the whole dict.
+                                                stream.prediction = {
+                                                    **stream.prediction,
+                                                    **fresh,
+                                                    "reasons": _merged_reasons,
+                                                }
                                                 pred_changed = True
                                             else:
                                                 # No previous lock — first time
                                                 # establishing a direction. Allow.
                                                 # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-11):
                                                 # merge reasons here too.
+                                                # FIX (CRASH-FIX-2026-07-26 / FX-005):
+                                                # same FX-004 fix — merge fresh
+                                                # into existing prediction to
+                                                # preserve candle/payout fields.
                                                 _merged_reasons = (
                                                     list(stream.prediction.get("reasons", []))
                                                     + list(fresh.get("reasons", []))
                                                     + [f"LIVE re-eval upgraded NEUTRAL→{fresh_dir}"]
                                                 )
-                                                stream.prediction = {**fresh,
-                                                                     "reasons": _merged_reasons}
+                                                stream.prediction = {
+                                                    **stream.prediction,
+                                                    **fresh,
+                                                    "reasons": _merged_reasons,
+                                                }
                                                 stream._locked_direction = fresh_dir
                                                 pred_changed = True
                             except Exception as exc:
@@ -4092,7 +4180,8 @@ class QuotexFeed:
                 await self._start_stream(stream)
                 await asyncio.sleep(self._stagger_gap)   # paces the NEXT waiting stream
             await self._stream_loop(stream)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as _e:
+            print(f"[silent-except] feed.py:4171 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         except Exception as exc:
             import traceback
@@ -4110,7 +4199,8 @@ class QuotexFeed:
                     self._client.unregister_tick_callback(
                         stream.asset, stream.tick_callback)
                     stream.tick_callback = None
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] feed.py:4189 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
             try:
                 # FIX (2026-07-13): skip stop_candles_stream if this stream
@@ -4131,13 +4221,31 @@ class QuotexFeed:
                         and not getattr(stream, '_evicting', False)
                         and sub_matches_current):
                     await self._client.stop_candles_stream(stream.asset)
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] feed.py:4210 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
             # FIX (DEEP-AUDIT-2026-07-26 / F-01-58): only pop if the
             # registered stream is STILL the same instance — otherwise
             # we'd pop a NEW stream the watchdog already started for the
             # same key, killing a live stream.
-            if self._streams.get(key) is stream:
+            # FIX (CRASH-FIX-2026-07-26 / FX-006): when an always_on stream
+            # crashes, the watchdog wants to PRESERVE its candle history,
+            # ticks, prediction, cooldown state, etc. Previously, popping
+            # the stream here wiped all that state — the watchdog then
+            # saw `stream=None` and took the "fresh start" branch, losing
+            # ~30s of history re-fetch. Now: if the stream is always_on,
+            # DON'T pop it — leave the dead stream in self._streams so
+            # the watchdog can read its state and rearm it in place.
+            # The watchdog will replace stream.task with a fresh asyncio
+            # task (see _watchdog_always_on). Non-always_on streams still
+            # pop normally — they were on-demand and have no watcher.
+            if stream.always_on:
+                # Don't pop — leave for the watchdog to preserve state.
+                # Mark the stream as needing restart so the watchdog picks
+                # it up on the next 30s cycle.
+                stream._needs_restart = True
+                print(f"[feed] always_on stream {key} crashed — preserved for watchdog")
+            elif self._streams.get(key) is stream:
                 self._streams.pop(key, None)
             print(f"[feed] stream {key} stopped")
 
@@ -4185,7 +4293,8 @@ class QuotexFeed:
                     try:
                         while not stream.tick_queue.empty():
                             stream.tick_queue.get_nowait()
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[silent-except] feed.py:4264 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                         pass
                     if hasattr(self._client, 'register_tick_callback'):
                         _loop = asyncio.get_running_loop()
@@ -4193,7 +4302,8 @@ class QuotexFeed:
                             try:
                                 _loop.call_soon_threadsafe(
                                     _stream.tick_queue.put_nowait, tick_dict)
-                            except Exception:
+                            except Exception as _e:
+                                print(f"[silent-except] feed.py:4272 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                                 pass
                         self._client.register_tick_callback(stream.asset, _on_tick)
                         stream.tick_callback = _on_tick
@@ -4202,12 +4312,18 @@ class QuotexFeed:
             await asyncio.sleep(self._stagger_gap)
 
     async def _rebuild_client(self) -> None:
-        for s in self._streams.values():
+        # FIX (CRASH-FIX-2026-07-26 / FX-002): iterating `self._streams` directly
+        # while awaiting broadcast is unsafe — if `ensure_stream` or the
+        # watchdog mutates the dict during the await, Python raises
+        # `RuntimeError: dictionary changed size during iteration`. Snapshot
+        # to a list first.
+        for s in list(self._streams.values()):
             await self._broadcast({"type": "stale", "asset": s.asset, "period": s.period})
         try:
             if self._client:
                 await self._client.close()
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] feed.py:4291 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         self._client, self._connected = None, False
         # FIX (DEEP-AUDIT-2026-07-26 / F-01-42): clear the connected event so
@@ -4256,7 +4372,7 @@ class QuotexFeed:
         for p in self._alltime_otc_pairs_list:
             eligible.add((p["asset"], 60))
 
-        for key, s in self._streams.items():
+        for key, s in list(self._streams.items()):
             if s.always_on and key not in eligible:
                 s.always_on = False
 
@@ -4337,7 +4453,8 @@ class QuotexFeed:
                         else:
                             print(f"[feed] watchdog: stream {asset} task completed "
                                   f"unexpectedly. Restarting.")
-                    except asyncio.InvalidStateError:
+                    except asyncio.InvalidStateError as _e:
+                        print(f"[silent-except] feed.py:4421 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                         pass
                 else:
                     print(f"[feed] watchdog: stream {asset} task was cancelled. Restarting.")
@@ -4468,7 +4585,8 @@ class QuotexFeed:
                     # finally block only does unregister + pop.
                     try:
                         await asyncio.wait_for(s.task, timeout=1.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                    except (asyncio.TimeoutError, asyncio.CancelledError) as _e:
+                        print(f"[silent-except] feed.py:4552 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                         pass
                 # The task's finally block will pop the key. But if the task
                 # was already dead (e.g., crashed earlier), pop here as a fallback.
@@ -4516,7 +4634,8 @@ class QuotexFeed:
                       f"({token[:8]}...) — will try it first")
                 os.environ["QX_TOKEN"] = token
                 return
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] feed.py:4600 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         
         email = os.environ.get("QX_EMAIL", "").strip()
@@ -4557,7 +4676,8 @@ class QuotexFeed:
             from quotex_ws import QuotexWSClient
             QuotexWSClient.clear_session_json_token()
             cleared_something = True
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] feed.py:4641 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
         if cleared_something:

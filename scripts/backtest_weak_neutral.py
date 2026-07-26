@@ -110,7 +110,6 @@ def main():
     feed_obj = QuotexFeed()
 
     # Manually construct a stream with a WEAK prediction
-    import time as _t
     candles = build_candles([(0, 0.0001, -0.0001, 0.00005)] * 50, base_price=1.0)
     stream = _AssetStream(asset="EURUSD_otc", period=60, always_on=False)
     stream.candles = candles

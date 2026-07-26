@@ -129,6 +129,19 @@ class WebsocketClient:
     ) -> None:
         """One ``connect()`` cycle. Returns when the connection ends."""
         headers = extra_headers or {}
+        # FIX (CRASH-FIX-2026-07-26 / PQ-003): reset auth_status BEFORE the
+        # fresh socket handshake. Previously, _on_open set state.status to
+        # CONNECTED but left auth_status = AUTHENTICATED from the prior
+        # session, so check_connect() / wait_until predicates returned True
+        # immediately even though the new socket had not been authorized
+        # by the server. After a reconnect, no SSID had been sent, so all
+        # replayed subscriptions silently failed.
+        try:
+            from pyquotex.types import AuthStatus
+            self.api.state.auth_status = AuthStatus.NOT_AUTHENTICATED
+        except Exception as _e:
+            print(f"[silent-except] pyquotex/ws/client.py:142 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+            pass
         async with websockets.connect(
             url,
             additional_headers=headers,
@@ -190,10 +203,12 @@ class WebsocketClient:
                     )
                     try:
                         await self._ws.close(code=4000, reason="watchdog-stale")
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[silent-except] pyquotex/ws/client.py:205 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                         pass
                     return
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as _e:
+            print(f"[silent-except] pyquotex/ws/client.py:208 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
     # ------------------------------------------------------------------
@@ -206,8 +221,35 @@ class WebsocketClient:
                 if self.state.status == WebsocketStatus.CONNECTED:
                     break
                 await asyncio.sleep(0.05)
-        except Exception:  # pragma: no cover
+        except Exception as _e:  # pragma: no cover
+            print(f"[silent-except] pyquotex/ws/client.py:221 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
+
+        # FIX (CRASH-FIX-2026-07-26 / PQ-002): the fresh socket is open but
+        # unauthenticated. The server silently drops every replayed
+        # `instruments/update`, `chart_notification/get`, and `depth/follow`
+        # because no SSID has been sent on this new connection.
+        # Send the SSID first; if the cached token is rejected, fall back
+        # to a full HTTP `authenticate()` (which fetches a fresh SSID).
+        try:
+            if self.api.state.SSID:
+                await self.api.send_ssid()
+            else:
+                # No cached token — try a full authenticate (this requires
+                # email/password to be set; if not, the original failure
+                # path will surface in connect()).
+                ok, _ = await self.api.authenticate()
+                if not ok:
+                    logger.warning(
+                        "_replay_subscriptions: authenticate() failed; "
+                        "subscriptions will not be re-established."
+                    )
+                    return
+        except Exception as e:
+            logger.warning(
+                "_replay_subscriptions: SSID send/auth failed (%s); "
+                "subscriptions may be delayed.", e,
+            )
 
         subs = list(getattr(self.api, "_subscriptions", {}).values())
         for sub in subs:

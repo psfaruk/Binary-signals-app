@@ -47,7 +47,8 @@ class AssetsMixin:
                         timeout=2,
                         poll_interval=0.1,
                     )
-                except asyncio.TimeoutError:
+                except asyncio.TimeoutError as _e:
+                    print(f"[silent-except] pyquotex/_api/assets.py:50 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                     pass
 
             return self.api.instruments or []
@@ -87,8 +88,22 @@ class AssetsMixin:
         """
         _, asset_open = await self.check_asset_open(asset_name)
         if force_open and (not asset_open or not asset_open[2]):
-            condition_otc = "otc" not in asset_name
-            refactor_asset = asset_name.replace("_otc", "")
+            # FIX (CRASH-FIX-2026-07-26 / PQ-053): the previous code used
+            # `"otc" not in asset_name` (case-sensitive substring match),
+            # which meant an asset named "BOOTCAMP" would be falsely
+            # detected as OTC ("otc" in "BOOTCAMP" is False because of
+            # case). And "EURUSD_OTC" (uppercase) would be detected as
+            # NOT OTC (case mismatch), stripping the "_otc" suffix and
+            # breaking the asset lookup. Now: case-insensitive SUFFIX
+            # match — only "_otc" at the END of the name is treated as
+            # the OTC marker. Stripping is also case-insensitive.
+            _lower = asset_name.lower()
+            condition_otc = not _lower.endswith("_otc")
+            if condition_otc:
+                refactor_asset = asset_name  # no _otc to strip
+            else:
+                # Strip the trailing _otc (case-insensitive)
+                refactor_asset = asset_name[:-len("_otc")] if _lower.endswith("_otc") else asset_name
             asset_name = (
                 f"{asset_name}_otc" if condition_otc else refactor_asset
             )

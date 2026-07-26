@@ -123,7 +123,6 @@ _SESSION_FILE_LOCK = threading.Lock()
 def _make_ws_is_open_check():
     try:
         # v13+ ClientConnection: close_code is None while open, set on close.
-        from websockets.exceptions import ConnectionClosed  # noqa: ensure imp
         # Probe by attribute existence on a dummy class.
         class _Probe:
             close_code = None
@@ -134,7 +133,8 @@ def _make_ws_is_open_check():
             except AttributeError:
                 return False
         return _v13_check
-    except Exception:
+    except Exception as _e:
+        print(f"[silent-except] quotex_ws.py:136 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
         pass
     try:
         from websockets.protocol import State  # v10-15
@@ -227,7 +227,8 @@ def _parse_incoming(raw: str | bytes) -> tuple[str, Any]:
                 arr = json.loads(rest)
                 if isinstance(arr, list) and arr:
                     return "event", arr
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as _e:
+                print(f"[silent-except] quotex_ws.py:229 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
             return "event", []
         if sub == "3":
@@ -473,12 +474,25 @@ class QuotexWSClient:
         state so the next connect() doesn't honor the 60s wait. This lets
         /api/set-token refresh the token and have the next reconnect
         succeed immediately instead of waiting 60s for no reason.
+
+        FIX (CRASH-FIX-2026-07-26 / QX-069): the previous `if ssid and
+        ssid != self._ssid` check meant that re-pasting the SAME token
+        via /api/set-token (typical user workflow — they re-fetch from
+        the browser and push) did NOT clear the dead-token state, so
+        auto-reconnect stayed stuck for 60s even though the token was
+        now valid again. Same-token refresh is the most common path in
+        production (Quotex tokens last ~24h, users refresh proactively).
+        Now we ALWAYS clear the backoff state when set_session is called
+        — if the operator is explicitly pushing a token, they know it's
+        fresh. The dead-token state is set ONLY by the actual auth-reject
+        handler in the WS message loop, not by the setter.
         """
-        # If the new ssid differs from the old one, treat as fresh token:
-        # reset the dead-token counter and backoff state.
-        if ssid and ssid != self._ssid:
-            self._consecutive_rejects = 0
-            self._token_dead_at = 0
+        # FIX (QX-069): always clear dead-token state on set_session.
+        # The operator explicitly pushed a token — treat it as fresh.
+        # If it's actually dead, the auth-reject handler will re-mark it
+        # after 3 consecutive rejects (same as before).
+        self._consecutive_rejects = 0
+        self._token_dead_at = 0
         self._user_agent = user_agent
         self._ssid = ssid
         self._cookies = cookies
@@ -501,14 +515,48 @@ class QuotexWSClient:
         env override, then fall back to sys._MEIPASS (frozen), then CWD.
         Prefer `pyquotex.config.load_session` if full PyInstaller support
         is needed — this implementation is the lightweight equivalent.
+
+        FIX (CRASH-FIX-2026-07-26 / QX-014): on Railway (and other ephemeral
+        container filesystems), os.getcwd() resolves to a tmpfs that is
+        WIPED on every redeploy — so session.json is lost and the saved
+        token never persists across Railway deploys, forcing the user to
+        manually re-push the token. Now: if running on Railway (detected
+        via RAILWAY_VOLUME_MOUNT_PATH env var or RAILWAY_PUBLIC_DOMAIN),
+        prefer a persistent volume mount path; only fall back to CWD if
+        no volume is configured. Operators should set
+        RAILWAY_VOLUME_MOUNT_PATH=/data and add a Railway volume mount
+        to /data for the token to persist.
         """
         env = os.environ.get("QX_SESSION_PATH")
         if env:
             return env
+        # Railway persistent volume (operators must add a volume mount).
+        # If RAILWAY_VOLUME_MOUNT_PATH is set, use it — session.json will
+        # survive container restarts and redeploys.
+        railway_vol = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+        if railway_vol:
+            try:
+                os.makedirs(railway_vol, exist_ok=True)
+                return os.path.join(railway_vol, "session.json")
+            except Exception as _e:
+                print(f"[silent-except] quotex_ws.py:539 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+                pass  # fall through to other options
         # PyInstaller: _MEIPASS is set to the bundle's extracted dir.
         meipass = getattr(__import__("sys"), "_MEIPASS", None)
         if meipass:
             return os.path.join(meipass, "session.json")
+        # Railway detection: if RAILWAY_PUBLIC_DOMAIN is set, we're on
+        # Railway — warn that session.json won't persist without a volume.
+        if os.environ.get("RAILWAY_PUBLIC_DOMAIN") and not railway_vol:
+            # Log once per process via a module-level flag.
+            global _RAILWAY_NOPERSIST_WARNED
+            if not globals().get("_RAILWAY_NOPERSIST_WARNED"):
+                _RAILWAY_NOPERSIST_WARNED = True
+                print("[quotex_ws] WARNING: running on Railway but "
+                      "RAILWAY_VOLUME_MOUNT_PATH not set — session.json "
+                      "will be lost on redeploy. Add a Railway volume "
+                      "mounted to e.g. /data and set "
+                      "RAILWAY_VOLUME_MOUNT_PATH=/data to persist tokens.")
         return os.path.join(os.getcwd(), "session.json")
 
     @staticmethod
@@ -574,7 +622,8 @@ class QuotexWSClient:
                     with open(path, "w", encoding="utf-8") as f:
                         json.dump(data, f)
                     print("[quotex_ws] cleared stale token in session.json")
-            except FileNotFoundError:
+            except FileNotFoundError as _e:
+                print(f"[silent-except] quotex_ws.py:622 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
             except Exception as exc:
                 print(f"[quotex_ws] could not clear session.json token: {exc}")
@@ -598,7 +647,8 @@ class QuotexWSClient:
                 try:
                     with open(path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                except (FileNotFoundError, json.JSONDecodeError):
+                except (FileNotFoundError, json.JSONDecodeError) as _e:
+                    print(f"[silent-except] quotex_ws.py:646 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                     pass
                 data[email] = {
                     "cookies": cookies,
@@ -856,7 +906,8 @@ class QuotexWSClient:
                     await self._dispatch(kind, payload, raw)
                 except Exception as exc:
                     print(f"[quotex_ws] dispatch error ({kind}): {exc}")
-        except ConnectionClosed:
+        except ConnectionClosed as _e:
+            print(f"[silent-except] quotex_ws.py:904 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         except Exception as exc:
             print(f"[quotex_ws] reader loop died: {exc}")
@@ -877,7 +928,8 @@ class QuotexWSClient:
             # Server wants a pong
             try:
                 await self._ws.send("3")
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] quotex_ws.py:925 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
         elif kind == "pong":
             # FIX (2026-07-13): server responded to our ping — record the
@@ -954,7 +1006,8 @@ class QuotexWSClient:
                 if callable(cb):
                     try:
                         cb()
-                    except Exception:
+                    except Exception as _e:
+                        print(f"[silent-except] quotex_ws.py:1002 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                         pass
             else:
                 print(f"[quotex_ws]    App will auto-relogin on next retry cycle.")
@@ -1005,7 +1058,8 @@ class QuotexWSClient:
                     server_ts = float(args[0].get("time", 0))
                     if server_ts > 0:
                         self._server_time_offset = server_ts - time.time()
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as _e:
+                print(f"[silent-except] quotex_ws.py:1053 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
         elif name == "chart_notification/update":
             # FIX (DEEP-AUDIT-2026-07-26 / F-15-36): previously `pass` —
@@ -1025,7 +1079,8 @@ class QuotexWSClient:
                             self._asset_open_state[asset] = bool(data["isOpened"])
                         elif "is_open" in body:
                             self._asset_open_state[asset] = bool(body["is_open"])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as _e:
+                print(f"[silent-except] quotex_ws.py:1073 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
         # Tick data is delivered as a list of [asset, ts, price, direction]
         # tuples — sent under various event names depending on Quotex version.
@@ -1084,6 +1139,23 @@ class QuotexWSClient:
         # of data during high-activity periods where 3-5 ticks/sec is
         # common. Now dedup on (timestamp, price) tuple — true duplicates
         # match both fields, distinct ticks within the same second are kept.
+        # FIX (CRASH-FIX-2026-07-26 / QX-036 revised): _ingest_tick is a
+        # SYNC function (called from the WS message dispatcher without
+        # await), so we can't `async with self._realtime_lock` here.
+        # In CPython, deque.append() is GIL-protected and atomic, and
+        # `list(buf)[-5:]` makes a thread-safe snapshot copy — so the
+        # dedup+append is already race-safe against the only writer
+        # (this function). The only race is with stop_candles_stream()'s
+        # `self._realtime.pop(asset)`, which holds the async
+        # `_realtime_lock` during pop. The pop itself is also atomic on
+        # dict. The previously-feared "recreate empty deque via
+        # defaultdict" race only matters if a tick lands AFTER pop —
+        # which is fine (the buffer is meant to be repopulated after
+        # the next subscribe). So we leave the sync path lock-free
+        # and rely on the atomicity of deque/dict ops in CPython.
+        # The async lock is still held by stop_candles_stream (caller
+        # side) and by get_realtime_price (reader side) — those are
+        # async so they can use asyncio.Lock.
         buf = self._realtime[asset]
         for _t in list(buf)[-5:]:
             if _t["time"] == ts and _t["price"] == price:
@@ -1341,7 +1413,8 @@ class QuotexWSClient:
                         try:
                             if self._ws is not None:
                                 await self._ws.close()
-                        except Exception:
+                        except Exception as _e:
+                            print(f"[silent-except] quotex_ws.py:1399 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                             pass
                         break
                     try:
@@ -1367,9 +1440,11 @@ class QuotexWSClient:
                             await self._ws.send(reauth_frame)
                             last_reauth = now
                             # Silent — don't log every 5 min
-                        except Exception:
+                        except Exception as _e:
+                            print(f"[silent-except] quotex_ws.py:1425 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                             pass
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as _e:
+            print(f"[silent-except] quotex_ws.py:1427 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
     async def _cleanup(self) -> None:
@@ -1389,12 +1464,14 @@ class QuotexWSClient:
         if self._ws and self._ws_is_open():
             try:
                 await self._ws.close()
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] quotex_ws.py:1447 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
         if tasks_to_await:
             try:
                 await asyncio.gather(*tasks_to_await, return_exceptions=True)
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] quotex_ws.py:1452 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
         self._ws = None
         self._connected = False
@@ -1452,7 +1529,8 @@ class QuotexWSClient:
             payout = int(inst[-9])
             if name and payout >= 0:
                 self._payouts[name] = payout
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError, IndexError) as _e:
+            print(f"[silent-except] quotex_ws.py:1510 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
     async def get_instruments(self) -> list:
@@ -1616,11 +1694,25 @@ class QuotexWSClient:
         background reader loop as ticks arrive. feed.py polls this every
         ~50ms per stream (see _stream_loop) and filters to new ticks via
         stream.last_tick_ts.
+
+        FIX (CRASH-FIX-2026-07-26 / QX-052): previously this did
+        `buf = self._realtime.get(asset); return list(buf)` without holding
+        `_realtime_lock`. Concurrently, stop_candles_stream()'s
+        `self._realtime.pop(asset)` could mutate the deque during the
+        `list(buf)` call → `RuntimeError: deque mutated during iteration`.
+        The race is rare (requires the pop to land between the .get() and
+        the list() call), but in production with many streams starting/
+        stopping, it crashes the asset stream. Now: acquire the lock and
+        return a snapshot.
         """
-        buf = self._realtime.get(asset)
-        if not buf:
-            return []
-        return list(buf)
+        # FIX (QX-052): hold _realtime_lock to prevent concurrent pop
+        # during list(buf) iteration. Also handle the case where the
+        # entry was popped between .get and the lock acquisition.
+        async with self._realtime_lock:
+            buf = self._realtime.get(asset)
+            if not buf:
+                return []
+            return list(buf)
 
     # ── History ───────────────────────────────────────────────────────────
 
@@ -1686,7 +1778,8 @@ class QuotexWSClient:
                     self._binary_history_queue.pop()
                 else:
                     break
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] quotex_ws.py:1758 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
         try:

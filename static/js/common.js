@@ -371,7 +371,26 @@ function updateChart(candles, predCandle, resetView){
     console.error('[chart] setData error:', e);
   }
   if(candleData.length) _resetRaf(candleData[candleData.length-1]);
-  if(candleData.length) hideChartLoading();
+  // FIX (CRASH-FIX-2026-07-26 / FE-002): hideChartLoading() was only called
+  // when candleData.length > 0. If the server returned an empty snapshot
+  // (broker feed down, asset not configured, period gap, new pair with no
+  // history yet), the chart-loading overlay stayed on "Loading…" forever,
+  // even though the connection was perfectly fine. Now we ALWAYS hide the
+  // loading overlay after setData, regardless of whether the array is empty.
+  hideChartLoading();
+  // Surface empty-snapshot state to the user so they know the connection
+  // is fine but no data is available (not the same as "Loading…").
+  if(!candleData.length){
+    try{
+      const _noData = document.getElementById('chart-no-data');
+      if(_noData) _noData.style.display = 'block';
+    }catch(_){}
+  } else {
+    try{
+      const _noData = document.getElementById('chart-no-data');
+      if(_noData) _noData.style.display = 'none';
+    }catch(_){}
+  }
   if(resetView && candleData.length){
     try{ chart.timeScale().scrollToPosition(3, false); }catch(_){}
   }
@@ -483,6 +502,15 @@ function updateLastCandle(candle){
     candleData.push(safeCandle);
     try{ if(candleSeries) candleSeries.setData(candleData); }catch(e){ console.error('[chart] setData(empty) error:', e); }
     _resetRaf(safeCandle);
+    // FIX (CRASH-FIX-2026-07-26 / FE-003): when the first tick arrives
+    // before any snapshot, the chart-loading overlay was never cleared
+    // because this branch returned before hideChartLoading(). Now we
+    // hide it so the user sees the tick immediately.
+    hideChartLoading();
+    try{
+      const _noData = document.getElementById('chart-no-data');
+      if(_noData) _noData.style.display = 'none';
+    }catch(_){}
     return;
   }
   const last = candleData[candleData.length-1];
@@ -1817,7 +1845,38 @@ function connect(){
     try { handleMsg(msg); }
     catch(err){ console.error('[ws] handleMsg error', err, msg); }
   };
-  ws.onclose = () => { setStatus('disconnected'); scheduleReconnect(); };
+  ws.onclose = (event) => {
+    // FIX (CRASH-FIX-2026-07-26 / FE-001): onclose ignored event.code /
+    // event.reason, so the user never knew WHY the connection dropped.
+    // On Railway, the most common close codes are:
+    //   1008  → Policy Violation (origin rejected by ALLOWED_WS_ORIGINS)
+    //   1011  → Internal server error (feed task crashed)
+    //   1013  → Try Again Later (server at capacity / starting up)
+    // For 1008 specifically, retrying forever won't help — the origin
+    // is blocked server-side. Surface the cause to the user with a
+    // persistent error overlay so they can fix the env var or contact
+    // the operator. For 1011 (feed crashed), the server auto-restarts
+    // the feed task, so retrying is fine but should be visible.
+    // For 1013, immediate retry is appropriate.
+    let _permError = '';
+    if(event && event.code === 1008){
+      _permError = 'Connection rejected by server (code 1008). ' +
+        'The WebSocket origin is not in ALLOWED_WS_ORIGINS. ' +
+        'Contact the operator to add this domain.';
+    } else if(event && event.code === 1011){
+      _permError = 'Server error (code 1011). The feed task may have ' +
+        'crashed — auto-restart in progress. Retrying…';
+    } else if(event && event.code === 1006){
+      _permError = 'Connection closed abnormally (code 1006). ' +
+        'Possible causes: network drop, server restart, or Cloudflare ' +
+        'intervention. Retrying…';
+    }
+    if(_permError){
+      try{ showError(_permError); }catch(_){}
+    }
+    setStatus('disconnected');
+    scheduleReconnect();
+  };
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-20, HIGH): call scheduleReconnect()
   // directly in onerror. Previously the comment assumed onclose would fire
   // after ws.close(), but if ws.close() throws (already closed) or onclose

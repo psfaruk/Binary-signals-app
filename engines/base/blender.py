@@ -26,7 +26,7 @@ Engine-specific configuration is passed in via a `BlenderConfig` dataclass:
   - module_names: tuple of 6 module names (for the breakdown display)
 """
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 # FIX (DEEP-AUDIT-2026-07-26 / F-02-16): `MarketContext` was imported but
@@ -916,7 +916,16 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # bin-cap block with a call to the centralised `_apply_calibration_caps`
     # helper. The helper also fixes the 5-point discontinuous jump at the
     # confidence=70 boundary (was: 60-69 → 60, 70-79 → 65; now: 60-79 → 60).
-    confidence = _apply_calibration_caps(confidence, total_groups, net_margin)
+    # FIX (CRASH-FIX-2026-07-26 / EN-007): pass effective_total_groups
+    # (post-suppression) instead of total_groups (pre-suppression) so
+    # the >75 consensus cap reflects the TRUE consensus, not the
+    # original vote count. Previously a 3-group signal with 1 suppressed
+    # could exceed 75 if all 3 originally voted — even though only 2
+    # contributed to the final prediction. If effective_total_groups
+    # isn't yet computed at this call site (early in the function), use
+    # the locals().get fallback.
+    _eff_groups_for_cap = locals().get("effective_total_groups", total_groups)
+    confidence = _apply_calibration_caps(confidence, _eff_groups_for_cap, net_margin)
 
     # ── Step 9: Pattern confluence check for STRONG ──────────────────────
     # FIX (BUG-BQ, 2026-07-20): pattern_agrees only checked reliability ==
@@ -1029,7 +1038,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # AUDIT-LIVE-2-01 FIX (2026-07-25): match the first cap block exactly.
     # FIX (DEEP-AUDIT-2026-07-26 / F-02-21): replaced the duplicated inline
     # block (was 12 lines) with a single call to the centralised helper.
-    confidence = _apply_calibration_caps(confidence, total_groups, net_margin)
+    # FIX (CRASH-FIX-2026-07-26 / EN-007): same as the earlier call —
+    # use effective_total_groups for the >75 consensus cap so suppressed
+    # groups don't count toward the consensus requirement.
+    _eff_groups_for_cap2 = locals().get("effective_total_groups", total_groups)
+    confidence = _apply_calibration_caps(confidence, _eff_groups_for_cap2, net_margin)
     # FIX (WIN-RATE-BOOST #2, 2026-07-23): re-apply the TREND_UP/DOWN cap
     # after the accuracy boost + calibration caps. The previous code only
     # re-applied a -8 penalty for counter-trend signals. Now we re-apply
@@ -1071,7 +1084,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                     all_reasons.append(
                         f"_TREND_COLD_STREAK: recent {_acc_val:.0%} "
                         f"({_acc_n} samples) → dampen trend cap to {_trend_cap}")
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as _e:
+                print(f"[silent-except] engines/base/blender.py:1074 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
         if confidence > _trend_cap:
             confidence = min(confidence, _trend_cap)
@@ -1120,8 +1134,25 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # guard is dead — `candles` was already checked at line 185
         # (`if len(candles) < MIN_CANDLES_FOR_PREDICTION:`) and the
         # function returns early if candles is empty. Removed.
-        _ctime = candles[-1].get("time")
-        _time_mult, _time_note = get_time_adjustment(asset, _ctime or 0)
+        # FIX (CRASH-FIX-2026-07-26 / EN-004): if the candle dict lacks a
+        # `time` key (common in backtest/test contexts), `.get("time")`
+        # returns None, and `_ctime or 0 = 0`, so `get_time_adjustment`
+        # computes `datetime.fromtimestamp(0)` = 1970-01-01 = hour 0.
+        # Time-of-day patterns are then looked up for hour 0 (ASIAN
+        # session) instead of the current hour, applying wrong session
+        # confidence multipliers to every prediction. Now: if the candle
+        # has no time, fall back to the current wall-clock time.
+        _ctime_raw = candles[-1].get("time")
+        if _ctime_raw:
+            _ctime = _ctime_raw
+            # Quotex timestamps are sometimes in ms; time_patterns expects
+            # seconds (datetime.fromtimestamp).
+            if isinstance(_ctime, (int, float)) and _ctime > 10_000_000_000:
+                _ctime = _ctime / 1000.0
+        else:
+            import time as _t_mod
+            _ctime = _t_mod.time()
+        _time_mult, _time_note = get_time_adjustment(asset, _ctime)
         if _time_mult != 1.0:
             # FIX (AUDIT-DEEP #08, 2026-07-23): use round() instead of int()
             # so a confidence of 63 * 1.06 = 66.78 → 67 (not 66). The previous
@@ -1164,7 +1195,16 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # leak. The outer init is the single source of truth.
         try:
             from core.algorithm_strategy import get_strategy_for_blender
-            strat = get_strategy_for_blender(asset)
+            # FIX (CRASH-FIX-2026-07-26 / EN-005): previously called
+            # `get_strategy_for_blender(asset)` WITHOUT period — defaults
+            # to period=60. For 15s/30s/120s/300s/1800s/3600s candles,
+            # the strategy lookup used the 60s strategy, applying wrong
+            # continuation/reversal/confidence multipliers and wrong
+            # min_confidence threshold. This silently degraded prediction
+            # quality for non-60s pairs.
+            # The blender has `period` in scope here (parameter passed
+            # to the outer analyze function). Pass it through.
+            strat = get_strategy_for_blender(asset, period)
             # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-15): use the strategy
             # KEY (e.g., "trend_following") for the prediction's "strategy"
             # field, not the human-readable display name (e.g., "Trend
@@ -1196,6 +1236,15 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             _conf_mult = strat.get("confidence_mult", 1.0)
             _min_conf = strat.get("min_confidence", 0)
             _algo_icon = strat.get("strategy_icon", "")
+            # FIX (CRASH-FIX-2026-07-26 / ROOT-CAUSE): `_algo` was previously
+            # assigned at line ~1288 (after the if-blocks that USE it at
+            # lines 1247 and 1268). When is_continuation/is_reversal fired,
+            # the f-string `({_algo})` raised NameError, caught by the broad
+            # `except Exception` at the end of this block, silently degrading
+            # the algorithm-strategy path to default — meaning the per-pair
+            # continuation/reversal multipliers were never actually applied
+            # in production. Moved BEFORE its first use.
+            _algo = strat.get("algorithm", "unknown")
 
             # Apply confidence multiplier (overall scaling)
             # FIX (DEEP-AUDIT-2026-07-26 / F-02-42): `signal != "NEUTRAL"
@@ -1284,8 +1333,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # proportionally dampens confidence without flattening the high
             # end. The calibration caps (50/55/60/65) and the >75 consensus
             # cap still apply downstream, preventing runaway confidence.
-            # The `_algo` variable is kept for downstream min_conf checks.
-            _algo = strat.get("algorithm", "unknown")
+            # The `_algo` variable is moved above (near other strategy fields)
+            # so it's available to the continuation/reversal f-strings above.
 
             # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-22): the previous code
             # returned NEUTRAL EARLY here, bypassing the final calibration

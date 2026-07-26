@@ -272,6 +272,27 @@ class QuotexAPI:
                 else str(msg)
             )
 
+            # FIX (CRASH-FIX-2026-07-26 / PQ-006): Engine.IO keep-alive.
+            # Quotex uses Socket.IO over Engine.IO. Engine.IO sends `2` as a
+            # PING probe and expects `3` as the PONG reply. Without this
+            # reply, the server closes the socket after a few minutes of
+            # silence. The legacy heartbeat handler was removed in the
+            # 2026-07-13 cleanup and never replaced — causing periodic
+            # disconnects every ~3-5 minutes, which manifested as the
+            # "auto-reconnect stopped working" complaint. Now we reply
+            # immediately and return; no further processing needed.
+            if msg_str == "2":
+                if self.websocket:
+                    try:
+                        await self.websocket.send("3")
+                    except Exception as _pong_err:
+                        logger.debug("PONG send failed: %s", _pong_err)
+                return
+            # Engine.IO `0` = open handshake, `1` = close, `4` = message
+            # (already prefixed to Socket.IO payloads like `42[...]`).
+            # We don't need to handle `0`/`1` specially — the websockets
+            # library handles the underlying socket lifecycle.
+
             # FIX (DEEP-AUDIT-2026-07-26 / F-16-07): removed DEBUG `print()`
             # of pre-auth WS messages that could leak session data to
             # stdout in production. Use logger.debug so it is filtered by
@@ -578,7 +599,8 @@ class QuotexAPI:
                 loop.create_task(
                     self.event_registry.set_event("status_changed", self.state.status)
                 )
-        except RuntimeError:
+        except RuntimeError as _e:
+            print(f"[silent-except] pyquotex/api.py:602 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
     def _on_close(self, code: int, msg: str) -> None:
@@ -598,7 +620,8 @@ class QuotexAPI:
                 loop.create_task(
                     self.event_registry.set_event("status_changed", self.state.status)
                 )
-        except RuntimeError:
+        except RuntimeError as _e:
+            print(f"[silent-except] pyquotex/api.py:622 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
     @property

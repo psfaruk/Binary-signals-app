@@ -1,4 +1,3 @@
-import asyncio
 import inspect
 import re
 import sys
@@ -172,7 +171,8 @@ class Login(Browser):
                 )
                 if digest_resp.is_success:
                     self.ssid = digest_resp.json().get("data", {}).get("token")
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] pyquotex/network/login.py:174 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
 
         self.api.session_data["token"] = self.ssid

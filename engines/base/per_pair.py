@@ -165,7 +165,15 @@ class PairWeightAdapter:
         cache_key = (asset, period)
         cached = self._adapt_cache.get(cache_key)
         if cached and (time.time() - cached["ts"]) < _ADAPT_CACHE_TTL:
-            return cached["weights"]
+            # FIX (CRASH-FIX-2026-07-26 / EN-010): return a COPY of the
+            # cached dict, not the dict itself. If the blender or any
+            # caller mutates the returned dict (e.g., sets a weight to 0
+            # for a "disable this module" path), the cache is silently
+            # corrupted — the next caller gets the mutated version. This
+            # is a classic cache-returns-mutable bug. Now: dict() copy.
+            # The copy is shallow — weights are float scalars, not nested
+            # dicts — so shallow is sufficient.
+            return dict(cached["weights"])
 
         with self._lock:
             invalidation_epoch = self._invalidation_epoch.get(cache_key, 0)
@@ -284,7 +292,20 @@ class PairWeightAdapter:
             if brain_rec:
                 brain_total = brain_rec.get("total", 0)
                 if brain_total >= _BRAIN_MIN_SAMPLES:
-                    brain_w = brain_rec["recommended_weight"]
+                    # FIX (CRASH-FIX-2026-07-26 / EN-002): the brain stores
+                    # `recommended_weight` as a MULTIPLIER (1.5/1.3/1.0/0.7/0.5
+                    # in brain.py:921-945) — NOT an absolute weight. The
+                    # previous code blended `brain_w` as an absolute weight,
+                    # so a module with static_w=0.7 and brain rec 1.5 got
+                    # blended toward 1.5 (overriding the static config)
+                    # instead of being multiplied to 0.7 * 1.5 = 1.05.
+                    # This caused massive weight inflation on modules the
+                    # brain was confident in — predictions became over-
+                    # confident and frequently wrong. Now we apply the
+                    # brain recommendation as a multiplier to the static
+                    # weight, not a replacement.
+                    brain_mult = brain_rec["recommended_weight"]
+                    brain_w = static_w * brain_mult
                     # FIX (DEEP-AUDIT-2026-07-26 / F-04-07): sample-size-weighted
                     # brain blend (was flat 50/50 regardless of brain_total).
                     # A 30-sample recommendation (wide CI) gets ~15% weight;

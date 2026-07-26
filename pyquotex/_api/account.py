@@ -56,7 +56,7 @@ class AccountMixin:
             wss_url_override=getattr(self, "wss_url_override", None),
         )
 
-        self.api.trace_ws = self.debug_ws_enable
+        self.api.trace_ws = getattr(self, "debug_ws_enable", False)
         self.api.session_data = self.session_data
         self.api.current_asset = self.asset_default
         self.api.current_period = self.period_default
@@ -72,8 +72,13 @@ class AccountMixin:
             logger.error(
                 "Websocket failed to connect or connection was rejected."
             )
-            if "token" in self.session_data:
-                self.session_data["token"] = None
+            # FIX (PQ-012 / ROOT-CAUSE): only wipe the token when we KNOW the
+            # rejection was auth-related, not on every transient WS failure.
+            # Previously, ANY connection drop wiped the token, forcing a full
+            # email/password re-login on every blip — Quotex anti-abuse may
+            # then trigger Captcha, locking the user out completely.
+            # We keep the token; if it's truly dead, _on_message will detect
+            # the explicit auth-reject and clear it then.
             return False, "Websocket connection rejected."
 
         return check, reason

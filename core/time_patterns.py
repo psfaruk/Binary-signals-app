@@ -162,7 +162,8 @@ def session_for_hour(hour, dt=None):
             # Winter 21 UTC = 16 EST → at close → still NY.
             if ny_dt.hour <= 16:
                 return "NY"
-        except (ValueError, OSError, AttributeError):
+        except (ValueError, OSError, AttributeError) as _e:
+            print(f"[silent-except] core/time_patterns.py:165 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass  # fall through to default ASIA_OPEN
     return "ASIA_OPEN"
 

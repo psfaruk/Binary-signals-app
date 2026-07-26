@@ -51,7 +51,8 @@ def analyze(candles, ctx: MarketContext) -> list:
         _trend_weight = _REAL_DEFAULTS.get("trend_follow", 1.0)
         if _trend_weight < 0.2:  # effectively disabled
             return []
-    except ImportError:
+    except ImportError as _e:
+        print(f"[silent-except] engines/base/modules/trend_follow.py:54 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
         pass  # engines.real.config not importable (test context) — run normally
 
     results = []

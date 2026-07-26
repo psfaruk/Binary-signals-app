@@ -465,8 +465,71 @@ def build_micro(ticks, open_price):
         "vap_migration": vap_migration,
         "live_wick": live_wick,
         "orderflow": orderflow,
+        # FIX (CRASH-FIX-2026-07-26 / EN-001): running_tick.py SUB-SIGNAL 1
+        # reads micro['ending_direction'] but build_micro() never produced
+        # this key. SUB-SIGNAL 1 was therefore dead code — a full category
+        # of microstructure analysis (last-10-ticks direction) silently
+        # never fired, weakening the running_tick composite vote. Now we
+        # compute it from the last 10 ticks (or fewer if n<10, though the
+        # function early-returns for n<10). Direction is based on
+        # tick-weighted delta over the last 10 ticks; dominance is the
+        # buyer-vs-seller pressure in that window.
+        "ending_direction": _compute_ending_direction(ticks, n),
     }
 
 
 # Backward-compat alias for existing code that imports `_build_micro`.
 _build_micro = build_micro
+
+
+def _compute_ending_direction(ticks, n):
+    """Analyze the last 10 (or fewer) ticks of a candle.
+
+    Returns a dict with keys:
+      - ``direction``: ``"UP"`` | ``"DOWN"`` | ``"FLAT"`` based on
+        tick-weighted delta over the last 10 ticks. ``"FLAT"`` if the
+        net change is below 1 tick of typical spread.
+      - ``dominance``: ``"BUYER"`` | ``"SELLER"`` | ``"FIGHT"`` based
+        on up-tick vs down-tick volume in the last 10 ticks.
+      - ``buy_pct``: buyer pressure percentage in the last 10 ticks
+        (0-100). Useful for running_tick SUB-SIGNAL 1 thresholds.
+    """
+    # FIX (CRASH-FIX-2026-07-26 / EN-001): previously this entire analysis
+    # was missing — running_tick.py SUB-SIGNAL 1 read
+    # `micro.get("ending_direction", {})` which always returned {} and
+    # silently disabled a whole sub-signal category.
+    if not ticks or n < 2:
+        return {"direction": "FLAT", "dominance": "FIGHT", "buy_pct": 50}
+    window = ticks[-min(10, n):]
+    if len(window) < 2:
+        return {"direction": "FLAT", "dominance": "FIGHT", "buy_pct": 50}
+    net = window[-1] - window[0]
+    # Direction threshold: must be non-trivial relative to tick range.
+    rng = max(window) - min(window)
+    if rng <= 0:
+        return {"direction": "FLAT", "dominance": "FIGHT", "buy_pct": 50}
+    if abs(net) < rng * 0.10:
+        return {"direction": "FLAT", "dominance": "FIGHT", "buy_pct": 50}
+    direction = "UP" if net > 0 else "DOWN"
+    # Dominance: tick-weighted up vs down volume
+    up_v = 0.0
+    dn_v = 0.0
+    for i in range(1, len(window)):
+        d = window[i] - window[i - 1]
+        if d > 0:
+            up_v += d
+        elif d < 0:
+            dn_v += abs(d)
+    tot = up_v + dn_v
+    buy_pct = round(up_v / tot * 100) if tot > 0 else 50
+    if buy_pct >= 55:
+        dominance = "BUYER"
+    elif buy_pct <= 45:
+        dominance = "SELLER"
+    else:
+        dominance = "FIGHT"
+    return {
+        "direction": direction,
+        "dominance": dominance,
+        "buy_pct": buy_pct,
+    }

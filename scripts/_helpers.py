@@ -16,7 +16,7 @@ Usage:
 from __future__ import annotations
 
 import sys
-from typing import Callable, List, Tuple
+from typing import List, Tuple
 
 PASS = "PASS"
 FAIL = "FAIL"

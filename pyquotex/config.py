@@ -73,7 +73,8 @@ def load_session(email: str, user_agent: str | None = None) -> dict[str, Any]:
         if output_file.exists():
             try:
                 all_sessions = json.loads(output_file.read_text())
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as _e:
+                print(f"[silent-except] pyquotex/config.py:76 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
         else:
             output_file.parent.mkdir(exist_ok=True, parents=True)
@@ -97,7 +98,8 @@ def update_session(email: str, d: dict[str, Any]) -> dict[str, Any]:
         if output_file.exists():
             try:
                 current_sessions = json.loads(output_file.read_text())
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as _e:
+                print(f"[silent-except] pyquotex/config.py:100 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
         else:
             output_file.parent.mkdir(exist_ok=True, parents=True)

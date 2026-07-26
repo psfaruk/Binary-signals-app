@@ -151,7 +151,7 @@ PAIR_CONFIGS = {
             "pattern":         1.2,
             "indicator":       1.4,   # EURUSD respects indicators well
             "key_level":       1.2,
-            "trend_follow":    1.2,   # TODO(F-11-CALIBRATION): should be 0.1 per DEFAULT intent (28.9% win rate) — see F-11-03 above
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "EUR/USD real — trending, indicators very reliable",
     },
@@ -163,7 +163,7 @@ PAIR_CONFIGS = {
             "pattern":         1.2,
             "indicator":       1.4,
             "key_level":       1.2,
-            "trend_follow":    1.2,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "GBP/USD real — trending, indicators reliable",
     },
@@ -175,7 +175,7 @@ PAIR_CONFIGS = {
             "pattern":         1.3,
             "indicator":       1.3,
             "key_level":       1.3,   # JPY pairs respect round numbers
-            "trend_follow":    1.2,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "USD/JPY real — trending, round levels important",
     },
@@ -187,7 +187,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.2,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "USD/CHF real — safe-haven, rangey",
     },
@@ -199,7 +199,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.2,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "AUD/USD real — commodity-correlated, stable",
     },
@@ -211,7 +211,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.2,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "USD/CAD real — oil-correlated, stable",
     },
@@ -223,7 +223,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.2,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "NZD/USD real — commodity-correlated, stable",
     },
@@ -237,7 +237,7 @@ PAIR_CONFIGS = {
             "pattern":         1.3,
             "indicator":       1.3,
             "key_level":       1.3,
-            "trend_follow":    1.3,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "EUR/JPY real — trending, round levels",
     },
@@ -249,7 +249,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.2,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "EUR/GBP real — rangey, key levels",
     },
@@ -261,7 +261,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.2,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "EUR/CHF real — rangey, key levels",
     },
@@ -273,7 +273,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.0,
             "key_level":       1.2,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "EUR/AUD real — volatile cross",
     },
@@ -285,7 +285,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.0,
             "key_level":       1.2,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "EUR/CAD real — volatile, oil-correlated",
     },
@@ -299,7 +299,7 @@ PAIR_CONFIGS = {
             "pattern":         1.2,
             "indicator":       1.1,
             "key_level":       1.3,
-            "trend_follow":    1.2,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "GBP/JPY real — high-volatility carry trade",
     },
@@ -311,7 +311,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.0,
             "key_level":       1.2,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "GBP/AUD real — volatile cross",
     },
@@ -323,7 +323,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.0,
             "key_level":       1.2,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "GBP/CAD real — volatile, oil-correlated",
     },
@@ -335,7 +335,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.0,
             "key_level":       1.2,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "GBP/CHF real — volatile cross",
     },
@@ -347,7 +347,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.0,
             "key_level":       1.2,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "GBP/NZD real — volatile cross",
     },
@@ -361,7 +361,7 @@ PAIR_CONFIGS = {
             "pattern":         1.2,
             "indicator":       1.2,
             "key_level":       1.2,
-            "trend_follow":    1.3,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "AUD/JPY real — carry trade, trending",
     },
@@ -373,7 +373,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.1,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "AUD/CHF real — carry-trade, rangey",
     },
@@ -385,7 +385,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.1,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "AUD/CAD real — stable, balanced",
     },
@@ -397,7 +397,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.1,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "AUD/NZD real — stable, balanced",
     },
@@ -411,7 +411,7 @@ PAIR_CONFIGS = {
             "pattern":         1.2,
             "indicator":       1.2,
             "key_level":       1.2,
-            "trend_follow":    1.3,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "CAD/JPY real — oil-correlated, trending",
     },
@@ -423,7 +423,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.1,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "CAD/CHF real — stable, balanced",
     },
@@ -435,7 +435,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.0,
             "key_level":       1.2,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "CHF/JPY real — safe-haven cross, volatile",
     },
@@ -447,7 +447,7 @@ PAIR_CONFIGS = {
             "pattern":         1.2,
             "indicator":       1.2,
             "key_level":       1.2,
-            "trend_follow":    1.3,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "NZD/JPY real — trending, round levels",
     },
@@ -459,7 +459,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.1,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "NZD/CAD real — stable, balanced",
     },
@@ -471,7 +471,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.1,
             "key_level":       1.1,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "NZD/CHF real — stable, balanced",
     },
@@ -483,7 +483,7 @@ PAIR_CONFIGS = {
             "pattern":         1.1,
             "indicator":       1.0,
             "key_level":       1.2,
-            "trend_follow":    1.1,
+            "trend_follow":    0.1,   # FIX (EN-003-2026-07-26): was 1.1-1.3, but trend_follow has 28.9% win rate (catastrophically bad). Match DEFAULT_WEIGHTS intent and disable.
         },
         "description": "EUR/NZD real — volatile, key levels",
     },

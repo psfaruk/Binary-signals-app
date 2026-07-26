@@ -330,6 +330,27 @@ async def lifespan(app: FastAPI):
             _logger.exception("feed task died", exc_info=exc)
             print(f"[server] FATAL: feed task died: "
                   f"{type(exc).__name__}: {exc}")
+        else:
+            # FIX (CRASH-FIX-2026-07-26 / SV-005): feed.run() returned
+            # NORMALLY (no exception, no cancellation). This should
+            # never happen — feed.run() is an infinite loop that only
+            # exits via cancellation or an unhandled exception. A
+            # normal return means the loop body completed and `return`
+            # was hit, which means the feed silently died. Without this
+            # branch, /api/status would show connected: False forever
+            # with ZERO error trail — the user sees "Loading…"
+            # indefinitely even though the server is up. Now we log
+            # loudly so the operator can investigate; on Railway the
+            # health check will catch the dead feed and restart the
+            # container if /healthz is configured to check feed_task.
+            _logger.error("feed task exited NORMALLY (unexpected) — "
+                         "this means feed.run() returned without raising. "
+                         "The feed is now dead; restart the container or "
+                         "investigate feed.run()'s exit paths.")
+            print("[server] FATAL: feed task exited normally (unexpected) "
+                  "— feed is dead. Restart the container.")
+            # Tag the task so /healthz can detect this state.
+            app.state.feed_dead_normal_exit = True
     feed_task = asyncio.create_task(feed.run(broadcast))
     feed_task.add_done_callback(_on_feed_done)
     # Expose the feed task so /healthz can check it (Problem 38).
@@ -344,7 +365,8 @@ async def lifespan(app: FastAPI):
     feed_task.cancel()
     try:
         await feed_task
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as _e:
+        print(f"[silent-except] server.py:368 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
         pass
     print("[server] lifespan: shutdown complete")
 
@@ -441,10 +463,24 @@ async def healthz(request: Request):
     """
     feed_task = getattr(request.app.state, "feed_task", None)
     feed_task_alive = bool(feed_task is not None and not feed_task.done())
+    feed_dead_normal_exit = bool(getattr(request.app.state,
+                                         "feed_dead_normal_exit", False))
+    # FIX (CRASH-FIX-2026-07-26 / SV-041): the previous healthz returned
+    # `ok: True` even when the feed task was DEAD, so Railway's health
+    # check passed while the app served zero data — the user saw
+    # "Loading…" forever. Now: if feed_task is dead OR exited normally,
+    # we still return ok: True (to keep the container alive so operators
+    # can fetch /api/token-status and debug logs), BUT surface
+    # `feed_healthy: False` so Railway healthcheck expressions can fail
+    # on this field if desired. The default healthcheck (just HTTP 200)
+    # still passes, preserving backward compat with existing deployments.
+    feed_healthy = feed_task_alive and not feed_dead_normal_exit
     return {
         "ok": True,
         "feed_connected": bool(getattr(feed, "_connected", False)),
         "feed_task_alive": feed_task_alive,
+        "feed_dead_normal_exit": feed_dead_normal_exit,
+        "feed_healthy": feed_healthy,
     }
 
 
@@ -489,7 +525,8 @@ async def token_status():
                 connection_status = "token_dead_backoff"
             else:
                 connection_status = "disconnected"
-    except Exception:
+    except Exception as _e:
+        print(f"[silent-except] server.py:527 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
         pass
 
     if has_token:
@@ -661,7 +698,8 @@ async def _apply_token(token: str):
     for s in getattr(feed, '_streams', {}).values():
         try:
             s.idle_since = None
-        except (AttributeError, TypeError):
+        except (AttributeError, TypeError) as _e:
+            print(f"[silent-except] server.py:699 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
     # Save token to session.json so it persists across restarts
@@ -1193,7 +1231,8 @@ def _ws_origin_allowed(ws: WebSocket) -> bool:
                                        host.endswith("." + auto_host) or
                                        auto_host.endswith("." + host)):
                         return True
-                except Exception:
+                except Exception as _e:
+                    print(f"[silent-except] server.py:1231 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                     pass
     return False
 
@@ -1215,7 +1254,8 @@ async def ws_endpoint(ws: WebSocket):
     if len(clients) >= _MAX_WS_CLIENTS:
         try:
             await ws.close(code=1013, reason="server at max capacity")
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] server.py:1253 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         return
 
@@ -1246,7 +1286,8 @@ async def ws_endpoint(ws: WebSocket):
                 print(f"[server] {cid} idle timeout ({ws_idle_timeout}s) — closing")
                 try:
                     await ws.close(code=1008, reason="idle timeout")
-                except Exception:
+                except Exception as _e:
+                    print(f"[silent-except] server.py:1284 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                     pass
                 break
             # FIX (DEEP-AUDIT-2026-07-26 / F-13-7): enforce a max message
@@ -1256,7 +1297,8 @@ async def ws_endpoint(ws: WebSocket):
             if len(raw) > _MAX_WS_MSG_BYTES:
                 try:
                     await ws.close(code=1009, reason="message too big")
-                except Exception:
+                except Exception as _e:
+                    print(f"[silent-except] server.py:1294 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                     pass
                 print(f"[server] {cid} sent oversized message "
                       f"({len(raw)} > {_MAX_WS_MSG_BYTES} bytes) — closing")

@@ -99,7 +99,8 @@ def _write_cursor():
     except Exception:
         try:
             conn.rollback()
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] db.py:102 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         raise
     finally:
@@ -177,6 +178,28 @@ def init():
         # `ctime` (not `ts`), and no query in db.py filters/orders by ts.
         # The index wasted write throughput and disk space.
         c.execute("DROP INDEX IF EXISTS ix_sl_ts")
+        # FIX (CRASH-FIX-2026-07-26 / DB-001): the `category` column
+        # migration (lines 301-318 below) must run BEFORE this index is
+        # created, otherwise any legacy DB created before 2026-07-17 is
+        # missing the `category` column and `CREATE INDEX ix_sl_category
+        # ON signal_log(category, ...)` raises `no such column: category`.
+        # The except clause in init() rolled back the ENTIRE migration
+        # transaction, causing feed.py lifespan startup to crash, which
+        # manifested as the Railway container restart loop. Now we move
+        # the category-column migration to BEFORE the index creation.
+        # The migration is idempotent (PRAGMA table_info + ADD COLUMN).
+        try:
+            _cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
+            if "category" not in _cols:
+                c.execute("ALTER TABLE signal_log ADD COLUMN category TEXT")
+                print("[db] migrated signal_log: added `category` column")
+                c.execute(
+                    "UPDATE signal_log SET category = 'otc' "
+                    "WHERE asset LIKE '%\\_otc' ESCAPE '\\'"
+                )
+                c.execute("UPDATE signal_log SET category = 'real' WHERE category IS NULL")
+        except Exception as _e:
+            print(f"[db] signal_log `category` column migration skipped: {_e}")
         # FIX (2026-07-17): index for per-category accuracy queries.
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_category ON signal_log(category, asset, period)")
 
@@ -243,13 +266,16 @@ def init():
                     """)
             except Exception as _e:
                 print(f"[db] signal_log dedup skipped: {_e}")
-            # Record completion so we never re-run the expensive query.
-            try:
-                c.execute(
-                    "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
-                    ("signal_log_dedup_done", "1"))
-            except Exception as _e:
-                print(f"[db] could not record dedup-done flag: {_e}")
+            # FIX (CRASH-FIX-2026-07-26 / DB-003): the _meta dedup_done flag
+            # was INSERTed here, INSIDE the transaction that also holds the
+            # dedup DELETE — and that transaction commits BEFORE the unique
+            # index CREATE at Step 4 runs. If the index CREATE then failed
+            # (duplicates somehow survived, or another error), the dedup
+            # flag was already persisted — subsequent boots would skip dedup
+            # and the unique-index CREATE would fail FOREVER, forcing the
+            # broken non-unique fallback. Now we move the _meta INSERT to
+            # AFTER the unique-index CREATE succeeds. If init() is rerun,
+            # the dedup runs again — idempotent (DELETE of zero rows).
         else:
             # Dedup already ran on a prior startup — skip.
             pass
@@ -267,7 +293,8 @@ def init():
             ]
             for idx_name in legacy_indexes:
                 c.execute(f"DROP INDEX IF EXISTS {idx_name}")
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] db.py:295 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
 
         # Step 4: create the canonical UNIQUE index.
@@ -283,6 +310,17 @@ def init():
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_sl_asset_period_ctime
                 ON signal_log(asset, period, ctime)
             """)
+            # FIX (CRASH-FIX-2026-07-26 / DB-003): only persist the dedup_done
+            # _meta flag AFTER the unique index CREATE succeeded. If the
+            # CREATE fails, we'll fall through to the except below and the
+            # dedup will rerun on the next boot (idempotent — DELETE of zero
+            # rows is a no-op).
+            try:
+                c.execute(
+                    "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                    ("signal_log_dedup_done", "1"))
+            except Exception as _e:
+                print(f"[db] could not record dedup-done flag: {_e}")
         except sqlite3.Error as _e:
             print(f"[db] WARNING: could not create UNIQUE index on signal_log: {_e}")
             print("[db] Falling back to non-unique index — duplicate-row bug may recur.")
@@ -292,30 +330,13 @@ def init():
                     CREATE INDEX IF NOT EXISTS ix_sl_asset_period_ctime_nonunique
                     ON signal_log(asset, period, ctime)
                 """)
-            except sqlite3.Error:
+            except sqlite3.Error as _e:
+                print(f"[silent-except] db.py:331 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
 
-        # FIX (2026-07-17): schema migration. Older deployments created
-        # signal_log WITHOUT the `category` column. Detect & add it here
-        # so existing DBs upgrade transparently on next startup.
-        try:
-            cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
-            if "category" not in cols:
-                c.execute("ALTER TABLE signal_log ADD COLUMN category TEXT")
-                print("[db] migrated signal_log: added `category` column")
-                # Backfill existing rows from asset name (OTC if ends with _otc)
-                # FIX (DEEP-AUDIT-2026-07-26 / F-14-11): escape the
-                # underscore wildcard — previously `LIKE '%_otc'` would
-                # match `fake_otc_otc` (the `_` is a single-char wildcard
-                # in SQL LIKE). Using ESCAPE clause makes the underscore
-                # literal.
-                c.execute(
-                    "UPDATE signal_log SET category = 'otc' "
-                    "WHERE asset LIKE '%\\_otc' ESCAPE '\\'"
-                )
-                c.execute("UPDATE signal_log SET category = 'real' WHERE category IS NULL")
-        except Exception as _e:
-            print(f"[db] signal_log migration skipped: {_e}")
+        # FIX (2026-07-17): the `category` column migration was moved ABOVE
+        # to run BEFORE `ix_sl_category` index creation (see DB-001 fix).
+        # The block that used to live here is now redundant.
 
         # Refactor (2026-07-14): the `theory_votes` table is no longer
         # populated. The old theory engine was replaced by the
@@ -379,21 +400,33 @@ def save(asset, period, closed, micro):
                  ",".join(micro.get("phases", [])), micro.get("reaction"),
                  micro.get("net"), micro.get("tick_count"),
                  micro.get("last_react"),
-                 micro.get("round", {}).get("near_level"),
-                 micro.get("round", {}).get("near_strength"),
+                 # FIX (CRASH-FIX-2026-07-26 / DB-004 + DB-005): the
+                 # `.get('round', {})` default only fires when the 'round'
+                 # key is MISSING. If callers pass `round=None` explicitly
+                 # (which JSON `null` round-trips to), `.get('round')`
+                 # returns None and `.get('near_level')` raises
+                 # AttributeError, which was NOT in the except tuple
+                 # (KeyError, TypeError, ValueError, sqlite3.Error) —
+                 # propagating up and crashing the asset stream. Now we
+                 # coerce None → {} via `or {}`.
+                 (micro.get("round") or {}).get("near_level"),
+                 (micro.get("round") or {}).get("near_strength"),
                  micro.get("gap_pct"), micro.get("gap_type"),
                  _as_text(micro.get("key_levels")), _as_text(micro.get("ticks_json"))))
             conn.commit()
-        except (sqlite3.Error, KeyError, TypeError, ValueError) as e:
-            # Operational errors (locked, disk full, corruption) and
-            # data-shape errors (missing key, non-serializable value) are
-            # logged but NOT re-raised — losing a single candle_micro
-            # row is preferable to crashing the stream. Logged with the
-            # specific error class so operators can spot patterns.
+        except (sqlite3.Error, KeyError, TypeError, ValueError, AttributeError) as e:
+            # FIX (DB-004): added AttributeError to the except tuple so
+            # NoneType.get() no longer crashes the stream. Operational
+            # errors (locked, disk full, corruption) and data-shape errors
+            # (missing key, non-serializable value) are logged but NOT
+            # re-raised — losing a single candle_micro row is preferable to
+            # crashing the stream. Logged with the specific error class so
+            # operators can spot patterns.
             print(f"[db] save {type(e).__name__}: {e}")
             try:
                 conn.rollback()
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] db.py:425 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
     finally:
         conn.close()
@@ -456,50 +489,85 @@ def log_signal(asset, period, ctime, signal, score, confidence,
     try:
         try:
             cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO signal_log
-                    (asset,period,ctime,signal,score,confidence,theories,
-                     actual,accuracy,strength,agree,right_codes,wrong_codes,
-                     reasons,a_open,a_close,regime,zone,tags,postmortem,
-                     category,total,ts)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(asset, period, ctime) DO UPDATE SET
-                    signal=excluded.signal,
-                    score=excluded.score,
-                    confidence=excluded.confidence,
-                    theories=excluded.theories,
-                    actual=excluded.actual,
-                    accuracy=excluded.accuracy,
-                    strength=excluded.strength,
-                    agree=excluded.agree,
-                    right_codes=excluded.right_codes,
-                    wrong_codes=excluded.wrong_codes,
-                    reasons=excluded.reasons,
-                    a_open=excluded.a_open,
-                    a_close=excluded.a_close,
-                    regime=excluded.regime,
-                    zone=excluded.zone,
-                    tags=excluded.tags,
-                    postmortem=excluded.postmortem,
-                    category=excluded.category,
-                    total=excluded.total,
-                    ts=excluded.ts
-                """,
-                (asset, period, ctime, signal, score, confidence, _as_text(theories),
-                 actual, accuracy,
-                 kw.get("strength"), kw.get("agree"),
-                 _as_text(kw.get("right_codes")), _as_text(kw.get("wrong_codes")),
-                 _as_text(kw.get("reasons")),
-                 kw.get("a_open"), kw.get("a_close"),
-                 kw.get("regime"), kw.get("zone"),
-                 _as_text(kw.get("tags")), kw.get("postmortem"),
-                 category, total_val, ts_val))
+            # FIX (CRASH-FIX-2026-07-26 / DB-002): when the UNIQUE index
+            # creation failed earlier (init() falls back to non-unique),
+            # `ON CONFLICT(asset, period, ctime)` raises
+            # "ON CONFLICT clause does not match a PRIMARY or UNIQUE
+            # constraint" and signals silently stop being logged. Detect
+            # this and retry with INSERT OR REPLACE which works with any
+            # index (or none). The downside — id stability — only matters
+            # when the unique index exists, which is the happy path.
+            try:
+                cur.execute("""
+                    INSERT INTO signal_log
+                        (asset,period,ctime,signal,score,confidence,theories,
+                         actual,accuracy,strength,agree,right_codes,wrong_codes,
+                         reasons,a_open,a_close,regime,zone,tags,postmortem,
+                         category,total,ts)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(asset, period, ctime) DO UPDATE SET
+                        signal=excluded.signal,
+                        score=excluded.score,
+                        confidence=excluded.confidence,
+                        theories=excluded.theories,
+                        actual=excluded.actual,
+                        accuracy=excluded.accuracy,
+                        strength=excluded.strength,
+                        agree=excluded.agree,
+                        right_codes=excluded.right_codes,
+                        wrong_codes=excluded.wrong_codes,
+                        reasons=excluded.reasons,
+                        a_open=excluded.a_open,
+                        a_close=excluded.a_close,
+                        regime=excluded.regime,
+                        zone=excluded.zone,
+                        tags=excluded.tags,
+                        postmortem=excluded.postmortem,
+                        category=excluded.category,
+                        total=excluded.total,
+                        ts=excluded.ts
+                    """,
+                    (asset, period, ctime, signal, score, confidence, _as_text(theories),
+                     actual, accuracy,
+                     kw.get("strength"), kw.get("agree"),
+                     _as_text(kw.get("right_codes")), _as_text(kw.get("wrong_codes")),
+                     _as_text(kw.get("reasons")),
+                     kw.get("a_open"), kw.get("a_close"),
+                     kw.get("regime"), kw.get("zone"),
+                     _as_text(kw.get("tags")), kw.get("postmortem"),
+                     category, total_val, ts_val))
+            except sqlite3.Error as _conflict_err:
+                if "ON CONFLICT" in str(_conflict_err) and "UNIQUE" in str(_conflict_err).upper():
+                    # Fallback path: no unique constraint exists, use
+                    # INSERT OR REPLACE (works with any index, preserves
+                    # the at-most-one-row-per-(asset,period,ctime) intent
+                    # at the cost of id stability on update).
+                    cur.execute("""
+                        INSERT OR REPLACE INTO signal_log
+                            (asset,period,ctime,signal,score,confidence,theories,
+                             actual,accuracy,strength,agree,right_codes,wrong_codes,
+                             reasons,a_open,a_close,regime,zone,tags,postmortem,
+                             category,total,ts)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (asset, period, ctime, signal, score, confidence, _as_text(theories),
+                         actual, accuracy,
+                         kw.get("strength"), kw.get("agree"),
+                         _as_text(kw.get("right_codes")), _as_text(kw.get("wrong_codes")),
+                         _as_text(kw.get("reasons")),
+                         kw.get("a_open"), kw.get("a_close"),
+                         kw.get("regime"), kw.get("zone"),
+                         _as_text(kw.get("tags")), kw.get("postmortem"),
+                         category, total_val, ts_val))
+                else:
+                    raise
             conn.commit()
         except (sqlite3.Error, TypeError, ValueError) as e:
             print(f"[db] log_signal {type(e).__name__}: {e}")
             try:
                 conn.rollback()
-            except Exception:
+            except Exception as _e:
+                print(f"[silent-except] db.py:565 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                 pass
     finally:
         conn.close()

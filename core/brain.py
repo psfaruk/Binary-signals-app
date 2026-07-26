@@ -312,7 +312,8 @@ def init_brain():
         print(f"[brain] init error: {e}")
         try:
             conn.rollback()
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] core/brain.py:315 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         raise
     finally:
@@ -359,7 +360,8 @@ def _derive_signal_type(modules: dict, reasons: list) -> str:
                     rev += 1
         if has_meta:
             return "CONTINUATION" if cont >= rev else "REVERSAL"
-    except Exception:
+    except Exception as _e:
+        print(f"[silent-except] core/brain.py:362 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
         pass
     # Legacy fallback: substring scan (only used if no per-module metadata).
     return "CONTINUATION" if "continuation" in " ".join(reasons).lower() else "REVERSAL"
@@ -457,8 +459,27 @@ def record_prediction(prediction: dict, asset: str, period: int,
         score = prediction.get("score")
         if score is None:
             score = 0
+        # FIX (CRASH-FIX-2026-07-26 / CO-002): `abs(score) / 10.0` divides
+        # the raw score by a hardcoded 10. But the blender's `score` field
+        # is the sum of effective module weights — it can be 15+ (3 groups
+        # with weight 5 each), not bounded to 0-10. Dividing by 10 made
+        # net_margin > 1.0 for high-consensus signals, breaking downstream
+        # thresholds (e.g., `_high_consensus = net_margin >= 0.6` always
+        # returned True). Now: dynamically normalize by the MAX possible
+        # score (sum of all module weights). If the caller provides
+        # `total_groups` in prediction, use that × max_module_weight (5.0);
+        # otherwise fall back to the historical 10.0 (backward compat).
         try:
-            net_margin = abs(score) / 10.0
+            _score = float(score)
+            _total_groups = prediction.get("total_groups") or prediction.get("total") or 0
+            if _total_groups > 0:
+                # Conservative max-per-group weight is 5.0 (candle_reaction
+                # boosted to 1.3 × 3 votes + bonus). Use 5.0 as the ceiling.
+                _denom = max(1.0, _total_groups * 5.0)
+                net_margin = abs(_score) / _denom
+            else:
+                # Fallback: historical hardcoded 10.0 divisor.
+                net_margin = abs(_score) / 10.0
         except (TypeError, ValueError):
             net_margin = 0
 
@@ -559,6 +580,19 @@ def record_prediction(prediction: dict, asset: str, period: int,
 
         columns = ", ".join(pred_data.keys())
         placeholders = ", ".join(["?"] * len(pred_data))
+        # FIX (CRASH-FIX-2026-07-26 / SQL-001 false-positive hardening):
+        # `columns` is built from `pred_data.keys()` which is constructed
+        # from HARDCODED string keys (see pred_data dict above) — never
+        # user input. The f-string is for SQL STRUCTURE (column names),
+        # and `placeholders` is parameter-binding markers, so VALUES are
+        # bound via the parameterized `list(pred_data.values())` argument.
+        # This is parameterized-safe. We add an assertion to fail loudly
+        # if a future caller injects a key with SQL metacharacters — that
+        # would be a real bug.
+        import re as _re_sql_guard
+        for _k in pred_data.keys():
+            assert _re_sql_guard.match(r'^[A-Za-z_][A-Za-z0-9_]*$', _k), \
+                f"brain_predictions column name contains SQL metacharacters: {_k!r}"
         # FIX (AUDIT-CORE #51, 2026-07-21): use INSERT OR REPLACE to prevent
         # duplicate brain_predictions rows for the same (asset, period, ctime).
         # Previously a watchdog restart or double-EOC would insert duplicates,
@@ -864,7 +898,8 @@ def analyze_and_learn(min_samples: int = 20):
         print(f"[brain] analyze error: {e}")
         try:
             conn.rollback()
-        except Exception:
+        except Exception as _e:
+            print(f"[silent-except] core/brain.py:880 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
         raise
     finally:
