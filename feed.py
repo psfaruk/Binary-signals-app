@@ -1745,6 +1745,7 @@ class QuotexFeed:
             self._client = self._make_client(ua, root)
             self._client.set_session(user_agent=ua, ssid=env_token)
             print(f"[feed] connecting with session token=…{env_token[-4:]}")
+            ok = False
             try:
                 ok, reason = await asyncio.wait_for(
                     self._client.connect(), timeout=30)
@@ -1761,15 +1762,29 @@ class QuotexFeed:
                 # the operator will push a new one via /api/set-token.
             except Exception as _te:
                 print(f"[feed] token attempt error: {_te}")
-                # FIX (2026-07-26 / MANUAL-TOKEN-MODE resource cleanup):
-                # close the client on failure so the next _connect() cycle
-                # starts with a fresh client. Without this, the old client's
-                # half-open WebSocket state lingers — next connect() may
-                # short-circuit on stale _connected=True (pyquotex bug QX-022)
-                # and never re-authenticate, which is exactly the "connected
-                # but no candles update" symptom the user reported.
-                await self._close_client(self._client)
-                self._client = None
+                ok = False
+            finally:
+                # FIX (2026-07-27 / connect-cleanup-gap): the previous fix
+                # (commit 3fd1b04) only closed the leaked client inside the
+                # `except` branch. But connect() reports the MOST COMMON
+                # failures — "authorization rejected", "authorization
+                # timeout (15s)", "ws connect failed: ..." — as a normal
+                # `(False, reason)` return, NOT an exception. That path fell
+                # straight through to `return False` below with no cleanup
+                # at all, leaving the failed client's background reconnect
+                # task (ReconnectPolicy(max_attempts=0) = unlimited retries)
+                # and half-open WebSocket running forever, orphaned in the
+                # background. Every subsequent failed cycle piled on another
+                # orphaned client doing the same thing — an unbounded leak,
+                # and each orphan kept hammering Quotex with the same dead
+                # token in the background, which is exactly the anti-abuse
+                # risk this file is trying to avoid. `_make_client()` always
+                # builds a brand-new client on the NEXT cycle regardless, so
+                # this cleanup only affects the orphaned one — it is safe to
+                # run on every failure, exception or not.
+                if not ok:
+                    await self._close_client(self._client)
+                    self._client = None
             return False
         except Exception as exc:
             err_msg = f"connect error: {exc}"

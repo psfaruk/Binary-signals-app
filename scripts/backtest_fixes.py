@@ -267,8 +267,15 @@ def test_bug08_round_vs_int():
     int_multiplier = re.findall(
         r'confidence\s*=\s*(?:min\(\s*100\s*,\s*)?int\(\s*confidence\s*\*\s*[\w.]+\s*\)',
         src)
+    # FIX (2026-07-27 / stale-test-drift): AUDIT-3-05 later replaced every
+    # bare round(...) multiplier with _round_half_up(...) — Python's round()
+    # does banker's rounding (round-half-to-even), so confidence=X.5 could
+    # round DOWN, which is worse than the int() truncation this test was
+    # originally written to catch. _round_half_up always rounds X.5 up, so
+    # it's a strict improvement, but the old regex only matched round(...)
+    # literally and never learned about the rename — match both spellings.
     round_multiplier = re.findall(
-        r'confidence\s*=\s*(?:min\(\s*100\s*,\s*)?round\(\s*confidence\s*\*\s*[\w.]+\s*\)',
+        r'confidence\s*=\s*(?:min\(\s*100\s*,\s*)?(?:round|_round_half_up)\(\s*confidence\s*\*\s*[\w.]+\s*\)',
         src)
 
     # The initial `int(math.sqrt(...) * 100)` is fine — not a multiplier

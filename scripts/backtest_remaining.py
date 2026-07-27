@@ -83,9 +83,19 @@ def main():
     try:
         # We can't easily call record_prediction without full setup,
         # but verify the code path doesn't crash by parsing it
+        # FIX (2026-07-27 / stale-test-drift): this assertion string-matched
+        # "net_margin = abs(score) / 10.0" literally. The CO-002 fix in
+        # brain.py later renamed the local to `_score` and replaced the
+        # hardcoded /10.0 with a dynamically-normalized, try/except-guarded
+        # conversion — a real safety improvement the test never learned
+        # about, so it kept failing against a healthier codebase. Check for
+        # the CURRENT safe pattern instead of the exact old substring.
+        has_safe_float_guard = (
+            "_score = float(score)" in src_b and "except" in src_b
+        )
         test("A3: 'is None' branch handles None safely",
-             "score = 0" in src_b and "net_margin = abs(score) / 10.0" in src_b,
-             "fallback to 0 + try/except present")
+             "score = 0" in src_b and has_safe_float_guard,
+             "fallback to 0 + guarded float conversion present")
     except Exception as e:
         test("A3: 'is None' branch handles None safely", False, str(e))
     print()
@@ -133,23 +143,38 @@ def main():
     # A8: algorithm_monitor env-configurable thresholds
     print("A8 (LOW): algorithm_monitor env-configurable thresholds")
     from core import algorithm_monitor
-    src_am = inspect.getsource(algorithm_monitor._guess_algorithm)
-    has_env_config = 'os.environ.get("ALGO_TREND_AUTOCORR"' in src_am
+    import importlib
+    # FIX (2026-07-27 / stale-test-drift): F-07-41 deliberately moved the
+    # env lookup OUT of _guess_algorithm to module-load time (960 lookups/
+    # min -> 1 per import) and documented the trade-off explicitly:
+    # "changes require a restart." The old test looked for the env lookup
+    # INSIDE the function body and mutated os.environ without reloading
+    # the module, so it could never pass against that intentional design —
+    # it was testing for the old (slower) implementation, not a bug in the
+    # new one. Check the module-level constants instead, and simulate a
+    # restart via importlib.reload() to verify the override still works.
+    src_mod = inspect.getsource(algorithm_monitor)
+    has_env_config = (
+        'os.environ.get("ALGO_TREND_AUTOCORR"' in src_mod
+        and "_TREND_AUTOCORR" in inspect.getsource(algorithm_monitor._guess_algorithm)
+    )
     test("A8: env-configurable thresholds added",
          has_env_config, f"env config present: {has_env_config}")
-    # Verify env override works
+    # Verify env override works across a simulated restart (module reload).
     # FIX (DEEP-AUDIT-2026-07-26 / F-19-07): wrap env-var manipulation in
     # try/finally so subsequent tests aren't polluted if _guess_algorithm
     # raises (A-10 PROBLEM 46).
     os.environ['ALGO_TREND_AUTOCORR'] = '0.5'  # lower threshold
     os.environ['ALGO_TREND_BODY'] = '40'
     try:
+        importlib.reload(algorithm_monitor)
         result = algorithm_monitor._guess_algorithm(0.55, 42, 100)
         test("A8: env override triggers trending classification",
              result == "trending", f"with autocorr=0.55, body=42, got: {result}")
     finally:
         os.environ.pop('ALGO_TREND_AUTOCORR', None)
         os.environ.pop('ALGO_TREND_BODY', None)
+        importlib.reload(algorithm_monitor)  # restore defaults for later tests
     print()
 
     # A9: feed.py uses pred.get('signal') (defensive)
