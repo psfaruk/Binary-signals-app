@@ -377,13 +377,25 @@ class QuotexAPI:
                     return
 
                 # Standard Event Processing — dispatch via table for O(1) lookup.
+                # FIX (2026-07-27 / AUTH-FIX-ROOT-CAUSE): previously required
+                # `len(message) > 1` to dispatch — but Quotex sends
+                # `42["s_authorization"]` (length 1, no data payload) when
+                # authentication succeeds. The dispatch never fired, so
+                # `_h_auth_ok` was never called, leaving auth_status at
+                # NOT_AUTHENTICATED even though auth actually succeeded.
+                # This was the ROOT CAUSE of "connect returns False but
+                # WS is actually connected and authorized" — the user saw
+                # "Websocket connection rejected" but the truth was the
+                # OPPOSITE: auth was successful but we failed to detect it.
+                # Now: dispatch when message is a list with a string head,
+                # regardless of length. Pass None as data if no payload.
                 if (
                         isinstance(message, list)
-                        and len(message) > 1
+                        and len(message) >= 1
                         and isinstance(message[0], str)
                 ):
                     event = message[0]
-                    data = message[1]
+                    data = message[1] if len(message) > 1 else None
                     handler = self._control_handlers.get(event)
                     if handler is not None:
                         await handler(data)
