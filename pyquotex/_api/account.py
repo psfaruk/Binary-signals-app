@@ -69,8 +69,22 @@ class AccountMixin:
 
         check, reason = await self.api.connect(self.account_is_demo == AccountType.DEMO)
         if not await self.check_connect():
+            # FIX (2026-07-27 / lost-error-detail): `reason` here already
+            # holds the SPECIFIC failure — start_websocket() (api.py) sets
+            # self.state.websocket_error_reason to the real cause (e.g. a
+            # TLS/handshake error, connection refused, an actual Quotex
+            # auth-reject, or a Cloudflare block) and returns it as `reason`.
+            # The old code below discarded it and returned the same generic
+            # "Websocket connection rejected." string for every failure —
+            # so a dead token, a Cloudflare block on Railway's IP, and a
+            # plain network blip were indistinguishable in the logs, which
+            # is exactly the ambiguity that made "candles won't flow" so
+            # hard to diagnose. Now: keep the specific reason and only fall
+            # back to the generic string if none was captured.
+            _specific = reason or getattr(self.api.state, "websocket_error_reason", None)
             logger.error(
-                "Websocket failed to connect or connection was rejected."
+                "Websocket failed to connect or connection was rejected: %s",
+                _specific or "no reason captured",
             )
             # FIX (PQ-012 / ROOT-CAUSE): only wipe the token when we KNOW the
             # rejection was auth-related, not on every transient WS failure.
@@ -79,6 +93,9 @@ class AccountMixin:
             # then trigger Captcha, locking the user out completely.
             # We keep the token; if it's truly dead, _on_message will detect
             # the explicit auth-reject and clear it then.
-            return False, "Websocket connection rejected."
+            return False, (
+                f"Websocket connection rejected: {_specific}"
+                if _specific else "Websocket connection rejected (no reason captured)"
+            )
 
         return check, reason

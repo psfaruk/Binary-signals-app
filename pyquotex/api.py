@@ -327,8 +327,16 @@ class QuotexAPI:
                 logger.warning(
                     "Websocket authorization rejected: %s", msg_str[:200]
                 )
+                # FIX (2026-07-27 / lost-error-detail): this used to be set to
+                # the same generic "Websocket connection rejected." string as
+                # every other WS failure (see _on_error below), so an actual
+                # dead/expired token and a Cloudflare block on the connecting
+                # IP were indistinguishable once they reached feed.py's logs.
+                # This branch is the ONE case where Quotex itself responded
+                # and explicitly rejected the session token — say so plainly.
                 self.state.websocket_error_reason = (
-                    "Websocket connection rejected."
+                    "authorization rejected by Quotex "
+                    "(token invalid, expired, or revoked)"
                 )
                 self.state.auth_status = AuthStatus.FAILED
                 await self.event_registry.set_event(
