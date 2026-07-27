@@ -1761,9 +1761,15 @@ class QuotexFeed:
                 # the operator will push a new one via /api/set-token.
             except Exception as _te:
                 print(f"[feed] token attempt error: {_te}")
-                # Don't close+recreate the client — that wipes session
-                # state. Just let the next cycle retry with the same
-                # client + same token.
+                # FIX (2026-07-26 / MANUAL-TOKEN-MODE resource cleanup):
+                # close the client on failure so the next _connect() cycle
+                # starts with a fresh client. Without this, the old client's
+                # half-open WebSocket state lingers — next connect() may
+                # short-circuit on stale _connected=True (pyquotex bug QX-022)
+                # and never re-authenticate, which is exactly the "connected
+                # but no candles update" symptom the user reported.
+                await self._close_client(self._client)
+                self._client = None
             return False
         except Exception as exc:
             err_msg = f"connect error: {exc}"
