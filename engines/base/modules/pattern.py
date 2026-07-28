@@ -168,7 +168,17 @@ def analyze(candles, ctx: MarketContext) -> list:
             confidence=pat["score"] * 18,  # PATTERN_CONFIDENCE_PER_SCORE=18; 3→54, 4→72
             signal_type=sig_type,
             reliability="PATTERN",
-            group=f"PATTERN_{name}",
+            # FIX (WINRATE-BOOST #5, 2026-07-28): collapse all PATTERN_* groups
+            # into two canonical groups (REVERSAL/CONTINUATION) so correlated
+            # patterns don't inflate the vote count. Previously each pattern
+            # got its own group (PATTERN_BULL_ENGULF, PATTERN_HAMMER, etc.),
+            # so 3 correlated patterns firing same-direction counted as 3
+            # independent groups — inflating both call_score AND
+            # majority_groups count, satisfying the >75 consensus cap with
+            # correlated data. Now: REVERSAL patterns share one group,
+            # CONTINUATION patterns share another. This matches how
+            # candle_reaction's BODY group is collapsed.
+            group="PATTERN_REVERSAL" if sig_type == "REVERSAL" else "PATTERN_CONTINUATION",
             reasons=[reason_str],
         ))
     return results

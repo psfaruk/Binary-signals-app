@@ -112,15 +112,24 @@ class Quotex(
     async def _check_connect(state: Any) -> bool:
         """Check connection using the per-instance state object.
 
-        Waits up to ~2s for the state to settle on AUTHENTICATED; returns
+        Waits up to ~5s for the state to settle on AUTHENTICATED; returns
         as soon as the predicate is satisfied (event-driven path) or False
         on timeout. Replaces an unconditional ``await asyncio.sleep(2)``.
+
+        FIX (2026-07-27 / AUTH-FIX): timeout increased from 2s to 5s.
+        Quotex's `s_authorization` reply sometimes takes 2-3s to arrive
+        (network latency + their server processing the SSID). The
+        previous 2s timeout returned False even when auth was about to
+        succeed — connect() reported "rejected" but the connection was
+        actually fine. With the AUTH-FIX in api.py (length-1 message
+        dispatch), the auth event WILL fire; we just need to wait
+        long enough for it.
         """
         from pyquotex._api._waits import wait_until
         try:
             await wait_until(
                 lambda: state.auth_status == AuthStatus.AUTHENTICATED,
-                timeout=2,
+                timeout=5,
                 poll_interval=0.05,
             )
             return True
