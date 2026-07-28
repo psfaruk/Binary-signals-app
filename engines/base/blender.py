@@ -127,31 +127,57 @@ def _round_half_up(x: float) -> int:
 #     cap), and the discontinuity is eliminated.
 # Returns the calibrated confidence (int).
 def _apply_calibration_caps(confidence: int, total_groups: int,
-                            net_margin: float) -> int:
-    """Apply bin-based calibration caps + >75 consensus cap.
+                            net_margin: float, abs_net: int = 0,
+                            majority_group_n: int = 0,
+                            has_pattern_confluence: bool = False) -> int:
+    """Apply bin-based calibration caps.
 
     Caps reflect historical accuracy ceilings from 7623 live signals:
       100%   → 44% actual → cap 50
       90-99  → 46% actual → cap 55
       80-89  → 51% actual → cap 60
       60-79  → ~49-50% actual → cap 60 (unified — was 60/65 split)
-    Plus the >75 consensus cap: signals above 75 require 3+ groups AND
-    net_margin >= 0.6 to survive (otherwise capped at 75).
+
+    FIX (2026-07-27 / strong-unreachable): these bins clamp EVERY input
+    >= 60 down to at most 60. But the STRONG strength tier (see the
+    final strength determination near the end of predict()) requires
+    confidence >= 65 (pattern-confluence path) or >= 75 (ultra-consensus
+    path, no pattern needed — ULTRA_CONSENSUS_CONF_MIN). With every
+    signal capped at 60 first, NEITHER path could ever fire — STRONG was
+    unreachable for every prediction, full stop, regardless of how
+    strong the actual consensus was. (There used to be a `confidence >
+    75: ... cap 75` block here meant to let strong signals survive, but
+    it checked confidence AFTER the bins already clamped it to <=60, so
+    it was equally dead — removed, then this replaces it properly.)
+    Fix: when a signal objectively meets the SAME thresholds the STRONG
+    tier itself checks for below (not an independent guess), raise the
+    ceiling to exactly the floor that tier needs — 75 for ultra-
+    consensus, 65 for pattern-confluence — instead of the standard 60.
+    This only RAISES THE CEILING; it never manufactures confidence a
+    signal didn't earn (a raw 68 with ultra-consensus stays 68, not 75).
+    Neither override is used by the first (pre-Step-9) call site, since
+    has_pattern_confluence isn't known yet there — only abs_net /
+    majority_group_n (ultra-consensus) apply at that call; the second
+    call (after Step 9) can supply all three.
     """
+    override = 0
+    if (abs_net >= ULTRA_CONSENSUS_ABS_NET_MIN
+            and majority_group_n >= ULTRA_CONSENSUS_GROUPS_MIN):
+        override = max(override, ULTRA_CONSENSUS_CONF_MIN)  # 75
+    if has_pattern_confluence and abs_net >= 5 and majority_group_n >= 2:
+        override = max(override, 65)
+
     if confidence >= 100:
-        confidence = min(confidence, 50)
+        confidence = min(confidence, max(50, override))
     elif confidence >= 90:
-        confidence = min(confidence, 55)
+        confidence = min(confidence, max(55, override))
     elif confidence >= 80:
-        confidence = min(confidence, 60)
+        confidence = min(confidence, max(60, override))
     elif confidence >= 60:
         # FIX (DEEP-AUDIT-2026-07-26 / F-02-05): unified 60-79 bin.
         # Previously split into 70-79 (cap 65) and 60-69 (cap 60),
         # creating a 5-point discontinuous jump at the boundary.
-        confidence = min(confidence, 60)
-    if confidence > 75:
-        if not (total_groups >= 3 and net_margin >= 0.6):
-            confidence = min(confidence, 75)
+        confidence = min(confidence, max(60, override))
     return confidence
 
 
@@ -925,7 +951,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # isn't yet computed at this call site (early in the function), use
     # the locals().get fallback.
     _eff_groups_for_cap = locals().get("effective_total_groups", total_groups)
-    confidence = _apply_calibration_caps(confidence, _eff_groups_for_cap, net_margin)
+    # FIX (2026-07-27 / strong-unreachable): pass abs_net/majority_group_n
+    # so the ultra-consensus override (see _apply_calibration_caps) can
+    # raise the ceiling to 75 when earned. has_pattern_confluence isn't
+    # computed until Step 9 (below) — not available at this call site.
+    confidence = _apply_calibration_caps(
+        confidence, _eff_groups_for_cap, net_margin,
+        abs_net=abs(net), majority_group_n=majority_group_n)
 
     # ── Step 9: Pattern confluence check for STRONG ──────────────────────
     # FIX (BUG-BQ, 2026-07-20): pattern_agrees only checked reliability ==
@@ -1042,7 +1074,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # use effective_total_groups for the >75 consensus cap so suppressed
     # groups don't count toward the consensus requirement.
     _eff_groups_for_cap2 = locals().get("effective_total_groups", total_groups)
-    confidence = _apply_calibration_caps(confidence, _eff_groups_for_cap2, net_margin)
+    # FIX (2026-07-27 / strong-unreachable): now that Step 9 has run,
+    # has_pattern_confluence is known — pass all three so either STRONG
+    # path's floor (65 or 75) can be honoured instead of squashed to 60.
+    confidence = _apply_calibration_caps(
+        confidence, _eff_groups_for_cap2, net_margin,
+        abs_net=abs_net, majority_group_n=majority_group_n,
+        has_pattern_confluence=has_pattern_confluence)
     # FIX (WIN-RATE-BOOST #2, 2026-07-23): re-apply the TREND_UP/DOWN cap
     # after the accuracy boost + calibration caps. The previous code only
     # re-applied a -8 penalty for counter-trend signals. Now we re-apply

@@ -4693,9 +4693,19 @@ class QuotexFeed:
         # trust their judgment. If it's actually dead, they'll push a
         # new one via /api/set-token, which sets _token_update_pending
         # and triggers immediate retry via _apply_token() in server.py.
-        print("[feed] auto-relogin: keeping QX_TOKEN (manual-token mode) "
-              "— backoff will retry; push a fresh token via /api/set-token "
-              "if the current one is dead.")
+        # FIX (2026-07-27 / contradictory-log): this used to always print
+        # "keeping QX_TOKEN" even when QX_TOKEN was never set in the first
+        # place — right after a "QX_TOKEN not set" warning a few lines
+        # earlier, which reads as self-contradictory in the logs and made
+        # it look like the app had a token when it didn't. Say what's
+        # actually true.
+        if os.environ.get("QX_TOKEN"):
+            print("[feed] auto-relogin: keeping QX_TOKEN (manual-token mode) "
+                  "— backoff will retry; push a fresh token via /api/set-token "
+                  "if the current one is dead.")
+        else:
+            print("[feed] auto-relogin: no QX_TOKEN set — waiting for one via "
+                  "Railway Variables or POST /api/set-token {\"token\":\"...\"}.")
         return False
 
     async def run(self, broadcast) -> None:
