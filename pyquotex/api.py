@@ -544,6 +544,57 @@ class QuotexAPI:
                                 'buy_confirmed', data
                             )
 
+                # FIX (2026-07-28 / QUOTES-STREAM-HANDLER): Quotex's NEW
+                # tick format. Ticks arrive as `451-["quotes/stream",...]`
+                # (placeholder + binary payload). The binary payload is a
+                # list-of-ticks: [["EURUSD_otc", ts, price, dir], ...].
+                # The previous code only handled the OLD format (direct
+                # 4-element list at the END of _on_message, line ~620).
+                # The new format was silently dropped because no `elif`
+                # branch matched 'quotes/stream' in _temp_status. This
+                # caused ticks to flow for ~30s (during initial subscribe
+                # burst) then STOP completely once Quotex switched to the
+                # streaming format — exactly the "No ticks for 10s —
+                # feed may be stale" symptom the user reported.
+                #
+                # IMPORTANT: by the time we reach this branch, `data` has
+                # already been unwrapped by line 423-427:
+                #   data = message[0] if isinstance(message, list) and len(message) == 1 else message
+                # So if the binary payload was `[["EURUSD_otc",ts,price,dir]]`
+                # (outer list of length 1 containing one tick), `data` is
+                # now the INNER tick `["EURUSD_otc",ts,price,dir]` (a list).
+                # We must NOT iterate `data` as if it were a list of ticks.
+                # Instead, check: if data is a list-of-ticks (each elem is
+                # itself a list/tuple with >=3 items), iterate. If data is
+                # itself a single tick (a list whose first elem is a string
+                # asset name), ingest directly.
+                elif self._temp_status and 'quotes/stream' in self._temp_status:
+                    def _is_tick(t):
+                        return (isinstance(t, (list, tuple))
+                                and len(t) >= 3
+                                and isinstance(t[0], str))
+                    def _ingest(t):
+                        try:
+                            asset = t[0]
+                            ts = float(t[1])
+                            price = float(t[2])
+                            buf = self.realtime_price[asset]
+                            # Dedup against last 5 ticks
+                            for _t in list(buf)[-5:]:
+                                if _t["time"] == ts and _t["price"] == price:
+                                    return
+                            buf.append({"time": ts, "price": price})
+                        except (TypeError, ValueError, IndexError):
+                            pass
+
+                    if _is_tick(data):
+                        # Single tick (data was unwrapped from outer list)
+                        _ingest(data)
+                    elif isinstance(data, list) and data and _is_tick(data[0]):
+                        # List of ticks
+                        for tick in data:
+                            _ingest(tick)
+
                 self._temp_status = ""  # Clear after consuming data
 
             if isinstance(message, dict):

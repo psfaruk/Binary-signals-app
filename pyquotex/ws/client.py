@@ -190,11 +190,24 @@ class WebsocketClient:
         if self.policy.stale_timeout <= 0:
             return
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+        # FIX (2026-07-28 / TICK-KEEPALIVE): start a periodic keepalive
+        # task that re-sends `chart_notification/get` for every active
+        # subscription every 15s. Without this, Quotex's server stops
+        # sending `quotes/stream` ticks after ~30s (server-side rate limit
+        # / subscription expiry). The user reported "No ticks for 10s —
+        # feed may be stale" after exactly this interval. The keepalive
+        # refreshes the subscription so ticks continue flowing indefinitely.
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
     def _stop_watchdog(self) -> None:
         if self._watchdog_task and not self._watchdog_task.done():
             self._watchdog_task.cancel()
         self._watchdog_task = None
+        # FIX (2026-07-28 / TICK-KEEPALIVE): cancel the keepalive too
+        _kt = getattr(self, "_keepalive_task", None)
+        if _kt and not _kt.done():
+            _kt.cancel()
+        self._keepalive_task = None
 
     async def _watchdog_loop(self) -> None:
         timeout = self.policy.stale_timeout
@@ -216,6 +229,60 @@ class WebsocketClient:
         except asyncio.CancelledError as _e:
             print(f"[silent-except] pyquotex/ws/client.py:208 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
+
+    # ------------------------------------------------------------------
+    # FIX (2026-07-28 / TICK-KEEPALIVE): periodic subscription refresh
+    # ------------------------------------------------------------------
+    async def _keepalive_loop(self) -> None:
+        """Send Engine.IO PING (`2`) every 20s and re-send chart_notification
+        for active subscriptions every 15s.
+
+        FIX (2026-07-28 / TICK-KEEPALIVE): Quotex uses Socket.IO v3 over
+        Engine.IO. In v3, the CLIENT sends PING (`2`) and the server
+        responds with PONG (`3`). The previous code only handled the
+        reverse direction (server PING → client PONG), which never
+        happened — so the server thought we were dead after 25s+5s
+        (pingInterval+pingTimeout) and stopped sending ticks. This is
+        the ROOT CAUSE of "ticks stop after 30s" — not a subscription
+        expiry, but an Engine.IO keepalive failure.
+
+        Now: send `2` every 20s (well under the 25s pingInterval) to
+        keep the connection alive. Also re-send chart_notification/get
+        for candle subscriptions every 15s as a belt-and-suspenders
+        measure against subscription expiry.
+        """
+        try:
+            while self._ws is not None and self._ws.state is State.OPEN:
+                await asyncio.sleep(15)
+                if not self.api.websocket:
+                    continue
+                # ── Engine.IO keepalive: send PING (`2`) ──────────────
+                # This is the critical fix. Without it, Quotex's server
+                # stops sending ticks after ~30s (pingInterval 25s +
+                # pingTimeout 5s = 30s total).
+                try:
+                    await self.api.websocket.send("2")
+                except Exception as _e:
+                    logger.debug("PING send failed: %s", _e)
+                # ── Subscription refresh: chart_notification/get ──────
+                # Belt-and-suspenders. Re-send for every active candle
+                # subscription in case the server expires them.
+                subs = list(getattr(self.api, "_subscriptions", {}).values())
+                for sub in subs:
+                    if sub.kind != "candle":
+                        continue
+                    try:
+                        asset = sub.asset
+                        if asset and self.api.websocket:
+                            payload = f'42["chart_notification/get", {{"asset":"{asset}","version":"1.0.0"}}]'
+                            await self.api.websocket.send(payload)
+                    except Exception as _e:
+                        logger.debug("keepalive refresh failed for %s: %s",
+                                     getattr(sub, "asset", "?"), _e)
+        except asyncio.CancelledError:
+            pass
+        except Exception as _e:
+            logger.warning("keepalive loop error: %s", _e)
 
     # ------------------------------------------------------------------
     # Subscription replay after reconnect
