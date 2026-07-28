@@ -105,7 +105,7 @@ RELIABILITY = {
 # either set per-pair trend_follow to 0.1 (apply disable intent) or remove
 # the "effectively disabled" claim from DEFAULT_WEIGHTS. Tracked.
 DEFAULT_WEIGHTS = {
-    "candle_reaction": 1.3,   # 54.3% win rate — BEST, boosted
+    "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.3, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
     "running_tick":    1.0,   # 50.7% — average
     "pattern":         1.0,   # 50.0% — average (was 1.2, reduced)
     "indicator":       1.2,   # 50.0% — kept high (high conviction signals)
@@ -146,7 +146,7 @@ PAIR_CONFIGS = {
     "EURUSD": {
         "profile": "trending",
         "weights": {
-            "candle_reaction": 1.0,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.0, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.2,
             "indicator":       1.4,   # EURUSD respects indicators well
@@ -158,7 +158,7 @@ PAIR_CONFIGS = {
     "GBPUSD": {
         "profile": "trending",
         "weights": {
-            "candle_reaction": 1.0,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.0, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.2,
             "indicator":       1.4,
@@ -170,7 +170,7 @@ PAIR_CONFIGS = {
     "USDJPY": {
         "profile": "trending",
         "weights": {
-            "candle_reaction": 1.0,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.0, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.3,
             "indicator":       1.3,
@@ -182,7 +182,7 @@ PAIR_CONFIGS = {
     "USDCHF": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.2,
@@ -194,7 +194,7 @@ PAIR_CONFIGS = {
     "AUDUSD": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.2,
@@ -206,7 +206,7 @@ PAIR_CONFIGS = {
     "USDCAD": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.2,
@@ -218,7 +218,7 @@ PAIR_CONFIGS = {
     "NZDUSD": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.2,
@@ -232,7 +232,7 @@ PAIR_CONFIGS = {
     "EURJPY": {
         "profile": "trending",
         "weights": {
-            "candle_reaction": 1.0,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.0, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.3,
             "indicator":       1.3,
@@ -244,7 +244,7 @@ PAIR_CONFIGS = {
     "EURGBP": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.2,
@@ -256,7 +256,7 @@ PAIR_CONFIGS = {
     "EURCHF": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.2,
@@ -268,7 +268,7 @@ PAIR_CONFIGS = {
     "EURAUD": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.0,
@@ -280,7 +280,7 @@ PAIR_CONFIGS = {
     "EURCAD": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.0,
@@ -294,7 +294,7 @@ PAIR_CONFIGS = {
     "GBPJPY": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.2,
             "indicator":       1.1,
@@ -306,7 +306,7 @@ PAIR_CONFIGS = {
     "GBPAUD": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.0,
@@ -318,7 +318,7 @@ PAIR_CONFIGS = {
     "GBPCAD": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.0,
@@ -330,7 +330,7 @@ PAIR_CONFIGS = {
     "GBPCHF": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.0,
@@ -342,7 +342,7 @@ PAIR_CONFIGS = {
     "GBPNZD": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.0,
@@ -356,7 +356,7 @@ PAIR_CONFIGS = {
     "AUDJPY": {
         "profile": "trending",
         "weights": {
-            "candle_reaction": 1.0,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.0, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.2,
             "indicator":       1.2,
@@ -368,7 +368,7 @@ PAIR_CONFIGS = {
     "AUDCHF": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.1,
@@ -380,7 +380,7 @@ PAIR_CONFIGS = {
     "AUDCAD": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.1,
@@ -392,7 +392,7 @@ PAIR_CONFIGS = {
     "AUDNZD": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.1,
@@ -406,7 +406,7 @@ PAIR_CONFIGS = {
     "CADJPY": {
         "profile": "trending",
         "weights": {
-            "candle_reaction": 1.0,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.0, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.2,
             "indicator":       1.2,
@@ -418,7 +418,7 @@ PAIR_CONFIGS = {
     "CADCHF": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.1,
@@ -430,7 +430,7 @@ PAIR_CONFIGS = {
     "CHFJPY": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.0,
@@ -442,7 +442,7 @@ PAIR_CONFIGS = {
     "NZDJPY": {
         "profile": "trending",
         "weights": {
-            "candle_reaction": 1.0,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.0, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.2,
             "indicator":       1.2,
@@ -454,7 +454,7 @@ PAIR_CONFIGS = {
     "NZDCAD": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.1,
@@ -466,7 +466,7 @@ PAIR_CONFIGS = {
     "NZDCHF": {
         "profile": "stable",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.1,
@@ -478,7 +478,7 @@ PAIR_CONFIGS = {
     "EURNZD": {
         "profile": "volatile",
         "weights": {
-            "candle_reaction": 1.1,
+            "candle_reaction":    1.3,   # FIX (WINRATE-BOOST #2, 2026-07-28): was 1.1, boosted to 1.3 to match DEFAULT_WEIGHTS (54.3% win rate, BEST module)
             "running_tick":    1.0,
             "pattern":         1.1,
             "indicator":       1.0,

@@ -25,6 +25,7 @@ Engine-specific configuration is passed in via a `BlenderConfig` dataclass:
   - weight_adapter: PairWeightAdapter instance
   - module_names: tuple of 6 module names (for the breakdown display)
 """
+import os
 import math
 from dataclasses import dataclass
 from typing import Callable
@@ -91,6 +92,14 @@ ULTRA_CONSENSUS_ABS_NET_MIN = 8
 ULTRA_CONSENSUS_GROUPS_MIN = 4
 
 LOW_CONF_SKIP_THRESHOLD = 20             # PROB 97 (confidence < 20 -> NEUTRAL)
+# FIX (WINRATE-BOOST #3, 2026-07-28): per-engine low-confidence skip threshold.
+# 29/30 OTC candles are random_walk (97%) — at 50% expected accuracy,
+# confidence-20 signals are coin flips with extra dampening. Raising the
+# threshold for OTC suppresses low-quality signals and improves win rate.
+# Real market pairs have genuine trends, so the lower threshold is kept.
+# Overridable via env: QX_LOW_CONF_SKIP_OTC, QX_LOW_CONF_SKIP_REAL.
+LOW_CONF_SKIP_OTC  = int(os.environ.get("QX_LOW_CONF_SKIP_OTC",  "30"))
+LOW_CONF_SKIP_REAL = int(os.environ.get("QX_LOW_CONF_SKIP_REAL", "25"))
 
 MEDIUM_CONFIDENCE_FLOOR = 30             # PROB 15 (strength tier MEDIUM gate)
 
@@ -1445,14 +1454,19 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     elif htf_trend in ("UPTREND", "DOWNTREND"):
         # Counter-trend signal in either direction.
         confidence = max(0, confidence - HTF_COUNTER_PENALTY)
-    # TODO (DEEP-AUDIT-2026-07-26 / F-02-09): the HTF bonus is applied
-    # AFTER all calibration caps, which means a signal that was capped at
-    # TREND_CAP_STANDARD (45) can be boosted to 50 by the HTF +5 bonus,
-    # bypassing the cap. The original dev intentionally placed the bonus
-    # after caps so the bonus survives (see comment above). Re-applying
-    # the calibration caps after the bonus would erase the bonus — the
-    # dev's stated intent was for the bonus to survive. Leaving as-is for
-    # now (low-impact: only +5 points, bounded by pair_max_conf cap).
+    # FIX (WINRATE-BOOST #1, 2026-07-28): re-apply TREND cap after HTF bonus.
+    # Previously the HTF +5 bonus was applied AFTER the TREND cap (45/55),
+    # so a signal correctly dampened to 45 (TREND_UP has 35% win rate per
+    # brain data) immediately re-inflated to 50, defeating the brain-learned
+    # insight. Now: if we're in a trend regime, re-clamp confidence to the
+    # trend cap after the HTF bonus. This preserves the dampening intent
+    # while still allowing HTF-aligned signals in non-trending regimes to
+    # get the full bonus. The pair_max_conf cap (next block) still applies
+    # as the final hard limit.
+    if _is_trending and confidence > 0:
+        _post_htf_cap = TREND_CAP_OTC_REVERSAL if _is_otc_reversal else TREND_CAP_STANDARD
+        if confidence > _post_htf_cap:
+            confidence = min(confidence, _post_htf_cap)
 
     # FIX (WIN-RATE-BOOST #1, 2026-07-23): per-pair max_confidence cap.
     # Some pairs (e.g., USDMXN_otc with 0% historical win rate) should
@@ -1533,8 +1547,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # consumers expecting NEUTRAL signals to have confidence=0.
     # FIX (DEEP-AUDIT-2026-07-26 / F-02-97): use centralised constant
     # LOW_CONF_SKIP_THRESHOLD (was magic 20).
-    if confidence < LOW_CONF_SKIP_THRESHOLD:
-        all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < {LOW_CONF_SKIP_THRESHOLD} -> NEUTRAL")
+    # FIX (WINRATE-BOOST #3, 2026-07-28): use per-engine threshold.
+    # OTC pairs (random_walk 97%) need a higher bar (30) to suppress
+    # coin-flip signals. Real pairs keep the lower bar (25) since they
+    # have genuine trends worth trading at lower confidence.
+    _low_conf_threshold = LOW_CONF_SKIP_OTC if asset.endswith("_otc") else LOW_CONF_SKIP_REAL
+    if confidence < _low_conf_threshold:
+        all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < {_low_conf_threshold} -> NEUTRAL")
         return {
             "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
             "score": net, "reasons": all_reasons,
