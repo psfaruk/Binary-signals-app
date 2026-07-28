@@ -175,6 +175,14 @@ PER_STREAM_STALE_SECS = int(os.environ.get("PER_STREAM_STALE_SECS", "60"))
 HOUSEKEEP_SECS = int(os.environ.get("HOUSEKEEP_SECS", "5"))
 WATCHDOG_INTERVAL = float(os.environ.get("WATCHDOG_INTERVAL", "30.0"))
 GLOBAL_STALE_SECS = int(os.environ.get("GLOBAL_STALE_SECS", "180"))
+# FIX (2026-07-28 / SUBSCRIPTION-CAP): maximum number of always-on 1m
+# streams to run simultaneously. Quotex's server silently drops ticks
+# when too many pairs are subscribed at once (observed: 40+ pairs →
+# some pairs get 0 ticks even though subscription succeeded). Capping
+# to 15 ensures all subscribed pairs actually receive ticks. The cap
+# prioritizes all-time OTC pairs (always tradeable) + highest-payout
+# pairs. Set to 0 for unlimited (legacy behavior, not recommended).
+MAX_ALWAYS_ON_STREAMS = int(os.environ.get("MAX_ALWAYS_ON_STREAMS", "15"))
 # Loss-cluster cooldown: 5 wrong in a row → 30-min cooldown.
 LOSS_COOLDOWN_SEC = int(os.environ.get("QX_LOSS_COOLDOWN_SEC", "1800"))
 LOSS_COOLDOWN_THRESHOLD = int(os.environ.get("QX_LOSS_THRESHOLD", "5"))
@@ -3356,13 +3364,24 @@ class QuotexFeed:
         # Initial subscription joins mid-candle — no signal delay (the candle
         # has already been running, opening ticks already happened).
         stream.signal_delay_until = 0.0
-        await self._broadcast({
-            "type":       "snapshot",
-            "asset":      asset,
-            "period":     period,
-            "candles":    history,
-            "prediction": stream.prediction,
-        })
+        # FIX (2026-07-28 / BROADCAST-GUARD): wrap the initial snapshot
+        # broadcast in try/except. If _broadcast is None (e.g., stream
+        # started before run() set self._broadcast) or fails for any
+        # reason, DON'T crash the stream — the stream_loop will still
+        # process ticks and broadcast them. Previously a single failed
+        # initial broadcast crashed the entire stream, leaving the pair
+        # with NO tick processing (root cause of "0 ticks for some pairs").
+        try:
+            if self._broadcast is not None:
+                await self._broadcast({
+                    "type":       "snapshot",
+                    "asset":      asset,
+                    "period":     period,
+                    "candles":    history,
+                    "prediction": stream.prediction,
+                })
+        except Exception as _bcast_err:
+            print(f"[feed] initial snapshot broadcast failed (non-fatal): {_bcast_err}")
 
     async def _stream_loop(self, stream: _AssetStream) -> None:
         """Runs 'forever' for one (asset, period) — timer-close fallback,
@@ -4363,20 +4382,19 @@ class QuotexFeed:
 
     def _reconcile_always_on(self) -> None:
         """
-        Keep ALL 85%+ payout pairs running as ALWAYS-ON 1m streams.
+        Keep eligible forex pairs running as ALWAYS-ON 1m streams.
 
-        This is the KEY fix for the user's complaint:
-        'প্রত্যেকটি পেয়ার নতুন করে ডেটা সংগ্রহ করে ক্যান্ডেল ওপেন হয়'
+        FIX (2026-07-28 / SUBSCRIPTION-CAP): cap the number of always-on
+        streams to MAX_ALWAYS_ON_STREAMS (default 15). When too many pairs
+        are subscribed simultaneously, Quotex's server silently drops
+        ticks for some of them — observed live as "EURUSD_otc: 0 ticks"
+        even though the subscription succeeded. The server appears to
+        rate-limit concurrent tick streams per connection. Capping to 15
+        ensures all subscribed pairs actually receive ticks.
 
-        With always-on, ALL 85%+ pairs have:
-          - History pre-loaded
-          - Live tick stream running
-          - EOC predictions being generated every candle
-          - Market state being tracked
-
-        When the user switches pairs, data is ALREADY there — no cold start,
-        no re-fetching, no delay. Each pair runs independently in its own
-        asyncio task, so switching one doesn't affect another.
+        Priority: all-time OTC pairs first (always tradeable), then
+        highest-payout pairs. This way the most important pairs (the
+        ones the user is most likely to view) are guaranteed to work.
         """
         # FIX (2026-07-17): previously used a single eligibility check
         # against `p.get("locked")` which was set with category-specific
@@ -4386,15 +4404,35 @@ class QuotexFeed:
         # that AND make sure both real (live) AND otc always-on pairs are
         # warmed up. The locked flag is the source of truth — if a pair
         # is locked, it's below its category's payout floor.
-        eligible = {(p["asset"], 60) for p in self._pairs_list
+        eligible_all = {(p["asset"], 60) for p in self._pairs_list
                     if p["status"] in ("live", "otc") and not p.get("locked")}
         # FIX (DATA-FLOW-2026-07-22): all-time OTC pairs are ALWAYS eligible
         # for always-on — they bypass the payout floor entirely. Without
         # this, the 6 exotic pairs (USDBDT, USDBRL, USDPKR, USDCOP, USDMXN,
         # USDIDR) would never be pre-warmed → user opens the All-Time OTC
         # page → sees "Loading..." forever because no stream is running.
+        alltime_assets = {p["asset"] for p in self._alltime_otc_pairs_list}
         for p in self._alltime_otc_pairs_list:
-            eligible.add((p["asset"], 60))
+            eligible_all.add((p["asset"], 60))
+
+        # FIX (2026-07-28 / SUBSCRIPTION-CAP): prioritize all-time OTC
+        # pairs first, then sort the rest by payout (highest first), then
+        # cap to MAX_ALWAYS_ON_STREAMS. This prevents Quotex from dropping
+        # ticks when too many pairs are subscribed simultaneously.
+        _MAX = MAX_ALWAYS_ON_STREAMS  # module-level constant (default 15)
+        # Build a list of (key, priority, payout) for sorting
+        _prioritized = []
+        for key in eligible_all:
+            asset = key[0]
+            if asset in alltime_assets:
+                priority = 0  # highest — always tradeable
+            else:
+                priority = 1  # normal eligible
+            pair_info = next((p for p in self._pairs_list if p["asset"] == asset), {})
+            payout = pair_info.get("payout") or 0
+            _prioritized.append((key, priority, -payout))  # -payout for desc sort
+        _prioritized.sort(key=lambda x: (x[1], x[2]))
+        eligible = {item[0] for item in _prioritized[:_MAX]}
 
         for key, s in list(self._streams.items()):
             if s.always_on and key not in eligible:
@@ -4699,7 +4737,23 @@ class QuotexFeed:
         return False
 
     async def run(self, broadcast) -> None:
-        self._broadcast = broadcast
+        # FIX (2026-07-28 / BROADCAST-GUARD): wrap the broadcast callable
+        # in a safe wrapper that swallows exceptions and checks for None.
+        # This prevents ANY single broadcast failure from crashing the
+        # stream loop — which was the root cause of "some pairs get 0
+        # ticks" (the initial snapshot broadcast crashed, killing the
+        # stream before it could process any ticks).
+        _orig_broadcast = broadcast
+        async def _safe_broadcast(msg):
+            if _orig_broadcast is None:
+                return
+            try:
+                await _orig_broadcast(msg)
+            except Exception as _e:
+                # Log but don't crash — the stream must keep processing
+                # ticks even if one broadcast fails.
+                print(f"[feed] broadcast error (non-fatal, type={msg.get('type','?')}): {_e}")
+        self._broadcast = _safe_broadcast
         _db.init()          # create DB tables if not exist
         _db.cleanup()       # prune rows older than 7 days
 
