@@ -4847,7 +4847,22 @@ class QuotexFeed:
                     # runs AFTER the rearm loop above so freshly-created
                     # streams here don't also get caught by that loop (which
                     # only means to re-issue already-existing subscriptions).
+                    # FIX (2026-07-27 / ALWAYS-ON-BACKGROUND): immediately
+                    # pre-warm ALL eligible pairs so candles keep running in
+                    # background even with no viewers. User requirement:
+                    # 'অ্যাপ টি কেউ দেখুক বা না দেখি আমি চাই নতুন deploy
+                    # হওয়ার পর অ্যাপ টি চলতে থাকবে' — without this, the
+                    # always_on streams only start when the 5-min housekeep
+                    # tick fires, leaving a gap where the app is "connected"
+                    # but no pairs are streaming.
                     self._reconcile_always_on()
+                    # FIX: also force the watchdog to run immediately so any
+                    # dead streams get restarted within seconds of (re)connect
+                    # rather than waiting up to 30s.
+                    try:
+                        asyncio.create_task(self._watchdog_always_on())
+                    except Exception as _wd_err:
+                        print(f"[feed] immediate watchdog post-connect failed: {_wd_err}")
 
                 # ── Global stale watchdog (backstop) ──────────────────────
                 # pyquotex's native ReconnectPolicy handles most drops itself.
