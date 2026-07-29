@@ -212,14 +212,20 @@ PAIR_CONFIGS = {
 
 
 # ── BlenderConfig assembly ─────────────────────────────────────────────
+# FIX (CALIBRATION-FIX-2026-07-29): expose `weight_adapter` as a module-level
+# export. server.py's /api/stats endpoint imports `weight_adapter` directly
+# to compute adaptation_status — the previous calibrated config only exposed
+# `CONFIG`, causing ImportError → adaptation_error on Railway.
+weight_adapter = PairWeightAdapter(
+    pair_configs=PAIR_CONFIGS,
+    default_weights=DEFAULT_WEIGHTS,
+)
+
 CONFIG = BlenderConfig(
     module_6_name="otc_pattern",
     module_6_fn=_otc_pattern_analyze,
     reliability=RELIABILITY,
-    weight_adapter=PairWeightAdapter(
-        pair_configs=PAIR_CONFIGS,
-        default_weights=DEFAULT_WEIGHTS,
-    ),
+    weight_adapter=weight_adapter,
     module_names=OTC_MODULES,
     engine_name="otc",
 )
