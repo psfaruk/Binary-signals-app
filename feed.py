@@ -200,6 +200,12 @@ BIG_MOVE_ATR_MULT = float(os.environ.get("QX_BIG_MOVE_ATR_MULT", "0.80"))
 # Buyer/seller pressure threshold (default 62%).
 BUYER_PCT_THRESHOLD = int(os.environ.get("QX_BUYER_PCT_THRESHOLD", "62"))
 # LIVE re-eval thresholds.
+# FIX (CALIBRATION-2026-07-29): LIVE re-eval was the #1 cause of low accuracy.
+# 88% of signals (1,172/1,325) had confidence reduced to 15 via "RECOVERED_CONFIDENCE"
+# path, and these signals had only 43.3% win rate (vs 99%+ for non-recovered signals).
+# Setting QX_DISABLE_LIVE_REEVAL=1 disables the entire LIVE re-eval system —
+# signals keep their original confidence from candle close.
+DISABLE_LIVE_REEVAL = os.environ.get("QX_DISABLE_LIVE_REEVAL", "1") == "1"
 LIVE_REEVAL_MIN_TICKS = int(os.environ.get("QX_LIVE_REEVAL_MIN_TICKS", "15"))
 LIVE_REEVAL_INTERVAL_CRITICAL = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_CRITICAL", "10"))
 LIVE_REEVAL_INTERVAL_LAST_10S = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_LAST_10S", "15"))
@@ -3744,8 +3750,15 @@ class QuotexFeed:
                     # FIX (DEEP-AUDIT-2026-07-26 / F-01-85, F-01-86): use
                     # module-level constants LIVE_REEVAL_MIN_TICKS and
                     # LIVE_REEVAL_INTERVAL_* instead of magic 15/10/15/30/100.
+                    # FIX (CALIBRATION-2026-07-29): wrap entire LIVE re-eval
+                    # block in `if not DISABLE_LIVE_REEVAL`. This was the #1
+                    # accuracy killer — 88% of signals got demoted to
+                    # confidence=15 via "RECOVERED_CONFIDENCE" path with
+                    # only 43.3% win rate. Disabling lets signals keep their
+                    # original MEDIUM/STRONG confidence from candle close.
                     pred_changed = False
-                    if (ENABLE_LIVE_THEORY and stream.base_candles
+                    if (not DISABLE_LIVE_REEVAL
+                            and ENABLE_LIVE_THEORY and stream.base_candles
                             and len(stream.ticks) >= LIVE_REEVAL_MIN_TICKS):
                         time_to_close = -1
                         if stream.candle_open_time > 0:
@@ -4036,7 +4049,11 @@ class QuotexFeed:
                         # stays as-is (stable for the user to read).
                         # FIX (DEEP-AUDIT-2026-07-26 / F-01-87): use module-level
                         # STRENGTH_GATE_LAST_SECS constant instead of magic 30.
-                        if 0 < _time_to_close < STRENGTH_GATE_LAST_SECS:
+                        # FIX (CALIBRATION-2026-07-29): gate the entire strength
+                        # gate + Option B block behind DISABLE_LIVE_REEVAL flag.
+                        # This was the #1 accuracy killer — 88% of signals got
+                        # demoted to confidence=15 via RECOVERED_CONFIDENCE path.
+                        if not DISABLE_LIVE_REEVAL and 0 < _time_to_close < STRENGTH_GATE_LAST_SECS:
                             gated = self._apply_strength_gate(stream, stream.prediction)
                             if gated is not stream.prediction:
                                 # Option B: if the strength gate demoted to WEAK,

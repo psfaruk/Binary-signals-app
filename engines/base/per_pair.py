@@ -43,6 +43,7 @@ _SQLITE_TIMEOUT = 10           # match db.py:17 / brain.py:38 (was 5 — outlier
 # (Audit A-06 #59.)
 _VALID_PROFILES = frozenset({
     "mean_reverting", "trending", "volatile", "stable", "default",
+    "calibrated",
 })
 
 __all__ = ["PairWeightAdapter"]
