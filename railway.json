@@ -15,7 +15,8 @@
     "HEADLESS": "1",
     "QX_USE_RAW_WS": "0",
     "QX_PAYOUT_FLOOR_REAL": "70",
-    "QX_PAYOUT_FLOOR_OTC": "85"
+    "QX_PAYOUT_FLOOR_OTC": "85",
+    "QX_DISABLE_LIVE_REEVAL": "1"
   },
   "env_required": {
     "QX_TOKEN": {
@@ -24,5 +25,7 @@
       "example": "quotex-token.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
     }
   },
-  "_notes_FIX_DEEP_AUDIT_2026_07_26_F_19_40": "Increased healthcheckTimeout 30→60s. Cold start imports brain.py + time_patterns.py + algorithm_monitor.py (each opens SQLite tables); 30s was too tight on Railway cold start and caused spurious deploy failures. A-10 PROBLEM 34."
+  "_notes_FIX_DEEP_AUDIT_2026_07_26_F_19_40": "Increased healthcheckTimeout 30→60s. Cold start imports brain.py + time_patterns.py + algorithm_monitor.py (each opens SQLite tables); 30s was too tight on Railway cold start and caused spurious deploy failures. A-10 PROBLEM 34.",
+  "_notes_CALIBRATION_2026_07_29": "Added QX_DISABLE_LIVE_REEVAL=1 to disable LIVE re-eval (was the #1 accuracy killer — 88% of signals got demoted to confidence=15 with 43% win rate).",
+  "_notes_PERSISTENT_VOLUME_REQUIRED": "CRITICAL: Railway does NOT persist the filesystem by default. Every redeploy wipes data/signals.db, losing ALL signal history, brain_learning, and brain_predictions. To fix: (1) Go to Railway dashboard → your service → Settings → Volumes → Add Volume. (2) Set Mount Path to '/app/data'. (3) This persists signals.db across deploys. Without this, the brain adaptation system never accumulates enough samples (needs 20+ per pair) and learned_weights stays at 0."
 }
