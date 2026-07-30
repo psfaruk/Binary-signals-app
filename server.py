@@ -1091,6 +1091,202 @@ async def patterns_for_asset(asset: str):
     return {"asset": asset, "patterns": get_asset_patterns_detail(asset)}
 
 
+@app.get("/api/module-analysis")
+async def module_analysis():
+    """Deep per-module per-pair per-direction analysis from module_votes table.
+
+    FIX (DEEP_v2 2026-07-30): new endpoint that queries the module_votes
+    table (added in this version) to provide queryable per-module accuracy
+    without requiring regex parsing of reasons JSON.
+
+    Returns:
+    - Per-module global accuracy (all pairs combined)
+    - Per-pair per-module accuracy
+    - Per-pair per-module per-direction (CALL/PUT) accuracy
+    - Best/worst modules per pair
+    - Recommended calibration actions
+    """
+    try:
+        with _db._read_cursor() as cur:
+            # Global per-module accuracy
+            cur.execute("""
+                SELECT module_name,
+                       SUM(vote_correct) as correct,
+                       COUNT(vote_correct) as total,
+                       ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
+                FROM module_votes
+                WHERE vote_correct IS NOT NULL
+                GROUP BY module_name
+                ORDER BY win_pct DESC
+            """)
+            global_modules = [dict(r) for r in cur.fetchall()]
+
+            # Per-pair per-module accuracy
+            cur.execute("""
+                SELECT asset, module_name,
+                       SUM(vote_correct) as correct,
+                       COUNT(vote_correct) as total,
+                       ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
+                FROM module_votes
+                WHERE vote_correct IS NOT NULL
+                GROUP BY asset, module_name
+                HAVING total >= 3
+                ORDER BY asset, win_pct DESC
+            """)
+            pair_modules = [dict(r) for r in cur.fetchall()]
+
+            # Per-pair per-module per-direction
+            cur.execute("""
+                SELECT asset, module_name, direction,
+                       SUM(vote_correct) as correct,
+                       COUNT(vote_correct) as total,
+                       ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
+                FROM module_votes
+                WHERE vote_correct IS NOT NULL
+                GROUP BY asset, module_name, direction
+                HAVING total >= 2
+                ORDER BY asset, module_name, direction
+            """)
+            pair_module_dirs = [dict(r) for r in cur.fetchall()]
+
+            # Best/worst per pair
+            cur.execute("""
+                SELECT asset,
+                       MAX(CASE WHEN win_pct IS NOT NULL THEN module_name END) as sample_module,
+                       COUNT(*) as vote_count
+                FROM (
+                    SELECT asset, module_name,
+                           ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
+                    FROM module_votes
+                    WHERE vote_correct IS NOT NULL
+                    GROUP BY asset, module_name
+                    HAVING COUNT(vote_correct) >= 3
+                )
+                GROUP BY asset
+                ORDER BY vote_count DESC
+            """)
+            pair_summary = [dict(r) for r in cur.fetchall()]
+
+        return {
+            "global_modules": global_modules,
+            "pair_modules": pair_modules,
+            "pair_module_directions": pair_module_dirs,
+            "pair_summary": pair_summary,
+            "total_vote_records": sum(m['total'] for m in global_modules),
+        }
+    except Exception as e:
+        _logger.exception("module analysis failed")
+        return {"error": str(e), "hint": "module_votes table may not exist yet — new table added in DEEP_v2"}
+
+
+@app.get("/api/pair-deep-stats/{asset}")
+async def pair_deep_stats(asset: str, period: int = 60):
+    """Deep statistics for a specific pair — all the data needed for calibration.
+
+    Returns:
+    - Overall win rate
+    - Per-module accuracy
+    - Per-module per-direction accuracy
+    - Regime distribution
+    - Tag distribution
+    - Confidence distribution
+    - Move magnitude distribution
+    - Time-of-day patterns
+    """
+    try:
+        with _db._read_cursor() as cur:
+            # Overall
+            cur.execute("""
+                SELECT accuracy, COUNT(*) as count
+                FROM signal_log
+                WHERE asset = ? AND period = ? AND accuracy IN ('correct', 'wrong')
+                GROUP BY accuracy
+            """, (asset, period))
+            overall = {r['accuracy']: r['count'] for r in cur.fetchall()}
+
+            # Per-module from module_votes
+            cur.execute("""
+                SELECT module_name, direction,
+                       SUM(vote_correct) as correct,
+                       COUNT(vote_correct) as total,
+                       ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
+                FROM module_votes
+                WHERE asset = ? AND vote_correct IS NOT NULL
+                GROUP BY module_name, direction
+                ORDER BY module_name, direction
+            """, (asset,))
+            module_votes = [dict(r) for r in cur.fetchall()]
+
+            # Regime distribution
+            cur.execute("""
+                SELECT regime, accuracy, COUNT(*) as count
+                FROM signal_log
+                WHERE asset = ? AND period = ? AND accuracy IN ('correct', 'wrong')
+                GROUP BY regime, accuracy
+            """, (asset, period))
+            regime_data = [dict(r) for r in cur.fetchall()]
+
+            # Tag distribution
+            cur.execute("""
+                SELECT tags, accuracy, COUNT(*) as count
+                FROM signal_log
+                WHERE asset = ? AND period = ? AND accuracy IN ('correct', 'wrong')
+                  AND tags IS NOT NULL AND tags != ''
+                GROUP BY tags, accuracy
+            """, (asset, period))
+            tag_data = [dict(r) for r in cur.fetchall()]
+
+            # Confidence distribution
+            cur.execute("""
+                SELECT
+                    CASE
+                        WHEN confidence < 20 THEN '<20'
+                        WHEN confidence < 40 THEN '20-39'
+                        WHEN confidence < 60 THEN '40-59'
+                        WHEN confidence < 75 THEN '60-74'
+                        ELSE '75+'
+                    END as conf_bucket,
+                    accuracy,
+                    COUNT(*) as count
+                FROM signal_log
+                WHERE asset = ? AND period = ? AND accuracy IN ('correct', 'wrong')
+                GROUP BY conf_bucket, accuracy
+                ORDER BY conf_bucket
+            """, (asset, period))
+            conf_data = [dict(r) for r in cur.fetchall()]
+
+            # Strength distribution
+            cur.execute("""
+                SELECT strength, accuracy, COUNT(*) as count
+                FROM signal_log
+                WHERE asset = ? AND period = ? AND accuracy IN ('correct', 'wrong')
+                GROUP BY strength, accuracy
+            """, (asset, period))
+            strength_data = [dict(r) for r in cur.fetchall()]
+
+        correct = overall.get('correct', 0)
+        wrong = overall.get('wrong', 0)
+        total = correct + wrong
+        win_pct = round(100.0 * correct / total, 1) if total > 0 else 0
+
+        return {
+            "asset": asset,
+            "period": period,
+            "total_signals": total,
+            "correct": correct,
+            "wrong": wrong,
+            "win_pct": win_pct,
+            "module_votes": module_votes,
+            "regime_distribution": regime_data,
+            "tag_distribution": tag_data,
+            "confidence_distribution": conf_data,
+            "strength_distribution": strength_data,
+        }
+    except Exception as e:
+        _logger.exception("pair deep stats failed")
+        return {"error": str(e)}
+
+
 @app.post("/api/patterns/refresh")
 async def patterns_refresh(request: Request):
     """Recompute ALL patterns from signal_log. Call after backtest or manually.

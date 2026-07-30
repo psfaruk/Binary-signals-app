@@ -362,6 +362,88 @@ def init():
         except Exception as _e:
             print(f"[db] theory_votes cleanup skipped: {_e}")
 
+        # ── NEW TABLE: module_votes (DEEP_v2 2026-07-30) ──────────────────
+        # Tracks each individual module's vote per signal, enabling:
+        # - Per-module per-pair per-direction accuracy analysis
+        # - Auto-calibration (weight tuning based on live performance)
+        # - Module-level debugging (why did this signal fail?)
+        # Previously module votes were embedded in signal_log.reasons as JSON
+        # text — required regex parsing to analyze. Now queryable directly.
+        try:
+            c.execute("""CREATE TABLE IF NOT EXISTS module_votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INT,           -- FK to signal_log.id (nullable for legacy)
+                asset TEXT, period INT, ctime INT,
+                module_name TEXT,        -- candle_reaction, pattern, etc.
+                direction TEXT,          -- CALL or PUT
+                vote_correct INT,        -- 1=correct, 0=wrong, NULL=ungraded
+                score REAL,              -- module's effective score
+                confidence REAL,         -- module's confidence contribution
+                signal_group TEXT,       -- BODY, WICK, PATTERN, etc.
+                engine TEXT,             -- otc or real
+                regime TEXT,             -- RANGE, TREND_UP, etc.
+                strength TEXT,           -- WEAK, MEDIUM, STRONG
+                ts REAL)""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_mv_asset_module ON module_votes(asset, module_name, vote_correct)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_mv_module_correct ON module_votes(module_name, vote_correct)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_mv_asset_dir ON module_votes(asset, direction, vote_correct)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_mv_ctime ON module_votes(ctime DESC)")
+        except sqlite3.Error as _e:
+            print(f"[db] module_votes table creation skipped: {_e}")
+
+        # ── NEW TABLE: signal_quality_metrics (DEEP_v2 2026-07-30) ────────
+        # Detailed quality metrics per signal for advanced analysis:
+        # - Move magnitude (ATR %)
+        # - Tick statistics
+        # - Time-of-day / session info
+        # - Module agreement patterns
+        try:
+            c.execute("""CREATE TABLE IF NOT EXISTS signal_quality_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INT,
+                asset TEXT, period INT, ctime INT,
+                move_atr_pct REAL,       -- |close-open|/ATR * 100
+                move_direction TEXT,     -- UP, DOWN, FLAT
+                tick_count INT,          -- ticks in the candle
+                buy_pct REAL, sell_pct REAL,
+                pressure TEXT,
+                session_hour INT,        -- 0-23 UTC
+                session_name TEXT,       -- asian, london, ny, off
+                agree_count INT,         -- modules agreeing
+                total_modules INT,
+                confidence_at_close REAL,
+                confidence_final REAL,
+                confidence_changed INT,  -- 1 if LIVE re-eval modified it
+                tags TEXT,
+                ts REAL)""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_sqm_asset ON signal_quality_metrics(asset, ctime DESC)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_sqm_session ON signal_quality_metrics(session_name, move_direction)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_sqm_move ON signal_quality_metrics(move_atr_pct)")
+        except sqlite3.Error as _e:
+            print(f"[db] signal_quality_metrics table creation skipped: {_e}")
+
+        # ── NEW TABLE: pair_performance_daily (DEEP_v2 2026-07-30) ────────
+        # Daily rollup of pair performance for trend analysis
+        try:
+            c.execute("""CREATE TABLE IF NOT EXISTS pair_performance_daily (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset TEXT,
+                date TEXT,               -- YYYY-MM-DD
+                engine TEXT,
+                total_signals INT,
+                correct INT,
+                wrong INT,
+                draw INT,
+                win_pct REAL,
+                avg_confidence REAL,
+                best_module TEXT,
+                worst_module TEXT,
+                ts REAL)""")
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_ppd_asset_date ON pair_performance_daily(asset, date)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_ppd_date ON pair_performance_daily(date DESC)")
+        except sqlite3.Error as _e:
+            print(f"[db] pair_performance_daily table creation skipped: {_e}")
+
 
 def _as_text(v):
     """SQLite can't bind lists/dicts — store them as JSON text."""
@@ -562,6 +644,62 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                 else:
                     raise
             conn.commit()
+
+            # ── NEW (DEEP_v2 2026-07-30): write module_votes rows ──────────
+            # Parse reasons JSON to extract per-module votes and store them
+            # in the module_votes table for queryable analysis.
+            try:
+                reasons_text = kw.get("reasons", "")
+                if reasons_text:
+                    import re as _re
+                    if isinstance(reasons_text, str):
+                        try:
+                            r_list = json.loads(reasons_text)
+                        except Exception:
+                            r_list = [reasons_text]
+                    else:
+                        r_list = reasons_text
+                    r_text = ' ||| '.join(str(r) for r in r_list) if isinstance(r_list, list) else str(reasons_text)
+                    
+                    mod_pat = _re.compile(r'\[(candle_reaction|running_tick|pattern|indicator|key_level|otc_pattern|trend_follow)\]')
+                    parts = _re.split(mod_pat, r_text)
+                    seen = set()
+                    vote_rows = []
+                    for i in range(1, len(parts), 2):
+                        mod = parts[i]
+                        content = parts[i+1] if i+1 < len(parts) else ''
+                        dir_match = _re.search(r'→\s*(CALL|PUT)\b', content)
+                        if not dir_match:
+                            continue
+                        direction = dir_match.group(1)
+                        if (mod, direction) in seen:
+                            continue
+                        seen.add((mod, direction))
+                        
+                        vote_correct = None
+                        if actual and actual in ('UP', 'DOWN'):
+                            vote_correct = 1 if (
+                                (direction == 'CALL' and actual == 'UP') or
+                                (direction == 'PUT' and actual == 'DOWN')
+                            ) else 0
+                        
+                        vote_rows.append((
+                            None, asset, period, ctime, mod, direction,
+                            vote_correct, None, None, None,
+                            category, kw.get('regime'), kw.get('strength'), ts_val
+                        ))
+                    
+                    if vote_rows:
+                        cur.executemany("""INSERT INTO module_votes
+                            (signal_id, asset, period, ctime, module_name, direction,
+                             vote_correct, score, confidence, signal_group,
+                             engine, regime, strength, ts)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            vote_rows)
+                        conn.commit()
+            except Exception as _mv_err:
+                print(f"[db] module_votes write skipped: {_mv_err}")
+
         except (sqlite3.Error, TypeError, ValueError) as e:
             print(f"[db] log_signal {type(e).__name__}: {e}")
             try:
