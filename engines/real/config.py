@@ -1,22 +1,29 @@
 """
-engines/real/config.py — DATA-DRIVEN CALIBRATED CONFIG (2026-07-29)
+engines/real/config.py — DEEP CALIBRATED CONFIG v2 (2026-07-30)
 
-Generated from 2,426 live signals sampled from Railway production DB.
+Generated from 614 fresh signals sampled from Railway production.
 Per-pair per-module weights calibrated against actual win rates.
 
-Calibration methodology:
-- Pairs with < 45% win rate (and >= 20 samples) → DISABLED entirely
-- Per-module per-direction accuracy computed:
-  - < 45% accuracy (n >= 10) → weight = 0.1 (disabled)
-  - 45-55% accuracy → baseline weight
-  - 55-60% accuracy → weight = 1.5 (boosted)
-  - >= 60% accuracy → weight = 1.8 (strongly boosted)
+Calibration methodology (DEEP_v2):
+- Pairs with < 40% win rate (and >= 8 samples) → DISABLED entirely
+- Per-module accuracy thresholds:
+  - < 35% → weight = 0.1 (DISABLED)
+  - 35-45% → weight = 0.5 (DAMPENED)
+  - 45-55% → weight = 1.0 (BASELINE)
+  - 55-65% → weight = 1.5 (BOOSTED)
+  - >= 65% → weight = 1.8 (STRONG BOOST)
+- Direction-specific patterns documented in comments
 
-Source data: scripts/pair_module_matrix.json
-Decisions log: scripts/calibration_decisions.json
+Source: scripts/deep_calibration_v2.json
+Date: 2026-07-30
+Total signals: 614 (OTC: 201, Real: 413)
 
-Total signals analyzed: 2,426 (across 37 pairs)
-Date: 2026-07-29
+KEY INSIGHT: Real engine modules perform WORSE than OTC:
+  - pattern: 48.4% (vs OTC 55.8%)
+  - indicator: 46.5% (vs OTC 50.0%)
+  - key_level: 44.4% (vs OTC 52.9%)
+  - candle_reaction: 48.9% (vs OTC 46.9%)
+This is why Real signals have lower win rate (51.4% vs OTC 53.8%).
 """
 from engines.base.blender import BlenderConfig
 from engines.base.per_pair import PairWeightAdapter
@@ -24,204 +31,242 @@ from engines.base.modules.trend_follow import analyze as _trend_follow_analyze
 from core.constants import REAL_MODULES
 
 
-# ── Reliability tier multipliers ────────────────────────────────────────
+# ── Reliability tier multipliers (data-driven for Real) ─────────────────
+# Real modules are weaker overall — dampened multipliers
 RELIABILITY = {
-    "PATTERN":   1.5,
-    "LEVEL":     1.3,
+    "PATTERN":   1.2,   # was 1.5 — Real pattern only 48.4%
+    "LEVEL":     0.9,   # was 1.3 — Real key_level only 44.4%
     "TREND":     1.0,
-    "INDICATOR": 1.4,   # BOOSTED from 1.2 — indicator is best module globally (51.3%)
-    "CANDLE":    0.9,   # DAMPENED from 1.0 — candle_reaction is worst module (47.1%)
-    "MICRO":     0.7,   # Real-market ticks more meaningful than OTC
+    "INDICATOR": 0.9,   # was 1.4 — Real indicator only 46.5%
+    "CANDLE":    0.9,
+    "MICRO":     0.7,
 }
 
 
-# ── DEFAULT_WEIGHTS ────────────────────────────────────────────────────
-# trend_follow kept at 0.1 — 0 graded signals in production (effectively dead)
+# ── DEFAULT_WEIGHTS — for pairs with insufficient data ─────────────────
 DEFAULT_WEIGHTS = {
     "candle_reaction": 0.9,
     "running_tick":    1.0,
-    "pattern":         1.1,
-    "indicator":       1.4,
-    "key_level":       1.0,
-    "trend_follow":    0.1,
+    "pattern":         1.0,
+    "indicator":       0.8,
+    "key_level":       0.8,
+    "trend_follow":    0.1,   # 0 graded signals — keep disabled
 }
 
 
-# ── DISABLED PAIRS — win rate < 45%, do not generate signals ────────────
-# These pairs are removed from PAIR_CONFIGS. The feed will not stream them.
-#   EURUSD: 43.8% win rate (n=77) — win rate 43.8% < 45.0% threshold
-#   USDCAD: 39.4% win rate (n=39) — win rate 39.4% < 45.0% threshold
-#   CHFJPY: 43.9% win rate (n=42) — win rate 43.9% < 45.0% threshold
-#   EURCHF: 30.6% win rate (n=41) — win rate 30.6% < 45.0% threshold
-#   AUDCAD: 41.0% win rate (n=40) — win rate 41.0% < 45.0% threshold
+# ── DISABLED PAIRS — win rate < 40%, do not generate signals ────────────
 
 
 # ── PER-PAIR CALIBRATED WEIGHTS ────────────────────────────────────────
 PAIR_CONFIGS = {
+    "AUDCAD": {
+        "profile": "calibrated",
+        "weights": {
+            "candle_reaction":   0.1,   # DISABLED (acc=26% < 35.0%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   0.5,   # dampened (acc=36% < 45.0%)
+            "indicator":   1.5,   # boost (acc=56% >= 55.0%)
+            "key_level":   1.0,   # baseline (acc=47%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
+        },
+        "description": "Calibrated: 40.0% win (n=26)",
+    },
     "AUDCHF": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.9,   # baseline (acc=47.5%)
-            "running_tick":   1.0,   # baseline (samples=2<10)
-            "pattern":   0.1,   # DISABLED (acc=39.1% < 45.0%)
-            "indicator":   1.8,   # STRONG BOOST (acc=65.4% >= 60%)
-            "key_level":   1.0,   # baseline (acc=50.0%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.5,   # boost (acc=63% >= 55.0%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.8,   # STRONG (acc=67% >= 65.0%)
+            "indicator":   0.5,   # dampened (acc=36% < 45.0%)
+            "key_level":   1.0,   # baseline (acc=45%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 58.5% win rate (n=97)",
+        "description": "Calibrated: 57.1% win (n=24)",
     },
     "AUDJPY": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=42.7% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=1<10)
-            "pattern":   1.5,   # boost (acc=56.3% >= 55.0%)
-            "indicator":   1.5,   # boost (acc=57.9% >= 55.0%)
-            "key_level":   0.1,   # DISABLED (acc=44.6% < 45.0%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (n=0<4)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.5,   # boost (acc=64% >= 55.0%)
+            "indicator":   1.5,   # boost (acc=56% >= 55.0%)
+            "key_level":   0.5,   # dampened (acc=44% < 45.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 54.1% win rate (n=116)",
+        "description": "Calibrated: 54.5% win (n=22)",
     },
     "AUDUSD": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=42.6% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=0<10)
-            "pattern":   1.1,   # baseline (acc=50.0%)
-            "indicator":   1.4,   # baseline (acc=52.0%)
-            "key_level":   0.1,   # DISABLED (acc=39.4% < 45.0%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (n=1<4)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.5,   # boost (acc=61% >= 55.0%) [PUT weak 29%, CALL strong 82%]
+            "indicator":   0.5,   # dampened (acc=40% < 45.0%) [PUT weak 29%, CALL strong 67%]
+            "key_level":   1.0,   # baseline (n=2<4)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 48.8% win rate (n=85)",
+        "description": "Calibrated: 60.0% win (n=27)",
     },
     "CADJPY": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.9,   # baseline (acc=49.0%)
-            "running_tick":   1.0,   # baseline (samples=1<10)
-            "pattern":   1.1,   # baseline (acc=50.0%)
-            "indicator":   0.1,   # DISABLED (acc=44.4% < 45.0%)
-            "key_level":   0.1,   # DISABLED (acc=39.5% < 45.0%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (acc=48%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.0,   # baseline (acc=45%) [CALL weak 14%, PUT strong 62%]
+            "indicator":   1.0,   # baseline (n=0<4)
+            "key_level":   1.0,   # baseline (n=3<4)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 53.3% win rate (n=120)",
+        "description": "Calibrated: 62.1% win (n=29)",
+    },
+    "CHFJPY": {
+        "profile": "calibrated",
+        "weights": {
+            "candle_reaction":   1.5,   # boost (acc=62% >= 55.0%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.5,   # boost (acc=60% >= 55.0%) [CALL weak 0%, PUT strong 75%]
+            "indicator":   1.0,   # baseline (n=2<4)
+            "key_level":   1.8,   # STRONG (acc=75% >= 65.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
+        },
+        "description": "Calibrated: 55.6% win (n=9)",
     },
     "EURAUD": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=35.9% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=0<10)
-            "pattern":   1.5,   # boost (acc=58.8% >= 55.0%)
-            "indicator":   1.4,   # baseline (acc=53.3%)
-            "key_level":   1.0,   # baseline (acc=45.5%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (n=0<4)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   0.5,   # dampened (acc=43% < 45.0%)
+            "indicator":   1.0,   # baseline (acc=50%)
+            "key_level":   0.5,   # dampened (acc=37% < 45.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 53.5% win rate (n=44)",
+        "description": "Calibrated: 46.4% win (n=29)",
     },
     "EURCAD": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=41.7% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=2<10)
-            "pattern":   1.8,   # STRONG BOOST (acc=65.6% >= 60%)
-            "indicator":   0.1,   # DISABLED (acc=44.0% < 45.0%)
-            "key_level":   0.1,   # DISABLED (acc=44.1% < 45.0%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (n=1<4)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   0.5,   # dampened (acc=39% < 45.0%)
+            "indicator":   1.0,   # baseline (n=0<4)
+            "key_level":   1.8,   # STRONG (acc=67% >= 65.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 51.7% win rate (n=121)",
+        "description": "Calibrated: 43.5% win (n=25)",
     },
     "EURGBP": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.9,   # baseline (acc=52.8%)
-            "running_tick":   1.0,   # baseline (samples=4<10)
-            "pattern":   0.1,   # DISABLED (acc=38.1% < 45.0%)
-            "indicator":   1.4,   # baseline (acc=48.6%)
-            "key_level":   1.0,   # baseline (acc=49.2%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (acc=52%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.0,   # baseline (acc=50%)
+            "indicator":   1.5,   # boost (acc=60% >= 55.0%)
+            "key_level":   0.5,   # dampened (acc=39% < 45.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 57.9% win rate (n=109)",
+        "description": "Calibrated: 50.0% win (n=35)",
     },
     "EURJPY": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=42.6% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=2<10)
-            "pattern":   1.5,   # boost (acc=56.8% >= 55.0%)
-            "indicator":   1.5,   # boost (acc=56.5% >= 55.0%)
-            "key_level":   1.0,   # baseline (acc=51.3%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (n=1<4)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.0,   # baseline (acc=55%) [CALL weak 20%, PUT strong 83%]
+            "indicator":   0.1,   # DISABLED (acc=33% < 35.0%)
+            "key_level":   0.1,   # DISABLED (acc=14% < 35.0%) [CALL weak 0%, PUT strong 100%]
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 47.2% win rate (n=75)",
+        "description": "Calibrated: 43.8% win (n=18)",
+    },
+    "EURUSD": {
+        "profile": "calibrated",
+        "weights": {
+            "candle_reaction":   0.5,   # dampened (acc=44% < 45.0%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   0.5,   # dampened (acc=38% < 45.0%) [PUT weak 17%, CALL strong 100%]
+            "indicator":   0.1,   # DISABLED (acc=25% < 35.0%)
+            "key_level":   1.0,   # baseline (acc=46%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
+        },
+        "description": "Calibrated: 42.9% win (n=18)",
     },
     "GBPAUD": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.9,   # baseline (acc=52.6%)
-            "running_tick":   1.0,   # baseline (samples=0<10)
-            "pattern":   1.5,   # boost (acc=57.1% >= 55.0%)
-            "indicator":   1.4,   # baseline (acc=53.3%)
-            "key_level":   1.0,   # baseline (acc=50.0%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (acc=53%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   0.1,   # DISABLED (acc=31% < 35.0%)
+            "indicator":   0.5,   # dampened (acc=44% < 45.0%)
+            "key_level":   0.5,   # dampened (acc=40% < 45.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 50.9% win rate (n=55)",
+        "description": "Calibrated: 48.0% win (n=28)",
     },
     "GBPCAD": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=44.6% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=1<10)
-            "pattern":   1.1,   # baseline (acc=52.6%)
-            "indicator":   0.1,   # DISABLED (acc=42.6% < 45.0%)
-            "key_level":   1.8,   # STRONG BOOST (acc=67.6% >= 60%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (n=0<4)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.0,   # baseline (acc=47%)
+            "indicator":   1.0,   # baseline (n=0<4)
+            "key_level":   0.5,   # dampened (acc=40% < 45.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 50.0% win rate (n=82)",
+        "description": "Calibrated: 51.7% win (n=30)",
+    },
+    "GBPCHF": {
+        "profile": "calibrated",
+        "weights": {
+            "candle_reaction":   1.0,   # baseline (acc=48%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.0,   # baseline (acc=54%)
+            "indicator":   1.5,   # boost (acc=62% >= 55.0%)
+            "key_level":   0.1,   # DISABLED (acc=29% < 35.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
+        },
+        "description": "Calibrated: 45.8% win (n=24)",
+    },
+    "GBPJPY": {
+        "profile": "calibrated",
+        "weights": {
+            "candle_reaction":   1.5,   # boost (acc=56% >= 55.0%)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   0.5,   # dampened (acc=43% < 45.0%)
+            "indicator":   0.5,   # dampened (acc=40% < 45.0%)
+            "key_level":   1.5,   # boost (acc=55% >= 55.0%)
+            "trend_follow":   1.0,   # baseline (n=0<4)
+        },
+        "description": "Calibrated: 52.2% win (n=23)",
     },
     "GBPUSD": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=42.5% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=3<10)
-            "pattern":   1.5,   # boost (acc=59.4% >= 55.0%)
-            "indicator":   1.5,   # boost (acc=57.7% >= 55.0%)
-            "key_level":   0.1,   # DISABLED (acc=42.0% < 45.0%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (n=1<4)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.0,   # baseline (acc=50%) [PUT weak 25%, CALL strong 67%]
+            "indicator":   0.5,   # dampened (acc=38% < 45.0%)
+            "key_level":   1.0,   # baseline (n=0<4)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 60.5% win rate (n=125)",
-    },
-    "USDCHF": {
-        "profile": "calibrated",
-        "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=41.2% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=0<10)
-            "pattern":   1.5,   # boost (acc=55.0% >= 55.0%)
-            "indicator":   1.4,   # baseline (acc=47.2%)
-            "key_level":   1.0,   # baseline (acc=47.2%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
-        },
-        "description": "Calibrated: 59.8% win rate (n=99)",
+        "description": "Calibrated: 63.6% win (n=26)",
     },
     "USDJPY": {
         "profile": "calibrated",
         "weights": {
-            "candle_reaction":   0.1,   # DISABLED (acc=36.5% < 45.0%)
-            "running_tick":   1.0,   # baseline (samples=1<10)
-            "pattern":   1.1,   # baseline (acc=53.1%)
-            "indicator":   1.5,   # boost (acc=57.6% >= 55.0%)
-            "key_level":   0.1,   # DISABLED (acc=42.6% < 45.0%)
-            "trend_follow":   0.1,   # baseline (samples=0<10)
+            "candle_reaction":   1.0,   # baseline (n=0<4)
+            "running_tick":   1.0,   # baseline (n=0<4)
+            "pattern":   1.5,   # boost (acc=62% >= 55.0%)
+            "indicator":   0.5,   # dampened (acc=42% < 45.0%)
+            "key_level":   1.0,   # baseline (n=0<4)
+            "trend_follow":   1.0,   # baseline (n=0<4)
         },
-        "description": "Calibrated: 47.0% win rate (n=95)",
+        "description": "Calibrated: 55.0% win (n=20)",
     },
 }
 
 
 # ── BlenderConfig assembly ─────────────────────────────────────────────
-# FIX (CALIBRATION-FIX-2026-07-29): expose `weight_adapter` as a module-level
-# export. server.py's /api/stats endpoint imports `weight_adapter` directly
-# to compute adaptation_status — the previous calibrated config only exposed
-# `CONFIG`, causing ImportError → adaptation_error on Railway.
 weight_adapter = PairWeightAdapter(
     pair_configs=PAIR_CONFIGS,
     default_weights=DEFAULT_WEIGHTS,
