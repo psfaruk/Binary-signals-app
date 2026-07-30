@@ -1492,6 +1492,23 @@ class QuotexFeed:
                         # Cap at 5 to avoid runaway but keep the backoff
                         # signal intact.
                         self._reconnect_attempts = 5
+                    # FIX (DISCONNECT-2026-07-30): if the manager task (run()
+                    # loop) is DEAD (crashed or exited), setting _connected=False
+                    # is useless — nobody picks it up. The original code only
+                    # restarted the manager when _abandoned was True, but
+                    # _abandoned is ALWAYS False (dead code path). This caused
+                    # the feed to stay permanently disconnected after any
+                    # manager crash. Now: check if the manager task is alive
+                    # and restart it if dead, REGARDLESS of _abandoned.
+                    try:
+                        existing_mgr = getattr(self, '_manager_task', None)
+                        if (existing_mgr is None or existing_mgr.done()) and self._broadcast is not None:
+                            print("[feed] aggressive_reconnect: manager task dead — restarting")
+                            self._manager_task = asyncio.create_task(
+                                self.run(self._broadcast))
+                            self._reconnect_attempts = 0  # fresh start
+                    except Exception as _re:
+                        print(f"[feed] aggressive_reconnect: manager restart failed: {_re}")
                     continue
 
                 # If abandoned, try to clear and retry
@@ -4932,8 +4949,13 @@ class QuotexFeed:
                         # when the token is dead/expired — operator pushes a
                         # new token via /api/set-token and the next cycle (within
                         # 5 min) picks it up.
+                        # FIX (DISCONNECT-2026-07-30): cap reduced 300s → 120s.
+                        # User complaint: "session token এর মেয়াদ থাকা সত্ত্বেও
+                        # ডিসকানেক্ট করে" — 5 min backoff too long for production.
+                        # 120s cap still prevents anti-abuse (max 1 attempt/2min)
+                        # but recovers 2.5x faster.
                         self._reconnect_attempts += 1
-                        delay = min(60 * (2 ** min(self._reconnect_attempts - 1, 3)), 300)
+                        delay = min(60 * (2 ** min(self._reconnect_attempts - 1, 2)), 120)
                         print(f"[feed] reconnect attempt {self._reconnect_attempts} "
                               f"failed — retrying in {delay}s "
                               f"(gentle backoff — Quotex blocks aggressive retries)")

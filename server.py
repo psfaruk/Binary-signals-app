@@ -739,6 +739,61 @@ async def _apply_token(token: str):
     }
 
 
+@app.post("/api/reconnect")
+async def force_reconnect():
+    """Force an immediate Quotex reconnect without changing the token.
+
+    FIX (DISCONNECT-2026-07-30): user complaint "session token এর মেয়াদ থাকা
+    সত্ত্বেও ডিসকানেক্ট করে" — when the feed gets stuck in a long backoff
+    (up to 120s), there was no way to force an immediate reconnect without
+    pushing a new token. This endpoint resets the feed state and restarts
+    the manager task if it's dead.
+
+    No admin key required — this is a safe operation (doesn't change tokens).
+    """
+    try:
+        # Reset feed state
+        feed._connected = False
+        feed._reconnect_attempts = 0
+        feed._last_error = None
+        feed._last_error_time = 0
+        feed._token_update_pending = True
+
+        # Close any stale client
+        if hasattr(feed, '_client') and feed._client:
+            try:
+                await feed._client.close()
+            except Exception:
+                pass
+            feed._client = None
+
+        # Check if manager task is dead and restart it
+        existing_mgr = getattr(feed, '_manager_task', None)
+        if existing_mgr is None or existing_mgr.done():
+            if feed._broadcast is not None:
+                feed._manager_task = asyncio.create_task(feed.run(feed._broadcast))
+                msg = "Manager task was dead — restarted + reconnect triggered"
+            else:
+                msg = "Cannot restart manager — no broadcast fn set"
+        else:
+            msg = "Manager task alive — reconnect triggered (will pick up within 60s)"
+
+        return {
+            "ok": True,
+            "message": msg,
+            "timestamp": time.time(),
+            "next_step": "Wait 10-30 seconds, then check /api/debug",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/reconnect")
+async def force_reconnect_get():
+    """GET version of /api/reconnect for browser-friendly access."""
+    return await force_reconnect()
+
+
 @app.get("/api/pairs")
 async def get_pairs():
     """Return both Real Market and OTC Market pair lists.
