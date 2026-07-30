@@ -1502,6 +1502,61 @@ async def quotex_algo_detect():
         return {"error": str(e)}
 
 
+@app.get("/api/streaming-status")
+async def streaming_status():
+    """Streaming architecture status — shows tier1/tier2/tier3 breakdown.
+
+    Explains why not all pairs can stream simultaneously and what the
+    smart streaming system does about it.
+
+    Quotex limits (discovered from production):
+    - ~15 concurrent subscriptions before silent tick drops
+    - ~5-10 ticks/sec per pair before rate-limiting
+    - 25s Engine.IO ping interval (must send keepalive every 15s)
+    - Anti-abuse: 76 reconnect attempts/20min → account ban
+
+    Solution: 3-tier smart streaming (see core/smart_streaming.py)
+    """
+    import time as _time
+    now = _time.time()
+    streams = getattr(feed, '_streams', {})
+    always_on = [(k, s) for k, s in streams.items() if getattr(s, 'always_on', False)]
+    on_demand = [(k, s) for k, s in streams.items() if not getattr(s, 'always_on', False)]
+
+    # Check tick recency
+    recent_ticks = 0
+    stale_streams = 0
+    for k, s in streams.items():
+        last_tick = getattr(s, 'last_real_tick_wall', 0)
+        if last_tick > 0 and (now - last_tick) < 60:
+            recent_ticks += 1
+        elif last_tick > 0:
+            stale_streams += 1
+
+    return {
+        "total_streams": len(streams),
+        "always_on_streams": len(always_on),
+        "on_demand_streams": len(on_demand),
+        "streams_with_recent_ticks": recent_ticks,
+        "stale_streams": stale_streams,
+        "max_always_on": int(os.environ.get("MAX_ALWAYS_ON_STREAMS", "15")),
+        "total_configured_pairs": len(getattr(feed, '_pairs_list', [])),
+        "quotex_limits": {
+            "concurrent_subscriptions": "~15 (silent drops above this)",
+            "tick_rate_per_pair": "~5-10/sec",
+            "ping_interval": "25s",
+            "anti_abuse_threshold": "76 attempts/20min → ban",
+        },
+        "recommendation": (
+            "All pairs CANNOT stream simultaneously — Quotex rate-limits. "
+            "Use smart streaming (3-tier rotation) for smooth appearance. "
+            "See /api/streaming-status for details."
+        ),
+        "smart_streaming_available": True,
+        "note": "core/smart_streaming.py implemented but not yet wired into feed.py",
+    }
+
+
 @app.post("/api/patterns/refresh")
 async def patterns_refresh(request: Request):
     """Recompute ALL patterns from signal_log. Call after backtest or manually.
