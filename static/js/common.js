@@ -191,6 +191,21 @@ function signalBeep(){
 function initChart(){
   const container = $('chart-container');
   if(!container) return;
+  // FIX (CRASH-2026-07-30): if chart already exists (double-init via bfcache
+  // restore or rapid setCategory), remove it first to prevent duplicate chart
+  // instances stacked on the same container (causes visual glitch + memory leak).
+  if(chart){
+    try{ chart.remove(); }catch(_){}
+    chart = null;
+    candleSeries = null;
+    ghostSeries = null;
+  }
+  // FIX (CRASH-2026-07-30): guard against LightweightCharts not loaded yet
+  // (shouldn't happen — safeInit checks — but defensive)
+  if(typeof LightweightCharts === 'undefined'){
+    console.error('[chart] LightweightCharts not loaded');
+    return;
+  }
   chart = LightweightCharts.createChart(container, {
     autoSize: true,
     layout: { background: { color: '#131722' }, textColor: '#8b949e', fontSize: 11 },
@@ -1779,6 +1794,41 @@ function setCategory(newCat){
   // Cycle: real → otc → alltime_otc → real.
   if(newCat !== 'real' && newCat !== 'otc' && newCat !== 'alltime_otc') return;
   if(newCat === currentCategory) return;
+
+  // FIX (CRASH-2026-07-30): prevent crash when switching markets rapidly.
+  // User complaint: "Otc মার্কেট, real market and all time OTC সুইচ করলে
+  // অ্যাপ ক্র্যাশ করে". Root cause: setCategory navigates to a new page
+  // via window.location.href, but the OLD page's safeInit() may still be
+  // polling (setTimeout retry loop waiting for LightweightCharts). When the
+  // new page loads, the old page's pending timers fire on a torn-down DOM,
+  // causing errors. Also, initChart() on the new page may run before the
+  // old page's chart.remove() completes, causing "Cannot read property of
+  // null" crashes. Fix: run full cleanup (same as onPageHide) BEFORE
+  // navigation, and mark a global flag so safeInit's retry loop aborts.
+  try{
+    // Abort any pending safeInit retries on this page
+    if(typeof safeInit !== 'undefined' && safeInit._retries){
+      safeInit._retries = 999;  // force it to bail on next tick
+    }
+    // Clear all intervals/timeouts
+    if(typeof _countdownInterval !== 'undefined' && _countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
+    if(typeof _keepaliveInterval !== 'undefined' && _keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
+    if(typeof staleTimeout !== 'undefined' && staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
+    if(typeof chartLoadingTimeout !== 'undefined' && chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
+    if(typeof reconnectTimer !== 'undefined' && reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if(typeof _resizeTimer !== 'undefined' && _resizeTimer){ clearTimeout(_resizeTimer); _resizeTimer = null; }
+    // Close WebSocket
+    if(typeof ws !== 'undefined' && ws){
+      try{ ws.onclose = null; ws.onerror = null; ws.onopen = null; ws.onmessage = null; ws.close(); }catch(_){}
+      ws = null;
+    }
+    // Dispose chart
+    if(typeof chart !== 'undefined' && chart){
+      try{ chart.remove(); }catch(_){}
+      chart = null;
+    }
+  }catch(_){}
+
   try{ localStorage.setItem('marketCategory', newCat); }catch(_){}
   const targets = {
     'real':         '/static/real.html',
@@ -2450,6 +2500,12 @@ function wireEvents(){
 
 /* ─── INIT ───────────────────────────────────────────────────────────────── */
 function safeInit(){
+  // FIX (CRASH-2026-07-30): abort if retries exceeded (set by setCategory
+  // cleanup before navigation). Prevents pending safeInit retries from
+  // running on a torn-down DOM after the user switched to another market.
+  if(safeInit._retries && safeInit._retries > 100){
+    return;
+  }
   if(typeof LightweightCharts === 'undefined'){
     if(!safeInit._retries) safeInit._retries = 0;
     safeInit._retries++;
