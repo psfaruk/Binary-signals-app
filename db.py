@@ -444,6 +444,64 @@ def init():
         except sqlite3.Error as _e:
             print(f"[db] pair_performance_daily table creation skipped: {_e}")
 
+        # ── NEW TABLE: pair_hourly_patterns (TIME-OF-DAY 2026-07-30) ────────
+        # Tracks per-pair per-hour win rate to detect time-based patterns.
+        # User insight: "কিছু পেয়ার 70% উইন রেট পায়, কিন্তু দিনের ভিন্ন
+        # সময়ে 30% এর নিচে পায়। আবার খারাপ পেয়ার ভালো সময়ে 60% পায়।"
+        # This table enables:
+        # - Time-aware confidence adjustment (brain uses this to boost/dampen)
+        # - Quotex algorithm detection (repeating time-based manipulation)
+        # - "Best time to trade X pair" recommendations
+        # Hour is UTC 0-23. Session names: asian(00-07), london(07-12),
+        # ny(12-17), overlap(12-16), off(17-24).
+        try:
+            c.execute("""CREATE TABLE IF NOT EXISTS pair_hourly_patterns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset TEXT,
+                hour_utc INT,             -- 0-23
+                session TEXT,             -- asian, london, ny, overlap, off
+                total_signals INT,
+                correct INT,
+                wrong INT,
+                win_pct REAL,
+                avg_confidence REAL,
+                avg_move_atr REAL,        -- average move size for this hour
+                best_direction TEXT,      -- CALL or PUT (which wins more)
+                call_win_pct REAL,        -- win rate when signal is CALL
+                put_win_pct REAL,         -- win rate when signal is PUT
+                last_updated REAL,
+                ts REAL)""")
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_php_asset_hour ON pair_hourly_patterns(asset, hour_utc)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_php_session ON pair_hourly_patterns(session, win_pct)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_php_win_pct ON pair_hourly_patterns(win_pct)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_php_asset ON pair_hourly_patterns(asset)")
+        except sqlite3.Error as _e:
+            print(f"[db] pair_hourly_patterns table creation skipped: {_e}")
+
+        # ── NEW TABLE: quotex_algo_patterns (ALGO DETECTION 2026-07-30) ────
+        # Detects Quotex's time-based manipulation patterns:
+        # - Pairs that consistently reverse at specific hours
+        # - "Trap" hours where signals systematically fail
+        # - Direction bias per hour (does Quotex favor CALL or PUT at hour X?)
+        # This is the user's insight: "কোয়েটেক্স এর এলগরিদম ডিটেক্ট করা সহজ হবে"
+        try:
+            c.execute("""CREATE TABLE IF NOT EXISTS quotex_algo_patterns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset TEXT,
+                pattern_type TEXT,        -- trap_hour, boost_hour, reversal_hour, direction_bias
+                hour_utc INT,
+                session TEXT,
+                description TEXT,
+                evidence TEXT,            -- JSON: {win_pct, sample_count, confidence}
+                severity TEXT,            -- info, warning, critical
+                detected_at REAL,
+                ts REAL)""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_qap_asset_type ON quotex_algo_patterns(asset, pattern_type)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_qap_hour ON quotex_algo_patterns(hour_utc)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_qap_severity ON quotex_algo_patterns(severity)")
+        except sqlite3.Error as _e:
+            print(f"[db] quotex_algo_patterns table creation skipped: {_e}")
+
 
 def _as_text(v):
     """SQLite can't bind lists/dicts — store them as JSON text."""
@@ -709,6 +767,200 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                 pass
     finally:
         conn.close()
+
+    # ── NEW (TIME-OF-DAY 2026-07-30): update pair_hourly_patterns ────────
+    # After logging the signal, update the hourly pattern stats so the brain
+    # can use time-aware confidence adjustment. Runs in a separate connection
+    # to avoid holding the main write transaction open.
+    try:
+        _update_hourly_pattern(asset, ctime, signal, accuracy, confidence)
+    except Exception as _hp_err:
+        print(f"[db] hourly pattern update skipped: {_hp_err}")
+
+
+def _get_session_name(hour_utc: int) -> str:
+    """Map UTC hour to trading session name."""
+    if 0 <= hour_utc < 7:
+        return "asian"
+    elif 7 <= hour_utc < 12:
+        return "london"
+    elif 12 <= hour_utc < 17:
+        return "ny"  # NY + London overlap
+    else:
+        return "off"
+
+
+def _update_hourly_pattern(asset: str, ctime: int, signal: str,
+                           accuracy: str, confidence):
+    """Update pair_hourly_patterns table after each graded signal.
+
+    Tracks per-pair per-hour win rate for time-aware predictions.
+    User insight: pairs perform differently at different hours.
+    """
+    if not ctime or accuracy not in ('correct', 'wrong'):
+        return
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(int(ctime), tz=timezone.utc)
+        hour_utc = dt.hour
+    except Exception:
+        return
+
+    session = _get_session_name(hour_utc)
+    is_correct = 1 if accuracy == 'correct' else 0
+    is_call = signal == 'CALL'
+    ts_val = time.time()
+
+    conn = _conn()
+    try:
+        cur = conn.cursor()
+        # Upsert: if row exists, increment counters; else insert new
+        cur.execute("""
+            SELECT total_signals, correct, wrong, call_win_pct, put_win_pct
+            FROM pair_hourly_patterns
+            WHERE asset = ? AND hour_utc = ?
+        """, (asset, hour_utc))
+        existing = cur.fetchone()
+
+        if existing:
+            old_total = existing['total_signals'] or 0
+            old_correct = existing['correct'] or 0
+            old_wrong = existing['wrong'] or 0
+            new_total = old_total + 1
+            new_correct = old_correct + is_correct
+            new_wrong = old_wrong + (1 - is_correct)
+            new_win_pct = round(100.0 * new_correct / new_total, 1) if new_total > 0 else 0
+
+            # Update direction-specific win rates
+            # We don't track call/put counts separately in this table,
+            # so we approximate: store the signal direction's running win rate
+            if is_call:
+                call_wins = existing['call_win_pct'] or 0
+                # Simple exponential moving average for direction win rate
+                new_call_wr = call_wins * 0.8 + is_correct * 100 * 0.2
+                new_put_wr = existing['put_win_pct']
+            else:
+                put_wins = existing['put_win_pct'] or 0
+                new_put_wr = put_wins * 0.8 + is_correct * 100 * 0.2
+                new_call_wr = existing['call_win_pct']
+
+            best_dir = 'CALL' if (new_call_wr or 0) >= (new_put_wr or 0) else 'PUT'
+
+            cur.execute("""
+                UPDATE pair_hourly_patterns SET
+                    session = ?, total_signals = ?, correct = ?, wrong = ?,
+                    win_pct = ?, avg_confidence = ?,
+                    best_direction = ?, call_win_pct = ?, put_win_pct = ?,
+                    last_updated = ?, ts = ?
+                WHERE asset = ? AND hour_utc = ?
+            """, (session, new_total, new_correct, new_wrong, new_win_pct,
+                  confidence, best_dir, new_call_wr, new_put_wr,
+                  ts_val, ts_val, asset, hour_utc))
+        else:
+            win_pct = 100.0 if is_correct else 0.0
+            call_wr = 100.0 if (is_call and is_correct) else (0.0 if is_call else None)
+            put_wr = 100.0 if (not is_call and is_correct) else (0.0 if not is_call else None)
+            best_dir = signal if is_correct else ('PUT' if signal == 'CALL' else 'CALL')
+
+            cur.execute("""
+                INSERT INTO pair_hourly_patterns
+                    (asset, hour_utc, session, total_signals, correct, wrong,
+                     win_pct, avg_confidence, best_direction, call_win_pct,
+                     put_win_pct, last_updated, ts)
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (asset, hour_utc, session, is_correct, 1 - is_correct,
+                  win_pct, confidence, best_dir, call_wr, put_wr, ts_val, ts_val))
+
+        conn.commit()
+    except Exception as e:
+        print(f"[db] _update_hourly_pattern error: {e}")
+    finally:
+        conn.close()
+
+
+def get_hourly_pattern(asset: str, hour_utc: int = None) -> dict:
+    """Get hourly pattern data for a pair.
+
+    If hour_utc is None, returns all 24 hours for the pair.
+    Used by the brain for time-aware confidence adjustment.
+    """
+    try:
+        with _read_cursor() as cur:
+            if hour_utc is not None:
+                cur.execute("""
+                    SELECT * FROM pair_hourly_patterns
+                    WHERE asset = ? AND hour_utc = ?
+                """, (asset, hour_utc))
+                row = cur.fetchone()
+                return dict(row) if row else None
+            else:
+                cur.execute("""
+                    SELECT * FROM pair_hourly_patterns
+                    WHERE asset = ?
+                    ORDER BY hour_utc
+                """, (asset,))
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[db] get_hourly_pattern error: {e}")
+        return None
+
+
+def get_time_confidence_adjustment(asset: str, hour_utc: int) -> dict:
+    """Get confidence adjustment for a pair at a specific hour.
+
+    Returns:
+        {
+            'win_pct': float,        # historical win rate at this hour
+            'total': int,            # sample count
+            'adjustment': float,     # multiplier (0.5 to 1.3)
+            'reason': str,           # human-readable reason
+            'best_direction': str,   # CALL or PUT (which wins more)
+        }
+
+    Adjustment logic:
+    - win_pct >= 65% and total >= 5 → 1.2 (boost)
+    - win_pct 55-65% and total >= 5 → 1.1 (slight boost)
+    - win_pct 45-55% or total < 5  → 1.0 (neutral)
+    - win_pct 35-45% and total >= 5 → 0.8 (dampen)
+    - win_pct < 35% and total >= 5 → 0.6 (strong dampen)
+    """
+    pattern = get_hourly_pattern(asset, hour_utc)
+    if not pattern or pattern.get('total_signals', 0) < 5:
+        return {
+            'win_pct': None,
+            'total': 0,
+            'adjustment': 1.0,
+            'reason': 'insufficient data',
+            'best_direction': None,
+        }
+
+    win_pct = pattern.get('win_pct', 50)
+    total = pattern.get('total_signals', 0)
+    best_dir = pattern.get('best_direction')
+
+    if win_pct >= 65:
+        adjustment = 1.2
+        reason = f' excellent at {hour_utc:02d}:00 UTC ({win_pct:.0f}%, n={total})'
+    elif win_pct >= 55:
+        adjustment = 1.1
+        reason = f' good at {hour_utc:02d}:00 UTC ({win_pct:.0f}%, n={total})'
+    elif win_pct >= 45:
+        adjustment = 1.0
+        reason = f' average at {hour_utc:02d}:00 UTC ({win_pct:.0f}%, n={total})'
+    elif win_pct >= 35:
+        adjustment = 0.8
+        reason = f' poor at {hour_utc:02d}:00 UTC ({win_pct:.0f}%, n={total})'
+    else:
+        adjustment = 0.6
+        reason = f' very poor at {hour_utc:02d}:00 UTC ({win_pct:.0f}%, n={total})'
+
+    return {
+        'win_pct': win_pct,
+        'total': total,
+        'adjustment': adjustment,
+        'reason': reason,
+        'best_direction': best_dir,
+    }
 
 
 def get_micro_history(asset, period, n=5, before_ctime=None):

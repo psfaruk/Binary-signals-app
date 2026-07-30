@@ -1264,6 +1264,9 @@ async def pair_deep_stats(asset: str, period: int = 60):
             """, (asset, period))
             strength_data = [dict(r) for r in cur.fetchall()]
 
+        # Time-of-day patterns from pair_hourly_patterns
+        hourly_patterns = _db.get_hourly_pattern(asset)
+
         correct = overall.get('correct', 0)
         wrong = overall.get('wrong', 0)
         total = correct + wrong
@@ -1281,9 +1284,221 @@ async def pair_deep_stats(asset: str, period: int = 60):
             "tag_distribution": tag_data,
             "confidence_distribution": conf_data,
             "strength_distribution": strength_data,
+            "hourly_patterns": hourly_patterns,
         }
     except Exception as e:
         _logger.exception("pair deep stats failed")
+        return {"error": str(e)}
+
+
+@app.get("/api/time-patterns")
+async def time_patterns_all():
+    """Time-of-day patterns for ALL pairs — best/worst hours per pair.
+
+    User insight: "কিছু পেয়ার 70% উইন রেট পায়, কিন্তু দিনের ভিন্ন সময়ে 30%
+    এর নিচে পায়। আবার খারাপ পেয়ার ভালো সময়ে 60% পায়।"
+
+    Returns per-pair:
+    - Best hour (highest win rate, min 5 samples)
+    - Worst hour (lowest win rate, min 5 samples)
+    - Time volatility (best - worst spread)
+    - All 24 hours data
+    - Recommended trading hours
+    """
+    try:
+        with _db._read_cursor() as cur:
+            cur.execute("""
+                SELECT asset, hour_utc, session, total_signals, correct,
+                       wrong, win_pct, best_direction, call_win_pct, put_win_pct
+                FROM pair_hourly_patterns
+                WHERE total_signals >= 3
+                ORDER BY asset, hour_utc
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+
+        # Group by pair
+        pair_data = {}
+        for row in rows:
+            pair = row['asset']
+            if pair not in pair_data:
+                pair_data[pair] = []
+            pair_data[pair].append(row)
+
+        # Build summary
+        summary = []
+        for pair, hours in sorted(pair_data.items()):
+            # Filter hours with >= 5 samples for best/worst
+            significant_hours = [h for h in hours if h['total_signals'] >= 5]
+            if not significant_hours:
+                significant_hours = hours  # fallback to all
+
+            best = max(significant_hours, key=lambda x: x['win_pct'])
+            worst = min(significant_hours, key=lambda x: x['win_pct'])
+            spread = best['win_pct'] - worst['win_pct']
+
+            # Overall pair win rate
+            total_correct = sum(h['correct'] for h in hours)
+            total_total = sum(h['total_signals'] for h in hours)
+            overall_wr = round(100.0 * total_correct / total_total, 1) if total_total > 0 else 0
+
+            # Recommended hours (win >= 55%)
+            good_hours = sorted(
+                [h for h in hours if h['win_pct'] >= 55 and h['total_signals'] >= 3],
+                key=lambda x: -x['win_pct']
+            )
+            # Avoid hours (win < 40%)
+            bad_hours = sorted(
+                [h for h in hours if h['win_pct'] < 40 and h['total_signals'] >= 3],
+                key=lambda x: x['win_pct']
+            )
+
+            volatility = '⚡ extreme' if spread >= 50 else ('🔄 high' if spread >= 30 else 'low')
+
+            summary.append({
+                'pair': pair,
+                'overall_win_pct': overall_wr,
+                'total_signals': total_total,
+                'best_hour': {
+                    'hour': best['hour_utc'],
+                    'win_pct': best['win_pct'],
+                    'samples': best['total_signals'],
+                    'session': best['session'],
+                },
+                'worst_hour': {
+                    'hour': worst['hour_utc'],
+                    'win_pct': worst['win_pct'],
+                    'samples': worst['total_signals'],
+                    'session': worst['session'],
+                },
+                'spread': round(spread, 1),
+                'volatility': volatility,
+                'recommended_hours': [
+                    {'hour': h['hour_utc'], 'win_pct': h['win_pct'], 'samples': h['total_signals']}
+                    for h in good_hours
+                ],
+                'avoid_hours': [
+                    {'hour': h['hour_utc'], 'win_pct': h['win_pct'], 'samples': h['total_signals']}
+                    for h in bad_hours
+                ],
+                'all_hours': hours,
+            })
+
+        return {
+            "total_pairs": len(summary),
+            "pairs": summary,
+        }
+    except Exception as e:
+        _logger.exception("time patterns failed")
+        return {"error": str(e)}
+
+
+@app.get("/api/time-patterns/{asset}")
+async def time_patterns_for_pair(asset: str):
+    """Time-of-day patterns for a specific pair — all 24 hours."""
+    try:
+        patterns = _db.get_hourly_pattern(asset)
+        if patterns is None:
+            patterns = []
+        # Current hour adjustment
+        from datetime import datetime, timezone
+        current_hour = datetime.now(tz=timezone.utc).hour
+        adjustment = _db.get_time_confidence_adjustment(asset, current_hour)
+        return {
+            "asset": asset,
+            "current_hour_utc": current_hour,
+            "current_adjustment": adjustment,
+            "hourly_patterns": patterns,
+        }
+    except Exception as e:
+        _logger.exception("time patterns for pair failed")
+        return {"error": str(e)}
+
+
+@app.get("/api/quotex-algo-detect")
+async def quotex_algo_detect():
+    """Detect Quotex algorithm patterns from time-based data.
+
+    User insight: "কোয়েটেক্স এর এলগরিদম ডিটেক্ট করা সহজ হবে"
+
+    Detects:
+    - Trap hours (pairs that consistently fail at specific hours)
+    - Boost hours (pairs that consistently win at specific hours)
+    - Direction bias (Quotex favoring CALL or PUT at specific hours)
+    - Reversal patterns (pairs that reverse direction at specific times)
+    """
+    try:
+        with _db._read_cursor() as cur:
+            # Get all hourly patterns with enough data
+            cur.execute("""
+                SELECT asset, hour_utc, session, total_signals, correct,
+                       wrong, win_pct, best_direction, call_win_pct, put_win_pct
+                FROM pair_hourly_patterns
+                WHERE total_signals >= 5
+                ORDER BY win_pct ASC
+            """)
+            all_patterns = [dict(r) for r in cur.fetchall()]
+
+        trap_hours = []
+        boost_hours = []
+        direction_bias = []
+
+        for p in all_patterns:
+            # Trap hour: win < 35%
+            if p['win_pct'] < 35:
+                trap_hours.append({
+                    'pair': p['asset'],
+                    'hour': p['hour_utc'],
+                    'session': p['session'],
+                    'win_pct': p['win_pct'],
+                    'samples': p['total_signals'],
+                    'severity': 'critical' if p['win_pct'] < 25 else 'warning',
+                    'description': f"{p['asset']} loses {100-p['win_pct']:.0f}% of trades at {p['hour_utc']:02d}:00 UTC ({p['session']} session)",
+                })
+
+            # Boost hour: win > 65%
+            if p['win_pct'] > 65:
+                boost_hours.append({
+                    'pair': p['asset'],
+                    'hour': p['hour_utc'],
+                    'session': p['session'],
+                    'win_pct': p['win_pct'],
+                    'samples': p['total_signals'],
+                    'description': f"{p['asset']} wins {p['win_pct']:.0f}% of trades at {p['hour_utc']:02d}:00 UTC ({p['session']} session)",
+                })
+
+            # Direction bias: call/put win rate difference > 20%
+            call_wr = p.get('call_win_pct')
+            put_wr = p.get('put_win_pct')
+            if call_wr is not None and put_wr is not None:
+                diff = abs(call_wr - put_wr)
+                if diff > 20 and p['total_signals'] >= 8:
+                    favored = 'CALL' if call_wr > put_wr else 'PUT'
+                    direction_bias.append({
+                        'pair': p['asset'],
+                        'hour': p['hour_utc'],
+                        'session': p['session'],
+                        'favored_direction': favored,
+                        'call_win_pct': round(call_wr, 1),
+                        'put_win_pct': round(put_wr, 1),
+                        'difference': round(diff, 1),
+                        'samples': p['total_signals'],
+                        'description': f"{p['asset']} at {p['hour_utc']:02d}:00 UTC favors {favored} (CALL {call_wr:.0f}% vs PUT {put_wr:.0f}%)",
+                    })
+
+        return {
+            "total_patterns_analyzed": len(all_patterns),
+            "trap_hours": sorted(trap_hours, key=lambda x: x['win_pct']),
+            "boost_hours": sorted(boost_hours, key=lambda x: -x['win_pct']),
+            "direction_bias": sorted(direction_bias, key=lambda x: -x['difference']),
+            "summary": {
+                "trap_hours_count": len(trap_hours),
+                "boost_hours_count": len(boost_hours),
+                "direction_bias_count": len(direction_bias),
+                "insight": "Quotex algorithm appears to manipulate specific pairs at specific hours. Avoid trap hours, trade during boost hours.",
+            }
+        }
+    except Exception as e:
+        _logger.exception("quotex algo detect failed")
         return {"error": str(e)}
 
 
