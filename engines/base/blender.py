@@ -1218,6 +1218,31 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             confidence = _round_half_up(confidence * _reg_mult)  # FIX (AUDIT-3-05): _round_half_up
             if _reg_note:
                 all_reasons.append(_reg_note)
+
+        # ── NEW (TIME-OF-DAY 2026-07-30): per-pair per-hour confidence ────
+        # User insight: "কিছু পেয়ার 70% উইন রেট পায়, কিন্তু দিনের ভিন্ন সময়ে
+        # 30% এর নিচে পায়। আবার খারাপ পেয়ার ভালো সময়ে 60% পায়।"
+        # This uses the new pair_hourly_patterns table (more granular than
+        # the existing get_time_adjustment which uses time_patterns table).
+        # Adjustment range: 0.6 to 1.2 (stronger than the ±6% nudge above).
+        # Only activates when total >= 5 samples for statistical validity.
+        try:
+            from db import get_time_confidence_adjustment
+            from datetime import datetime, timezone
+            _hour_utc = datetime.fromtimestamp(_ctime, tz=timezone.utc).hour
+            _time_adj = get_time_confidence_adjustment(asset, _hour_utc)
+            if _time_adj['adjustment'] != 1.0:
+                confidence = _round_half_up(confidence * _time_adj['adjustment'])
+                all_reasons.append(
+                    f"_TIME_PATTERN: {asset} at {_hour_utc:02d}:00 UTC "
+                    f"→ ×{_time_adj['adjustment']:.2f} "
+                    f"(win {_time_adj['win_pct']:.0f}%, n={_time_adj['total']}) "
+                    f"— {_time_adj['reason'].strip()}"
+                )
+        except Exception as _ta_err:
+            # Non-critical — don't crash prediction if DB unavailable
+            pass
+
         # FIX (DEEP-AUDIT-2026-07-26 / F-02-11): tag-based adjustment was
         # planned but never implemented — see dead-import removal above.
         # The previous TODO comment ("skip for now, will be added in a
