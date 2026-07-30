@@ -82,6 +82,15 @@ class AccountMixin:
             # hard to diagnose. Now: keep the specific reason and only fall
             # back to the generic string if none was captured.
             _specific = reason or getattr(self.api.state, "websocket_error_reason", None)
+            # FIX (DISCONNECT-2026-07-30): when reason="Connected" but
+            # check_connect() returns False, it means the WS briefly reached
+            # CONNECTED status but immediately dropped back to DISCONNECTED.
+            # This is almost always an AUTH REJECT (token expired/invalid).
+            # Surface this clearly so the operator knows to refresh the token.
+            if _specific == "Connected":
+                _specific = ("Connected-then-disconnected — likely AUTH REJECT "
+                           "(token expired or invalid). Refresh QX_TOKEN via "
+                           "/api/set-token")
             logger.error(
                 "Websocket failed to connect or connection was rejected: %s",
                 _specific or "no reason captured",
