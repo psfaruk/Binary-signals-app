@@ -1362,8 +1362,9 @@ class QuotexFeed:
             else:
                 return  # have live ticks — all good
             err = (f"stream {asset}@{period}s stuck (no live ticks after 30s) "
-                   "— token may have expired. NOT falling back to sim mode "
-                   "(sim is permanently disabled). Use /api/set-token to refresh.")
+                   "— likely a silent subscription drop by Quotex server "
+                   "(NOT necessarily token expiry). Auto-re-arming subscription. "
+                   "If this persists across multiple pairs, refresh token via /api/set-token.")
             print(f"[feed] ⚠️  {err}")
             self._last_error = err
             self._last_error_time = time.time()
@@ -1389,6 +1390,22 @@ class QuotexFeed:
                     # failures (queue full, JSON serialize error) so they
                     # don't disappear silently.
                     print(f"[feed] _warn_if_stuck broadcast failed: {_be}")
+            # FIX (DISCONNECT-2026-07-29): proactively re-arm the stuck stream's
+            # subscription instead of waiting for the next 60s watchdog cycle.
+            # User complaint: 'session token এর মেয়াদ থাকা সত্ত্বেও ডিসকানেক্ট করে'
+            # — root cause: Quotex silently drops per-stream subscriptions
+            # mid-session (NOT token expiry). The per-stream watchdog only
+            # fires every 30s, so a stuck stream waits up to 90s before
+            # recovery (30s _warn_if_stuck + 60s PER_STREAM_STALE_SECS).
+            # Now: trigger immediate re-arm from _warn_if_stuck itself,
+            # cutting recovery time from 90s → 30s.
+            try:
+                if self._client and getattr(stream, 'sub_started', False):
+                    print(f"[feed] _warn_if_stuck: auto re-arming {asset}@{period}s")
+                    asyncio.create_task(self._rearm_stream(stream))
+                    stream.last_real_tick_wall = time.time()  # reset to prevent double re-arm
+            except Exception as _re:
+                print(f"[feed] _warn_if_stuck re-arm failed: {_re}")
         except asyncio.CancelledError as _e:
             print(f"[silent-except] feed.py:1378 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
             pass
@@ -1439,8 +1456,25 @@ class QuotexFeed:
                 # unreachable and the WARNING print never fires).
 
                 # No sim delegate - check if we need to reconnect real feed
-                if not self._streams and not getattr(self, '_abandoned', False):
-                    print("[feed] aggressive_reconnect: 0 streams - triggering reconnect")
+                # FIX (DISCONNECT-2026-07-29): original check `if not self._streams`
+                # never triggered when always_on streams were running (always_on
+                # streams keep self._streams non-empty even when stuck). Now also
+                # check if ALL streams are stale (no recent ticks across all).
+                _all_stale = False
+                if self._streams:
+                    now = time.time()
+                    _stale_count = sum(
+                        1 for s in self._streams.values()
+                        if s.last_real_tick_wall > 0
+                        and (now - s.last_real_tick_wall) > 120
+                    )
+                    _all_stale = _stale_count >= len(self._streams)
+                if (not self._streams or _all_stale) and not getattr(self, '_abandoned', False):
+                    if _all_stale:
+                        print(f"[feed] aggressive_reconnect: all {_stale_count} streams "
+                              f"stale (no ticks >120s) — triggering reconnect")
+                    else:
+                        print("[feed] aggressive_reconnect: 0 streams - triggering reconnect")
                     self._connected = False
                     self._connected_event.clear()
                     # FIX (CRASH-FIX-2026-07-26 / FX-007): resetting
