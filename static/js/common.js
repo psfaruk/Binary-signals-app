@@ -1720,16 +1720,43 @@ function renderPairs(payload){
 
   // If the currently-selected asset is NOT in the active category's list,
   // auto-switch to the first available pair.
+  // FIX (ALLTIME-OTC-FIX 2026-07-30): on alltime_otc page, don't auto-switch
+  // away if the current pair is locked or temporarily missing — the user
+  // explicitly selected it. Only auto-switch on real/otc pages where a
+  // missing pair means the market closed.
   const stillThere = activeList.find(p => p.asset === currentAsset && !p.locked);
   if(!stillThere && activeList.length > 0){
-    const firstOk = activeList.find(p => !p.locked) || activeList[0];
-    if(firstOk){
-      currentAsset = firstOk.asset;
-      pairSelect.value = currentAsset;
-      if(ws && ws.readyState === WebSocket.OPEN){
-        send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
-               category: currentCategory });
-        loadServerHistory();
+    // On alltime_otc: if the pair IS in the list (even if locked), keep it.
+    // Only switch if the pair is completely absent from the list.
+    if(currentCategory === 'alltime_otc'){
+      const pairExists = activeList.find(p => p.asset === currentAsset);
+      if(pairExists){
+        // Pair exists but is locked — keep selection, don't auto-switch.
+        // The user will see the locked indicator and can pick another.
+      } else {
+        // Pair completely absent — switch to first available.
+        const firstOk = activeList.find(p => !p.locked) || activeList[0];
+        if(firstOk){
+          currentAsset = firstOk.asset;
+          pairSelect.value = currentAsset;
+          if(ws && ws.readyState === WebSocket.OPEN){
+            send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+                   category: currentCategory });
+            loadServerHistory();
+          }
+        }
+      }
+    } else {
+      // Real/OTC page: original behavior — auto-switch to first available.
+      const firstOk = activeList.find(p => !p.locked) || activeList[0];
+      if(firstOk){
+        currentAsset = firstOk.asset;
+        pairSelect.value = currentAsset;
+        if(ws && ws.readyState === WebSocket.OPEN){
+          send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+                 category: currentCategory });
+          loadServerHistory();
+        }
       }
     }
   }
@@ -2259,50 +2286,28 @@ function wireEvents(){
       // Sanity check: the selected asset must belong to the current page's
       // category. (Server enforces this too — better to bail out client-side
       // than hit a category/asset mismatch error.)
-      // FIX (P0-ISSUE-002, 2026-07-22): previously this computed newCat as
-      // 'otc' for ANY asset ending in '_otc' — including alltime_otc pairs.
-      // On the All-Time OTC page, EVERY pair ends with '_otc', so newCat
-      // was always 'otc' !== 'alltime_otc' → user was redirected to
-      // /static/otc.html before the subscribe could fire. "বাকি গুল সুইচ
-      // করা যায় না" was this redirect loop. Now: only redirect if the
-      // asset's category TRULY mismatches (e.g. user somehow selected a
-      // real pair on the OTC page). alltime_otc pairs stay on their page.
-      // FIX (DEEP-AUDIT-2026-07-26 / F-17-08, CRITICAL): look up the pair in
-      // pairsList to determine its ACTUAL category, then redirect to that
-      // category's page. Previously the redirect logic only knew about
-      // 'real' vs 'otc' (based on the _otc suffix) — so selecting an
-      // all-time OTC pair (e.g. USDBDT_otc) on the Real page redirected to
-      // the OTC page (not the alltime_otc page), and the OTC dropdown
-      // doesn't include USDBDT_otc, so the user got auto-switched to
-      // EURUSD_otc (losing their selection). Now: search pairsList for the
-      // selected asset; if it's in alltimeOtcPairsList, redirect to
-      // alltime_otc; if it's in otcPairsList, redirect to otc; if it's in
-      // realPairsList, redirect to real.
+      // FIX (ALLTIME-OTC-FIX 2026-07-30): user complaint — "All time OTC তে
+      // পেয়ার চেঞ্জ করলে OTC তে পাঠিয়ে দেয়"। Root cause: when a pair from
+      // alltime_otc was selected, the lookup in pairsList sometimes failed
+      // (pair not yet loaded), and the fallback logic at the bottom used the
+      // _otc suffix heuristic which redirected to 'otc' page.
+      // Now: ALL alltime_otc pairs STAY on the alltime_otc page — no redirect.
+      // Only redirect if a REAL pair is selected on an OTC page, or vice versa.
       const isOtcAsset = currentAsset.endsWith('_otc');
-      let expectedCat;
-      if(currentCategory === 'real')           expectedCat = isOtcAsset ? 'otc' : 'real';
-      else if(currentCategory === 'alltime_otc') expectedCat = 'alltime_otc'; // stay
-      else                                    expectedCat = isOtcAsset ? 'otc' : 'real';
-      // Look up the actual pair to determine its true category.
-      const selectedPair = pairsList.find(p => p.asset === currentAsset);
-      let actualCat = null;
-      if(selectedPair){
-        if(realPairsList.indexOf(selectedPair) !== -1)        actualCat = 'real';
-        else if(alltimeOtcPairsList.indexOf(selectedPair) !== -1) actualCat = 'alltime_otc';
-        else if(otcPairsList.indexOf(selectedPair) !== -1)    actualCat = 'otc';
-      }
-      // Only redirect if there's a genuine mismatch — and redirect to the
-      // ACTUAL category of the selected pair (not a guessed one).
-      if(actualCat && actualCat !== currentCategory){
-        setCategory(actualCat); return;
-      }
-      // Fallback: if we couldn't determine the actual category (pair not yet
-      // in pairsList), use the old suffix-based heuristic.
-      if(!actualCat){
-        if(currentCategory === 'real' && isOtcAsset){
+
+      // FIX (ALLTIME-OTC-FIX): if we're on alltime_otc page, NEVER redirect.
+      // All alltime_otc pairs end with _otc and belong on this page.
+      if(currentCategory === 'alltime_otc'){
+        // All pairs on this page are OTC-type — stay here, no redirect needed.
+        // Just proceed to re-subscribe.
+      } else if(currentCategory === 'real'){
+        // On Real page: if user selected an _otc pair, redirect to OTC page
+        if(isOtcAsset){
           setCategory('otc'); return;
         }
-        if(currentCategory === 'otc' && !isOtcAsset){
+      } else {
+        // On OTC page: if user selected a non-_otc pair, redirect to Real
+        if(!isOtcAsset){
           setCategory('real'); return;
         }
       }
