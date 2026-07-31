@@ -19,6 +19,61 @@ DB_PATH = os.environ.get(
     os.path.abspath(os.path.join(os.path.dirname(__file__) or ".", "signals.db")),
 )
 
+# FIX (LIVE-TICK-RELIABILITY-2026-07-31): DB_PATH can now point at
+# /app/data/signals.db (Railway volume mount, see railway.json). If the
+# operator hasn't added the Volume yet, /app/data doesn't exist and
+# sqlite3.connect() would crash the whole app on startup. Create the
+# directory defensively — this does NOT make data persistent by itself
+# (a plain directory on the ephemeral filesystem also "exists"), it only
+# prevents a hard crash. See _log_persistence_status() below for the
+# actual persistence check.
+try:
+    _db_dir = os.path.dirname(DB_PATH)
+    if _db_dir:
+        os.makedirs(_db_dir, exist_ok=True)
+except Exception as _mkdir_exc:
+    print(f"[db] WARNING: could not create DB_PATH directory {DB_PATH!r}: {_mkdir_exc}")
+
+
+def _log_persistence_status() -> None:
+    """Log a boot counter next to signals.db so Railway logs make it
+    obvious whether the data directory is really persisting across
+    redeploys, instead of silently trusting the dashboard Volume
+    checkbox. Call once at startup, after init() has created signals.db.
+
+    Interpretation (see this printed line in Railway's deploy logs):
+      boot_count == 1 on the FIRST ever deploy: normal.
+      boot_count == 1 on EVERY redeploy after that: the volume is NOT
+        actually mounted at DB_PATH's directory — data is being wiped
+        every time, even if a Volume exists elsewhere in the dashboard.
+      boot_count > 1 and increasing: persistence is working correctly.
+    """
+    marker_path = os.path.join(os.path.dirname(DB_PATH) or ".", ".persistence_marker.json")
+    boot_count = 1
+    first_seen = None
+    try:
+        if os.path.exists(marker_path):
+            with open(marker_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            boot_count = int(data.get("boot_count", 0)) + 1
+            first_seen = data.get("first_seen")
+        else:
+            first_seen = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(marker_path, "w", encoding="utf-8") as f:
+            json.dump({"boot_count": boot_count, "first_seen": first_seen,
+                       "last_boot": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, f)
+    except Exception as exc:
+        print(f"[db] persistence marker check failed (non-fatal): {exc}")
+        return
+    if boot_count == 1:
+        print(f"[db] persistence marker: boot_count=1 at {DB_PATH!r} — "
+              f"if this ALSO reads 1 after your next redeploy, the Railway "
+              f"Volume is not actually mounted here (data is being wiped).")
+    else:
+        print(f"[db] persistence marker: boot_count={boot_count} "
+              f"(first_seen={first_seen}) at {DB_PATH!r} — data directory "
+              f"is surviving restarts.")
+
 # FIX (DEEP-AUDIT-2026-07-26 / F-14-02): previously a global `_lock`
 # serialized ALL writes across 38+ streams through one threading.Lock
 # (db.py L241, L296). Throughput ceiling was ~1 write per commit+fsync
@@ -113,6 +168,7 @@ _cursor = _write_cursor
 
 
 def init():
+    _log_persistence_status()
     with _cursor() as c:
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-28): metadata table for
         # one-time migration tracking. Previously the signal_log dedup

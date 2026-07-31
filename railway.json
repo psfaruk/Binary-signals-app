@@ -16,7 +16,8 @@
     "QX_USE_RAW_WS": "0",
     "QX_PAYOUT_FLOOR_REAL": "70",
     "QX_PAYOUT_FLOOR_OTC": "85",
-    "QX_DISABLE_LIVE_REEVAL": "1"
+    "QX_DISABLE_LIVE_REEVAL": "1",
+    "DB_PATH": "/app/data/signals.db"
   },
   "env_required": {
     "QX_TOKEN": {
@@ -27,5 +28,6 @@
   },
   "_notes_FIX_DEEP_AUDIT_2026_07_26_F_19_40": "Increased healthcheckTimeout 30→60s. Cold start imports brain.py + time_patterns.py + algorithm_monitor.py (each opens SQLite tables); 30s was too tight on Railway cold start and caused spurious deploy failures. A-10 PROBLEM 34.",
   "_notes_CALIBRATION_2026_07_29": "Added QX_DISABLE_LIVE_REEVAL=1 to disable LIVE re-eval (was the #1 accuracy killer — 88% of signals got demoted to confidence=15 with 43% win rate).",
-  "_notes_PERSISTENT_VOLUME_REQUIRED": "CRITICAL: Railway does NOT persist the filesystem by default. Every redeploy wipes data/signals.db, losing ALL signal history, brain_learning, and brain_predictions. To fix: (1) Go to Railway dashboard → your service → Settings → Volumes → Add Volume. (2) Set Mount Path to '/app/data'. (3) This persists signals.db across deploys. Without this, the brain adaptation system never accumulates enough samples (needs 20+ per pair) and learned_weights stays at 0."
+  "_notes_PERSISTENT_VOLUME_REQUIRED": "CRITICAL: Railway does NOT persist the filesystem by default. Every redeploy wipes signals.db, losing ALL signal history, brain_learning, and brain_predictions. BOTH steps below are required — mounting the volume alone does NOT persist data, because db.py / core/brain.py / core/*.py all defaulted DB_PATH to a path OUTSIDE the volume (app root) unless an env var told them otherwise: (1) Railway dashboard -> your service -> Settings -> Volumes -> Add Volume, Mount Path '/app/data'. (2) DB_PATH is now set to '/app/data/signals.db' in this file's env block (was missing before 2026-07-31 -- this is the step that was silently making step (1) alone insufficient). (3) Redeploy and check the boot logs: db.py now logs a persistence marker boot_count on every startup -- boot_count > 1 confirms the volume is real; boot_count always resetting to 1 after every redeploy means the volume isn't actually mounted at this path. Without real persistence, the brain adaptation system never accumulates enough samples (needs 20+ per pair) and learned_weights stays at 0.",
+  "_notes_TELEGRAM_ALERTS_OPTIONAL": "Optional: set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in Railway Variables (not committed here) to get a Telegram message the moment the Quotex token dies or the feed goes stale, and again when it recovers -- see alerts.py and .env.example. QX_TOKEN expires ~24h and previously died with zero notification."
 }

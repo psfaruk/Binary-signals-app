@@ -515,24 +515,37 @@ async def token_status():
     has_email = bool(qx_email)
 
     # Inspect the feed's live Quotex client state.
+    #
+    # FIX (LIVE-TICK-RELIABILITY-2026-07-31): consecutive_rejects/token_dead
+    # used to be read off `feed._client`, but that attribute only exists on
+    # quotex_ws.QuotexWSClient (QX_USE_RAW_WS=1). The default production
+    # backend (pyquotex.stable_api.Quotex, QX_USE_RAW_WS=0) never set it, so
+    # this always silently fell back to 0/False via getattr — token_dead
+    # was unreachable in the actual deployed configuration. Also, a fresh
+    # client object is created on every failed connect() attempt, so even a
+    # client-level counter would never survive across reconnects. Both are
+    # now tracked on the persistent `feed` manager instance itself — see
+    # QuotexFeed.__init__ / QuotexFeed._connect() in feed.py.
     connection_status = "disconnected"
-    consecutive_rejects = 0
-    token_dead = False
+    consecutive_rejects = int(getattr(feed, "_consecutive_rejects", 0))
+    token_dead = bool(getattr(feed, "_token_dead_at", 0))
     try:
         client = getattr(feed, "_client", None)
-        if client is not None:
-            authorized = bool(getattr(client, "_authorized", False))
-            connected = bool(getattr(client, "_connected", False))
-            consecutive_rejects = int(getattr(client, "_consecutive_rejects", 0))
-            token_dead = bool(getattr(client, "_token_dead_at", 0))
-            if authorized and connected:
-                connection_status = "live_authorized"
-            elif connected and not authorized:
-                connection_status = "connected_unauth"
-            elif token_dead:
-                connection_status = "token_dead_backoff"
-            else:
-                connection_status = "disconnected"
+        authorized = bool(getattr(client, "_authorized", False)) if client else False
+        connected = bool(getattr(client, "_connected", False)) if client else False
+        if authorized and connected:
+            connection_status = "live_authorized"
+        elif connected and not authorized:
+            connection_status = "connected_unauth"
+        elif token_dead:
+            # FIX (LIVE-TICK-RELIABILITY-2026-07-31): token_dead now lives
+            # on `feed`, not `feed._client` — so this fires even when
+            # `client` is None (e.g. between the failed connect and the
+            # next retry cycle, when _connect() has already torn the
+            # client down).
+            connection_status = "token_dead_backoff"
+        else:
+            connection_status = "disconnected"
     except Exception as _e:
         print(f"[silent-except] server.py:527 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
         pass

@@ -54,6 +54,7 @@ from collections import deque  # noqa: E402
 # connected but with no data producer alive — frontend stays on "Loading".
 # Same applies to `_key_levels` / `_round_level` used during candle analysis.
 import db as _db                                  # noqa: E402
+import alerts as _alerts                          # noqa: E402
 from core.analysis import _key_levels, _round_level  # noqa: E402
 import os      # noqa: E402
 import re      # noqa: E402
@@ -720,6 +721,20 @@ class QuotexFeed:
         self._broadcast           = None     # set once in run()
         self._last_error          = None     # set by _record_stream_error for /api/debug
         self._last_error_time     = 0        # wall time of last error
+
+        # FIX (LIVE-TICK-RELIABILITY-2026-07-31): token-dead tracking used
+        # to live on `self._client._token_dead_at`, but that only exists on
+        # quotex_ws.QuotexWSClient (QX_USE_RAW_WS=1, disabled by default).
+        # The DEFAULT backend (pyquotex.stable_api.Quotex, QX_USE_RAW_WS=0)
+        # never set that attribute, so /api/token-status's dead-token
+        # detection silently never fired in production (getattr fell back
+        # to its default every time). Worse: `_make_client()` builds a
+        # brand-new client object on every failed _connect() cycle, so even
+        # a client-level counter would reset every attempt. Tracking lives
+        # here on the manager instead — it persists across reconnects
+        # regardless of which backend is active.
+        self._consecutive_rejects = 0        # consecutive AUTH-rejected connect() attempts
+        self._token_dead_at       = 0        # wall time token was marked dead; 0 = alive
 
         # ── Multi-asset stream management (replaces the old singleton
         # asset/candles/ticks/... fields) ───────────────────────────────────
@@ -1817,6 +1832,15 @@ class QuotexFeed:
                 if ok:
                     self._remember_token()
                     print(f"[feed] connect -> ok=True  reason={reason}")
+                    # FIX (LIVE-TICK-RELIABILITY-2026-07-31): reset the
+                    # manager-level reject counter and, if the token was
+                    # previously marked dead, tell the operator it's alive
+                    # again so they know their fresh token worked.
+                    was_dead = bool(self._token_dead_at)
+                    self._consecutive_rejects = 0
+                    self._token_dead_at = 0
+                    if was_dead:
+                        _alerts.feed_recovered()
                     return True
                 print(f"[feed] connect -> ok=False  reason={reason}")
                 # Don't pop the token on failure — operator pushed it,
@@ -1825,6 +1849,20 @@ class QuotexFeed:
                 # every time, increasing manual workload.
                 # If the rejection is auth-related (token expired/revoked),
                 # the operator will push a new one via /api/set-token.
+                #
+                # FIX (LIVE-TICK-RELIABILITY-2026-07-31): only AUTH
+                # rejections count toward "token dead" — a network blip or
+                # Cloudflare timeout is not a token problem and shouldn't
+                # trigger a "push a new token" alert that would just be
+                # wrong advice. Match the exact reason pyquotex sets in
+                # api.py's authorization/reject handler.
+                if reason and "rejected by quotex" in str(reason).lower():
+                    self._consecutive_rejects += 1
+                    if self._consecutive_rejects >= 3 and not self._token_dead_at:
+                        self._token_dead_at = time.time()
+                        print(f"[feed] ⛔ token marked DEAD after "
+                              f"{self._consecutive_rejects} consecutive rejects")
+                        _alerts.token_dead(self._consecutive_rejects)
             except Exception as _te:
                 print(f"[feed] token attempt error: {_te}")
                 ok = False
@@ -4658,6 +4696,8 @@ class QuotexFeed:
         # PER_STREAM_STALE_SECS instead of reading env every watchdog tick.
         _per_stream_stale = PER_STREAM_STALE_SECS
         now = time.time()
+        _checked = 0
+        _stale = 0
         for key, s in list(self._streams.items()):
             # Skip streams that are already being evicted or haven't started.
             if getattr(s, '_evicting', False) or not s.sub_started:
@@ -4665,8 +4705,10 @@ class QuotexFeed:
             # Skip streams with no last_real_tick_wall yet (just started).
             if not s.last_real_tick_wall:
                 continue
+            _checked += 1
             age = now - s.last_real_tick_wall
             if age > _per_stream_stale:
+                _stale += 1
                 print(f"[feed] per-stream stale: {s.asset}@{s.period}s "
                       f"no tick for {age:.0f}s — re-arming subscription")
                 try:
@@ -4676,6 +4718,17 @@ class QuotexFeed:
                     s.last_real_tick_wall = now
                 except Exception as exc:
                     print(f"[feed] per-stream re-arm failed for {s.asset}: {exc}")
+
+        # FIX (LIVE-TICK-RELIABILITY-2026-07-31): if most/all streams are
+        # stale at the same time, per-stream re-arming won't help — that
+        # pattern means the underlying connection (not one pair's
+        # subscription) is the problem, e.g. Cloudflare blocking the
+        # Railway IP on reconnect, or the whole WS silently dying. This is
+        # a *different* failure mode than "token dead" (auth can still be
+        # fine) so it needs its own alert — token_dead() only fires on
+        # explicit authorization/reject, which this may never trigger.
+        if _checked >= 3 and _stale / _checked >= 0.8:
+            _alerts.all_streams_stale(_stale, _checked)
 
     async def _sweep_idle_streams(self) -> None:
         """Evict streams with no interested viewers for > IDLE_TIMEOUT.
