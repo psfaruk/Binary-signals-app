@@ -93,10 +93,18 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             Real engine (or vice versa).
     """
     # FIX (DEEP-AUDIT-2026-07-26 / F-03-05): case-normalize category so "OTC",
-    # "Otc", "ALLTIME_OTC" etc. are accepted. Previously a mixed-case category
-    # raised ValueError because `detected` is always lowercase.
+    # "Otc", etc. are accepted. Previously a mixed-case category raised
+    # ValueError because `detected` is always lowercase.
     if isinstance(category, str):
         category = category.lower()
+
+    # NOTE (USER REQUIREMENT 2026-08-03): the 'alltime_otc' category has
+    # been REMOVED. Only 'real' and 'otc' are valid. Old callers that pass
+    # 'alltime_otc' are normalized to 'otc' for backward compatibility
+    # (defensive — the engine logic is identical either way, and the
+    # frontend has already been updated to never send it).
+    if category == "alltime_otc":
+        category = "otc"
 
     # FIX (DEEP-AUDIT-2026-07-26 / F-03-06): previously `detected = category_of(asset)`
     # was always computed even when the caller explicitly passed category. Now
@@ -104,32 +112,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # or for the mismatch check (explicit category passed).
     if category is None:
         category = category_of(asset)
-    elif category not in ("otc", "real", "alltime_otc"):
+    elif category not in ("otc", "real"):
         # Unknown category — let dispatcher raise a clear error below.
         pass
     else:
         detected = category_of(asset)
-        if category != detected and not (
-            category == "alltime_otc" and detected == "otc"
-        ):
-            # FIX (AUDIT-DEEP #05, 2026-07-23): the previous hard-mismatch check
-            # rejected `category="alltime_otc"` even when the asset ended with
-            # "_otc" (which is the correct pairing). `category_of()` returns
-            # "otc" or "real" — never "alltime_otc" — so passing
-            # `category="alltime_otc"` always triggered the ValueError.
-            # `alltime_otc` is a presentation-layer flag (the 6 exotic pairs
-            # get a dedicated UI tab) but the engine logic is identical to
-            # regular OTC, so it should be accepted and routed to the OTC
-            # engine.
-            #
-            # FIX (DEEP-AUDIT-2026-07-26 / F-03-01): previously this branch
-            # normalized `category = "otc"` for routing, which (a) made the
-            # `or category == "alltime_otc"` check at the dispatcher dead
-            # (PROBLEM 12), and (b) lost the alltime_otc flag on echo-back so
-            # the UI could not distinguish the 6 exotic pairs (PROBLEM 13).
-            # Now we keep the original category and let the dispatcher handle
-            # both "otc" and "alltime_otc".
-            #
+        if category != detected:
             # Hard mismatch — refuse to route. This was previously silent,
             # allowing an OTC pair to be analyzed by the Real engine (or
             # vice versa), defeating the whole point of having two engines.
@@ -143,18 +131,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # a single engine variable + single call site. Both branches used the exact
     # same args, so the verbose if/elif was unnecessary. Same behavior — same
     # args, same return value, same error semantics.
-    if category == "otc" or category == "alltime_otc":
-        # FIX (P1-ISSUE-004, 2026-07-22): alltime_otc routes to the OTC engine
-        # (mean-reversion tuned). The 'alltime_otc' category is a presentation-
-        # layer flag for the 6 exotic pairs; the engine logic is identical to
-        # regular OTC.
+    if category == "otc":
         engine = _otc_engine
     elif category == "real":
         engine = _real_engine
     else:
         raise ValueError(
-            f"unknown category {category!r}; expected 'otc', 'alltime_otc' "
-            f"or 'real'")
+            f"unknown category {category!r}; expected 'otc' or 'real'")
 
     result = engine.predict(
         candles, ticks, micro, asset=asset,
@@ -171,11 +154,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # corrupt the engine's regime dict (which is freshly computed per
     # prediction via compute_context, so unlikely to cause issues in
     # practice, but a latent footgun). deepcopy fully isolates the result.
-    #
     # FIX (DEEP-AUDIT-2026-07-26 / F-03-02): preserve the ORIGINAL category
-    # ("alltime_otc" is no longer silently overwritten with "otc") so the UI
-    # can route signals to the dedicated exotic-pairs tab. Also moved
+    # so the UI can route signals to the right tab. Also moved
     # `import copy` to module top per PEP 8 (was inlined per PROBLEM 68).
+    # NOTE (USER REQUIREMENT 2026-08-03): 'alltime_otc' is no longer a valid
+    # category — it's normalized to 'otc' above, so the echoed category is
+    # always 'otc' or 'real'.
     result = copy.deepcopy(result)
     result["category"] = category
     return result

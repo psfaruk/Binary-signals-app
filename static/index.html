@@ -56,7 +56,6 @@
     .router-links a:hover{transform:translateY(-1px)}
     .router-links a.real{background:rgba(0,200,83,.15);color:#00c853;border:1px solid rgba(0,200,83,.4)}
     .router-links a.otc{background:rgba(255,193,7,.15);color:#ffc107;border:1px solid rgba(255,193,7,.4)}
-    .router-links a.alltime{background:rgba(0,229,255,.15);color:#00e5ff;border:1px solid rgba(0,229,255,.4)}
     .noscript{color:#ff1744;font-size:12px;margin-top:8px}
   </style>
 </head>
@@ -68,7 +67,6 @@
   <div class="router-links">
     <a class="real"    href="/static/real.html">Real Market</a>
     <a class="otc"     href="/static/otc.html">OTC Market</a>
-    <a class="alltime" href="/static/alltime_otc.html">All-Time OTC</a>
   </div>
   <noscript>
     <div class="noscript">JavaScript is required. Pick a market above to continue.</div>
@@ -89,8 +87,14 @@ document.documentElement.classList.remove('no-js');
   var category = 'otc';   // default — OTC is always open (24/7)
   try{
     var stored = localStorage.getItem('marketCategory');
-    if(stored === 'real' || stored === 'otc' || stored === 'alltime_otc'){
+    // NOTE (USER REQUIREMENT 2026-08-03): 'alltime_otc' category removed.
+    // Old users who had it stored as their default get redirected to OTC
+    // (the closest equivalent — every OTC pair is now always-on).
+    if(stored === 'real' || stored === 'otc'){
       category = stored;
+    }else if(stored === 'alltime_otc'){
+      category = 'otc';
+      try{ localStorage.setItem('marketCategory', 'otc'); }catch(_){}
     }
   }catch(_){ /* localStorage may be unavailable (private mode, etc.) */ }
 
@@ -100,7 +104,6 @@ document.documentElement.classList.remove('no-js');
   var targets = {
     'real':         '/static/real.html',
     'otc':          '/static/otc.html',
-    'alltime_otc':  '/static/alltime_otc.html',
   };
   var target = targets[category] || '/static/otc.html';
   setTimeout(function(){

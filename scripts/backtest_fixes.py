@@ -203,8 +203,14 @@ def test_bug04_cooldown_per_call():
 
 
 # ─── BUG-05: engines/__init__.py — alltime_otc routes to OTC engine ─────
+# NOTE (USER REQUIREMENT 2026-08-03): the 'alltime_otc' category has been
+# REMOVED from the codebase. The engines/__init__.py router now normalizes
+# any incoming 'alltime_otc' string to 'otc' for backward compatibility
+# (see engines/__init__.py:101-107). This test verifies that legacy
+# 'alltime_otc' callers still get a valid OTC engine result without
+# raising — i.e. the normalization path works.
 def test_bug05_alltime_otc_routes():
-    """category='alltime_otc' with asset ending _otc should NOT raise."""
+    """category='alltime_otc' is normalized to 'otc' and should NOT raise."""
     from engines import predict
     patterns = [(0, 0.0001, -0.0001, 0.00005)] * 30
     candles = build_candles(patterns, base_price=1.0)
@@ -214,11 +220,11 @@ def test_bug05_alltime_otc_routes():
     try:
         result = predict(candles, asset="EURUSD_otc", period=60,
                          category="alltime_otc")
-        ok = "signal" in result
-        test("BUG-05: alltime_otc routes without ValueError",
-             ok, f"signal={result.get('signal')}")
+        ok = "signal" in result and result.get("category") == "otc"
+        test("BUG-05: alltime_otc normalized to otc without error",
+             ok, f"signal={result.get('signal')}, category={result.get('category')}")
     except Exception as e:
-        test("BUG-05: alltime_otc routes without ValueError",
+        test("BUG-05: alltime_otc normalized to otc without error",
              False, f"{type(e).__name__} raised: {e}")
 
 
@@ -498,7 +504,7 @@ def main():
     test_bug04_cooldown_per_call()
     print()
 
-    print("BUG-05: engines/__init__.py — alltime_otc routes correctly")
+    print("BUG-05: engines/__init__.py — alltime_otc normalized to otc")
     test_bug05_alltime_otc_routes()
     print()
 

@@ -1,16 +1,13 @@
 /* otc.js — OTC Market page bootstrap.
    Loaded after common.js. Boots the app in "otc" mode.
 
-   FIX (DEEP-AUDIT-2026-07-26 / F-18-01): A-09 PROBLEM 87 — this file is one
-   of THREE near-identical bootstrap files (real.js / otc.js /
-   alltime_otc.js). The only difference is the category string passed to
-   initApp(). The audit recommends consolidating into a single bootstrap.js
-   that reads `document.body.dataset.category` (set via
-   `<body data-category="otc">` in each HTML). However, since each HTML page
-   <script> tag references its own bootstrap file, consolidation would require
-   HTML changes which are out of scope for this fix-batch. The duplication is
-   therefore DOCUMENTED here: if you change this retry/boot pattern, you MUST
-   change it identically in real.js and alltime_otc.js. */
+   This file is one of TWO near-identical bootstrap files (real.js / otc.js)
+   — alltime_otc.js has been removed (USER REQUIREMENT 2026-08-03). The
+   only difference between the two is the category string passed to initApp().
+   Future refactor: consolidate into a single bootstrap.js that reads
+   `document.body.dataset.category` (set via `<body data-category="otc">`
+   in each HTML). Until then, if you change this retry/boot pattern, you
+   MUST change it identically in real.js. */
 (function(){
   'use strict';
   // FIX (DEEP-AUDIT-2026-07-26 / F-18-02): Hoist boot reference so a

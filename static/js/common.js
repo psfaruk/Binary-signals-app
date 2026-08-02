@@ -77,7 +77,7 @@ let lastPrediction = null;
 let signalHistory = [];
 let totalCorrect = 0, totalSignals = 0;
 let soundEnabled = false, audioCtx = null;
-let realPairsList = [], otcPairsList = [], alltimeOtcPairsList = [], pairsList = [];
+let realPairsList = [], otcPairsList = [], pairsList = [];
 let currentMicro = null, runningConf = null;
 let tapePrices = [], tapeDir = [];
 let tickTimestamps = [];
@@ -794,26 +794,15 @@ function renderSignal(pred){
   // Active engine badge — shows which engine produced this prediction.
   const engineLabel = $('engine-label');
   if(engineLabel){
-    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-16 + AUDIT-5-20): use
-    // currentCategory as authoritative source for the engine-label decision
-    // instead of pred.category. The engines router (engines/__init__.py)
-    // normalizes category="alltime_otc" to "otc" before routing, so
-    // pred.category is "otc" even for alltime_otc subscriptions — causing
-    // the All-Time OTC page to always show "OTC ENGINE" in yellow instead
-    // of "ALL-OTC ENGINE" in cyan (the alltime_otc accent color). The page's
-    // currentCategory is authoritative for UI labeling. Added a third
-    // branch for alltime_otc with the cyan accent color matching the rest
-    // of the page (per common.js:2260 statActiveCat, alltime_otc.html
-    // router link, etc.).
+    // Use currentCategory as the authoritative source for the engine-label
+    // decision. 'real' → REAL ENGINE (green), 'otc' → OTC ENGINE (yellow).
+    // NOTE (USER REQUIREMENT 2026-08-03): alltime_otc removed; only 'real'
+    // and 'otc' categories remain.
     const cat = currentCategory;
     if(cat === 'real'){
       engineLabel.textContent = 'REAL ENGINE';
       engineLabel.style.background = 'rgba(0,200,83,.15)';
       engineLabel.style.color = 'var(--green)';
-    } else if(cat === 'alltime_otc'){
-      engineLabel.textContent = 'ALL-OTC ENGINE';
-      engineLabel.style.background = 'rgba(0,229,255,.15)';
-      engineLabel.style.color = '#00e5ff';
     } else {
       engineLabel.textContent = 'OTC ENGINE';
       engineLabel.style.background = 'rgba(255,193,7,.15)';
@@ -834,16 +823,10 @@ function renderModuleBreakdown(pred){
   const modules = pred.modules || {};
 
   // Pick the active category's 6-module set. If the prediction's category
-  // field is set and differs from currentCategory, trust the prediction's
-  // category (it's authoritative — that's the engine that produced it).
-  // FIX (DEEP-AUDIT-2026-07-26 / F-17-32, HIGH): document that all-time OTC
-  // uses the OTC engine (intentional — engines/__init__.py routes
-  // category='alltime_otc' through the OTC engine). So OTC_MODULES (with
-  // otc_pattern as the 6th module) is the correct module set for the
-  // alltime_otc page. The predCat fallback to currentCategory doesn't help
-  // because predCat === 'otc' matches first (the engines router normalizes
-  // category='alltime_otc' to 'otc' before routing, so pred.category is
-  // 'otc' even for alltime_otc subscriptions).
+  // field is set, trust it (it's authoritative — that's the engine that
+  // produced it). Only two categories remain: 'real' uses REAL_MODULES
+  // (with trend_follow as the 6th module), 'otc' uses OTC_MODULES (with
+  // otc_pattern as the 6th module).
   const predCat = pred.category || currentCategory;
   const moduleSet = predCat === 'real' ? REAL_MODULES : OTC_MODULES;
 
@@ -1578,9 +1561,8 @@ function renderHistoryPairSelect(){
   const histPairSelect = $('history-pair-select');
   if(!histPairSelect) return;
   let activeList;
-  if(currentCategory === 'real')              activeList = realPairsList;
-  else if(currentCategory === 'alltime_otc')  activeList = alltimeOtcPairsList;
-  else                                        activeList = otcPairsList;
+  if(currentCategory === 'real') activeList = realPairsList;
+  else                             activeList = otcPairsList;
 
   // Build new options only if the set actually changed — avoids clobbering
   // the user's in-progress dropdown interaction on every renderPairs call.
@@ -1647,17 +1629,14 @@ function renderPairs(payload){
     realPairsList = payload.real_pairs || [];
     otcPairsList  = payload.otc_pairs  || [];
   }
-  // FIX (DATA-FLOW-2026-07-22): support alltime_otc category.
-  alltimeOtcPairsList = payload.alltime_otc_pairs || [];
-  pairsList = realPairsList.concat(otcPairsList).concat(alltimeOtcPairsList);
+  pairsList = realPairsList.concat(otcPairsList);
 
   const pairSelect = $('pair-select');
 
   // Render only the active category's pairs in the dropdown.
   let activeList;
-  if(currentCategory === 'real')         activeList = realPairsList;
-  else if(currentCategory === 'alltime_otc') activeList = alltimeOtcPairsList;
-  else                                   activeList = otcPairsList;
+  if(currentCategory === 'real') activeList = realPairsList;
+  else                           activeList = otcPairsList;
 
   pairSelect.innerHTML = '';
   if(activeList.length === 0){
@@ -1665,25 +1644,11 @@ function renderPairs(payload){
     opt.value = '';
     if(currentCategory === 'real'){
       opt.textContent = '⚠ Real Market closed (weekend/bank holiday)';
-    } else if(currentCategory === 'alltime_otc'){
-      opt.textContent = 'No All-Time OTC pairs available';
     } else {
       opt.textContent = 'No OTC pairs available';
     }
     opt.disabled = true;
     pairSelect.appendChild(opt);
-    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-17): when the active list is
-    // empty (e.g., Real market on weekend, or alltime_otc list temporarily
-    // empty), update the chart-loading-overlay with a clear market-closed
-    // message instead of leaving it stuck on "Loading…" indefinitely. The
-    // initial onopen subscribe already fired for currentAsset (which has no
-    // stream), so we can't get a snapshot to dismiss the overlay naturally.
-    // This is the "graceful empty-list handler" the audit proposed — we
-    // keep the onopen subscribe (it's harmless — the server doesn't
-    // validate against the pair list) but surface the closed state to the
-    // user. The dead-connection keepalive check at 45s will eventually
-    // close the WS and reconnect, but the user sees a clear message
-    // immediately instead of an infinite spinner.
     const overlay = $('chart-loading-overlay');
     if(overlay){
       overlay.classList.add('show');
@@ -1691,8 +1656,6 @@ function renderPairs(payload){
       if(txt){
         if(currentCategory === 'real'){
           txt.textContent = 'Real market closed (weekend). Switch to OTC for 24/7 signals.';
-        } else if(currentCategory === 'alltime_otc'){
-          txt.textContent = 'No All-Time OTC pairs available right now.';
         } else {
           txt.textContent = 'No OTC pairs available right now.';
         }
@@ -1720,43 +1683,16 @@ function renderPairs(payload){
 
   // If the currently-selected asset is NOT in the active category's list,
   // auto-switch to the first available pair.
-  // FIX (ALLTIME-OTC-FIX 2026-07-30): on alltime_otc page, don't auto-switch
-  // away if the current pair is locked or temporarily missing — the user
-  // explicitly selected it. Only auto-switch on real/otc pages where a
-  // missing pair means the market closed.
   const stillThere = activeList.find(p => p.asset === currentAsset && !p.locked);
   if(!stillThere && activeList.length > 0){
-    // On alltime_otc: if the pair IS in the list (even if locked), keep it.
-    // Only switch if the pair is completely absent from the list.
-    if(currentCategory === 'alltime_otc'){
-      const pairExists = activeList.find(p => p.asset === currentAsset);
-      if(pairExists){
-        // Pair exists but is locked — keep selection, don't auto-switch.
-        // The user will see the locked indicator and can pick another.
-      } else {
-        // Pair completely absent — switch to first available.
-        const firstOk = activeList.find(p => !p.locked) || activeList[0];
-        if(firstOk){
-          currentAsset = firstOk.asset;
-          pairSelect.value = currentAsset;
-          if(ws && ws.readyState === WebSocket.OPEN){
-            send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
-                   category: currentCategory });
-            loadServerHistory();
-          }
-        }
-      }
-    } else {
-      // Real/OTC page: original behavior — auto-switch to first available.
-      const firstOk = activeList.find(p => !p.locked) || activeList[0];
-      if(firstOk){
-        currentAsset = firstOk.asset;
-        pairSelect.value = currentAsset;
-        if(ws && ws.readyState === WebSocket.OPEN){
-          send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
-                 category: currentCategory });
-          loadServerHistory();
-        }
+    const firstOk = activeList.find(p => !p.locked) || activeList[0];
+    if(firstOk){
+      currentAsset = firstOk.asset;
+      pairSelect.value = currentAsset;
+      if(ws && ws.readyState === WebSocket.OPEN){
+        send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+               category: currentCategory });
+        loadServerHistory();
       }
     }
   }
@@ -1776,16 +1712,14 @@ function renderPairs(payload){
   renderHistoryPairSelect();
 }
 
-// FIX (DATA-FLOW-2026-07-22): update the switch button's label/title
-// based on what the NEXT market is.
+// Update the switch button's label/title based on the OTHER market.
 function _updateSwitchButtonLabel(){
   const btn = $('market-switch-btn');
   if(!btn) return;
   const next = _nextCategory(currentCategory);
   const labels = {
-    'real':         { text: 'Switch to Real',  title: 'Real Market (live forex, weekdays only)' },
-    'otc':          { text: 'Switch to OTC',   title: 'OTC Market (standard OTC pairs, 24/7)' },
-    'alltime_otc':  { text: 'Switch to All-OTC', title: 'All-Time OTC (exotic pairs, 24/7, no payout floor)' },
+    'real':  { text: 'Switch to Real',  title: 'Real Market (live forex, weekdays only)' },
+    'otc':   { text: 'Switch to OTC',   title: 'OTC Market (24/7, all kept pairs always-on)' },
   };
   const lbl = labels[next] || labels.otc;
   const textEl = btn.querySelector('.switch-text');
@@ -1817,9 +1751,9 @@ function _updateSwitchButtonLabel(){
    eliminates the BUG-1 class of issues entirely (each page only ever
    subscribes to pairs of its own category). */
 function setCategory(newCat){
-  // FIX (DATA-FLOW-2026-07-22): added 'alltime_otc' as a 3rd category.
-  // Cycle: real → otc → alltime_otc → real.
-  if(newCat !== 'real' && newCat !== 'otc' && newCat !== 'alltime_otc') return;
+  // Only 'real' and 'otc' are valid categories (USER REQUIREMENT 2026-08-03:
+  // 'alltime_otc' removed — only 2 market pages remain).
+  if(newCat !== 'real' && newCat !== 'otc') return;
   if(newCat === currentCategory) return;
 
   // FIX (CRASH-2026-07-30): prevent crash when switching markets rapidly.
@@ -1858,9 +1792,8 @@ function setCategory(newCat){
 
   try{ localStorage.setItem('marketCategory', newCat); }catch(_){}
   const targets = {
-    'real':         '/static/real.html',
-    'otc':          '/static/otc.html',
-    'alltime_otc':  '/static/alltime_otc.html',
+    'real': '/static/real.html',
+    'otc':  '/static/otc.html',
   };
   const target = targets[newCat] || '/static/otc.html';
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-46, HIGH): use location.href instead of
@@ -1868,19 +1801,16 @@ function setCategory(newCat){
   // browser history, breaking the back button — user on Real clicks "Switch
   // to OTC", lands on OTC, presses back, and goes to whatever page was BEFORE
   // Real (not back to Real as expected). Now: `href` pushes a new history
-  // entry so back returns to the previous market page. The original "bouncing
-  // between market pages" concern is moot — the cycle real→otc→alltime_otc→real
-  // is exactly what users want when navigating between markets.
+  // entry so back returns to the previous market page.
   window.location.href = target;
 }
 
-// FIX (DATA-FLOW-2026-07-22): cycle through the 3 markets on switch click.
+// Cycle through the 2 markets on switch click.
 // The switch button's label is updated by renderPairs() based on the
 // current category — see _updateSwitchButtonLabel().
 function _nextCategory(cat){
   if(cat === 'real') return 'otc';
-  if(cat === 'otc')  return 'alltime_otc';
-  return 'real';  // alltime_otc → real
+  return 'real';
 }
 
 /* ─── WEBSOCKET ──────────────────────────────────────────────────────────── */
@@ -2286,21 +2216,13 @@ function wireEvents(){
       // Sanity check: the selected asset must belong to the current page's
       // category. (Server enforces this too — better to bail out client-side
       // than hit a category/asset mismatch error.)
-      // FIX (ALLTIME-OTC-FIX 2026-07-30): user complaint — "All time OTC তে
-      // পেয়ার চেঞ্জ করলে OTC তে পাঠিয়ে দেয়"। Root cause: when a pair from
-      // alltime_otc was selected, the lookup in pairsList sometimes failed
-      // (pair not yet loaded), and the fallback logic at the bottom used the
-      // _otc suffix heuristic which redirected to 'otc' page.
-      // Now: ALL alltime_otc pairs STAY on the alltime_otc page — no redirect.
-      // Only redirect if a REAL pair is selected on an OTC page, or vice versa.
+      // NOTE (USER REQUIREMENT 2026-08-03): the alltime_otc category has
+      // been removed — only 'real' and 'otc' remain. If a real pair is
+      // selected on the OTC page (or vice versa), redirect to the correct
+      // market page. All OTC pairs end with _otc; real pairs do not.
       const isOtcAsset = currentAsset.endsWith('_otc');
 
-      // FIX (ALLTIME-OTC-FIX): if we're on alltime_otc page, NEVER redirect.
-      // All alltime_otc pairs end with _otc and belong on this page.
-      if(currentCategory === 'alltime_otc'){
-        // All pairs on this page are OTC-type — stay here, no redirect needed.
-        // Just proceed to re-subscribe.
-      } else if(currentCategory === 'real'){
+      if(currentCategory === 'real'){
         // On Real page: if user selected an _otc pair, redirect to OTC page
         if(isOtcAsset){
           setCategory('otc'); return;
@@ -2436,8 +2358,9 @@ function wireEvents(){
     });
   }
 
-  // Market switch button → cycle to the NEXT market.
-  // FIX (DATA-FLOW-2026-07-22): cycle real → otc → alltime_otc → real.
+  // Market switch button → switch to the OTHER market (real ⇄ otc).
+  // NOTE (USER REQUIREMENT 2026-08-03): only 2 markets now (alltime_otc
+  // removed). _nextCategory() cycles real ↔ otc.
   const switchBtn = $('market-switch-btn');
   if(switchBtn){
     switchBtn.addEventListener('click', () => {
@@ -2547,11 +2470,12 @@ function safeInit(){
    Resets all module state (so the IIFE can be re-entered safely), wires up
    DOM events, starts the chart + WebSocket. */
 function initApp(category){
-  // FIX (P0-ISSUE-001, 2026-07-22): was `category !== 'real' && category !== 'otc'`
-  // — rejected 'alltime_otc', so the All-Time OTC page's initApp() returned
-  // immediately without setting up WS / chart / pairs. THE root cause of
-  // "All-time OTC দেখায় কিন্তু ডেটা আসে না". Now accepts all 3 categories.
-  if(category !== 'real' && category !== 'otc' && category !== 'alltime_otc'){
+  // NOTE (USER REQUIREMENT 2026-08-03): only 'real' and 'otc' are valid
+  // categories. 'alltime_otc' has been removed — if an old cached page
+  // somehow calls initApp('alltime_otc'), normalize to 'otc' (every OTC
+  // pair is now always-on, so this is the closest equivalent).
+  if(category === 'alltime_otc') category = 'otc';
+  if(category !== 'real' && category !== 'otc'){
     console.error('initApp: invalid category', category);
     return;
   }
@@ -2572,7 +2496,7 @@ function initApp(category){
   chart = null; candleSeries = null; ghostSeries = null;
   candleData = []; lastPrediction = null;
   signalHistory = []; totalCorrect = 0; totalSignals = 0;
-  realPairsList = []; otcPairsList = []; alltimeOtcPairsList = []; pairsList = [];
+  realPairsList = []; otcPairsList = []; pairsList = [];
   currentMicro = null; runningConf = null;
   tapePrices = []; tapeDir = [];
   tickTimestamps = []; lastLivePrice = 0; lastTickAt = 0;
@@ -2596,13 +2520,11 @@ function initApp(category){
 
   currentCategory = category;
   // Default asset depends on the page's category.
-  // FIX (DATA-FLOW-2026-07-22): alltime_otc defaults to USDBDT_otc
-  // (first of the 6 exotic pairs the user requested).
-  // NOTE: USD/BRL is listed as BRLUSD_otc on Quotex — using the Quotex
-  // symbol so the stream actually subscribes correctly.
-  if(category === 'real')               currentAsset = 'EURUSD';
-  else if(category === 'alltime_otc')   currentAsset = 'USDBDT_otc';
-  else                                  currentAsset = 'EURUSD_otc';
+  // NOTE (USER REQUIREMENT 2026-08-03): alltime_otc removed; only 'real'
+  // and 'otc' pages exist. USD/BRL is listed as BRLUSD_otc on Quotex —
+  // the engine handles this transparently (see feed.py _CANONICAL_DISPLAY).
+  if(category === 'real')  currentAsset = 'EURUSD';
+  else                     currentAsset = 'EURUSD_otc';
 
   // Persist the user's choice so the router index.html picks the right
   // page on next visit.

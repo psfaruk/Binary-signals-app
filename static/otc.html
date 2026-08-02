@@ -49,12 +49,9 @@
            'Unmute sounds' to match the initial sound-enabled=false state.
            common.js updates this dynamically on toggle. -->
       <button id="market-switch-btn" type="button" aria-label="Switch market">
-        <!-- FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-21): set the correct
-             initial switch-button label per page. The OTC page's next
-             market is alltime_otc (per _nextCategory in common.js), so
-             the initial label is "All-OTC" — was "Real" which was wrong
-             for the ~100-500ms before renderPairs updates the label. -->
-        <span class="switch-icon">⇄</span><span class="switch-text">All-OTC</span>
+        <!-- The OTC page's next market is real (real ⇄ otc cycle).
+             Initial label "Real" is set here; renderPairs updates dynamically. -->
+        <span class="switch-icon">⇄</span><span class="switch-text">Real</span>
       </button>
     </div>
   </header>
@@ -220,12 +217,12 @@
 </div>
 
 <!--
-FIX (DEEP-AUDIT-2026-07-26 / F-17-88, MEDIUM): DRY refactor TODO.
-real.html / otc.html / alltime_otc.html are ~95% identical (only title, brand
-name, CSS/JS file refs differ). A server-side template (e.g. Jinja2 with a
-{{category}} variable) or a client-side build step (handlebars / lit-html)
-would consolidate these 3 × 200-line files into 1 template + 3 stubs.
-Not done in this batch to avoid breaking the static-file server.
+NOTE (USER REQUIREMENT 2026-08-03): real.html and otc.html are the only two
+market pages now — the alltime_otc.html page has been removed. These two
+files are still ~95% identical (only title, brand name, CSS/JS file refs
+differ). A server-side template would consolidate them into one template
++ 2 stubs, but that's a future refactor — the static-file server keeps
+working as-is.
 -->
 <!--
 FIX (DEEP-AUDIT-2026-07-26 / F-17-53, MEDIUM): SRI (Subresource Integrity) TODO.

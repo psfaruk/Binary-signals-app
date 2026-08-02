@@ -834,6 +834,10 @@ async def get_pairs_by_category(category: str):
     Returns:
         {"category": "real", "pairs": [...], "payout_floor": 70}
         or 404 if category is unknown.
+
+    NOTE (USER REQUIREMENT 2026-08-03): the "alltime_otc" category has been
+    removed. Every OTC pair is now treated uniformly — they're all always-on
+    and bypass the payout floor. Use "otc" to get the full OTC pair list.
     """
     cat = category.lower().strip()
     all_pairs = feed.available_pairs()
@@ -849,16 +853,9 @@ async def get_pairs_by_category(category: str):
             "pairs": all_pairs["otc_pairs"],
             "payout_floor": all_pairs["payout_floor_otc"],
         }
-    # FIX (DATA-FLOW-2026-07-22): alltime_otc category — no payout floor.
-    if cat == "alltime_otc":
-        return {
-            "category": "alltime_otc",
-            "pairs": all_pairs.get("alltime_otc_pairs", []),
-            "payout_floor": 0,
-        }
     raise HTTPException(
         status_code=404,
-        detail=f"unknown category {category!r}; expected 'real', 'otc', or 'alltime_otc'")
+        detail=f"unknown category {category!r}; expected 'real' or 'otc'")
 
 
 @app.get("/api/status")
@@ -1910,20 +1907,22 @@ async def ws_endpoint(ws: WebSocket):
                 # be analyzed by the Real engine (defeating the whole point
                 # of having two engines).
                 category = (msg.get("category") or "").lower().strip()
-                # FIX (DATA-FLOW-2026-07-22): accept 'alltime_otc' as a 3rd
-                # category. It routes to the OTC engine (asset ends with _otc).
-                if category and category not in ("real", "otc", "alltime_otc"):
+                # NOTE (USER REQUIREMENT 2026-08-03): 'alltime_otc' category
+                # removed. Only 'real' and 'otc' are accepted. (Older clients
+                # that still send 'alltime_otc' will get a clear error — the
+                # frontend has been updated to never send it.)
+                if category and category not in ("real", "otc"):
                     await ws.send_text(json.dumps({
                         "type": "error",
                         "error": f"invalid category {category!r}; "
-                                 f"expected 'real', 'otc', or 'alltime_otc'",
+                                 f"expected 'real' or 'otc'",
                     }))
                     continue
                 # If category is specified, validate it matches the asset.
-                # 'alltime_otc' and 'otc' both require asset to end with _otc.
+                # 'otc' requires the asset to end with _otc.
                 if category:
                     is_otc_asset = asset.endswith("_otc")
-                    if category in ("otc", "alltime_otc") and not is_otc_asset:
+                    if category == "otc" and not is_otc_asset:
                         await ws.send_text(json.dumps({
                             "type": "error",
                             "error": f"category/asset mismatch: category={category!r} "
