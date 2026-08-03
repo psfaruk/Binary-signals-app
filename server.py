@@ -1003,6 +1003,7 @@ async def db_info():
     the full file via /api/db-download or /api/db-export.
     """
     import sqlite3
+    import time as _time_mod
     import traceback
 
     db_path = os.environ.get("DB_PATH", "signals.db")
@@ -1065,7 +1066,7 @@ async def db_info():
         result.update({
             "file_size_bytes": file_size,
             "file_size_kb": round(file_size / 1024, 1),
-            "last_modified": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(mtime)),
+            "last_modified": _time_mod.strftime("%Y-%m-%dT%H:%M:%SZ", _time_mod.gmtime(mtime)),
             "tables": table_info,
             "total_rows": sum(t["rows"] for t in table_info if t["rows"] > 0),
             "download_endpoints": {
