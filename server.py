@@ -960,7 +960,7 @@ async def export_db_json():
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = [row[0] for row in cursor.fetchall()]
 
-        export = {"_meta": {
+        export = {"_export_meta": {
             "exported_at": _time.time(),
             "exported_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
             "db_path": found_path,
@@ -983,7 +983,7 @@ async def export_db_json():
                 counts[table] = cursor.fetchone()[0]
             except Exception:
                 counts[table] = -1
-        export["_meta"]["row_counts"] = counts
+        export["_export_meta"]["row_counts"] = counts
 
         cursor.close()
         conn.close()
