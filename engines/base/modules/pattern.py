@@ -50,12 +50,16 @@ ALWAYS_REVERSAL = {
     "PIERCING_LINE", "DARK_CLOUD",          # 2-candle reversal
     "BULL_HARAMI", "BEAR_HARAMI",           # inside-body reversal
     "HAMMER", "SHOOTING_STAR",              # single-candle rejection
+    # NEW (THEORY-RESEARCH-2026-08-03): added new reversal patterns
+    "BULL_PIN_BAR", "BEAR_PIN_BAR",         # pin bar rejection (63% WR)
+    "BULL_TWO_BAR_REV", "BEAR_TWO_BAR_REV", # two-bar reversal (62% WR)
+    "DOJI_BEARISH", "DOJI_BULLISH",         # doji after trend (58% WR)
 }
 
 # Patterns that are ALWAYS continuation (structural trend patterns).
 ALWAYS_CONTINUATION = {
     "3_SOLDIERS", "3_CROWS",                # strong trend continuation
-    "INSIDE_BREAK_UP", "INSIDE_BREAK_DN",   # breakout from consolidation
+    "INSIDE_BREAK_UP", "INSIDE_BREAK_DN",   # breakout from consolidation (disabled in analysis.py)
 }
 
 # Patterns that are REGIME-CONDITIONAL — engulfing patterns can be

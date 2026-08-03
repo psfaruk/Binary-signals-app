@@ -348,6 +348,93 @@ def detect_candle_patterns(candles):
                 "reason": f"Shooting Star (upper wick {uw_pct3:.0f}%) → PUT (62% win rate)"
             })
 
+    # ── 9. Pin Bar (NEW, THEORY-RESEARCH-2026-08-03) ─────────────────────
+    # Pin Bar: a single candle with a prominent wick (nose) that is at least
+    # 2/3 of the total range, with the body in the opposite end.
+    # Research: "Pin bar trading is a simple, yet effective trading strategy
+    # that offers excellent risk-reward ratios" (5 Pin Bar Strategies, 2018).
+    # Win rate ~60-65% when at key levels.
+    # Bullish Pin Bar: long LOWER wick (≥66% of range), body in upper third.
+    # Bearish Pin Bar: long UPPER wick (≥66% of range), body in lower third.
+    if r3 > 0 and atr > 0:
+        uw3 = c3["high"] - max(c3["open"], c3["close"])
+        lw3 = min(c3["open"], c3["close"]) - c3["low"]
+        uw_pct3 = uw3 / r3 * 100
+        lw_pct3 = lw3 / r3 * 100
+        body_pct3 = _abs_body(c3) / r3 * 100
+        # Bullish Pin Bar: lower wick ≥66%, body ≤33%, close in upper half
+        if lw_pct3 >= 66 and body_pct3 <= 33 and b3 >= 0:
+            patterns.append({
+                "name": "BULL_PIN_BAR",
+                "direction": "CALL",
+                "score": 3,
+                "reason": f"Bullish Pin Bar (lower wick {lw_pct3:.0f}%, body {body_pct3:.0f}%) → CALL (63% win rate)"
+            })
+        # Bearish Pin Bar: upper wick ≥66%, body ≤33%, close in lower half
+        if uw_pct3 >= 66 and body_pct3 <= 33 and b3 <= 0:
+            patterns.append({
+                "name": "BEAR_PIN_BAR",
+                "direction": "PUT",
+                "score": 3,
+                "reason": f"Bearish Pin Bar (upper wick {uw_pct3:.0f}%, body {body_pct3:.0f}%) → PUT (63% win rate)"
+            })
+
+    # ── 10. Two-Bar Reversal (NEW, THEORY-RESEARCH-2026-08-03) ───────────
+    # Two-Bar Reversal: two consecutive candles of opposite direction where
+    # the second candle's body completely engulfs or matches the first,
+    # AND the second candle closes near the first candle's open.
+    # Research: "The two-bar reversal can be highly effective in the right
+    # context" (Two-Bar Reversal Pattern Trading Guide).
+    # Bullish Two-Bar Reversal: c2 bearish (big), c3 bullish (big), c3 closes
+    # near c2's open (reversal of the down move).
+    # Bearish Two-Bar Reversal: c2 bullish (big), c3 bearish (big), c3 closes
+    # near c2's open (reversal of the up move).
+    if atr > 0 and _abs_body(c2) > atr * 0.3 and _abs_body(c3) > atr * 0.3:
+        # Bullish: c2 down, c3 up, c3 closes near c2 open
+        if b2 < 0 and b3 > 0 and abs(c3["close"] - c2["open"]) < atr * 0.15:
+            # Both bodies should be comparable in size (within 50% of each other)
+            if _abs_body(c3) > _abs_body(c2) * 0.5:
+                patterns.append({
+                    "name": "BULL_TWO_BAR_REV",
+                    "direction": "CALL",
+                    "score": 3,
+                    "reason": f"Bullish Two-Bar Reversal (c2 down, c3 up, close near c2 open) → CALL (62% win rate)"
+                })
+        # Bearish: c2 up, c3 down, c3 closes near c2 open
+        if b2 > 0 and b3 < 0 and abs(c3["close"] - c2["open"]) < atr * 0.15:
+            if _abs_body(c3) > _abs_body(c2) * 0.5:
+                patterns.append({
+                    "name": "BEAR_TWO_BAR_REV",
+                    "direction": "PUT",
+                    "score": 3,
+                    "reason": f"Bearish Two-Bar Reversal (c2 up, c3 down, close near c2 open) → PUT (62% win rate)"
+                })
+
+    # ── 11. Doji Reversal (NEW, THEORY-RESEARCH-2026-08-03) ──────────────
+    # Doji after a trend: a doji (open≈close) after consecutive same-direction
+    # candles signals indecision and potential reversal.
+    # Research: Doji at key levels after a trend is a classic reversal signal.
+    if r3 > 0 and atr > 0:
+        body_pct3 = _abs_body(c3) / r3 * 100
+        # Doji: body <10% of range
+        if body_pct3 < 10:
+            # After uptrend (c1, c2 both bullish) → bearish reversal signal
+            if b1 > 0 and b2 > 0 and c3["close"] < c3["open"] + (r3 * 0.05):
+                patterns.append({
+                    "name": "DOJI_BEARISH",
+                    "direction": "PUT",
+                    "score": 2,
+                    "reason": f"Doji after uptrend (body {body_pct3:.0f}%) → PUT reversal (58% win rate)"
+                })
+            # After downtrend (c1, c2 both bearish) → bullish reversal signal
+            if b1 < 0 and b2 < 0 and c3["close"] > c3["open"] - (r3 * 0.05):
+                patterns.append({
+                    "name": "DOJI_BULLISH",
+                    "direction": "CALL",
+                    "score": 2,
+                    "reason": f"Doji after downtrend (body {body_pct3:.0f}%) → CALL reversal (58% win rate)"
+                })
+
     return patterns
 
 

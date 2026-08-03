@@ -712,6 +712,13 @@ _THEORY_PATTERNS = {
         (r'Bear Harami|BEAR_HARAMI', 'Bear Harami'),
         (r'Hammer', 'Hammer'),
         (r'Shooting Star', 'Shooting Star'),
+        # NEW (THEORY-RESEARCH-2026-08-03): new pattern theories
+        (r'Bullish Pin Bar|BULL_PIN_BAR', 'Bullish Pin Bar'),
+        (r'Bearish Pin Bar|BEAR_PIN_BAR', 'Bearish Pin Bar'),
+        (r'Bullish Two-Bar Reversal|BULL_TWO_BAR_REV', 'Bullish Two-Bar Reversal'),
+        (r'Bearish Two-Bar Reversal|BEAR_TWO_BAR_REV', 'Bearish Two-Bar Reversal'),
+        (r'Doji after uptrend|DOJI_BEARISH', 'Doji Bearish'),
+        (r'Doji after downtrend|DOJI_BULLISH', 'Doji Bullish'),
     ],
     'key_level': [
         (r'Support wick rejection', 'Support wick rejection'),
@@ -760,6 +767,13 @@ _THEORY_GROUPS = {
     'Bear Harami': 'PATTERN',
     'Hammer': 'PATTERN',
     'Shooting Star': 'PATTERN',
+    # NEW (THEORY-RESEARCH-2026-08-03): new pattern groups
+    'Bullish Pin Bar': 'PATTERN',
+    'Bearish Pin Bar': 'PATTERN',
+    'Bullish Two-Bar Reversal': 'PATTERN',
+    'Bearish Two-Bar Reversal': 'PATTERN',
+    'Doji Bearish': 'PATTERN',
+    'Doji Bullish': 'PATTERN',
     'Support wick rejection': 'LEVEL',
     'Resistance wick rejection': 'LEVEL',
     'Key support bounce': 'LEVEL',
