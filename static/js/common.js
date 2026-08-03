@@ -1104,8 +1104,10 @@ function renderHistory(){
   const historyList = $('history-list');
   if(!historyList) return;
 
-  // FIX (ALWAYS-SIGNAL-2026-08-03): replaced hardcoded 1-hour filter with
-  // user-selectable filters: time range, direction, accuracy, pair.
+  // FIX (ALWAYS-SIGNAL-2026-08-03): SMOOTH REFRESH — compute a signature of
+  // the current state; if it matches the last render, skip the innerHTML
+  // replacement entirely. This eliminates the visual "jolt" on the 30s
+  // auto-refresh when nothing has changed.
   const onHistoryTab = (currentTab === 'history');
   const nowSec = Math.floor(Date.now() / 1000);
 
@@ -1133,6 +1135,25 @@ function renderHistory(){
     if(pairFilter && h.asset !== pairFilter) return false;
     return true;
   });
+
+  // FIX (ALWAYS-SIGNAL-2026-08-03): SMOOTH REFRESH — compute signature.
+  // If the displayed signals + filters haven't changed, skip the innerHTML
+  // rebuild entirely. This eliminates the visual jolt on 30s auto-refresh.
+  const sig = displayHistory.map(h => (h.detail&&h.detail.ctime)+'|'+h.signal+'|'+h.accuracy+'|'+(h.asset||'')).join('§')
+            + '|' + hoursFilter + '|' + dirFilter + '|' + accFilter + '|' + pairFilter + '|' + onHistoryTab;
+  if(renderHistory._lastSig === sig && historyList.innerHTML){
+    // Nothing changed — just update the count hint and return.
+    const hintEl = $('history-count-hint');
+    if(hintEl){
+      const total = displayHistory.length;
+      const wins = displayHistory.filter(h => h.accuracy === 'correct').length;
+      const losses = displayHistory.filter(h => h.accuracy === 'wrong').length;
+      const pending = displayHistory.filter(h => !h.accuracy || h.accuracy === 'pending').length;
+      hintEl.textContent = `${total} signals · ${wins}W / ${losses}L / ${pending}⏳`;
+    }
+    return;
+  }
+  renderHistory._lastSig = sig;
 
   // Update count hint
   const hintEl = $('history-count-hint');
@@ -1575,14 +1596,68 @@ async function renderModuleStats(){
   const container = $('acc-module-breakdown');
   if(!container) return;
   if(_moduleStatsLoading) return;
+
+  // FIX (ALWAYS-SIGNAL-2026-08-03): read selected pair from the new dropdown.
+  // If a pair is selected, show per-pair module breakdown (from data.pairs).
+  // If "All pairs", show app-wide breakdown (from data.modules).
+  const pairSelect = $('stats-pair-select');
+  const selectedPair = pairSelect ? pairSelect.value : '';
+
+  // Update context labels
+  const ctxHint = $('stats-context-hint');
+  const ctxLabel = $('acc-module-context');
+  const ctxText = selectedPair ? selectedPair : 'App-wide';
+  if(ctxHint) ctxHint.textContent = ctxText;
+  if(ctxLabel) ctxLabel.textContent = ctxText;
+
   _moduleStatsLoading = true;
-  container.innerHTML = '<div class="accuracy-empty">Loading module stats…</div>';
+  // FIX: only show "Loading…" if container is empty (avoids flash on 30s refresh)
+  if(!container.children.length || container.querySelector('.accuracy-empty')){
+    container.innerHTML = '<div class="accuracy-empty">Loading module stats…</div>';
+  }
   try{
-    const r = await fetch('/api/stats');
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    _moduleStatsCache = data;
-    const modules = data.modules || [];
+    // Use cached data if available (avoids refetch on pair-switch)
+    if(!_moduleStatsCache){
+      const r = await fetch('/api/stats');
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      _moduleStatsCache = await r.json();
+    }
+    const data = _moduleStatsCache;
+
+    // Determine which module list to render
+    let modules;
+    let heroOverall, heroGraded, heroCorrect, heroWrong;
+
+    if(selectedPair && data.pairs && data.pairs[selectedPair]){
+      // Per-pair breakdown
+      const pairData = data.pairs[selectedPair];
+      modules = [];
+      for(const [moduleKey, m] of Object.entries(pairData)){
+        modules.push({
+          module: moduleKey,
+          display_name: m.display_name || moduleKey,
+          total: m.total || 0,
+          correct: m.correct || 0,
+          wrong: m.wrong || 0,
+          win_pct: m.win_pct,
+          call_win_pct: null,  // per-pair doesn't have call/put split in pairs dict
+          put_win_pct: null,
+        });
+      }
+      // Compute hero from pair totals
+      heroGraded = modules.reduce((s,m) => s + (m.total||0), 0);
+      heroCorrect = modules.reduce((s,m) => s + (m.correct||0), 0);
+      heroWrong = modules.reduce((s,m) => s + (m.wrong||0), 0);
+      heroOverall = heroGraded > 0 ? (heroCorrect / heroGraded * 100) : 0;
+    } else {
+      // App-wide breakdown
+      modules = data.modules || [];
+      heroOverall = data.overall_win_pct || 0;
+      heroGraded = data.total_graded || 0;
+      heroCorrect = data.total_correct || 0;
+      heroWrong = data.total_wrong || 0;
+    }
+
     if(!modules.length){
       container.innerHTML = '<div class="accuracy-empty">No graded module votes yet</div>';
       return;
@@ -1591,12 +1666,12 @@ async function renderModuleStats(){
     // Hero summary
     html += '<div class="module-stats-hero">'
          +  '<span class="module-stats-overall">'
-         +  (data.overall_win_pct || 0).toFixed(1) + '% overall'
+         +  heroOverall.toFixed(1) + '% overall'
          +  '</span>'
          +  '<span class="module-stats-meta">'
-         +  (data.total_graded || 0) + ' graded · '
-         +  (data.total_correct || 0) + 'W / '
-         +  (data.total_wrong || 0) + 'L'
+         +  heroGraded + ' graded · '
+         +  heroCorrect + 'W / '
+         +  heroWrong + 'L'
          +  '</span>'
          +  '</div>';
     // Per-module rows
@@ -1637,27 +1712,51 @@ async function renderModuleStats(){
   }
 }
 
+// FIX (ALWAYS-SIGNAL-2026-08-03): replaced alert() with in-page drill-down panel
 window._showModulePairDetail = async function(moduleName){
-  // Drill-down: fetch /api/module-analysis and show per-pair rows for this module
+  const panel = $('acc-module-pair-detail');
+  const rowsContainer = $('acc-module-pair-detail-rows');
+  if(!panel || !rowsContainer) return;
+
+  // Show panel + loading state
+  panel.style.display = 'block';
+  panel.scrollIntoView({behavior:'smooth', block:'nearest'});
+  rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">Loading per-pair breakdown…</div>';
+
+  // Update title
+  const titleEl = panel.querySelector('.module-pair-detail-title');
+  if(titleEl) titleEl.textContent = 'Per-pair breakdown — ' + moduleName;
+
   try{
     const r = await fetch('/api/module-analysis');
     if(!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
     const rows = (data.pair_modules || []).filter(r => r.module_name === moduleName);
     if(!rows.length){
-      alert('No per-pair data for module: ' + moduleName);
+      rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">No per-pair data for ' + esc(moduleName) + '</div>';
       return;
     }
-    let msg = 'Per-pair breakdown — ' + moduleName + '\n\n';
     rows.sort((a,b) => (b.win_pct || 0) - (a.win_pct || 0));
+    let html = '<div class="module-pair-detail-rows">';
     rows.forEach(r => {
-      msg += (r.asset || '?').padEnd(14) + ' '
-           + (r.win_pct == null ? '—' : r.win_pct.toFixed(0) + '%').padStart(4) + ' '
-           + (r.correct || 0) + '/' + (r.total || 0) + '\n';
+      const pct = r.win_pct;
+      const pctCls = pct == null ? 'none'
+                   : pct >= 55 ? 'good'
+                   : pct >= 45 ? 'mid' : 'bad';
+      const barWidth = pct == null ? 0 : pct;
+      html += '<div class="module-pair-detail-row">'
+           +  '<span class="mppd-asset">' + esc(r.asset || '?') + '</span>'
+           +  '<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:' + barWidth + '%"></div></div>'
+           +  '<span class="mppd-pct ' + pctCls + '">'
+           +  (pct == null ? '—' : pct.toFixed(0) + '%')
+           +  '</span>'
+           +  '<span class="mppd-meta">' + (r.correct || 0) + '/' + (r.total || 0) + '</span>'
+           +  '</div>';
     });
-    alert(msg);
+    html += '</div>';
+    rowsContainer.innerHTML = html;
   } catch(e){
-    alert('Error: ' + e.message);
+    rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">Error: ' + esc(e.message) + '</div>';
   }
 };
 
@@ -1771,6 +1870,32 @@ function renderHistoryPairSelect(){
     if(o.selected) opt.selected = true;
     histPairSelect.appendChild(opt);
   });
+
+  // FIX (ALWAYS-SIGNAL-2026-08-03): also populate the Stats tab pair selector
+  // so the user can view per-pair module stats.
+  renderStatsPairSelect();
+}
+
+// FIX (ALWAYS-SIGNAL-2026-08-03): populate the Stats tab pair selector
+function renderStatsPairSelect(){
+  const sel = $('stats-pair-select');
+  if(!sel) return;
+  let activeList;
+  if(currentCategory === 'real') activeList = realPairsList;
+  else                           activeList = otcPairsList;
+  // Preserve current selection
+  const prevVal = sel.value;
+  sel.innerHTML = '<option value="">All pairs (app-wide)</option>';
+  activeList.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.asset;
+    opt.textContent = p.display + (p.payout ? ' (' + p.payout + '%)' : '');
+    sel.appendChild(opt);
+  });
+  // Restore selection if still valid
+  if(prevVal && Array.from(sel.options).some(o => o.value === prevVal)){
+    sel.value = prevVal;
+  }
 }
 
 /* ─── PAIRS ────────────────────────────────────────────────────────────────
@@ -2471,6 +2596,15 @@ function wireEvents(){
   if(moduleRefreshBtn){
     moduleRefreshBtn.addEventListener('click', () => {
       _moduleStatsCache = null;  // force refetch
+      renderModuleStats();
+    });
+  }
+
+  // FIX (ALWAYS-SIGNAL-2026-08-03): Stats tab pair selector — when user picks
+  // a pair, re-render module stats scoped to that pair (uses cached data).
+  const statsPairSelect = $('stats-pair-select');
+  if(statsPairSelect){
+    statsPairSelect.addEventListener('change', () => {
       renderModuleStats();
     });
   }

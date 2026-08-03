@@ -127,6 +127,15 @@
 
       <!-- TAB: Accuracy -->
       <div id="tab-accuracy" class="tab-pane" role="tabpanel" aria-labelledby="tab-accuracy-btn">
+        <!-- FIX (ALWAYS-SIGNAL-2026-08-03): pair selector for per-pair module stats -->
+        <div class="stats-filter-bar">
+          <label class="stats-filter-label">Pair:</label>
+          <select id="stats-pair-select" aria-label="Select pair for stats">
+            <option value="">All pairs (app-wide)</option>
+          </select>
+          <button id="acc-module-refresh" type="button" class="mini-btn" title="Refresh module stats from DB">↻ Refresh</button>
+          <span class="hint" id="stats-context-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">App-wide</span>
+        </div>
         <div class="accuracy-hero">
           <div class="accuracy-hero-pct" id="acc-hero-pct">—</div>
           <div class="accuracy-hero-detail" id="acc-hero-detail">No data</div>
@@ -149,10 +158,18 @@
         <div class="accuracy-section">
           <div class="accuracy-section-title">
             By Module (4-Module Engine)
-            <button id="acc-module-refresh" type="button" class="mini-btn" title="Refresh module stats from DB">↻</button>
+            <span class="hint" id="acc-module-context" style="font-size:9px;color:var(--text-dim);margin-left:auto">App-wide</span>
           </div>
           <div id="acc-module-breakdown">
-            <div class="accuracy-empty">Click ↻ to load module stats</div>
+            <div class="accuracy-empty">Loading module stats…</div>
+          </div>
+          <!-- NEW: per-pair drill-down panel (hidden by default, shown when a module row is clicked) -->
+          <div id="acc-module-pair-detail" class="module-pair-detail" style="display:none">
+            <div class="module-pair-detail-header">
+              <span class="module-pair-detail-title">Per-pair breakdown</span>
+              <button class="mini-btn" onclick="document.getElementById('acc-module-pair-detail').style.display='none'">✕ Close</button>
+            </div>
+            <div id="acc-module-pair-detail-rows"></div>
           </div>
         </div>
       </div>
@@ -182,10 +199,10 @@
           <div class="signal-row"><span>Regime</span><span id="sig-regime">—</span></div>
           <div class="signal-row" id="sig-strategy-row" style="display:none"><span>Strategy</span><span id="sig-strategy" style="font-weight:700;color:var(--accent)">—</span></div>
         </div>
-        <!-- 6-Module Engine — collapsible inside Signal section -->
+        <!-- 4-Module Engine — collapsible inside Signal section -->
         <div class="engine-block">
           <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
-            <span class="section-title section-title--inline">6-Module Engine</span>
+            <span class="section-title section-title--inline">4-Module Engine</span>
             <span class="arrow">▶</span>
           </button>
           <div class="engine-active-row"><span>Engine:</span><span id="engine-label" class="engine-label">—</span></div>

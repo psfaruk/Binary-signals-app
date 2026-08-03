@@ -1717,3 +1717,178 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   height:100%;border-radius:3px;transition:width .3s ease;
 }
 .breakdown-bar-fill.correct{background:linear-gradient(90deg,#4caf50,#66bb6a)}
+
+/* ═══ NEW (ALWAYS-SIGNAL-2026-08-03): UI polish — shadows, fade-in, filter bar ═══ */
+
+/* Subtle background gradient for depth */
+body{
+  background:radial-gradient(ellipse at top, #131722 0%, #0d1117 60%);
+}
+
+/* Card shadow system (replaces flat borders on key sections) */
+.accuracy-section{
+  box-shadow:0 1px 3px rgba(0,0,0,.3), 0 1px 2px rgba(0,0,0,.2);
+  border:1px solid var(--border);
+  transition:box-shadow .2s ease;
+}
+.accuracy-section:hover{
+  box-shadow:0 4px 12px rgba(0,0,0,.4);
+}
+.accuracy-stat{
+  box-shadow:0 1px 2px rgba(0,0,0,.2);
+}
+.module-stats-row{
+  box-shadow:0 1px 2px rgba(0,0,0,.15);
+  transition:all .2s ease;
+}
+.module-stats-row:hover{
+  box-shadow:0 4px 8px rgba(0,0,0,.3);
+  transform:translateY(-1px);
+}
+
+/* History row fade-in animation (smooth refresh) */
+.history-row{
+  animation:row-fade-in .25s ease;
+}
+@keyframes row-fade-in{
+  from{opacity:0;transform:translateY(-4px)}
+  to{opacity:1;transform:none}
+}
+
+/* Fixed-width history columns for alignment (was 1fr for asset) */
+.history-row{
+  grid-template-columns:46px 84px 50px 24px 40px 50px 24px !important;
+}
+@media(max-width:400px){
+  .history-row{
+    grid-template-columns:38px 70px 44px 20px 34px 44px 20px !important;
+  }
+}
+.history-asset{
+  text-overflow:ellipsis;
+  overflow:hidden;
+  white-space:nowrap;
+}
+.history-delete-btn{
+  flex-shrink:0;
+}
+
+/* Stats filter bar (pair selector + refresh on Stats tab) */
+.stats-filter-bar{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:8px 12px;
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  margin-bottom:12px;
+  box-shadow:0 1px 3px rgba(0,0,0,.2);
+}
+.stats-filter-label{
+  font-size:11px;
+  color:var(--text-dim);
+  font-weight:600;
+  text-transform:uppercase;
+  letter-spacing:.5px;
+}
+#stats-pair-select{
+  flex:1;
+  min-width:120px;
+  background:var(--bg-elev);
+  color:var(--text);
+  border:1px solid var(--border);
+  border-radius:4px;
+  padding:4px 8px;
+  font-size:12px;
+  cursor:pointer;
+}
+#stats-pair-select:focus{
+  outline:2px solid var(--accent);
+  outline-offset:-1px;
+}
+
+/* Per-pair drill-down panel */
+.module-pair-detail{
+  margin-top:12px;
+  padding:10px;
+  background:var(--bg-elev);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  box-shadow:0 2px 8px rgba(0,0,0,.3);
+  animation:panel-slide-in .2s ease;
+}
+@keyframes panel-slide-in{
+  from{opacity:0;transform:translateY(-8px)}
+  to{opacity:1;transform:none}
+}
+.module-pair-detail-header{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-bottom:8px;
+  padding-bottom:6px;
+  border-bottom:1px solid var(--border);
+}
+.module-pair-detail-title{
+  font-size:11px;
+  font-weight:700;
+  color:var(--text);
+  text-transform:uppercase;
+  letter-spacing:.5px;
+}
+.module-pair-detail-rows{
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+.module-pair-detail-row{
+  display:grid;
+  grid-template-columns:100px 1fr 50px 60px;
+  align-items:center;
+  gap:8px;
+  padding:4px 6px;
+  border-radius:3px;
+  background:var(--card);
+}
+.mppd-asset{
+  font-size:10px;
+  color:var(--text);
+  font-weight:600;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.mppd-pct{
+  font-size:12px;
+  font-weight:700;
+  text-align:right;
+}
+.mppd-pct.none{color:var(--text-dim)}
+.mppd-pct.good{color:#4caf50}
+.mppd-pct.mid{color:#ffc107}
+.mppd-pct.bad{color:#f44336}
+.mppd-meta{
+  font-size:9px;
+  color:var(--text-dim);
+  text-align:right;
+}
+
+/* Refresh button — no layout shift on spin */
+#refresh-btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:32px;
+  height:32px;
+  padding:0;
+  line-height:1;
+}
+
+/* Last-refresh label — subtle */
+#last-refresh-label{
+  font-variant-numeric:tabular-nums;
+  opacity:.7;
+  transition:opacity .2s;
+}
+#last-refresh-label:hover{opacity:1}
