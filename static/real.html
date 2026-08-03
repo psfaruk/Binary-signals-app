@@ -90,10 +90,35 @@
 
       <!-- TAB: History -->
       <!-- FIX (F-17-91): aria-labelledby + default option for #history-pair-select. -->
+      <!-- FIX (ALWAYS-SIGNAL-2026-08-03): added filter controls + delete buttons -->
       <div id="tab-history" class="tab-pane" role="tabpanel" aria-labelledby="tab-history-btn">
         <div class="tab-history-header">
-          <select id="history-pair-select" aria-label="Select pair"><option value="">Loading...</option></select>
-          <span class="hint">Last 1 hour · click for detail</span>
+          <select id="history-pair-select" aria-label="Select pair"><option value="">All pairs</option></select>
+          <select id="history-time-filter" aria-label="Time filter">
+            <option value="0.25">Last 15 min</option>
+            <option value="1" selected>Last 1 hour</option>
+            <option value="4">Last 4 hours</option>
+            <option value="8">Last 8 hours</option>
+            <option value="12">Last 12 hours</option>
+            <option value="24">Last 24 hours</option>
+            <option value="168">Last 7 days</option>
+            <option value="0">All time</option>
+          </select>
+          <select id="history-direction-filter" aria-label="Direction filter">
+            <option value="">All directions</option>
+            <option value="CALL">CALL only</option>
+            <option value="PUT">PUT only</option>
+          </select>
+          <select id="history-accuracy-filter" aria-label="Result filter">
+            <option value="">All results</option>
+            <option value="correct">Wins only</option>
+            <option value="wrong">Losses only</option>
+            <option value="draw">Draws only</option>
+            <option value="pending">Pending</option>
+          </select>
+          <button id="history-clear-btn" class="btn-danger" title="Delete ALL signals for current filter">🗑 Clear Filtered</button>
+          <button id="history-clear-all-btn" class="btn-danger" title="Delete ALL signals (cannot undo)">🗑🗑 Clear ALL</button>
+          <span class="hint" id="history-count-hint">Loading…</span>
         </div>
         <div id="history-list"></div>
       </div>

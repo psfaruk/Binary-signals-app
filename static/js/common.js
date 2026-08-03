@@ -1100,21 +1100,49 @@ function renderHistory(){
   const historyList = $('history-list');
   if(!historyList) return;
 
-  // When the history tab is active, only show signals from the last 1 hour
-  // (3600s). HISTORY_MAX (100) holds more than an hour of 60s candles, so this
-  // filter keeps the view focused on what the user actually wants to see.
-  // When the history tab is NOT active, render the full list (the rendering is
-  // invisible but stays in sync so switching tabs is instant).
-  const filterLastHour = (currentTab === 'history');
+  // FIX (ALWAYS-SIGNAL-2026-08-03): replaced hardcoded 1-hour filter with
+  // user-selectable filters: time range, direction, accuracy, pair.
+  const onHistoryTab = (currentTab === 'history');
   const nowSec = Math.floor(Date.now() / 1000);
-  const oneHourAgo = nowSec - 3600;
-  const displayHistory = filterLastHour
-    ? signalHistory.filter(h => h && h.detail && h.detail.ctime && h.detail.ctime >= oneHourAgo)
-    : signalHistory;
+
+  // Read filter values from the dropdowns
+  const timeFilterEl = $('history-time-filter');
+  const dirFilterEl = $('history-direction-filter');
+  const accFilterEl = $('history-accuracy-filter');
+  const pairFilterEl = $('history-pair-select');
+
+  const hoursFilter = timeFilterEl ? parseFloat(timeFilterEl.value) : 1;
+  const dirFilter = dirFilterEl ? dirFilterEl.value : '';
+  const accFilter = accFilterEl ? accFilterEl.value : '';
+  const pairFilter = pairFilterEl ? pairFilterEl.value : '';
+
+  // Compute time cutoff (0 = all time)
+  const cutoff = (hoursFilter && hoursFilter > 0) ? nowSec - (hoursFilter * 3600) : 0;
+
+  // Apply filters
+  let displayHistory = signalHistory.filter(h => {
+    if(!h || !h.detail) return false;
+    const ct = h.detail.ctime;
+    if(cutoff > 0 && ct && ct < cutoff) return false;
+    if(dirFilter && h.signal !== dirFilter) return false;
+    if(accFilter && h.accuracy !== accFilter) return false;
+    if(pairFilter && h.asset !== pairFilter) return false;
+    return true;
+  });
+
+  // Update count hint
+  const hintEl = $('history-count-hint');
+  if(hintEl){
+    const total = displayHistory.length;
+    const wins = displayHistory.filter(h => h.accuracy === 'correct').length;
+    const losses = displayHistory.filter(h => h.accuracy === 'wrong').length;
+    const pending = displayHistory.filter(h => !h.accuracy || h.accuracy === 'pending').length;
+    hintEl.textContent = `${total} signals · ${wins}W / ${losses}L / ${pending}⏳`;
+  }
 
   if(!displayHistory.length){
     historyList.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:8px 4px">'
-      + (filterLastHour ? 'No signals in the last hour' : 'No signals yet')
+      + 'No signals match the current filter'
       + '</div>';
     return;
   }
@@ -1123,12 +1151,6 @@ function renderHistory(){
   for(let i = lastIdx; i >= 0; i--){
     const h = displayHistory[i];
     const isRecent = (i === lastIdx);
-    // FIX (2026-07-18): clearer win/loss icons with text labels.
-    //   correct  → ✅ WIN   (green)
-    //   wrong    → ❌ LOSS  (red)
-    //   draw     → ➖ DRAW  (yellow)
-    //   pending  → ⏳ WAIT  (blue)
-    // On phones (<400px) the text label is hidden via CSS — only the emoji shows.
     let iconEmoji, iconLabel;
     if(h.accuracy === 'correct'){
       iconEmoji = '✅'; iconLabel = 'WIN';
@@ -1143,10 +1165,6 @@ function renderHistory(){
     const strength = h.detail ? h.detail.strength : '';
     const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
     const strengthLetter = strength ? strength[0] : '·';
-    // FIX (DEEP-AUDIT-2026-07-26 / F-17-42, HIGH): add a title attribute so
-    // hovering reveals the full word. Previously the single-letter strength
-    // indicator (S/M/W) was ambiguous — "S" could mean "Strong" or "Sell"
-    // in trading context. Now the tooltip clarifies.
     const strengthTitle = strength ? ('Strength: ' + strength) : 'No strength';
     const scoreVal = h.detail ? h.detail.score : null;
     const score = scoreVal != null ? ((scoreVal >= 0 ? '+' : '') + scoreVal) : '';
@@ -1165,21 +1183,16 @@ function renderHistory(){
     const time = (h.detail && h.detail.ctime)
       ? new Date(h.detail.ctime * 1000).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false})
       : '--:--';
-    // FIX (AUDIT-CORE #74, 2026-07-21): use ctime as the lookup key (not
-    // the array index) so a click always opens the right signal even if
-    // signalHistory was mutated between render and click. Index-based
-    // lookup was fragile — pair-switch / addHistory / onServerSignals
-    // could all shift indices.
+    const assetLabel = h.asset ? esc(h.asset) : '';
     const clickKey = (h.detail && h.detail.ctime) ? String(h.detail.ctime) : '';
     const clickable = clickKey ? `onclick="window._showSignalDetail('${clickKey}')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._showSignalDetail('${clickKey}')}"` : '';
+    // NEW (ALWAYS-SIGNAL-2026-08-03): per-row delete button
+    const deleteBtn = clickKey
+      ? `<span class="history-delete-btn" onclick="event.stopPropagation();window._deleteSignal('${esc(h.asset)}',${h.detail.period||60},${clickKey})" title="Delete this signal">🗑</span>`
+      : '';
     html += `<div class="history-row${accCls}${recentCls}" ${clickable}>`
          +  `<span class="history-time">${time}</span>`
-         // FIX (DEEP-AUDIT-2026-07-26 / F-17-11, HIGH): XSS — escape h.signal before
-         // interpolation. The signal field comes from the WS server response
-         // (onServerSignals → s.signal) and could contain arbitrary HTML if the
-         // server were compromised or a buggy payload sent. Previously it was
-         // interpolated raw into historyList.innerHTML, allowing script
-         // injection. esc() already existed but wasn't applied here.
+         +  `<span class="history-asset" style="font-size:9px;color:var(--text-dim);min-width:70px">${assetLabel}</span>`
          +  `<span class="history-signal ${sigCls}">${esc(h.signal)}</span>`
          +  `<span class="history-strength ${strengthCls}" title="${esc(strengthTitle)}">${strengthLetter}</span>`
          +  `<span class="history-score ${scoreCls}">${score || '—'}</span>`
@@ -1187,26 +1200,11 @@ function renderHistory(){
          +    `<span class="icon-emoji">${iconEmoji}</span>`
          +    `<span class="icon-label">${iconLabel}</span>`
          +  `</span>`
+         +  deleteBtn
          +  `</div>`;
   }
-  // FIX (AUDIT-CORE #106, 2026-07-21): add a "Load more" button at the
-  // bottom so users can page through older signals beyond HISTORY_MAX.
-  // The button uses the oldest visible signal's ctime as the cursor and
-  // requests the next 100 signals from the server via the WS `signals`
-  // message with a `before_ctime` field (newly supported by server.py).
-  // FIX (DEEP-AUDIT-2026-07-26 / F-17-02, CRITICAL): the previous logic
-  // rendered the button only when `!filterLastHour` (i.e. NOT on the
-  // History tab). But `#history-list` lives inside `#tab-history`, which
-  // is `display:none` whenever another tab is active — so when the
-  // button WAS rendered (on Chart/Stats tabs) it was invisible, and when
-  // the History tab was actually shown the button was suppressed. The
-  // pagination feature was completely unreachable. The intent of "skip
-  // load-more when filtering to last 1 hour" is wrong — the History tab
-  // is precisely where users want to load OLDER signals (which are
-  // outside the 1-hour window). Now: render the button ONLY on the
-  // History tab (where it's visible) using the full signalHistory (not
-  // the filtered displayHistory) to find the oldest ctime cursor.
-  if(filterLastHour){
+  // Load-more button (always render on history tab)
+  if(onHistoryTab){
     const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
       ? signalHistory[0].detail.ctime : 0;
     if(oldestCtime){
@@ -1218,6 +1216,68 @@ function renderHistory(){
   }
   historyList.innerHTML = html;
 }
+
+// ─── NEW (ALWAYS-SIGNAL-2026-08-03): delete/clear functions ──────────────
+window._deleteSignal = async function(asset, period, ctime){
+  if(!confirm(`Delete this signal?\n${asset} @ ${new Date(ctime*1000).toLocaleTimeString()}`)) return;
+  try{
+    const r = await fetch(`/api/signals/${encodeURIComponent(asset)}/${period}/${ctime}`, {method:'DELETE'});
+    if(r.ok){
+      // Remove from local signalHistory
+      signalHistory = signalHistory.filter(h => !(h && h.detail && h.detail.ctime === ctime));
+      renderHistory();
+    } else {
+      alert('Delete failed: ' + r.status);
+    }
+  } catch(e){
+    alert('Delete error: ' + e.message);
+  }
+};
+
+window._clearFilteredSignals = async function(){
+  const pairFilterEl = $('history-pair-select');
+  const pairFilter = pairFilterEl ? pairFilterEl.value : '';
+  const msg = pairFilter
+    ? `Delete ALL signals for ${pairFilter}? This cannot be undone.`
+    : 'Delete ALL signals? This cannot be undone.';
+  if(!confirm(msg)) return;
+  try{
+    const url = pairFilter
+      ? `/api/signals/clear?asset=${encodeURIComponent(pairFilter)}`
+      : '/api/signals/clear';
+    const r = await fetch(url, {method:'POST'});
+    if(r.ok){
+      const data = await r.json();
+      alert(`Deleted ${data.deleted_count} signals.`);
+      // Clear local history and reload
+      signalHistory = [];
+      loadServerHistory();
+    } else {
+      alert('Clear failed: ' + r.status);
+    }
+  } catch(e){
+    alert('Clear error: ' + e.message);
+  }
+};
+
+window._clearAllSignals = async function(){
+  if(!confirm('⚠ DELETE ALL SIGNALS FROM DATABASE?\n\nThis will permanently delete EVERY signal for EVERY pair.\nThis cannot be undone.')) return;
+  if(!confirm('Are you absolutely sure? Type-confirm by clicking OK again.')) return;
+  try{
+    const r = await fetch('/api/signals/clear', {method:'POST'});
+    if(r.ok){
+      const data = await r.json();
+      alert(`Deleted ALL ${data.deleted_count} signals from database.`);
+      signalHistory = [];
+      renderHistory();
+    } else {
+      alert('Clear-all failed: ' + r.status);
+    }
+  } catch(e){
+    alert('Clear-all error: ' + e.message);
+  }
+};
+
 
 // FIX (AUDIT-CORE #74 + #106, 2026-07-21): ctime-based signal detail
 // lookup + Load-more helper. Both are exposed on window so inline
@@ -2271,6 +2331,9 @@ function wireEvents(){
   const histPairSelect = $('history-pair-select');
   if(histPairSelect){
     histPairSelect.addEventListener('change', () => {
+      // FIX (ALWAYS-SIGNAL-2026-08-03): in addition to syncing topbar,
+      // also re-render history to apply the pair filter.
+      renderHistory();
       const topbarSelect = $('pair-select');
       if(!topbarSelect) return;
       if(topbarSelect.value !== histPairSelect.value){
@@ -2285,6 +2348,18 @@ function wireEvents(){
       }
     });
   }
+
+  // ── NEW (ALWAYS-SIGNAL-2026-08-03): history filter + delete button listeners ──
+  ['history-time-filter','history-direction-filter','history-accuracy-filter'].forEach(id => {
+    const el = $(id);
+    if(el) el.addEventListener('change', renderHistory);
+  });
+
+  const clearBtn = $('history-clear-btn');
+  if(clearBtn) clearBtn.addEventListener('click', () => window._clearFilteredSignals());
+
+  const clearAllBtn = $('history-clear-all-btn');
+  if(clearAllBtn) clearAllBtn.addEventListener('click', () => window._clearAllSignals());
 
   // Sound toggle.
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): update aria-label dynamically

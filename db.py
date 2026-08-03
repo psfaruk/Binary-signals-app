@@ -1268,6 +1268,56 @@ def per_module_accuracy(asset, period=60, n=200):
     return out
 
 
+# ─── NEW (ALWAYS-SIGNAL-2026-08-03): signal history delete/clear functions ──
+# User requirement: "আমাকে অ্যাপ এর মধ্যে থেকে ডেটা সিগন্যাল হিস্টোরি ডিলিট করার
+# সিস্টেম যোগ করতে হবে"
+
+def delete_signal(asset: str, period: int, ctime: int) -> bool:
+    """Delete a single signal by (asset, period, ctime).
+
+    Returns True if a row was deleted, False if not found.
+    """
+    with _write_cursor() as c:
+        c.execute(
+            "DELETE FROM signal_log WHERE asset=? AND period=? AND ctime=?",
+            (asset, period, ctime),
+        )
+        return c.rowcount > 0
+
+
+def clear_signals(asset=None, period=None, before_ctime=None):
+    """Clear signals, optionally filtered by asset/period/before_ctime.
+
+    Args:
+        asset: if set, only delete signals for this asset
+        period: if set, only delete signals for this period
+        before_ctime: if set, only delete signals with ctime < this value
+
+    Returns: number of rows deleted.
+    """
+    q = "DELETE FROM signal_log WHERE 1=1"
+    params = []
+    if asset:
+        q += " AND asset=?"
+        params.append(asset)
+    if period is not None:
+        q += " AND period=?"
+        params.append(period)
+    if before_ctime is not None:
+        q += " AND ctime < ?"
+        params.append(before_ctime)
+    with _write_cursor() as c:
+        c.execute(q, params)
+        return c.rowcount
+
+
+def clear_all_signals():
+    """Delete ALL signals from signal_log. Returns count deleted."""
+    with _write_cursor() as c:
+        c.execute("DELETE FROM signal_log")
+        return c.rowcount
+
+
 def cleanup(days=7):
     """Delete rows older than `days`. Returns (deleted_candle_micro, deleted_signal_log).
 

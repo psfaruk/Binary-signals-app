@@ -27,7 +27,7 @@ _ADAPT_CACHE_TTL = float(os.environ.get("ADAPT_CACHE_TTL", "60"))
 # FIX (DEEP-AUDIT-2026-07-26 / F-04-06): named calibration thresholds.
 # Previously inline magic numbers scattered across _adapt_from_db; now
 # centralized for clarity and tuning. (Audit A-06 #12, #83-91, A-02 #115-118.)
-_HARD_DISABLE_WIN_RATE = 0.30   # below this, hard-disable the module
+_HARD_DISABLE_WIN_RATE = 0.0    # FIX (ALWAYS-SIGNAL-2026-08-03): was 0.30, set to 0.0 to never hard-disable modules
 _HARD_DISABLE_SAMPLES = 50      # need this many samples to hard-disable
 _DB_STATS_FULL_SAMPLES = 50.0   # adapt_fraction saturates at this sample count
 _BRAIN_MIN_SAMPLES = 30         # brain_learning blend activates above this

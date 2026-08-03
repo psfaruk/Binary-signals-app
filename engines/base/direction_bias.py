@@ -28,20 +28,9 @@ accumulate; it will refresh this map from the latest live brain data.
 # Only includes pair+module combos with >=8 samples in BOTH CALL and PUT
 # AND a win-rate gap >=15 percentage points.
 DIRECTION_LOCK = {
-    # CALL-biased (PUT suppressed)
-    ("USDPKR_otc",  "running_tick"):    "CALL",   # CALL 54% vs PUT 33%
-    ("USDCHF_otc",  "pattern"):         "CALL",   # CALL 65% vs PUT 50%
-    ("EURUSD_otc",  "candle_reaction"): "CALL",   # CALL 56% vs PUT 41%
-    # PUT-biased (CALL suppressed)
-    ("USDJPY_otc",  "key_level"):       "PUT",    # CALL 41% vs PUT 61%
-    ("USDCOP_otc",  "running_tick"):    "PUT",    # CALL 34% vs PUT 52%
-    ("USDCOP_otc",  "key_level"):       "PUT",    # CALL 33% vs PUT 60%
-    ("AUDUSD_otc",  "running_tick"):    "PUT",    # CALL 46% vs PUT 64%
-    ("AUDUSD_otc",  "pattern"):         "PUT",    # CALL 36% vs PUT 52%
-    ("AUDUSD_otc",  "candle_reaction"): "PUT",    # CALL 47% vs PUT 64%
-    # FIX (MODULE-PRUNE-2026-08-03): removed 9 entries that referenced
-    # deleted modules (indicator, otc_pattern). Kept only entries for the
-    # 4 surviving modules: candle_reaction, running_tick, pattern, key_level.
+    # FIX (ALWAYS-SIGNAL-2026-08-03): cleared all DIRECTION_LOCK entries.
+    # User requirement: "4 মডিউল কে তার স্বাধীন মতো চলতে দেন"
+    # Modules now vote freely without any directional dampening.
 }
 
 

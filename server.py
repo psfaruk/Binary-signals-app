@@ -1927,6 +1927,68 @@ async def get_signal_detail(asset: str, period: int, ctime: int):
     raise HTTPException(status_code=404, detail="not found")
 
 
+# ─── NEW (ALWAYS-SIGNAL-2026-08-03): signal history delete/clear endpoints ──
+# User requirement: "আমাকে অ্যাপ এর মধ্যে থেকে ডেটা সিগন্যাল হিস্টোরি ডিলিট
+# করার সিস্টেম যোগ করতে হবে"
+
+@app.delete("/api/signals/{asset}/{period}/{ctime}")
+async def delete_signal_endpoint(asset: str, period: int, ctime: int):
+    """Delete a single signal by (asset, period, ctime)."""
+    deleted = await asyncio.to_thread(_db.delete_signal, asset, period, ctime)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="signal not found")
+    return {"deleted": True, "asset": asset, "period": period, "ctime": ctime}
+
+
+@app.post("/api/signals/clear")
+async def clear_signals_endpoint(
+    asset: Optional[str] = None,
+    period: Optional[int] = None,
+    before_ctime: Optional[int] = None,
+):
+    """Clear signals, optionally filtered by asset/period/before_ctime.
+
+    If no filters provided, clears ALL signals.
+    """
+    count = await asyncio.to_thread(
+        _db.clear_signals, asset, period, before_ctime)
+    return {"deleted_count": count, "filter": {"asset": asset, "period": period, "before_ctime": before_ctime}}
+
+
+@app.get("/api/signals/count")
+async def get_signals_count(
+    asset: Optional[str] = None,
+    period: Optional[int] = None,
+    hours: Optional[int] = None,
+):
+    """Return total signal count, optionally filtered by asset/period/hours.
+
+    Used by the frontend history tab to show total + filtered counts.
+    """
+    import time as _t
+    q = "SELECT COUNT(*) as n FROM signal_log WHERE signal IN ('CALL','PUT')"
+    params = []
+    if asset:
+        q += " AND asset=?"
+        params.append(asset)
+    if period is not None:
+        q += " AND period=?"
+        params.append(period)
+    if hours is not None:
+        cutoff = int(_t.time()) - hours * 3600
+        q += " AND ts >= ?"
+        params.append(cutoff)
+    # Use read cursor
+    import sqlite3 as _sql
+    conn = _db._conn()
+    try:
+        row = conn.execute(q, params).fetchone()
+        total = row["n"] if row else 0
+    finally:
+        conn.close()
+    return {"count": total}
+
+
 # ── WebSocket endpoint ───────────────────────────────────────────────────────
 
 # Allowed candle periods (seconds). Anything outside this whitelist is

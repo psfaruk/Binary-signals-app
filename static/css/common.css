@@ -1594,3 +1594,66 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   #signal-box{font-size:16px;padding:8px}
   .tab-btn{padding:6px 4px}
 }
+
+/* ═══ NEW (ALWAYS-SIGNAL-2026-08-03): history filter + delete button styles ═══ */
+
+/* Danger buttons (delete/clear) */
+.btn-danger{
+  background:#3a1518;
+  color:#ff6b6b;
+  border:1px solid #5a2228;
+  border-radius:4px;
+  padding:4px 8px;
+  font-size:10px;
+  cursor:pointer;
+  transition:all .15s;
+}
+.btn-danger:hover{
+  background:#5a2228;
+  color:#ff8a8a;
+  border-color:#7a2a30;
+}
+.btn-danger:active{
+  transform:scale(.97);
+}
+
+/* Per-row delete button (trash icon) */
+.history-delete-btn{
+  margin-left:auto;
+  cursor:pointer;
+  opacity:.4;
+  font-size:11px;
+  padding:2px 4px;
+  border-radius:3px;
+  transition:all .15s;
+}
+.history-delete-btn:hover{
+  opacity:1;
+  background:rgba(255,107,107,.2);
+}
+
+/* History header layout — wrap on small screens */
+.tab-history-header{
+  flex-wrap:wrap;
+  gap:4px;
+}
+.tab-history-header select,
+.tab-history-header button{
+  font-size:10px;
+  padding:3px 6px;
+  height:24px;
+}
+
+/* Count hint */
+#history-count-hint{
+  margin-left:auto;
+  font-size:10px;
+  color:var(--text-dim);
+}
+
+/* Asset label in history row */
+.history-asset{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
