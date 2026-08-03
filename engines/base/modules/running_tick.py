@@ -63,6 +63,18 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
     sub_votes = []  # (direction, score, reason)
     atr = ctx.atr if ctx.atr > 0 else ATR_FALLBACK
 
+    # FIX (THEORY-LOGIC-FIX-2026-08-03): read regime for composite type classification.
+    # Previously the composite type (CONTINUATION vs REVERSAL) was based solely on
+    # the prior candle's body direction. In a strong TREND_UP, if the prior candle
+    # was a small DOWN pullback and the running candle resumes upward, the composite
+    # voted CALL (correct) but classified it as REVERSAL (wrong — should be CONTINUATION).
+    # This caused the blender to penalize trend-continuation votes by ~46% (×0.7 vs ×1.3).
+    # Now we use regime when available, falling back to prior-candle comparison in RANGE.
+    regime = ctx.regime
+    is_trending = regime.get("is_trending", False)
+    trend_regime = regime.get("regime", "RANGE")
+    trend_strength = regime.get("trend_strength", 0.0)
+
     # ═══════════════════════════════════════════════════════════════════════
     # SUB-SIGNAL 1: Ending direction (last 10 ticks)
     # ═══════════════════════════════════════════════════════════════════════
@@ -335,16 +347,34 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
         net_diff = call_sum - put_sum
         breadth_bonus = min(2, call_n // 3)  # +1 per 3 agreeing signals, max +2
         composite_score = min(6, net_diff + breadth_bonus)
-        if prior_dir == 1:
-            composite_type = "CONTINUATION"
-            type_reason = "continues prior up"
-        elif prior_dir == -1:
-            composite_type = "REVERSAL"
-            type_reason = "reverses prior down"
+        # FIX (THEORY-LOGIC-FIX-2026-08-03): use regime for composite type when trending.
+        # Previously used prior candle only — a single counter-trend pullback candle
+        # caused the composite to be mislabeled as REVERSAL, triggering the blender's
+        # trend-reversal penalty on what was actually trend-continuation.
+        if is_trending and trend_strength > 0.5:
+            # In a strong trend, classify based on whether the vote aligns with the trend
+            if trend_regime == "TREND_UP":
+                composite_type = "CONTINUATION"  # CALL in TREND_UP = continuation
+                type_reason = f"continues TREND_UP (str={trend_strength:.2f})"
+            elif trend_regime == "TREND_DOWN":
+                composite_type = "REVERSAL"  # CALL in TREND_DOWN = counter-trend reversal
+                type_reason = f"reverses TREND_DOWN (str={trend_strength:.2f})"
+                composite_score = max(1, composite_score - 1)  # dampen counter-trend
+            else:
+                composite_type = "REVERSAL"
+                type_reason = "fresh-direction (volatile regime)"
         else:
-            composite_type = "REVERSAL"
-            type_reason = "prior doji, fresh-direction"
-            composite_score = max(1, composite_score - 1)
+            # RANGE/VOLATILE — fall back to prior-candle comparison (original logic)
+            if prior_dir == 1:
+                composite_type = "CONTINUATION"
+                type_reason = "continues prior up"
+            elif prior_dir == -1:
+                composite_type = "REVERSAL"
+                type_reason = "reverses prior down"
+            else:
+                composite_type = "REVERSAL"
+                type_reason = "prior doji, fresh-direction"
+                composite_score = max(1, composite_score - 1)
         # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-35): weight confidence by
         # the MAX sub-signal score (depth) instead of the COUNT of agreeing
         # sub-signals (breadth). The previous formula `composite_score * 12 +
@@ -366,16 +396,30 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
     net_diff = put_sum - call_sum
     breadth_bonus = min(2, put_n // 3)
     composite_score = min(6, net_diff + breadth_bonus)
-    if prior_dir == -1:
-        composite_type = "CONTINUATION"
-        type_reason = "continues prior down"
-    elif prior_dir == 1:
-        composite_type = "REVERSAL"
-        type_reason = "reverses prior up"
+    # FIX (THEORY-LOGIC-FIX-2026-08-03): use regime for composite type when trending (mirror of CALL branch)
+    if is_trending and trend_strength > 0.5:
+        if trend_regime == "TREND_DOWN":
+            composite_type = "CONTINUATION"  # PUT in TREND_DOWN = continuation
+            type_reason = f"continues TREND_DOWN (str={trend_strength:.2f})"
+        elif trend_regime == "TREND_UP":
+            composite_type = "REVERSAL"  # PUT in TREND_UP = counter-trend reversal
+            type_reason = f"reverses TREND_UP (str={trend_strength:.2f})"
+            composite_score = max(1, composite_score - 1)  # dampen counter-trend
+        else:
+            composite_type = "REVERSAL"
+            type_reason = "fresh-direction (volatile regime)"
     else:
-        composite_type = "REVERSAL"
-        type_reason = "prior doji, fresh-direction"
-        composite_score = max(1, composite_score - 1)
+        # RANGE/VOLATILE — fall back to prior-candle comparison (original logic)
+        if prior_dir == -1:
+            composite_type = "CONTINUATION"
+            type_reason = "continues prior down"
+        elif prior_dir == 1:
+            composite_type = "REVERSAL"
+            type_reason = "reverses prior up"
+        else:
+            composite_type = "REVERSAL"
+            type_reason = "prior doji, fresh-direction"
+            composite_score = max(1, composite_score - 1)
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-35): same depth-over-breadth
     # fix as the CALL branch above (use max_sub_signal_score instead of put_n).
     max_sub_signal_score = max((s for d, s, _ in sub_votes if d == "PUT"), default=0)

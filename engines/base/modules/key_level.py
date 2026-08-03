@@ -57,6 +57,15 @@ def analyze(candles, ctx: MarketContext) -> list:
     atr = ctx.atr
     level_conf = ctx.level_confluence
 
+    # FIX (THEORY-LOGIC-FIX-2026-08-03): read regime for context-aware signals.
+    # Previously this module had ZERO regime awareness — all signals fired at
+    # full strength regardless of trend. Now we check regime for signals 3b/3d,
+    # 6, and 7 to apply correct REVERSAL vs CONTINUATION classification.
+    regime = ctx.regime
+    is_trending = regime.get("is_trending", False)
+    trend_regime = regime.get("regime", "RANGE")
+    trend_strength = regime.get("trend_strength", 0.0)
+
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 1: Swing level confluence (ORIGINAL — kept)
     # ═══════════════════════════════════════════════════════════════════════
@@ -144,10 +153,22 @@ def analyze(candles, ctx: MarketContext) -> list:
                     signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close near prev high ({prev_high:.5f}) → PUT rejection"]))
             elif close > prev_high + eps:
+                # FIX (THEORY-LOGIC-FIX-2026-08-03): regime-conditional signal_type.
+                # In TREND_DOWN, breaking above prev high is a COUNTER-TREND reversal
+                # (should be dampened, not boosted). In TREND_UP, it's genuine continuation.
+                # Previously hardcoded CONTINUATION → blender boosted counter-trend false signals.
+                _sig_type = "CONTINUATION"
+                _score, _conf = 1, 52
+                if is_trending and trend_strength > 0.5:
+                    if trend_regime == "TREND_DOWN":
+                        _sig_type = "REVERSAL"  # counter-trend breakout attempt
+                        _score, _conf = 1, 48  # dampen
+                    elif trend_regime == "TREND_UP":
+                        _score, _conf = 2, 56  # trend-aligned — boost
                 results.append(ModuleResult(
-                    module_name="key_level", direction="CALL", score=1, confidence=52,
-                    signal_type="CONTINUATION", reliability="LEVEL", group="MICRO_SR",
-                    reasons=[f"Close above prev high ({prev_high:.5f}) → CALL breakout"]))
+                    module_name="key_level", direction="CALL", score=_score, confidence=_conf,
+                    signal_type=_sig_type, reliability="LEVEL", group="MICRO_SR",
+                    reasons=[f"Close above prev high ({prev_high:.5f}) → CALL breakout ({_sig_type})"]))
 
         elif abs(close - prev_low) < tol:
             if close > prev_low + eps:
@@ -156,10 +177,19 @@ def analyze(candles, ctx: MarketContext) -> list:
                     signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close near prev low ({prev_low:.5f}) → CALL bounce"]))
             elif close < prev_low - eps:
+                # FIX (THEORY-LOGIC-FIX-2026-08-03): regime-conditional signal_type (mirror of above)
+                _sig_type = "CONTINUATION"
+                _score, _conf = 1, 52
+                if is_trending and trend_strength > 0.5:
+                    if trend_regime == "TREND_UP":
+                        _sig_type = "REVERSAL"  # counter-trend breakdown attempt
+                        _score, _conf = 1, 48  # dampen
+                    elif trend_regime == "TREND_DOWN":
+                        _score, _conf = 2, 56  # trend-aligned — boost
                 results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=1, confidence=52,
-                    signal_type="CONTINUATION", reliability="LEVEL", group="MICRO_SR",
-                    reasons=[f"Close below prev low ({prev_low:.5f}) → PUT breakdown"]))
+                    module_name="key_level", direction="PUT", score=_score, confidence=_conf,
+                    signal_type=_sig_type, reliability="LEVEL", group="MICRO_SR",
+                    reasons=[f"Close below prev low ({prev_low:.5f}) → PUT breakdown ({_sig_type})"]))
 
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 4: Fibonacci Retracement (NEW — real market classic)
@@ -275,11 +305,16 @@ def analyze(candles, ctx: MarketContext) -> list:
                 # Broken resistance — now acts as support
                 # FIX (DEEP-AUDIT-2026-07-26 / F-09-02): magic number
                 # `atr * 0.2` → SR_FLIP_PROXIMITY_ATR constant (PROBLEM 52).
+                # FIX (THEORY-LOGIC-FIX-2026-08-03): signal_type REVERSAL → CONTINUATION.
+                # S/R flip is structurally a CONTINUATION of the original breakout direction:
+                # price broke ABOVE resistance (UP move), pulled back, bounced UP from retest.
+                # The bounce is continuation of the original UP breakout, not a reversal.
+                # Labeling as REVERSAL caused blender to dampen (×0.7) instead of boost (×1.3).
                 if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:
                     results.append(ModuleResult(
                         module_name="key_level", direction="CALL", score=2, confidence=57,
-                        signal_type="REVERSAL", reliability="LEVEL", group="SR_FLIP",
-                        reasons=[f"Broken resistance now support ({lvl_price:.5f}) → CALL"]))
+                        signal_type="CONTINUATION", reliability="LEVEL", group="SR_FLIP",
+                        reasons=[f"Broken resistance now support ({lvl_price:.5f}) → CALL (continuation of original breakout)"]))
                     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-22): break after
                     # the first SR_FLIP signal so a whipsaw around a level
                     # (broken resistance AND broken support detected in the
@@ -289,11 +324,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                     break
             elif lvl_type == "support" and prev["close"] < lvl_price and close < lvl_price:
                 # Broken support — now acts as resistance
+                # FIX (THEORY-LOGIC-FIX-2026-08-03): signal_type REVERSAL → CONTINUATION (mirror).
                 if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:
                     results.append(ModuleResult(
                         module_name="key_level", direction="PUT", score=2, confidence=57,
-                        signal_type="REVERSAL", reliability="LEVEL", group="SR_FLIP",
-                        reasons=[f"Broken support now resistance ({lvl_price:.5f}) → PUT"]))
+                        signal_type="CONTINUATION", reliability="LEVEL", group="SR_FLIP",
+                        reasons=[f"Broken support now resistance ({lvl_price:.5f}) → PUT (continuation of original breakdown)"]))
                     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-22): same break-
                     # after-first-signal rule for the support side.
                     break
@@ -335,20 +371,47 @@ def analyze(candles, ctx: MarketContext) -> list:
         # so a flat horizontal series (which technically satisfies the
         # `all()` chain via `>=`) does NOT fire a trendline breakout.
         # Same logic mirrored below for lows.
-        if highs[0] > highs[-1] and all(highs[i] >= highs[i+1]
+        # FIX (THEORY-LOGIC-FIX-2026-08-03): relaxed the strict monotonic filter.
+        # The old `all(highs[i] >= highs[i+1])` rejected ANY single uptick, even 1 pip.
+        # On noisy 1m forex candles this was too strict — the signal rarely fired.
+        # Now allow a tiny tolerance (0.05×ATR) on inner elements while keeping
+        # the strict `highs[0] > highs[-1]` overall-decline requirement.
+        _tol = atr * 0.05
+        if highs[0] > highs[-1] and all(highs[i] >= highs[i+1] - _tol
                                         for i in range(len(highs)-1)):
             if close > max(highs[-2], highs[-1]):
+                # FIX (THEORY-LOGIC-FIX-2026-08-03): regime-aware trendline breakout.
+                # In strong TREND_DOWN, a breakout above descending highs is likely a
+                # FALSE breakout (dampen). In TREND_UP, descending highs rarely form
+                # but if they do + breakout, it's actually continuation (reclassify).
+                _sig_type = "REVERSAL"
+                _score, _conf = 2, 56
+                if is_trending and trend_strength > 0.5:
+                    if trend_regime == "TREND_DOWN":
+                        _score, _conf = 1, 50  # likely false breakout — dampen
+                    elif trend_regime == "TREND_UP":
+                        _sig_type = "CONTINUATION"  # trend-aligned breakout
+                        _score, _conf = 3, 60  # boost
                 results.append(ModuleResult(
-                    module_name="key_level", direction="CALL", score=2, confidence=56,
-                    signal_type="REVERSAL", reliability="LEVEL", group="TRENDLINE",
-                    reasons=[f"Trendline breakout above descending highs → CALL reversal"]))
+                    module_name="key_level", direction="CALL", score=_score, confidence=_conf,
+                    signal_type=_sig_type, reliability="LEVEL", group="TRENDLINE",
+                    reasons=[f"Trendline breakout above descending highs → CALL ({_sig_type})"]))
         # Ascending lows = bullish trendline
-        elif lows[0] < lows[-1] and all(lows[i] <= lows[i+1]
+        elif lows[0] < lows[-1] and all(lows[i] <= lows[i+1] + _tol
                                         for i in range(len(lows)-1)):
             if close < min(lows[-2], lows[-1]):
+                # FIX (THEORY-LOGIC-FIX-2026-08-03): regime-aware (mirror of above)
+                _sig_type = "REVERSAL"
+                _score, _conf = 2, 56
+                if is_trending and trend_strength > 0.5:
+                    if trend_regime == "TREND_UP":
+                        _score, _conf = 1, 50  # likely false breakdown — dampen
+                    elif trend_regime == "TREND_DOWN":
+                        _sig_type = "CONTINUATION"  # trend-aligned breakdown
+                        _score, _conf = 3, 60  # boost
                 results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=2, confidence=56,
-                    signal_type="REVERSAL", reliability="LEVEL", group="TRENDLINE",
-                    reasons=[f"Trendline breakdown below ascending lows → PUT reversal"]))
+                    module_name="key_level", direction="PUT", score=_score, confidence=_conf,
+                    signal_type=_sig_type, reliability="LEVEL", group="TRENDLINE",
+                    reasons=[f"Trendline breakdown below ascending lows → PUT ({_sig_type})"]))
 
     return results
