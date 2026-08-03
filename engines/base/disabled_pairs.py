@@ -25,10 +25,8 @@ uses to apply the dampening multiplier.
 # Source: live /api/stats on Railway production, 2026-08-03.
 # Threshold: aggregate win rate < 45% AND >= 50 graded signals.
 PENALIZED_PAIRS = {
-    "USDCOP_otc":    0.6,   # 44.9% win (n=205)
-    "BRLUSD_otc":    0.6,   # 45.1% win (n=266)
-    "USDBDT_otc":    0.6,   # 45.9% win (n=209)
-    "GBPUSD_otc":    0.5,   # 33.3% win (n=24) — heavier penalty
+    # FIX (ALWAYS-SIGNAL-2026-08-03): cleared all penalty entries.
+    # Every pair now signals at full confidence — no pair-based dampening.
 }
 
 # Backward-compat: empty set — no pair is fully blocked anymore.

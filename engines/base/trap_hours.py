@@ -11,20 +11,11 @@ Regenerate with: python /home/z/my-project/scripts/generate_calibration.py
 
 # Map: asset -> set of UTC hours where signals are suppressed.
 # Format: { "EURUSD_otc": {0, 17, 19}, ... }
-TRAP_HOURS = {
-    "AUDUSD_otc": frozenset({0}),
-    "BRLUSD_otc": frozenset({2, 18}),
-    "EURUSD_otc": frozenset({1, 17, 18, 20}),
-    "USDARS_otc": frozenset({1, 19}),
-    "USDBDT_otc": frozenset({20}),
-    "USDCHF": frozenset({2}),
-    "USDCHF_otc": frozenset({0, 1}),
-    "USDCOP_otc": frozenset({21}),
-    "USDDZD_otc": frozenset({19}),
-    "USDIDR_otc": frozenset({18}),
-    "USDJPY_otc": frozenset({1, 19, 23}),
-    "USDPKR_otc": frozenset({1}),
-}
+#
+# FIX (ALWAYS-SIGNAL-2026-08-03): cleared all trap-hour entries.
+# Every pair now signals at every hour — no time-based blocking.
+# User requirement: "সকল পেয়ার এ সব সময় signal আসতে হবে"
+TRAP_HOURS = {}
 
 
 def is_trap_hour(asset: str, hour_utc: int) -> bool:

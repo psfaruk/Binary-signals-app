@@ -72,11 +72,11 @@ SINGLE_GROUP_CAP_MID_MIN = 3            # raw_majority >= 3 (was 4)
 SINGLE_GROUP_CAP_MID = 48
 SINGLE_GROUP_CAP_LOW = 42
 
-SIDEWAYS_RANGE_DAMPEN = 5                # PROB 48 (confidence -5)
+SIDEWAYS_RANGE_DAMPEN = 0                # was 5, set to 0 for always-signal mode
 
 TREND_PENALTY = 15                        # PROB 49 (TREND_UP/DOWN -15)
-TREND_CAP_STANDARD = 45                  # PROB 49
-TREND_CAP_OTC_REVERSAL = 55              # PROB 49
+TREND_CAP_STANDARD = 100                 # was 45, raised for always-signal mode
+TREND_CAP_OTC_REVERSAL = 100             # was 55, raised for always-signal mode
 
 ACCURACY_DAMPEN_MIN_SAMPLES = 3          # PROB 50
 ACCURACY_DAMPEN_THRESHOLD = 0.45
@@ -101,8 +101,8 @@ LOW_CONF_SKIP_THRESHOLD = 20             # PROB 97 (confidence < 20 -> NEUTRAL)
 # threshold for OTC suppresses low-quality signals and improves win rate.
 # Real market pairs have genuine trends, so the lower threshold is kept.
 # Overridable via env: QX_LOW_CONF_SKIP_OTC, QX_LOW_CONF_SKIP_REAL.
-LOW_CONF_SKIP_OTC  = int(os.environ.get("QX_LOW_CONF_SKIP_OTC",  "30"))
-LOW_CONF_SKIP_REAL = int(os.environ.get("QX_LOW_CONF_SKIP_REAL", "25"))
+LOW_CONF_SKIP_OTC  = int(os.environ.get("QX_LOW_CONF_SKIP_OTC",  "5"))  # was 30, lowered for always-signal mode
+LOW_CONF_SKIP_REAL = int(os.environ.get("QX_LOW_CONF_SKIP_REAL", "5"))  # was 25, lowered for always-signal mode
 
 MEDIUM_CONFIDENCE_FLOOR = 30             # PROB 15 (strength tier MEDIUM gate)
 
@@ -811,15 +811,20 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # already returns 0 for two empty sets — the `if (call_g or put_g)
         # else 0` guard was redundant. Removed.
         maj_n = max(len(call_g), len(put_g))
-        # FIX (USER FIX #7+#8, 2026-08-03): include strategy keys so
-        # downstream consumers (tests, DB log) don't crash when all
-        # votes were suppressed by direction lock. Use safe fallback
-        # because _algo_strategy_name is computed later in the flow.
+        # FIX (ALWAYS-SIGNAL-2026-08-03): instead of returning NEUTRAL when
+        # all votes were suppressed, use the last candle's direction as a
+        # fallback. User requirement: every candle must produce CALL or PUT.
+        _last_candle = candles[-1] if candles else {}
+        _last_body = (_last_candle.get("close", 0) - _last_candle.get("open", 0)) if _last_candle else 0
+        _fallback_signal = "CALL" if _last_body >= 0 else "PUT"
         _strat = locals().get('_algo_strategy_name', 'default')
         _strat_r = locals().get('_algo_strategy_reason', '')
+        all_reasons.append(
+            f"_FALLBACK: all votes suppressed (total=0) -> using last candle "
+            f"direction {_fallback_signal} (always-signal mode)")
         return {
-            "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
-            "score": 0, "reasons": all_reasons or ["CONFLICTING_SIGNALS"],
+            "signal": _fallback_signal, "confidence": 15, "strength": "WEAK",
+            "score": 1, "reasons": all_reasons or ["FALLBACK_SIGNAL"],
             "regime": regime, "agree": maj_n,
             "total": total_groups, "signals_fired": total_groups,
             "modules": _module_breakdown(adjusted, all_results, module_names),
@@ -850,17 +855,17 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # dampened (0.5 baseline) — confidence is dampened to reflect
             # the score tie, as the original dev intended.
         else:
-            # Group count also tied — return NEUTRAL.
-            # FIX (DEEP-AUDIT-2026-07-26 / F-02-85): redundant `else 0` removed.
+            # Group count also tied — FALLBACK to last candle direction.
+            # FIX (ALWAYS-SIGNAL-2026-08-03): was returning NEUTRAL here.
+            # User requirement: every candle must produce CALL or PUT.
+            _last_candle = candles[-1] if candles else {}
+            _last_body = (_last_candle.get("close", 0) - _last_candle.get("open", 0)) if _last_candle else 0
+            signal = "CALL" if _last_body >= 0 else "PUT"
+            _tiebreaker_score = 1
             maj_n = max(len(call_g), len(put_g))
-            return {
-                "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
-                "score": 0, "reasons": all_reasons or ["CONFLICTING_SIGNALS"],
-                "regime": regime, "agree": maj_n,
-                "total": total_groups, "signals_fired": total_groups,
-                "modules": _module_breakdown(adjusted, all_results, module_names),
-                "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
-            }
+            all_reasons.append(
+                f"_FALLBACK_TIE: score + group count tied -> using last candle "
+                f"direction {signal} (always-signal mode)")
     else:
         signal = "CALL" if net > 0 else "PUT"
 
@@ -1496,7 +1501,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # can be relaxed if signal volume matters more than precision
             # for a given deployment.
             if (_algo == "random_walk" and _is_ranging
-                    and os.environ.get("QX_RANDOM_WALK_FORCE_NEUTRAL", "1") != "0"):
+                    and os.environ.get("QX_RANDOM_WALK_FORCE_NEUTRAL", "0") != "0"):  # default changed to 0 (disabled)
                 _force_neutral = True
                 all_reasons.append(
                     "_ALGO_STRATEGY: random_walk (autocorr) + RANGE (regime) "
@@ -1609,7 +1614,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # FIX (DEEP-AUDIT-2026-07-26 / F-02-42): `signal != "NEUTRAL"`
             # is always True here — `signal` is CALL or PUT at this point.
             # Removed the dead check.
-            if confidence < _min_conf:
+            # FIX (ALWAYS-SIGNAL-2026-08-03): disabled algo-strategy min_confidence gate
+            # so signals are never forced to NEUTRAL by strategy thresholds.
+            if False and confidence < _min_conf:
                 all_reasons.append(
                     f"_ALGO_STRATEGY: confidence {confidence} < {_min_conf} "
                     f"({_algo_strategy_name}) → will force NEUTRAL")
@@ -1803,9 +1810,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # in the right place: only fires for EXTREME ranging markets (low
     # trend_strength + low volatility) and exempts ultra-consensus signals.
     _is_extreme_ranging = (
-        _is_ranging
-        and _trend_strength < 0.10
-        and _volatility_pct < 1.5
+        False  # FIX (ALWAYS-SIGNAL-2026-08-03): disabled EXTREME RANGE suppression
+        # was: _is_ranging and _trend_strength < 0.10 and _volatility_pct < 1.5
     )
     if _is_extreme_ranging and not (
         confidence >= 65 and abs_net >= 5 and majority_group_n >= 2

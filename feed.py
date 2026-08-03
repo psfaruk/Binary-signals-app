@@ -191,7 +191,7 @@ GLOBAL_STALE_SECS = int(os.environ.get("GLOBAL_STALE_SECS", "180"))
 MAX_ALWAYS_ON_STREAMS = int(os.environ.get("MAX_ALWAYS_ON_STREAMS", "30"))
 # Loss-cluster cooldown: 5 wrong in a row → 30-min cooldown.
 LOSS_COOLDOWN_SEC = int(os.environ.get("QX_LOSS_COOLDOWN_SEC", "1800"))
-LOSS_COOLDOWN_THRESHOLD = int(os.environ.get("QX_LOSS_THRESHOLD", "5"))
+LOSS_COOLDOWN_THRESHOLD = int(os.environ.get("QX_LOSS_THRESHOLD", "999"))  # was 5, raised for always-signal
 # Brain analysis runs every N graded signals.
 BRAIN_ANALYZE_INTERVAL = int(os.environ.get("QX_BRAIN_ANALYZE_INTERVAL", "50"))
 # Days of history used by recompute_from_signal_log.
@@ -718,7 +718,7 @@ class _AssetStream:
 # history), so once a zone proves itself unreadable N times running, stop
 # guessing in it rather than keep flipping a coin. Resets the moment the
 # regime/zone classification actually changes. Overridable per-deployment.
-ZONE_LOSS_GUARD = int(os.environ.get("ZONE_LOSS_GUARD", "3"))
+ZONE_LOSS_GUARD = int(os.environ.get("ZONE_LOSS_GUARD", "999"))  # was 3, raised for always-signal
 
 
 class QuotexFeed:
@@ -2203,7 +2203,9 @@ class QuotexFeed:
         # and grade the signal as a wrong trade. This ensures loss
         # signals appear in the history DB (otherwise the win rate
         # looks artificially high because WEAK losses are invisible).
-        if result.get("signal") in ("CALL", "PUT") and result.get("strength") == "WEAK":
+        # FIX (ALWAYS-SIGNAL-2026-08-03): disabled WEAK→NEUTRAL conversion.
+        # User requirement: every candle must produce CALL or PUT signal.
+        if False and result.get("signal") in ("CALL", "PUT") and result.get("strength") == "WEAK":
             _weak_conf = result.get("confidence", 0)
             _orig_signal = result.get("signal")
             result["signal"] = "NEUTRAL"
