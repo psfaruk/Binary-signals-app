@@ -938,62 +938,76 @@ async def export_db_json():
     import sqlite3
     import json as _json
     import time as _time
+    import traceback
 
-    db_path = os.environ.get("DB_PATH", "signals.db")
-    candidates = [db_path, "/app/data/signals.db", "signals.db", "./signals.db"]
-    found_path = None
-    for p in candidates:
-        if p and os.path.exists(p):
-            found_path = p
-            break
-    if not found_path:
-        raise HTTPException(
-            status_code=404,
-            detail=f"DB file not found. Checked: {candidates}")
+    try:
+        db_path = os.environ.get("DB_PATH", "signals.db")
+        candidates = [db_path, "/app/data/signals.db", "signals.db", "./signals.db"]
+        found_path = None
+        for p in candidates:
+            if p and os.path.exists(p):
+                found_path = p
+                break
+        if not found_path:
+            raise HTTPException(
+                status_code=404,
+                detail=f"DB file not found. Checked: {candidates}")
 
-    conn = sqlite3.connect(found_path, timeout=10)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+        conn = sqlite3.connect(found_path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
 
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    tables = [row[0] for row in cursor.fetchall()]
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = [row[0] for row in cursor.fetchall()]
 
-    export = {"_meta": {
-        "exported_at": _time.time(),
-        "exported_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-        "db_path": found_path,
-        "tables_count": len(tables),
-        "tables": tables,
-    }}
+        export = {"_meta": {
+            "exported_at": _time.time(),
+            "exported_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "db_path": found_path,
+            "tables_count": len(tables),
+            "tables": tables,
+        }}
 
-    for table in tables:
-        try:
-            cursor.execute(f"SELECT * FROM {table}")
-            rows = [dict(r) for r in cursor.fetchall()]
-            export[table] = rows
-        except Exception as exc:
-            export[table] = {"_error": f"failed to read table {table}: {exc}"}
+        for table in tables:
+            try:
+                cursor.execute(f"SELECT * FROM {table}")
+                rows = [dict(r) for r in cursor.fetchall()]
+                export[table] = rows
+            except Exception as exc:
+                export[table] = {"_error": f"failed to read table {table}: {exc}"}
 
-    counts = {}
-    for table in tables:
-        try:
-            cursor.execute(f"SELECT COUNT(*) FROM {table}")
-            counts[table] = cursor.fetchone()[0]
-        except Exception:
-            counts[table] = -1
-    export["_meta"]["row_counts"] = counts
+        counts = {}
+        for table in tables:
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                counts[table] = cursor.fetchone()[0]
+            except Exception:
+                counts[table] = -1
+        export["_meta"]["row_counts"] = counts
 
-    cursor.close()
-    conn.close()
+        cursor.close()
+        conn.close()
 
-    ts = _time.strftime("%Y%m%d_%H%M%S", _time.gmtime())
-    return Response(
-        content=_json.dumps(export, indent=2, default=str),
-        media_type="application/json",
-        headers={
-            "Content-Disposition": f'attachment; filename="signals_export_{ts}.json"',
-        },
-    )
+        ts = _time.strftime("%Y%m%d_%H%M%S", _time.gmtime())
+        return Response(
+            content=_json.dumps(export, indent=2, default=str),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="signals_export_{ts}.json"',
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Return error as JSON so we can see what went wrong
+        return Response(
+            content=_json.dumps({
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }, indent=2),
+            media_type="application/json",
+            status_code=500,
+        )
 
 
 @app.get("/api/db-info")
