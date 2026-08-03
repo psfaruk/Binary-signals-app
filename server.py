@@ -937,6 +937,7 @@ async def export_db_json():
     """Export all DB tables as a single JSON document."""
     import sqlite3
     import json as _json
+    import time as _time
 
     db_path = os.environ.get("DB_PATH", "signals.db")
     candidates = [db_path, "/app/data/signals.db", "signals.db", "./signals.db"]
