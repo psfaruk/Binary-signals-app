@@ -44,6 +44,10 @@ from engines.base.modules import (
     key_level as mod_keylevel,
 )
 from engines.base.per_pair import PairWeightAdapter
+# USER FIX #7 (2026-08-03): per-pair per-module direction lock.
+# Filters out votes in the wrong direction for combos where live brain
+# data shows >=15pp CALL/PUT win-rate gap. See engines/base/direction_bias.py.
+from engines.base.direction_bias import is_vote_allowed as _is_vote_allowed, suppression_reason as _dir_lock_reason
 
 
 # FIX (DEEP-AUDIT-2026-07-26 / F-02-CONST): centralised magic-number
@@ -141,11 +145,31 @@ def _apply_calibration_caps(confidence: int, total_groups: int,
                             has_pattern_confluence: bool = False) -> int:
     """Apply bin-based calibration caps.
 
-    Caps reflect historical accuracy ceilings from 7623 live signals:
-      100%   → 44% actual → cap 50
-      90-99  → 46% actual → cap 55
-      80-89  → 51% actual → cap 60
-      60-79  → ~49-50% actual → cap 60 (unified — was 60/65 split)
+    USER REQUIREMENT (2026-08-03, Fix #2 — Confidence Calibration):
+    Live brain data shows the engine is OVERCONFIDENT:
+      70-79% confidence -> only 52% actual win (expected ~75%)
+      60-69% confidence -> only 52% actual win (expected ~65%)
+      50-59% confidence -> only 45% actual win (expected ~55%)
+    Recommendation from /api/brain/insights: cap each bin at the actual
+    win-rate ceiling + ~10pp safety margin.
+
+    New caps (2026-08-03):
+      >= 90   -> 55   (was 55 — kept)
+      80-89   -> 55   (was 60 — tightened: 80% claimed but only 51% actual)
+      70-79   -> 50   (was 60 — tightened: 70% claimed but only 52% actual)
+      60-69   -> 45   (was 60 — tightened: 60% claimed but only 52% actual)
+      50-59   -> 40   (NEW bin — was uncapped; 50% claimed but only 45% actual)
+      < 50    -> unchanged (already low-confidence path)
+
+    Ultra-consensus + pattern-confluence overrides preserved (raise the
+    ceiling to 75 / 65 respectively when those rare strong-signal paths
+    fire — see the historical comment below).
+
+    Historical accuracy ceilings (7623 live signals, pre-2026-08-03):
+      100%   -> 44% actual   (cap was 50)
+      90-99  -> 46% actual   (cap was 55)
+      80-89  -> 51% actual   (cap was 60)
+      60-79  -> ~49-50% actual (cap was 60 unified)
 
     FIX (2026-07-27 / strong-unreachable): these bins clamp EVERY input
     >= 60 down to at most 60. But the STRONG strength tier (see the
@@ -176,17 +200,24 @@ def _apply_calibration_caps(confidence: int, total_groups: int,
     if has_pattern_confluence and abs_net >= 5 and majority_group_n >= 2:
         override = max(override, 65)
 
+    # USER FIX #2 (2026-08-03): tighter calibration caps based on live
+    # brain data. The historical "every bin → 60" approach masked the
+    # engine's overconfidence but did not actually improve win rate.
+    # The new caps clamp displayed confidence closer to the actual win
+    # rate ceiling, so users don't over-bet on weak signals.
     if confidence >= 100:
         confidence = min(confidence, max(50, override))
     elif confidence >= 90:
         confidence = min(confidence, max(55, override))
     elif confidence >= 80:
-        confidence = min(confidence, max(60, override))
+        confidence = min(confidence, max(55, override))   # was 60 -> 55
+    elif confidence >= 70:
+        confidence = min(confidence, max(50, override))   # was 60 -> 50
     elif confidence >= 60:
-        # FIX (DEEP-AUDIT-2026-07-26 / F-02-05): unified 60-79 bin.
-        # Previously split into 70-79 (cap 65) and 60-69 (cap 60),
-        # creating a 5-point discontinuous jump at the boundary.
-        confidence = min(confidence, max(60, override))
+        confidence = min(confidence, max(45, override))   # was 60 -> 45
+    elif confidence >= 50:
+        confidence = min(confidence, max(40, override))   # NEW: was uncapped
+    # < 50: leave unchanged (already low-confidence path)
     return confidence
 
 
@@ -484,6 +515,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # Apply all multipliers
     adjusted = []
     suppressed_count = 0
+    # USER FIX #7 (2026-08-03): initialize all_reasons early so the
+    # direction-lock suppression block (inside the for-loop below) can
+    # append reasons. Previously all_reasons was only initialized later
+    # (around line 698), but the direction-lock check runs inside the
+    # loop BEFORE that point — causing UnboundLocalError. Move the init
+    # up here so it's available throughout the prediction path.
+    all_reasons = list(regime_reasons)
     for r in grouped_results:
         # Regime multiplier
         # FIX (DEEP-AUDIT-2026-07-26 / F-02-18): use safe `_is_*` locals
@@ -527,16 +565,24 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # trend was strong and not exhausting — exactly the wrong time.
         # Fix: MULTIPLY the gate's r_mult by the OTC inversion factor,
         # preserving the gate's relative dampening/boosting.
+        #
+        # USER FIX #4 (2026-08-03): REMOVED the OTC inversion ×1.3 boost.
+        # Live brain data shows OTC trend-reversal signals at cap=55 only
+        # win 35-44% — the inversion boost was amplifying weak signals
+        # that then hit the trend cap (55) and traded anyway with negative
+        # EV. The continuation dampen (×0.7) is KEPT — continuation in OTC
+        # trends is still wrong (broker reverses them). But we no longer
+        # BOOST the reversal side; the gate's natural 0.8/1.0/1.2 stands.
+        # Net effect: fewer OTC trend-reversal signals emitted, those that
+        # do fire are the genuinely-exhausting ones the gate wanted to boost.
         if _is_trending and config.engine_name == "otc":
             if r.signal_type == "CONTINUATION":
                 # OTC trends reverse, don't continue — dampen continuation.
                 # Apply on top of the gate's value (which may already be 1.3
                 # for non-exhausting, or 1.0 for exhausting).
                 r_mult = r_mult * 0.7  # was: r_mult = 0.7
-            else:  # REVERSAL
-                # OTC trends reverse — reversal is right. Boost on top of
-                # the gate's value (which may be 0.8/1.0/1.2).
-                r_mult = r_mult * 1.3  # was: r_mult = 1.3
+            # REVERSAL: no longer boosted — gate value (0.8/1.0/1.2) stands.
+            # (Previous code: r_mult = r_mult * 1.3 — removed 2026-08-03.)
 
         # Reliability tier multiplier
         t_mult = reliability.get(r.reliability, 1.0)
@@ -588,6 +634,20 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # was previously `round(0.5) = 0` → suppressed. Now: 0.5 ≥ 0.5 →
         # survives with effective=1. This eliminates the asymmetric 0.50→0 /
         # 0.51→1 suppression boundary.
+        #
+        # USER FIX #7 (2026-08-03): per-pair per-module direction lock.
+        # If (asset, r.module_name) is in the DIRECTION_LOCK map and the
+        # module's vote direction does NOT match the locked direction,
+        # suppress the vote entirely (skip to next iteration). Live brain
+        # data shows these combos lose >=15pp more often in the wrong
+        # direction, so filtering them out is +EV.
+        if not _is_vote_allowed(asset, r.module_name, r.direction):
+            _reason = _dir_lock_reason(asset, r.module_name, r.direction)
+            if _reason:
+                all_reasons.append(_reason)
+            suppressed_count += 1
+            continue
+
         raw_product = r.score * r_mult * t_mult * p_mult * h_mult
         effective = _round_half_up(raw_product)
 
@@ -641,13 +701,17 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # If nothing survived suppression, fired_groups is empty — but
     # original_groups may be non-empty (all suppressed). In that case
     # we still want to report NEUTRAL, not crash on divide-by-zero.
-
-    all_reasons = []
+    # NOTE (USER FIX #7, 2026-08-03): all_reasons was already initialized
+    # above (around line 524) to include regime_reasons + any direction-
+    # lock suppression reasons appended inside the multiplier loop.
+    # Do NOT reset it here — that would erase those reasons.
     for r, e in adjusted:
         score_str = f" (eff={e})" if e != r.score else ""
         for reason in r.reasons:
             all_reasons.append(f"[{r.module_name}] {reason}{score_str}")
-    all_reasons += regime_reasons
+    # NOTE (USER FIX #7, 2026-08-03): all_reasons was pre-initialized with
+    # regime_reasons above (line ~524) so the direction-lock block could
+    # append. Skip the duplicate `all_reasons += regime_reasons` here.
     if vol_note:
         all_reasons.append(vol_note)
     if suppressed_count > 0:
@@ -699,6 +763,33 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # consensus side) and proceed to confidence calibration. Only return
     # NEUTRAL if the group counts are ALSO tied. Total==0 (all signals
     # suppressed) still returns NEUTRAL — no consensus to break.
+    #
+    # USER FIX #3 (2026-08-03): RANGE regime suppression — moved HERE
+    # (before the net==0 tiebreaker) so it intercepts ALL signals when
+    # the market is ranging, regardless of whether scores tie or not.
+    # Live brain data shows RANGE regime has only 44% win rate.
+    if _is_ranging:
+        all_reasons.append(
+            f"_RANGE_SUPPRESS: regime=RANGE (str={_trend_strength:.2f}) "
+            f"-> NEUTRAL (historical win rate only 44% in this regime)")
+        # FIX (USER FIX #3, 2026-08-03): _algo_strategy_name is not yet
+        # computed at this point (it's computed later in the algo-strategy
+        # block). Use a getattr-safe fallback so the return dict still
+        # has the strategy key for downstream consumers.
+        _strat_name = locals().get('_algo_strategy_name', 'default')
+        _strat_reason = locals().get('_algo_strategy_reason', '')
+        return {
+            "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
+            "score": 0, "reasons": all_reasons,
+            "regime": regime, "agree": 0,
+            "total": total_groups, "signals_fired": total_groups,
+            "modules": _module_breakdown(adjusted, all_results, module_names),
+            "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
+            "strategy": _strat_name,
+            "strategy_reason": _strat_reason,
+            "range_suppressed": True,
+        }
+
     if total == 0:
         call_g = set(r.group for r, e in adjusted if r.direction == "CALL")
         put_g = set(r.group for r, e in adjusted if r.direction == "PUT")
@@ -1243,6 +1334,31 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # Non-critical — don't crash prediction if DB unavailable
             pass
 
+        # USER FIX #9 (2026-08-03): BOOST HOUR ×1.3 confidence multiplier.
+        # Live brain data (/api/quotex-algo-detect boost_hours) shows 3
+        # specific (asset, hour_utc) windows with 66-69% historical win
+        # rate — significantly above the 50% baseline. When a signal is
+        # emitted during one of these boost windows, multiply confidence
+        # by 1.3 to surface it more prominently to the user.
+        # Source: /api/quotex-algo-detect boost_hours (samples >= 20).
+        try:
+            from datetime import datetime, timezone
+            _boost_hour = datetime.fromtimestamp(_ctime, tz=timezone.utc).hour
+            _BOOST_HOURS = {
+                # (asset, hour_utc): multiplier — only entries with >=20 samples
+                ("EURUSD_otc", 21): 1.3,   # 69.2% win (n=26)
+                ("AUDUSD_otc", 21): 1.3,   # 68.1% win (n=47)
+                ("USDARS_otc",  0): 1.3,   # 65.9% win (n=44)
+            }
+            _boost_mult = _BOOST_HOURS.get((asset, _boost_hour))
+            if _boost_mult and _boost_mult != 1.0:
+                confidence = _round_half_up(confidence * _boost_mult)
+                all_reasons.append(
+                    f"_BOOST_HOUR: {asset} at {_boost_hour:02d}:00 UTC "
+                    f"→ ×{_boost_mult:.2f} (historically 66-69% win rate)")
+        except Exception:
+            pass
+
         # FIX (DEEP-AUDIT-2026-07-26 / F-02-11): tag-based adjustment was
         # planned but never implemented — see dead-import removal above.
         # The previous TODO comment ("skip for now, will be added in a
@@ -1610,10 +1726,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # consumers expecting NEUTRAL signals to have confidence=0.
     # FIX (DEEP-AUDIT-2026-07-26 / F-02-97): use centralised constant
     # LOW_CONF_SKIP_THRESHOLD (was magic 20).
-    # FIX (WINRATE-BOOST #3, 2026-07-28): use per-engine threshold.
-    # OTC pairs (random_walk 97%) need a higher bar (30) to suppress
-    # coin-flip signals. Real pairs keep the lower bar (25) since they
-    # have genuine trends worth trading at lower confidence.
+    # NOTE (USER FIX #3, 2026-08-03): the RANGE suppression block has been
+    # moved EARLIER in the predict() flow (to just after the net/total
+    # computation, before the net==0 tiebreaker) so it intercepts ALL
+    # signals when the market is ranging. The previous location here was
+    # unreachable when net==0 triggered an early NEUTRAL return.
     _low_conf_threshold = LOW_CONF_SKIP_OTC if asset.endswith("_otc") else LOW_CONF_SKIP_REAL
     if confidence < _low_conf_threshold:
         all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < {_low_conf_threshold} -> NEUTRAL")

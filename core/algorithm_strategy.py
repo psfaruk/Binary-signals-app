@@ -163,7 +163,13 @@ STRATEGIES = {
 _ASSET_STRATEGY: dict[str, dict] = {}  # asset → {strategy, reason, until, cooldown_candles}
 _COOLDOWN_DURATION = int(os.environ.get("STRATEGY_COOLDOWN_CANDLES", "5"))
 _RESET_DURATION = int(os.environ.get("STRATEGY_RESET_CANDLES", "3"))
-_MIN_SAMPLES = int(os.environ.get("STRATEGY_MIN_SAMPLES", "15"))
+# USER FIX #6 (2026-08-03): _MIN_SAMPLES 15 -> 30.
+# Source audit (BUG #6) found that a 15-candle window's direction
+# autocorrelation is highly noisy — a single 3-candle streak inflates
+# autocorr to ~0.7, causing the strategy to flip between trend_following
+# and neutral, producing confidence thrashing (multipliers 1.3 vs 0.8
+# oscillating). 30 candles gives a more stable signal.
+_MIN_SAMPLES = int(os.environ.get("STRATEGY_MIN_SAMPLES", "30"))
 _RECENT_CHANGE_TTL = float(os.environ.get("STRATEGY_RECENT_CHANGE_TTL", "5"))
 _RECENT_CHANGE_CACHE: dict[str, tuple[float, "dict | None"]] = {}
 _lock = threading.Lock()

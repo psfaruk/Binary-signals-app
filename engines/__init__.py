@@ -42,6 +42,10 @@ from engines import real as _real_engine
 # loses >=65% of trades with >=5 samples. Signals during these windows are
 # suppressed (returned as NEUTRAL with reason="trap_hour").
 from engines.base.trap_hours import is_trap_hour as _is_trap_hour, trap_reason as _trap_reason
+# USER FIX #8 (2026-08-03): disabled-pairs blocklist. Pairs with chronically
+# low (< 45%) win rate are suppressed entirely — no signal emitted regardless
+# of what the modules vote.
+from engines.base.disabled_pairs import is_pair_disabled as _is_pair_disabled, disabled_reason as _disabled_reason
 
 __all__ = ["predict", "otc", "real", "category_of"]
 # TODO (DEEP-AUDIT-2026-07-26 / F-03-08): BlenderConfig is intentionally NOT
@@ -143,6 +147,31 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # Defensive: never let the trap-hour check itself crash the prediction.
         # Log and fall through to the normal prediction path.
         print(f"[engines] trap-hour check failed for {asset}: {_trap_exc}")
+
+    # USER FIX #8 (2026-08-03): DISABLED-PAIRS BLOCKLIST.
+    # Pairs with chronically low (< 45%) win rate over 200+ graded signals
+    # are suppressed entirely. The engine returns NEUTRAL with reason=
+    # "pair_disabled" for these assets, regardless of what the modules vote.
+    # The user can still SEE the chart and watch the price — only the signal
+    # emission is blocked.
+    try:
+        if _is_pair_disabled(asset):
+            _reason = _disabled_reason(asset)
+            return {
+                "signal": "NEUTRAL",
+                "confidence": 0,
+                "strength": "WEAK",
+                "score": 0.0,
+                "reasons": [_reason] if _reason else ["pair disabled"],
+                "modules": {},
+                "regime": "pair_disabled",
+                "category": category if category in ("otc", "real") else "otc",
+                "pair_disabled": True,
+                "disabled_reason": _reason,
+                "skipped": True,
+            }
+    except Exception as _disabled_exc:
+        print(f"[engines] disabled-pair check failed for {asset}: {_disabled_exc}")
 
     # FIX (DEEP-AUDIT-2026-07-26 / F-03-06): previously `detected = category_of(asset)`
     # was always computed even when the caller explicitly passed category. Now

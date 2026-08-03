@@ -23,9 +23,15 @@ from core.constants import OTC_MODULES as _MODULES
 
 
 # ── Reliability tier multipliers (data-driven) ──────────────────────────
+# USER FIX #5 (2026-08-03): LEVEL reliability 0.8 -> 1.0.
+# Live brain data shows key_level's S/R wick-rejection signals have 70%
+# win rate — the highest of any module. But the previous double-dampen
+# (RELIABILITY 0.8 × DEFAULT_WEIGHT 0.8 = 0.64 effective) was crushing
+# its strong signals down to the same score as weak ones. Restoring to
+# 1.0 lets the per-pair weight be the sole dampener/booster.
 RELIABILITY = {
     "PATTERN":   1.3,
-    "LEVEL":   0.8,
+    "LEVEL":   1.0,   # was 0.8 — restored (key_level has 70% S/R win rate)
     "TREND":   1.0,
     "INDICATOR":   0.9,
     "CANDLE":   1.0,

@@ -23,9 +23,12 @@ from core.constants import REAL_MODULES as _MODULES
 
 
 # ── Reliability tier multipliers (data-driven) ──────────────────────────
+# USER FIX #5 (2026-08-03): LEVEL reliability 0.8 -> 1.0.
+# Restored to let the per-pair weight be the sole dampener/booster
+# (removes the double-dampen issue from BUG #8 in the source audit).
 RELIABILITY = {
     "PATTERN":   1.0,
-    "LEVEL":   0.8,
+    "LEVEL":   1.0,   # was 0.8 — restored
     "TREND":   1.0,
     "INDICATOR":   0.9,
     "CANDLE":   1.0,
