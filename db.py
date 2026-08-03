@@ -447,6 +447,34 @@ def init():
         except sqlite3.Error as _e:
             print(f"[db] module_votes table creation skipped: {_e}")
 
+        # ── NEW TABLE: theory_votes (ALWAYS-SIGNAL-2026-08-03) ──────────────
+        # Per-THEORY breakdown — one row per individual theory emitted by a
+        # module (not collapsed to one row per module-direction like module_votes).
+        # User requirement: "কোনটার ভিতরে কি কি কতগুলো করে theory আছে?
+        # সেই theory গুলো কেমন পারফেমস করছে? কোন পেয়ার এ কেমন?"
+        try:
+            c.execute("""CREATE TABLE IF NOT EXISTS theory_votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INT,
+                asset TEXT, period INT, ctime INT,
+                module_name TEXT,
+                theory_name TEXT,
+                theory_group TEXT,
+                direction TEXT,
+                signal_type TEXT,
+                score INT,
+                confidence INT,
+                effective_score INT,
+                vote_correct INT,
+                engine TEXT, regime TEXT, strength TEXT,
+                ts REAL)""")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_tv_module_theory ON theory_votes(module_name, theory_name, vote_correct)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_tv_asset_theory ON theory_votes(asset, theory_name, vote_correct)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_tv_theory ON theory_votes(theory_name, vote_correct)")
+            c.execute("CREATE INDEX IF NOT EXISTS ix_tv_ctime ON theory_votes(ctime DESC)")
+        except sqlite3.Error as _e:
+            print(f"[db] theory_votes table creation skipped: {_e}")
+
         # ── NEW TABLE: signal_quality_metrics (DEEP_v2 2026-07-30) ────────
         # Detailed quality metrics per signal for advanced analysis:
         # - Move magnitude (ATR %)
@@ -640,6 +668,187 @@ def _category_for_asset(asset):
     return "otc" if asset.endswith("_otc") else "real"
 
 
+# ─── NEW (ALWAYS-SIGNAL-2026-08-03): per-theory extraction helper ──────────
+# Parses reason strings to extract individual theory names for the theory_votes
+# table. Each reason string follows the pattern:
+#   "[module_name] theory_description → DIRECTION (signal_type_note) (eff=N)"
+#
+# Theory name mapping per module (extracted from reason text patterns):
+#   candle_reaction: "Streak reversal", "Big body reversal", "Upper wick rejection",
+#       "Lower wick rejection", "Close at range top", "Close at range bottom",
+#       "Rising closes momentum", "Falling closes momentum"
+#   running_tick: "Micro composite" (single composite vote with sub-signals)
+#   pattern: pattern name (e.g., "Bullish Engulfing", "Morning Star", "Hammer")
+#   key_level: "Support wick rejection", "Resistance wick rejection", "Key support bounce",
+#       "Key resistance bounce", "Close near prev high/low", "Fibonacci retracement",
+#       "S/R flip", "Trendline breakout"
+import re as _re_module
+
+_THEORY_PATTERNS = {
+    'candle_reaction': [
+        (r'(\d+)\+\s*(UP|DOWN)\s+streak', 'Streak reversal'),
+        (r'Big\s+(UP|DOWN)\s+body', 'Big body reversal'),
+        (r'Upper wick rejection', 'Upper wick rejection'),
+        (r'Lower wick rejection', 'Lower wick rejection'),
+        (r'Close at range top', 'Close at range top'),
+        (r'Close at range bottom', 'Close at range bottom'),
+        (r'Rising closes momentum', 'Rising closes momentum'),
+        (r'Falling closes momentum', 'Falling closes momentum'),
+    ],
+    'pattern': [
+        (r'Bullish Engulfing', 'Bullish Engulfing'),
+        (r'Bearish Engulfing', 'Bearish Engulfing'),
+        (r'Morning Star', 'Morning Star'),
+        (r'Evening Star', 'Evening Star'),
+        (r'Tweezer Top', 'Tweezer Top'),
+        (r'Tweezer Bottom', 'Tweezer Bottom'),
+        (r'Three White Soldiers|3_SOLDIERS', 'Three White Soldiers'),
+        (r'Three Black Crows|3_CROWS', 'Three Black Crows'),
+        (r'3_SOLDIERS_EXHAUST|Three Soldiers Exhaust', '3 Soldiers Exhaust'),
+        (r'3_CROWS_EXHAUST|Three Crows Exhaust', '3 Crows Exhaust'),
+        (r'Piercing Line', 'Piercing Line'),
+        (r'Dark Cloud', 'Dark Cloud Cover'),
+        (r'Bull Harami|BULL_HARAMI', 'Bull Harami'),
+        (r'Bear Harami|BEAR_HARAMI', 'Bear Harami'),
+        (r'Hammer', 'Hammer'),
+        (r'Shooting Star', 'Shooting Star'),
+    ],
+    'key_level': [
+        (r'Support wick rejection', 'Support wick rejection'),
+        (r'Resistance wick rejection', 'Resistance wick rejection'),
+        (r'Key support bounce', 'Key support bounce'),
+        (r'Key resistance bounce', 'Key resistance bounce'),
+        (r'Close near prev high', 'Close near prev high'),
+        (r'Close above prev high', 'Close above prev high (breakout)'),
+        (r'Close near prev low', 'Close near prev low'),
+        (r'Close below prev low', 'Close below prev low (breakdown)'),
+        (r'Fibonacci\s+(\d+\.?\d*)%', 'Fibonacci retracement'),
+        (r'Broken resistance now support', 'S/R flip (resistance→support)'),
+        (r'Broken support now resistance', 'S/R flip (support→resistance)'),
+        (r'Trendline breakout above', 'Trendline breakout (bullish)'),
+        (r'Trendline breakdown below', 'Trendline breakdown (bearish)'),
+    ],
+    'running_tick': [
+        (r'Micro composite', 'Micro composite'),
+    ],
+}
+
+# Map theory_name → theory_group (for display grouping)
+_THEORY_GROUPS = {
+    'Streak reversal': 'BODY',
+    'Big body reversal': 'BODY',
+    'Upper wick rejection': 'WICK',
+    'Lower wick rejection': 'WICK',
+    'Close at range top': 'BODY',
+    'Close at range bottom': 'BODY',
+    'Rising closes momentum': 'BODY_CONT',
+    'Falling closes momentum': 'BODY_CONT',
+    'Micro composite': 'MICRO',
+    'Bullish Engulfing': 'PATTERN',
+    'Bearish Engulfing': 'PATTERN',
+    'Morning Star': 'PATTERN',
+    'Evening Star': 'PATTERN',
+    'Tweezer Top': 'PATTERN',
+    'Tweezer Bottom': 'PATTERN',
+    'Three White Soldiers': 'PATTERN',
+    'Three Black Crows': 'PATTERN',
+    '3 Soldiers Exhaust': 'PATTERN',
+    '3 Crows Exhaust': 'PATTERN',
+    'Piercing Line': 'PATTERN',
+    'Dark Cloud Cover': 'PATTERN',
+    'Bull Harami': 'PATTERN',
+    'Bear Harami': 'PATTERN',
+    'Hammer': 'PATTERN',
+    'Shooting Star': 'PATTERN',
+    'Support wick rejection': 'LEVEL',
+    'Resistance wick rejection': 'LEVEL',
+    'Key support bounce': 'LEVEL',
+    'Key resistance bounce': 'LEVEL',
+    'Close near prev high': 'MICRO_SR',
+    'Close above prev high (breakout)': 'MICRO_SR',
+    'Close near prev low': 'MICRO_SR',
+    'Close below prev low (breakdown)': 'MICRO_SR',
+    'Fibonacci retracement': 'FIB',
+    'S/R flip (resistance→support)': 'SR_FLIP',
+    'S/R flip (support→resistance)': 'SR_FLIP',
+    'Trendline breakout (bullish)': 'TRENDLINE',
+    'Trendline breakdown (bearish)': 'TRENDLINE',
+}
+
+
+def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, regime, strength, ts_val):
+    """Parse reason strings and extract per-theory vote rows for theory_votes.
+
+    Returns list of tuples matching the theory_votes INSERT columns.
+    """
+    rows = []
+    if not reasons_list:
+        return rows
+
+    for reason_str in reasons_list:
+        if not isinstance(reason_str, str):
+            reason_str = str(reason_str)
+        # Extract module name from [module_name] prefix
+        if not reason_str.startswith('['):
+            continue
+        end_bracket = reason_str.find(']')
+        if end_bracket == -1:
+            continue
+        module = reason_str[1:end_bracket].strip()
+        if module not in _THEORY_PATTERNS:
+            continue
+
+        # Extract direction
+        dir_match = _re_module.search(r'→\s*(CALL|PUT)\b', reason_str)
+        if not dir_match:
+            continue
+        direction = dir_match.group(1)
+
+        # Determine signal_type from keywords
+        reason_lower = reason_str.lower()
+        if 'continuation' in reason_lower or 'breakout' in reason_lower or 'breakdown' in reason_lower:
+            signal_type = 'CONTINUATION'
+        elif 'reversal' in reason_lower or 'bounce' in reason_lower or 'rejection' in reason_lower or 'flip' in reason_lower:
+            signal_type = 'REVERSAL'
+        else:
+            signal_type = 'REVERSAL'  # default
+
+        # Extract effective score from (eff=N) suffix
+        eff_match = _re_module.search(r'\(eff=(\d+)\)', reason_str)
+        effective_score = int(eff_match.group(1)) if eff_match else None
+
+        # Extract theory name using module-specific patterns
+        theory_name = None
+        for pattern, name in _THEORY_PATTERNS[module]:
+            if _re_module.search(pattern, reason_str, _re_module.IGNORECASE):
+                theory_name = name
+                break
+
+        if not theory_name:
+            # Fallback: use first 40 chars of content after module prefix
+            content = reason_str[end_bracket + 1:].strip()[:40]
+            theory_name = content or 'Unknown'
+
+        theory_group = _THEORY_GROUPS.get(theory_name, 'UNKNOWN')
+
+        # Compute vote_correct
+        vote_correct = None
+        if actual and actual in ('UP', 'DOWN'):
+            vote_correct = 1 if (
+                (direction == 'CALL' and actual == 'UP') or
+                (direction == 'PUT' and actual == 'DOWN')
+            ) else 0
+
+        rows.append((
+            None, asset, period, ctime, module,
+            theory_name, theory_group, direction, signal_type,
+            None, None, effective_score,  # score, confidence, effective_score
+            vote_correct, category, regime, strength, ts_val
+        ))
+
+    return rows
+
+
 def log_signal(asset, period, ctime, signal, score, confidence,
                theories, actual, accuracy, **kw):
     # FIX (DEEP-AUDIT-2026-07-26 / F-14-16): use UPSERT (INSERT ... ON
@@ -812,6 +1021,26 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                              engine, regime, strength, ts)
                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             vote_rows)
+                        conn.commit()
+
+                    # ── NEW (ALWAYS-SIGNAL-2026-08-03): per-theory breakdown ──
+                    # Parse each reason string to extract individual theory names
+                    # and insert into theory_votes. Unlike module_votes (which
+                    # dedups by module+direction), this keeps EVERY theory.
+                    # User requirement: "কোনটার ভিতরে কি কি কতগুলো করে theory আছে?
+                    # সেই theory গুলো কেমন পারফেমস করছে?"
+                    theory_rows = _extract_theory_votes(
+                        r_list if isinstance(r_list, list) else [reasons_text],
+                        asset, period, ctime, actual, category,
+                        kw.get('regime'), kw.get('strength'), ts_val)
+                    if theory_rows:
+                        cur.executemany("""INSERT INTO theory_votes
+                            (signal_id, asset, period, ctime, module_name,
+                             theory_name, theory_group, direction, signal_type,
+                             score, confidence, effective_score, vote_correct,
+                             engine, regime, strength, ts)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            theory_rows)
                         conn.commit()
             except Exception as _mv_err:
                 print(f"[db] module_votes write skipped: {_mv_err}")

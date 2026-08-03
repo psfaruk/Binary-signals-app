@@ -1760,6 +1760,87 @@ window._showModulePairDetail = async function(moduleName){
   }
 };
 
+// ─── NEW (ALWAYS-SIGNAL-2026-08-03): PER-THEORY stats from /api/theory-analysis ──
+// User requirement: "কোনটার ভিতরে কি কি কতগুলো করে theory আছে?
+// সেই theory গুলো কেমন পারফেমস করছে? কোন পেয়ার এ কেমন?"
+let _theoryStatsCache = null;
+let _theoryStatsLoading = false;
+
+async function renderTheoryStats(){
+  const container = $('acc-theory-breakdown');
+  if(!container) return;
+  if(_theoryStatsLoading) return;
+
+  // Read selected pair from Stats tab pair selector
+  const pairSelect = $('stats-pair-select');
+  const selectedPair = pairSelect ? pairSelect.value : '';
+
+  _theoryStatsLoading = true;
+  if(!container.children.length || container.querySelector('.accuracy-empty')){
+    container.innerHTML = '<div class="accuracy-empty">Loading theory stats…</div>';
+  }
+
+  try{
+    if(!_theoryStatsCache){
+      const r = await fetch('/api/theory-analysis?min_samples=1');
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      _theoryStatsCache = await r.json();
+    }
+    const data = _theoryStatsCache;
+
+    // Determine which theories to show
+    let theories;
+    if(selectedPair){
+      theories = (data.pair_theories || []).filter(t => t.asset === selectedPair);
+    } else {
+      theories = data.global_theories || [];
+    }
+
+    // Update count hint
+    const hintEl = $('theory-count-hint');
+    if(hintEl){
+      hintEl.textContent = theories.length + ' theories' + (selectedPair ? ' · ' + selectedPair : '');
+    }
+
+    if(!theories.length){
+      container.innerHTML = '<div class="accuracy-empty">No theory data yet. Signals will appear after the first graded candle.</div>';
+      return;
+    }
+
+    // Sort by win_pct descending
+    theories.sort((a,b) => (b.win_pct || 0) - (a.win_pct || 0));
+
+    let html = '<div class="theory-stats-rows">';
+    theories.forEach(t => {
+      const pct = t.win_pct;
+      const pctCls = pct == null ? 'none'
+                   : pct >= 55 ? 'good'
+                   : pct >= 45 ? 'mid' : 'bad';
+      const barWidth = pct == null ? 0 : pct;
+      const total = t.total || 0;
+      const correct = t.correct || 0;
+      const wrong = total - correct;
+      html += '<div class="theory-stats-row">'
+           +  '<div class="theory-row-header">'
+           +  '<span class="theory-name">' + esc(t.theory_name || '?') + '</span>'
+           +  '<span class="theory-module">' + esc(t.module_name || '?') + '</span>'
+           +  '</div>'
+           +  '<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:' + barWidth + '%"></div></div>'
+           +  '<div class="theory-row-stats">'
+           +  '<span class="theory-pct ' + pctCls + '">' + (pct == null ? '—' : pct.toFixed(1) + '%') + '</span>'
+           +  '<span class="theory-meta">' + correct + 'W / ' + wrong + 'L (n=' + total + ')</span>'
+           +  '</div>'
+           +  '</div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  } catch(e){
+    container.innerHTML = '<div class="accuracy-empty">Failed to load: ' + esc(e.message) + '</div>';
+  } finally {
+    _theoryStatsLoading = false;
+  }
+}
+
 /* ─── TAB SWITCHING ────────────────────────────────────────────────────────
    switchTab(name): toggles the .active class on the 3 tab buttons and the
    3 tab panes. Also fires tab-specific refresh logic so the just-shown
@@ -1792,8 +1873,9 @@ function switchTab(tabName){
     setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
   } else if(tabName === 'accuracy'){
     renderAccuracyTab();
-    // FIX (ALWAYS-SIGNAL-2026-08-03): also refresh per-module stats from DB
+    // FIX (ALWAYS-SIGNAL-2026-08-03): also refresh per-module + per-theory stats from DB
     if(typeof renderModuleStats === 'function') renderModuleStats();
+    if(typeof renderTheoryStats === 'function') renderTheoryStats();
   } else if(tabName === 'chart'){
     // The chart's autoSize handles hidden→visible resizes, but on some
     // browsers the chart needs an explicit nudge after being display:none.
@@ -2601,11 +2683,13 @@ function wireEvents(){
   }
 
   // FIX (ALWAYS-SIGNAL-2026-08-03): Stats tab pair selector — when user picks
-  // a pair, re-render module stats scoped to that pair (uses cached data).
+  // a pair, re-render module stats + theory stats scoped to that pair.
   const statsPairSelect = $('stats-pair-select');
   if(statsPairSelect){
     statsPairSelect.addEventListener('change', () => {
       renderModuleStats();
+      _theoryStatsCache = null;  // force refetch for new pair
+      renderTheoryStats();
     });
   }
 

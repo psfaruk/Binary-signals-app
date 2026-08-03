@@ -1427,6 +1427,82 @@ async def module_analysis():
         return {"error": str(e), "hint": "module_votes table may not exist yet — new table added in DEEP_v2"}
 
 
+# ─── NEW (ALWAYS-SIGNAL-2026-08-03): per-THEORY analysis endpoint ──────────
+# User requirement: "কোনটার ভিতরে কি কি কতগুলো করে theory আছে?
+# সেই theory গুলো কেমন পারফেমস করছে? কোন পেয়ার এ কেমন?"
+@app.get("/api/theory-analysis")
+async def theory_analysis(period: int = 60, min_samples: int = 3):
+    """Per-theory win-rate analysis from the theory_votes table.
+
+    Returns:
+      global_theories: [{module_name, theory_name, theory_group, correct, total, win_pct}]
+      pair_theories: [{asset, module_name, theory_name, correct, total, win_pct}]
+      total_theory_records: int
+    """
+    try:
+        conn = _db._conn()
+        try:
+            # Global per-theory accuracy
+            global_rows = conn.execute("""
+                SELECT module_name, theory_name, theory_group,
+                       SUM(vote_correct) as correct, COUNT(*) as total
+                FROM theory_votes
+                WHERE vote_correct IS NOT NULL AND period=?
+                GROUP BY module_name, theory_name, theory_group
+                HAVING total >= ?
+                ORDER BY 100.0 * SUM(vote_correct) / COUNT(*) DESC
+            """, (period, min_samples)).fetchall()
+
+            global_theories = []
+            for r in global_rows:
+                win_pct = round(100.0 * r["correct"] / r["total"], 1) if r["total"] else 0
+                global_theories.append({
+                    "module_name": r["module_name"],
+                    "theory_name": r["theory_name"],
+                    "theory_group": r["theory_group"],
+                    "correct": r["correct"],
+                    "total": r["total"],
+                    "win_pct": win_pct,
+                })
+
+            # Per-pair per-theory accuracy
+            pair_rows = conn.execute("""
+                SELECT asset, module_name, theory_name, theory_group,
+                       SUM(vote_correct) as correct, COUNT(*) as total
+                FROM theory_votes
+                WHERE vote_correct IS NOT NULL AND period=?
+                GROUP BY asset, module_name, theory_name, theory_group
+                HAVING total >= ?
+                ORDER BY asset, 100.0 * SUM(vote_correct) / COUNT(*) DESC
+            """, (period, min_samples)).fetchall()
+
+            pair_theories = []
+            for r in pair_rows:
+                win_pct = round(100.0 * r["correct"] / r["total"], 1) if r["total"] else 0
+                pair_theories.append({
+                    "asset": r["asset"],
+                    "module_name": r["module_name"],
+                    "theory_name": r["theory_name"],
+                    "theory_group": r["theory_group"],
+                    "correct": r["correct"],
+                    "total": r["total"],
+                    "win_pct": win_pct,
+                })
+
+            total = conn.execute("SELECT COUNT(*) as n FROM theory_votes WHERE period=?", (period,)).fetchone()
+
+            return {
+                "global_theories": global_theories,
+                "pair_theories": pair_theories,
+                "total_theory_records": total["n"] if total else 0,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        _logger.exception("theory analysis failed")
+        return {"error": str(e), "hint": "theory_votes table may not exist yet — run db.init()"}
+
+
 @app.get("/api/pair-deep-stats/{asset}")
 async def pair_deep_stats(asset: str, period: int = 60):
     """Deep statistics for a specific pair — all the data needed for calibration.

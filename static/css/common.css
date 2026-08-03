@@ -1892,3 +1892,68 @@ body{
   transition:opacity .2s;
 }
 #last-refresh-label:hover{opacity:1}
+
+/* ═══ NEW (ALWAYS-SIGNAL-2026-08-03): per-theory breakdown styles ═══ */
+
+.theory-stats-rows{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.theory-stats-row{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:4px;
+  padding:8px 10px;
+  border-radius:var(--radius);
+  background:var(--card);
+  border:1px solid var(--border);
+  box-shadow:0 1px 2px rgba(0,0,0,.15);
+  transition:all .2s ease;
+}
+.theory-stats-row:hover{
+  box-shadow:0 4px 8px rgba(0,0,0,.3);
+  transform:translateY(-1px);
+  border-color:var(--text-dim);
+}
+.theory-row-header{
+  display:flex;
+  justify-content:space-between;
+  align-items:baseline;
+  gap:8px;
+}
+.theory-name{
+  font-size:12px;
+  font-weight:600;
+  color:var(--text);
+}
+.theory-module{
+  font-size:9px;
+  color:var(--text-dim);
+  text-transform:uppercase;
+  letter-spacing:.5px;
+  padding:1px 6px;
+  border-radius:3px;
+  background:var(--bg-elev);
+  white-space:nowrap;
+}
+.theory-row-stats{
+  display:flex;
+  justify-content:space-between;
+  align-items:baseline;
+  gap:8px;
+}
+.theory-pct{
+  font-size:14px;
+  font-weight:700;
+  font-variant-numeric:tabular-nums;
+}
+.theory-pct.none{color:var(--text-dim)}
+.theory-pct.good{color:#4caf50}
+.theory-pct.mid{color:#ffc107}
+.theory-pct.bad{color:#f44336}
+.theory-meta{
+  font-size:10px;
+  color:var(--text-dim);
+  font-variant-numeric:tabular-nums;
+}
