@@ -870,11 +870,6 @@ async def download_db():
     browsers save it as 'signals_<timestamp>.db'. The file is read
     directly from DB_PATH (defaults to /app/data/signals.db on Railway,
     or ./signals.db locally).
-
-    NOTE: SQLite WAL mode may have uncommitted changes in the -wal file.
-    We use sqlite3.connect() with a brief read lock to ensure a
-    consistent snapshot — copies the file to a temp path, then streams
-    that. Avoids 'database is locked' errors if a write is in flight.
     """
     import os
     import shutil
@@ -883,27 +878,34 @@ async def download_db():
     import time as _time
 
     db_path = os.environ.get("DB_PATH", "signals.db")
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail=f"DB file not found at {db_path}")
+    # Search common locations if DB_PATH doesn't exist.
+    candidates = [db_path, "/app/data/signals.db", "signals.db", "./signals.db"]
+    found_path = None
+    for p in candidates:
+        if p and os.path.exists(p):
+            found_path = p
+            break
+    if not found_path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"DB file not found. Checked: {candidates}")
 
-    # Copy to temp file with a brief read lock for consistency.
-    # FIX: SQLite WAL mode can leave recent writes in the -wal file;
-    # a plain file copy would miss them. Use sqlite3.backup() to get
-    # a consistent snapshot that includes all WAL changes.
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db", prefix="signals_export_")
     os.close(tmp_fd)
     try:
-        src = sqlite3.connect(db_path, timeout=5)
+        src = sqlite3.connect(found_path, timeout=5)
         dst = sqlite3.connect(tmp_path, timeout=5)
         src.backup(dst)
         dst.close()
         src.close()
     except Exception as exc:
-        # Fallback: plain file copy if backup() fails (e.g., locked)
         try:
-            shutil.copy2(db_path, tmp_path)
+            shutil.copy2(found_path, tmp_path)
         except Exception as copy_exc:
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
             raise HTTPException(
                 status_code=500,
                 detail=f"DB snapshot failed: backup={exc}, copy={copy_exc}")
@@ -911,17 +913,12 @@ async def download_db():
     ts = _time.strftime("%Y%m%d_%H%M%S", _time.gmtime())
     filename = f"signals_{ts}.db"
 
-    def _cleanup():
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-
-    # Stream the file, then clean up.
     with open(tmp_path, "rb") as f:
         data = f.read()
-
-    _cleanup()
+    try:
+        os.unlink(tmp_path)
+    except Exception:
+        pass
 
     return Response(
         content=data,
@@ -929,7 +926,7 @@ async def download_db():
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(len(data)),
-            "X-DB-Path": db_path,
+            "X-DB-Path": found_path,
             "X-DB-Size": str(len(data)),
         },
     )
@@ -937,41 +934,33 @@ async def download_db():
 
 @app.get("/api/db-export")
 async def export_db_json():
-    """Export all DB tables as a single JSON document.
-
-    Returns a JSON object with one key per table, each containing a
-    list of row dicts. Useful for quick offline analysis without
-    needing a SQLite client.
-
-    Tables exported:
-      - signal_log (all graded predictions)
-      - module_votes (per-module vote breakdown per signal)
-      - brain_learning (per-pair per-module learned weights)
-      - brain_insights (auto-generated insights)
-      - brain_predictions (per-prediction brain state)
-      - algorithm_changes (regime/payout changes)
-      - pair_hourly_patterns (per-pair per-hour win rates)
-      - time_session_patterns (session-level patterns)
-    """
+    """Export all DB tables as a single JSON document."""
     import sqlite3
     import json as _json
 
     db_path = os.environ.get("DB_PATH", "signals.db")
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail=f"DB file not found at {db_path}")
+    candidates = [db_path, "/app/data/signals.db", "signals.db", "./signals.db"]
+    found_path = None
+    for p in candidates:
+        if p and os.path.exists(p):
+            found_path = p
+            break
+    if not found_path:
+        raise HTTPException(
+            status_code=404,
+            detail=f"DB file not found. Checked: {candidates}")
 
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = sqlite3.connect(found_path, timeout=10)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Discover all tables
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
     tables = [row[0] for row in cursor.fetchall()]
 
     export = {"_meta": {
         "exported_at": _time.time(),
         "exported_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-        "db_path": db_path,
+        "db_path": found_path,
         "tables_count": len(tables),
         "tables": tables,
     }}
@@ -984,7 +973,6 @@ async def export_db_json():
         except Exception as exc:
             export[table] = {"_error": f"failed to read table {table}: {exc}"}
 
-    # Get row counts for each table (quick summary)
     counts = {}
     for table in tables:
         try:
@@ -1015,43 +1003,81 @@ async def db_info():
     the full file via /api/db-download or /api/db-export.
     """
     import sqlite3
+    import traceback
 
     db_path = os.environ.get("DB_PATH", "signals.db")
-    if not os.path.exists(db_path):
-        raise HTTPException(status_code=404, detail=f"DB file not found at {db_path}")
+    result = {"db_path_env": db_path, "cwd": os.getcwd()}
 
-    file_size = os.path.getsize(db_path)
-    mtime = os.path.getmtime(db_path)
+    # Check if DB_PATH exists; if not, search common locations.
+    candidates = [
+        db_path,
+        "/app/data/signals.db",
+        "signals.db",
+        "./signals.db",
+        os.path.join(os.getcwd(), "signals.db"),
+    ]
+    found_path = None
+    for p in candidates:
+        if p and os.path.exists(p):
+            found_path = p
+            break
 
-    conn = sqlite3.connect(db_path, timeout=5)
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-    tables = [row[0] for row in cursor.fetchall()]
+    result["checked_paths"] = [
+        {"path": p, "exists": bool(p and os.path.exists(p)),
+         "size": (os.path.getsize(p) if p and os.path.exists(p) else 0)}
+        for p in candidates
+    ]
+    result["found_path"] = found_path
 
-    table_info = []
-    for t in tables:
+    if not found_path:
+        result["error"] = "DB file not found in any candidate location"
+        # List /app/data contents if it exists
         try:
-            cursor.execute(f"SELECT COUNT(*) FROM {t}")
-            count = cursor.fetchone()[0]
-        except Exception as exc:
-            count = -1
-        table_info.append({"table": t, "rows": count})
+            if os.path.exists("/app/data"):
+                result["app_data_contents"] = os.listdir("/app/data")
+            else:
+                result["app_data_exists"] = False
+        except Exception as e:
+            result["app_data_list_error"] = str(e)
+        return result
 
-    cursor.close()
-    conn.close()
+    try:
+        file_size = os.path.getsize(found_path)
+        mtime = os.path.getmtime(found_path)
 
-    return {
-        "db_path": db_path,
-        "file_size_bytes": file_size,
-        "file_size_kb": round(file_size / 1024, 1),
-        "last_modified": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(mtime)),
-        "tables": table_info,
-        "total_rows": sum(t["rows"] for t in table_info if t["rows"] > 0),
-        "download_endpoints": {
-            "binary_db": "/api/db-download",
-            "json_export": "/api/db-export",
-        },
-    }
+        conn = sqlite3.connect(found_path, timeout=5)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = [row[0] for row in cursor.fetchall()]
+
+        table_info = []
+        for t in tables:
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM {t}")
+                count = cursor.fetchone()[0]
+            except Exception as exc:
+                count = -1
+            table_info.append({"table": t, "rows": count})
+
+        cursor.close()
+        conn.close()
+
+        result.update({
+            "file_size_bytes": file_size,
+            "file_size_kb": round(file_size / 1024, 1),
+            "last_modified": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(mtime)),
+            "tables": table_info,
+            "total_rows": sum(t["rows"] for t in table_info if t["rows"] > 0),
+            "download_endpoints": {
+                "binary_db": "/api/db-download",
+                "json_export": "/api/db-export",
+            },
+        })
+    except Exception as exc:
+        result["error"] = str(exc)
+        result["traceback"] = traceback.format_exc()
+
+    return result
 
 
 @app.get("/api/status")
