@@ -107,6 +107,19 @@ LOW_CONF_SKIP_REAL = int(os.environ.get("QX_LOW_CONF_SKIP_REAL", "25"))
 
 MEDIUM_CONFIDENCE_FLOOR = 30             # PROB 15 (strength tier MEDIUM gate)
 
+# FIX (DIRECTION-LOCK-OVERFIT-RISK, 2026-08-03): direction_bias.py's
+# DIRECTION_LOCK map is generated from live win-rate gaps with only
+# >=8 samples per side required (no significance test) — at n=8 the
+# standard error of a win-rate estimate is ~17pp, so a documented
+# "15pp gap" can easily be noise rather than a real broker bias.
+# disabled_pairs.py already hit this exact problem today and switched
+# from a hard block to a partial penalty (Fix #8 REVISED) because the
+# hard block was "too aggressive" and threw away real signal. Apply
+# the same fix here: dampen an against-the-lock vote instead of
+# zeroing it, so a genuinely strong signal can still partially survive
+# if a given lock entry turns out to be noise rather than real bias.
+DIRECTION_LOCK_DAMPEN = 0.4
+
 
 # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-05 + AUDIT-LIVE-2-05): Python 3's
 # built-in `round()` uses banker's rounding (round-half-to-EVEN), not
@@ -641,14 +654,19 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # suppress the vote entirely (skip to next iteration). Live brain
         # data shows these combos lose >=15pp more often in the wrong
         # direction, so filtering them out is +EV.
+        # FIX (DIRECTION-LOCK-OVERFIT-RISK, 2026-08-03): changed from a
+        # hard suppress (`continue`, score forced to 0) to a partial
+        # dampen (×DIRECTION_LOCK_DAMPEN) — see constant definition above
+        # for rationale. The vote still counts, just weighted down, so it
+        # can still contribute if the module's signal was genuinely strong.
+        _dir_lock_mult = 1.0
         if not _is_vote_allowed(asset, r.module_name, r.direction):
             _reason = _dir_lock_reason(asset, r.module_name, r.direction)
             if _reason:
                 all_reasons.append(_reason)
-            suppressed_count += 1
-            continue
+            _dir_lock_mult = DIRECTION_LOCK_DAMPEN
 
-        raw_product = r.score * r_mult * t_mult * p_mult * h_mult
+        raw_product = r.score * r_mult * t_mult * p_mult * h_mult * _dir_lock_mult
         effective = _round_half_up(raw_product)
 
         if raw_product < 0.5:
@@ -1424,6 +1442,29 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             _algo_strategy_reason = strat.get("strategy_reason", "")
             _cont_mult = strat.get("continuation_mult", 1.0)
             _rev_mult = strat.get("reversal_mult", 1.0)
+            # FIX (DUAL-CLASSIFIER-CONFLICT, 2026-08-03): this continuation/
+            # reversal multiplier comes from a DIFFERENT classifier (tick
+            # autocorrelation in core/algorithm_strategy.py, tuned on a
+            # ~24h sample, no OTC/Real split) than the one already applied
+            # in Step 6 above (EMA trend-strength regime, tuned on a
+            # 7623-signal live sample, OTC-specific). For OTC, Step 6 found
+            # the OPPOSITE of what this module assumes: continuation in a
+            # TREND_UP/DOWN regime wins only 47.1%/42.9% (not the ~65%
+            # this module's docstring claims for "trending" algorithm
+            # state). The two layers were stacking multiplicatively in
+            # opposite directions on the SAME continuation-vs-reversal
+            # question — e.g. an OTC trend continuation signal got Step
+            # 6's dampen AND THEN this module's ×1.3 boost, compounding
+            # into a net effect neither layer's own evidence supports.
+            # For OTC, defer to the larger, OTC-specific, more recent
+            # Step-6 evidence: drop this module's DIRECTIONAL multiplier
+            # entirely. Its non-directional confidence_mult/min_confidence
+            # (cautious/reset/random-walk dampening below) make no
+            # continuation-vs-reversal claim, so they still apply to both
+            # engines unchanged.
+            if config.engine_name == "otc":
+                _cont_mult = 1.0
+                _rev_mult = 1.0
             _conf_mult = strat.get("confidence_mult", 1.0)
             _min_conf = strat.get("min_confidence", 0)
             _algo_icon = strat.get("strategy_icon", "")
@@ -1436,6 +1477,30 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # continuation/reversal multipliers were never actually applied
             # in production. Moved BEFORE its first use.
             _algo = strat.get("algorithm", "unknown")
+
+            # FIX (RANDOM-WALK-DUAL-CONFIRM, 2026-08-03): two INDEPENDENT
+            # classifiers each separately flag "no exploitable direction"
+            # here — Step 6's regime=RANGE (EMA/trend-strength based) and
+            # this module's algo=random_walk (tick-autocorrelation based).
+            # On live OTC data these overlap most of the time (algorithm_
+            # monitor.py comment: ~97% of OTC candles are random_walk;
+            # Step 6 comment: ~81% are RANGE). Previously, even when BOTH
+            # independent checks agreed there was no structure, the engine
+            # still emitted a directional CALL/PUT at confidence ×0.8 with
+            # min_confidence only 25 — a low bar that let most of these
+            # through as discounted-but-still-directional bets. A discount
+            # cannot turn a coin flip into a real edge — the honest
+            # response when two unrelated methods both say "no pattern" is
+            # NEUTRAL, not "NEUTRAL-ish". Gated behind an env var so this
+            # can be relaxed if signal volume matters more than precision
+            # for a given deployment.
+            if (_algo == "random_walk" and _is_ranging
+                    and os.environ.get("QX_RANDOM_WALK_FORCE_NEUTRAL", "1") != "0"):
+                _force_neutral = True
+                all_reasons.append(
+                    "_ALGO_STRATEGY: random_walk (autocorr) + RANGE (regime) "
+                    "agree — no directional edge, forcing NEUTRAL instead of "
+                    "a discounted directional bet")
 
             # Apply confidence multiplier (overall scaling)
             # FIX (DEEP-AUDIT-2026-07-26 / F-02-42): `signal != "NEUTRAL"
