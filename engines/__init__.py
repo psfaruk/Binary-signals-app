@@ -5,12 +5,12 @@ Two completely separate engines live side-by-side:
 
     engines.otc  — for OTC pairs (broker-generated price feed)
         6 modules + Smart Blender tuned for mean-reversion behavior.
-        Heavier weight on candle_reaction, otc_pattern, key_level.
+        Heavier weight on candle_reaction, key_level.
         Payout floor: 85%.
 
     engines.real — for real-market pairs (live exchange prices)
         Same 6 modules + Smart Blender, but retuned for trend-following.
-        Module 6 is replaced with `trend_follow` (instead of `otc_pattern`)
+        FIX (MODULE-PRUNE-2026-08-03): engine-specific 6th module removed
         which detects momentum continuation rather than mean-reversion.
         Heavier weight on indicator (RSI/MACD/EMA), pattern (engulfing etc.).
         Payout floor: 70%.

@@ -26,13 +26,12 @@ from collections import defaultdict
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRITICAL_FILES = [
     "engines/base/blender.py",
-    "engines/base/modules/otc_pattern.py",
     "engines/base/modules/candle_reaction.py",
-    "engines/base/modules/trend_follow.py",
-    "engines/base/modules/indicator.py",
     "engines/base/modules/key_level.py",
     "engines/base/modules/running_tick.py",
     "engines/base/modules/pattern.py",
+    # FIX (MODULE-PRUNE-2026-08-03): removed otc_pattern.py, trend_follow.py,
+    # indicator.py — these modules have been deleted from the codebase.
     "core/analysis.py",
     "core/brain.py",
     "core/microstructure.py",

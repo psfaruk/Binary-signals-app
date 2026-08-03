@@ -40,7 +40,6 @@ from engines.base.modules import (
     candle_reaction as mod_candle,
     running_tick as mod_tick,
     pattern as mod_pattern,
-    indicator as mod_indicator,
     key_level as mod_keylevel,
 )
 from engines.base.per_pair import PairWeightAdapter
@@ -239,16 +238,17 @@ class BlenderConfig:
     """Engine-specific configuration for the shared blender.
 
     Encapsulates everything that differs between the OTC and Real engines:
-      - module_6_name: name of the 6th module ("otc_pattern" or "trend_follow")
-      - module_6_fn: the 6th module's analyze() function
       - reliability: dict of reliability tier → multiplier
       - weight_adapter: PairWeightAdapter instance (with engine-specific
                         PAIR_CONFIGS and DEFAULT_WEIGHTS baked in)
-      - module_names: tuple of 6 module names (for breakdown display)
+      - module_names: tuple of module names (for breakdown display)
       - engine_name: short label for debug logs ("otc" or "real")
+
+    FIX (MODULE-PRUNE-2026-08-03): removed module_6_name / module_6_fn
+    fields. The engine-specific 6th modules (otc_pattern, trend_follow)
+    have been deleted from the codebase. Both engines now run the same
+    4 shared modules: candle_reaction, running_tick, pattern, key_level.
     """
-    module_6_name: str
-    module_6_fn: Callable
     reliability: dict
     weight_adapter: PairWeightAdapter
     module_names: tuple
@@ -257,7 +257,7 @@ class BlenderConfig:
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             period: int = 60, config=None, recent_accuracy=None) -> dict:
-    """Run 6 modules + smart blend using the given engine config.
+    """Run 4 modules + smart blend using the given engine config.
 
     Args:
         candles: list of closed candle dicts (time, open, high, low, close)
@@ -299,7 +299,6 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
 
     reliability = config.reliability
     weight_adapter = config.weight_adapter
-    module_6_fn = config.module_6_fn
     module_names = config.module_names
 
     # FIX (DEEP-AUDIT-2026-07-26 / F-02-108 / F-02-56): `not candles` is
@@ -313,43 +312,15 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # ── Step 1: Compute shared context ONCE ──────────────────────────────
     ctx = compute_context(candles)
 
-    # ── Step 2: Run all 6 modules ────────────────────────────────────────
+    # ── Step 2: Run all 4 modules ────────────────────────────────
+    # FIX (MODULE-PRUNE-2026-08-03): removed indicator module and the
+    # engine-specific 6th module (otc_pattern / trend_follow). Both
+    # engines now run the same 4 shared modules.
     all_results = []
     all_results += mod_candle.analyze(candles, ctx)
     all_results += mod_tick.analyze(candles, ticks, micro, ctx)
     all_results += mod_pattern.analyze(candles, ctx)
-    all_results += mod_indicator.analyze(candles, ctx)
     all_results += mod_keylevel.analyze(candles, ctx)
-    # FIX (OTC-DEEP Phase 1, 2026-07-23): pass `asset` to the 6th module
-    # so it can query the algorithm_monitor's current state for this
-    # asset and gate signals based on the live algorithm guess.
-    # The module_6_fn wrapper accepts (candles, ctx, asset=None) — if the
-    # underlying analyze() doesn't accept asset, the wrapper ignores it.
-    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-25): the previous code caught
-    # ALL TypeErrors, including ones raised INSIDE the module's analyze
-    # function (e.g., `asset.upper()` when `asset=None`). The fallback then
-    # called module_6_fn(candles, ctx) — which would ALSO fail or produce
-    # degraded results without the asset context. Now: only catch the
-    # specific TypeError from argument-count mismatch (the error message
-    # contains "positional argument" or "unexpected keyword argument").
-    # Internal TypeErrors are re-raised so they're visible (and caught by
-    # the outer try/except in the prediction pipeline if any).
-    try:
-        all_results += module_6_fn(candles, ctx, asset)
-    except TypeError as _te:
-        _msg = str(_te).lower()
-        if ("positional argument" in _msg
-                or "unexpected keyword argument" in _msg
-                or "takes" in _msg):
-            # Module's analyze() doesn't accept asset — fall back to 2-arg call.
-            all_results += module_6_fn(candles, ctx)
-        else:
-            # Internal TypeError — re-raise so it's not masked.
-            raise
-
-    if not all_results:
-        return _neutral("NO_SIGNAL", ctx.regime, asset, weight_adapter,
-                         module_names=module_names, htf_trend=htf_trend)
 
     # ── Step 3: Collapse correlated groups (BODY → 1 vote) ───────────────
     # FIX (Bug 10, deep audit 2026-07-19): previously only collapsed
@@ -1085,7 +1056,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # "PATTERN", missing "OTC" reliability (otc_pattern module). An OTC
     # pattern agreement now counts toward pattern confluence.
     pattern_agrees = any(
-        r.reliability in ("PATTERN", "OTC") and r.direction == signal
+        r.reliability == "PATTERN" and r.direction == signal
         for r, e in adjusted
     )
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-18): use RAW score (r.score)
@@ -1101,7 +1072,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # for genuinely-strong setups where the modules agreed but dampening
     # multipliers reduced the effective score.
     strong_non_pattern_agrees = any(
-        r.reliability not in ("PATTERN", "OTC") and r.direction == signal and r.score >= 2
+        r.reliability != "PATTERN" and r.direction == signal and r.score >= 2
         for r, e in adjusted
     )
     has_pattern_confluence = pattern_agrees and strong_non_pattern_agrees

@@ -46,30 +46,9 @@ def main():
          not old_pattern_present, f"old pattern still present: {old_pattern_present}")
     print()
 
-    # A2: trend_follow short-circuits when weight < TREND_FOLLOW_MIN_WEIGHT
-    # FIX (DEEP-AUDIT-2026-07-26 / F-19-08): extract magic threshold 0.2
-    # to a named constant (A-10 PROBLEM 86).
-    TREND_FOLLOW_MIN_WEIGHT = 0.2
-    print(f"A2 (LOW): trend_follow short-circuits when weight < {TREND_FOLLOW_MIN_WEIGHT}")
-    from engines.base.modules import trend_follow
-    src_tf = inspect.getsource(trend_follow.analyze)
-    has_short_circuit = "if _trend_weight < 0.2" in src_tf
-    test("A2: short-circuit check added", has_short_circuit,
-         f"check present: {has_short_circuit}")
-    # Verify it actually returns [] when weight is low (the default is 0.1)
-    from engines import predict
-    import time as _t
-    base_t = int(_t.time()) - 60*60
-    candles = [{'time': base_t + i*60, 'open': 1.0+i*0.0001,
-                'high': 1.0+i*0.0001+0.0003, 'low': 1.0+i*0.0001-0.0002,
-                'close': 1.0+i*0.0001+0.0001} for i in range(60)]
-    # For EURUSD (Real engine), trend_follow should NOT contribute
-    r = predict(candles, asset='EURUSD', period=60)
-    modules = r.get('modules', {})
-    tf_module = modules.get('trend_follow', {})
-    test("A2: trend_follow shows 'fired: False' in breakdown",
-         tf_module.get('fired') is False,
-         f"trend_follow.fired = {tf_module.get('fired')}")
+    # A2: REMOVED (MODULE-PRUNE-2026-08-03) — trend_follow module has been
+    # deleted from the codebase. The short-circuit check is no longer relevant.
+    print("A2: SKIPPED — trend_follow module deleted (MODULE-PRUNE-2026-08-03)")
     print()
 
     # A3: brain.py uses 'is None' check for score

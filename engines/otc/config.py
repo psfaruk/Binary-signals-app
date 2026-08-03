@@ -1,7 +1,11 @@
-"""engines/otc/config.py — AUTO-CALIBRATED CONFIG v3 (2026-08-03)
+"""engines/otc/config.py — AUTO-CALIBRATED CONFIG v4 (2026-08-03)
 
 Generated from live Railway brain data (~1280 graded signals).
 Per-pair per-module weights calibrated against actual win rates.
+
+FIX (MODULE-PRUNE-2026-08-03): removed `indicator` and `otc_pattern`
+modules entirely. Both engines now run the same 4 shared modules:
+candle_reaction, running_tick, pattern, key_level.
 
 Calibration methodology (DEEP_v3, 2026-08-03):
 - Pairs with < 40% win rate (and >= 8 samples) -> DISABLED entirely
@@ -18,50 +22,41 @@ Date: 2026-08-03
 """
 from engines.base.blender import BlenderConfig
 from engines.base.per_pair import PairWeightAdapter
-from engines.base.modules.otc_pattern import analyze as _otc_pattern_analyze
 from core.constants import OTC_MODULES as _MODULES
 
 
 # ── Reliability tier multipliers (data-driven) ──────────────────────────
-# USER FIX #5 (2026-08-03): LEVEL reliability 0.8 -> 1.0.
-# Live brain data shows key_level's S/R wick-rejection signals have 70%
-# win rate — the highest of any module. But the previous double-dampen
-# (RELIABILITY 0.8 × DEFAULT_WEIGHT 0.8 = 0.64 effective) was crushing
-# its strong signals down to the same score as weak ones. Restoring to
-# 1.0 lets the per-pair weight be the sole dampener/booster.
+# FIX (MODULE-PRUNE-2026-08-03): removed "INDICATOR", "OTC", "TREND" tiers —
+# the corresponding modules have been deleted.
 RELIABILITY = {
     "PATTERN":   1.3,
-    "LEVEL":   1.0,   # was 0.8 — restored (key_level has 70% S/R win rate)
-    "TREND":   1.0,
-    "INDICATOR":   0.9,
-    "CANDLE":   1.0,
-    "MICRO":   0.7,
-    "OTC":   1.4,
+    "LEVEL":     1.0,
+    "CANDLE":    1.0,
+    "MICRO":     0.7,
 }
 
 
 # ── DEFAULT_WEIGHTS — for pairs with insufficient data (< 8 samples) ──
+# FIX (MODULE-PRUNE-2026-08-03): removed indicator + otc_pattern entries.
 DEFAULT_WEIGHTS = {
     "candle_reaction":   1.0,
-    "running_tick":   1.0,
-    "pattern":   1.0,
-    "indicator":   0.9,
-    "key_level":   0.8,
-    "otc_pattern":   1.4,
+    "running_tick":      1.0,
+    "pattern":           1.0,
+    "key_level":         0.8,
 }
 
 
 # ── PER-PAIR CALIBRATED WEIGHTS (auto-generated from live data) ────────
+# FIX (MODULE-PRUNE-2026-08-03): removed indicator + otc_pattern from
+# every pair's weights dict. Comments for those entries are also removed.
 PAIR_CONFIGS = {
     "AUDUSD_otc": {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=54%) (n=80)
-            "running_tick":   1.0,   # baseline (acc=54%) (n=90)
-            "pattern":   0.5,   # dampened (acc=44% < 45.0%) (n=64)
-            "indicator":   1.5,   # boost (acc=60% >= 55.0%) (n=35)
-            "key_level":   1.0,   # baseline (acc=51%) (n=49)
-            "otc_pattern":   1.0,   # baseline (acc=55%) (n=71) [CALL weak 41%, PUT strong 64%]
+            "running_tick":      1.0,   # baseline (acc=54%) (n=90)
+            "pattern":           0.5,   # dampened (acc=44% < 45.0%) (n=64)
+            "key_level":         1.0,   # baseline (acc=51%) (n=49)
         },
         "description": "Calibrated: 52.7% win (n=389)",
     },
@@ -69,11 +64,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   0.5,   # dampened (acc=45% < 45.0%) (n=58)
-            "running_tick":   1.0,   # baseline (acc=46%) (n=71)
-            "pattern":   0.5,   # dampened (acc=44% < 45.0%) (n=57)
-            "indicator":   0.5,   # dampened (acc=42% < 45.0%) (n=38)
-            "key_level":   1.0,   # baseline (acc=47%) (n=32)
-            "otc_pattern":   0.5,   # dampened (acc=42% < 45.0%) (n=62)
+            "running_tick":      1.0,   # baseline (acc=46%) (n=71)
+            "pattern":           0.5,   # dampened (acc=44% < 45.0%) (n=57)
+            "key_level":         1.0,   # baseline (acc=47%) (n=32)
         },
         "description": "Calibrated: 44.3% win (n=318)",
     },
@@ -81,11 +74,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=48%) (n=66)
-            "running_tick":   1.0,   # baseline (acc=54%) (n=69)
-            "pattern":   1.0,   # baseline (acc=48%) (n=56)
-            "indicator":   0.5,   # dampened (acc=44% < 45.0%) (n=27)
-            "key_level":   1.0,   # baseline (acc=49%) (n=41)
-            "otc_pattern":   1.0,   # baseline (acc=51%) (n=55)
+            "running_tick":      1.0,   # baseline (acc=54%) (n=69)
+            "pattern":           1.0,   # baseline (acc=48%) (n=56)
+            "key_level":         1.0,   # baseline (acc=49%) (n=41)
         },
         "description": "Calibrated: 49.7% win (n=314)",
     },
@@ -93,11 +84,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=50%) (n=114)
-            "running_tick":   1.0,   # baseline (acc=53%) (n=123)
-            "pattern":   1.0,   # baseline (acc=53%) (n=97)
-            "indicator":   1.5,   # boost (acc=62% >= 55.0%) (n=48)
-            "key_level":   0.5,   # dampened (acc=40% < 45.0%) (n=67)
-            "otc_pattern":   1.5,   # boost (acc=55% >= 55.0%) (n=92)
+            "running_tick":      1.0,   # baseline (acc=53%) (n=123)
+            "pattern":           1.0,   # baseline (acc=53%) (n=97)
+            "key_level":         0.5,   # dampened (acc=40% < 45.0%) (n=67)
         },
         "description": "Calibrated: 51.9% win (n=541)",
     },
@@ -105,11 +94,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (no data)
-            "running_tick":   1.0,   # baseline (acc=53%) (n=105)
-            "pattern":   1.0,   # baseline (acc=49%) (n=87)
-            "indicator":   0.1,   # DISABLED (acc=34% < 35.0%) (n=38) [CALL strong 64%, PUT weak 22%]
-            "key_level":   0.5,   # dampened (acc=43% < 45.0%) (n=46)
-            "otc_pattern":   0.1,   # DISABLED (acc=23% < 35.0%) (n=30) [CALL weak 0%, PUT strong 28%]
+            "running_tick":      1.0,   # baseline (acc=53%) (n=105)
+            "pattern":           1.0,   # baseline (acc=49%) (n=87)
+            "key_level":         0.5,   # dampened (acc=43% < 45.0%) (n=46)
         },
         "description": "Calibrated: 45.4% win (n=306)",
     },
@@ -117,11 +104,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=49%) (n=97)
-            "running_tick":   1.0,   # baseline (acc=52%) (n=120)
-            "pattern":   1.5,   # boost (acc=57% >= 55.0%) (n=87)
-            "indicator":   1.5,   # boost (acc=56% >= 55.0%) (n=43) [CALL strong 73%, PUT weak 50%]
-            "key_level":   0.5,   # dampened (acc=43% < 45.0%) (n=58)
-            "otc_pattern":   1.5,   # boost (acc=58% >= 55.0%) (n=78)
+            "running_tick":      1.0,   # baseline (acc=52%) (n=120)
+            "pattern":           1.5,   # boost (acc=57% >= 55.0%) (n=87)
+            "key_level":         0.5,   # dampened (acc=43% < 45.0%) (n=58)
         },
         "description": "Calibrated: 52.6% win (n=483)",
     },
@@ -129,11 +114,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   0.5,   # dampened (acc=44% < 45.0%) (n=59)
-            "running_tick":   0.5,   # dampened (acc=44% < 45.0%) (n=73)
-            "pattern":   0.5,   # dampened (acc=40% < 45.0%) (n=20) [CALL weak 20%, PUT strong 47%]
-            "indicator":   0.5,   # dampened (acc=45% < 45.0%) (n=38)
-            "key_level":   1.0,   # baseline (acc=47%) (n=32) [CALL weak 31%, PUT strong 62%]
-            "otc_pattern":   1.0,   # baseline (acc=47%) (n=66) [CALL weak 39%, PUT strong 64%]
+            "running_tick":      0.5,   # dampened (acc=44% < 45.0%) (n=73)
+            "pattern":           0.5,   # dampened (acc=40% < 45.0%) (n=20)
+            "key_level":         1.0,   # baseline (acc=47%) (n=32)
         },
         "description": "Calibrated: 44.8% win (n=288)",
     },
@@ -141,11 +124,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.8,   # STRONG (acc=67% >= 65.0%) (n=87)
-            "running_tick":   0.5,   # dampened (acc=44% < 45.0%) (n=109)
-            "pattern":   0.5,   # dampened (acc=39% < 45.0%) (n=90)
-            "indicator":   0.5,   # dampened (acc=44% < 45.0%) (n=41)
-            "key_level":   1.5,   # boost (acc=65% >= 55.0%) (n=57)
-            "otc_pattern":   1.5,   # boost (acc=58% >= 55.0%) (n=83)
+            "running_tick":      0.5,   # dampened (acc=44% < 45.0%) (n=109)
+            "pattern":           0.5,   # dampened (acc=39% < 45.0%) (n=90)
+            "key_level":         1.5,   # boost (acc=65% >= 55.0%) (n=57)
         },
         "description": "Calibrated: 52.2% win (n=467)",
     },
@@ -153,11 +134,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=50%) (n=68)
-            "running_tick":   1.0,   # baseline (acc=55%) (n=88)
-            "pattern":   1.0,   # baseline (acc=50%) (n=66)
-            "indicator":   0.5,   # dampened (acc=37% < 45.0%) (n=38)
-            "key_level":   1.0,   # baseline (acc=49%) (n=47)
-            "otc_pattern":   0.5,   # dampened (acc=42% < 45.0%) (n=64)
+            "running_tick":      1.0,   # baseline (acc=55%) (n=88)
+            "pattern":           1.0,   # baseline (acc=50%) (n=66)
+            "key_level":         1.0,   # baseline (acc=49%) (n=47)
         },
         "description": "Calibrated: 48.2% win (n=371)",
     },
@@ -165,11 +144,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=49%) (n=41)
-            "running_tick":   1.0,   # baseline (acc=53%) (n=53)
-            "pattern":   1.8,   # STRONG (acc=65% >= 65.0%) (n=40)
-            "indicator":   1.5,   # boost (acc=64% >= 55.0%) (n=25)
-            "key_level":   1.0,   # baseline (no data)
-            "otc_pattern":   1.0,   # baseline (acc=54%) (n=37) [CALL strong 67%, PUT weak 45%]
+            "running_tick":      1.0,   # baseline (acc=53%) (n=53)
+            "pattern":           1.8,   # STRONG (acc=65% >= 65.0%) (n=40)
+            "key_level":         1.0,   # baseline (no data)
         },
         "description": "Calibrated: 56.1% win (n=196)",
     },
@@ -177,11 +154,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=51%) (n=96)
-            "running_tick":   1.0,   # baseline (acc=54%) (n=114)
-            "pattern":   1.5,   # boost (acc=57% >= 55.0%) (n=88)
-            "indicator":   1.5,   # boost (acc=55% >= 55.0%) (n=49)
-            "key_level":   1.0,   # baseline (acc=50%) (n=60) [CALL weak 41%, PUT strong 61%]
-            "otc_pattern":   1.0,   # baseline (acc=55%) (n=84)
+            "running_tick":      1.0,   # baseline (acc=54%) (n=114)
+            "pattern":           1.5,   # boost (acc=57% >= 55.0%) (n=88)
+            "key_level":         1.0,   # baseline (acc=50%) (n=60)
         },
         "description": "Calibrated: 53.6% win (n=491)",
     },
@@ -189,11 +164,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.5,   # boost (acc=59% >= 55.0%) (n=46)
-            "running_tick":   1.0,   # baseline (acc=47%) (n=49)
-            "pattern":   1.0,   # baseline (acc=50%) (n=46)
-            "indicator":   1.0,   # baseline (acc=50%) (n=32)
-            "key_level":   1.5,   # boost (acc=59% >= 55.0%) (n=32)
-            "otc_pattern":   1.5,   # boost (acc=63% >= 55.0%) (n=49)
+            "running_tick":      1.0,   # baseline (acc=47%) (n=49)
+            "pattern":           1.0,   # baseline (acc=50%) (n=46)
+            "key_level":         1.5,   # boost (acc=59% >= 55.0%) (n=32)
         },
         "description": "Calibrated: 54.7% win (n=254)",
     },
@@ -207,8 +180,6 @@ weight_adapter = PairWeightAdapter(
 )
 
 CONFIG = BlenderConfig(
-    module_6_name="otc_pattern",
-    module_6_fn=_otc_pattern_analyze,
     reliability=RELIABILITY,
     weight_adapter=weight_adapter,
     module_names=_MODULES,

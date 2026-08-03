@@ -144,17 +144,11 @@ def test_bug01_sr_flip_resistance():
          f"SR_FLIP signals: {sr_summary}")
 
 
-# ─── BUG-02: trend_follow.py — pullback uses swing low/high ──────────────
+# ─── BUG-02: REMOVED (MODULE-PRUNE-2026-08-03) ──────────────
+# trend_follow module has been deleted from the codebase.
 def test_bug02_pullback_swing_check():
-    """Verify the code uses min/max of recent lows/highs, not prior close."""
-    from engines.base.modules import trend_follow
-    src = inspect.getsource(trend_follow.analyze)
-    uses_swing_low = "prior_swing_low = min(" in src
-    uses_swing_high = "prior_swing_high = max(" in src
-    test("BUG-02: pullback uses prior_swing_low (not prior close)",
-         uses_swing_low, f"prior_swing_low present: {uses_swing_low}")
-    test("BUG-02: pullback uses prior_swing_high (not prior close)",
-         uses_swing_high, f"prior_swing_high present: {uses_swing_high}")
+    """SKIPPED — trend_follow module deleted."""
+    print("BUG-02: SKIPPED — trend_follow module deleted (MODULE-PRUNE-2026-08-03)")
 
 
 # ─── BUG-03: blender.py — strategy variables pre-initialized ─────────────
@@ -345,34 +339,18 @@ def test_bug09_invalidate_cache_call():
          not has_bad_method, f"bad method exists: {has_bad_method}")
 
 
-# ─── BUG-10: otc_pattern.py — dead z_threshold code removed ─────────────
-def test_bug10_dead_code_removed():
-    """The z_threshold = 999 dead code should be gone."""
-    from engines.base.modules import otc_pattern
-    src = inspect.getsource(otc_pattern.analyze)
-    # Should NOT have the unreachable 'if stats["z_body"] > z_threshold:' block
-    has_dead_if = 'if stats["z_body"] > z_threshold:' in src
-    # Should have a clear DISABLED comment
-    has_disabled_comment = "DISABLED" in src and "0% win rate" in src
-    test("BUG-10: dead z_threshold code block removed",
-         not has_dead_if, f"dead if block present: {has_dead_if}")
-    test("BUG-10: DISABLED comment preserved for documentation",
-         has_disabled_comment, f"comment present: {has_disabled_comment}")
+# ─── BUG-10: REMOVED (MODULE-PRUNE-2026-08-03) ──────────────
+# otc_pattern module has been deleted from the codebase.
+def test_bug10_otc_pattern_dead_code():
+    """SKIPPED — otc_pattern module deleted."""
+    print("BUG-10: SKIPPED — otc_pattern module deleted (MODULE-PRUNE-2026-08-03)")
 
 
-# ─── BUG-11: trend_follow.py — avg_body excludes current candle ────────
-def test_bug11_avg_body_excludes_current():
-    """The exhaustion avg_body should NOT include the current candle."""
-    from engines.base.modules import trend_follow
-    src = inspect.getsource(trend_follow.analyze)
-    # Look for the SIGNAL 6 block
-    if "SIGNAL 6" not in src:
-        test("BUG-11: SIGNAL 6 block exists", False, "SIGNAL 6 not found in source")
-        return
-    # The fixed code uses range(-lookback, -1) — exclusive of last
-    uses_exclusive = "range(-lookback, -1)" in src
-    test("BUG-11: avg_body uses range(-lookback, -1) (excludes current)",
-         uses_exclusive, f"exclusive range present: {uses_exclusive}")
+# ─── BUG-11: REMOVED (MODULE-PRUNE-2026-08-03) ──────────────
+# trend_follow module has been deleted from the codebase.
+def test_bug11_trend_follow_avg_body():
+    """SKIPPED — trend_follow module deleted."""
+    print("BUG-11: SKIPPED — trend_follow module deleted (MODULE-PRUNE-2026-08-03)")
 
 
 # ─── BUG-12: candle_reaction.py — reason shows actual ratio ─────────────
@@ -465,8 +443,8 @@ def test_regression_imports():
         "engines.base.blender",
         "engines.base.modules.candle_reaction",
         "engines.base.modules.key_level",
-        "engines.base.modules.otc_pattern",
-        "engines.base.modules.trend_follow",
+        # FIX (MODULE-PRUNE-2026-08-03): removed otc_pattern and trend_follow
+        # from the regression import test — these modules have been deleted.
     ]
     all_ok = True
     for mod_name in modules:

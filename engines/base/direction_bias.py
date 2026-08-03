@@ -30,25 +30,18 @@ accumulate; it will refresh this map from the latest live brain data.
 DIRECTION_LOCK = {
     # CALL-biased (PUT suppressed)
     ("USDPKR_otc",  "running_tick"):    "CALL",   # CALL 54% vs PUT 33%
-    ("USDJPY_otc",  "indicator"):       "CALL",   # CALL 64% vs PUT 48%
-    ("USDINR_otc",  "otc_pattern"):     "CALL",   # CALL 67% vs PUT 45%
-    ("USDINR_otc",  "indicator"):       "CALL",   # CALL 75% vs PUT 59%
     ("USDCHF_otc",  "pattern"):         "CALL",   # CALL 65% vs PUT 50%
-    ("USDCHF_otc",  "otc_pattern"):     "CALL",   # CALL 69% vs PUT 51%
-    ("USDCHF_otc",  "indicator"):       "CALL",   # CALL 73% vs PUT 50%
-    ("USDBDT_otc",  "indicator"):       "CALL",   # CALL 64% vs PUT 23%
-    ("EURUSD_otc",  "otc_pattern"):     "CALL",   # CALL 57% vs PUT 40%
     ("EURUSD_otc",  "candle_reaction"): "CALL",   # CALL 56% vs PUT 41%
     # PUT-biased (CALL suppressed)
     ("USDJPY_otc",  "key_level"):       "PUT",    # CALL 41% vs PUT 61%
     ("USDCOP_otc",  "running_tick"):    "PUT",    # CALL 34% vs PUT 52%
-    ("USDCOP_otc",  "otc_pattern"):     "PUT",    # CALL 35% vs PUT 56%
     ("USDCOP_otc",  "key_level"):       "PUT",    # CALL 33% vs PUT 60%
     ("AUDUSD_otc",  "running_tick"):    "PUT",    # CALL 46% vs PUT 64%
     ("AUDUSD_otc",  "pattern"):         "PUT",    # CALL 36% vs PUT 52%
-    ("AUDUSD_otc",  "otc_pattern"):     "PUT",    # CALL 41% vs PUT 64%
-    ("AUDUSD_otc",  "indicator"):       "PUT",    # CALL 50% vs PUT 65%
     ("AUDUSD_otc",  "candle_reaction"): "PUT",    # CALL 47% vs PUT 64%
+    # FIX (MODULE-PRUNE-2026-08-03): removed 9 entries that referenced
+    # deleted modules (indicator, otc_pattern). Kept only entries for the
+    # 4 surviving modules: candle_reaction, running_tick, pattern, key_level.
 }
 
 

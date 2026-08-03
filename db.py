@@ -775,7 +775,9 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         r_list = reasons_text
                     r_text = ' ||| '.join(str(r) for r in r_list) if isinstance(r_list, list) else str(reasons_text)
                     
-                    mod_pat = _re.compile(r'\[(candle_reaction|running_tick|pattern|indicator|key_level|otc_pattern|trend_follow)\]')
+                    # FIX (MODULE-PRUNE-2026-08-03): removed indicator, otc_pattern, trend_follow
+                    # from the regex — these modules have been deleted.
+                    mod_pat = _re.compile(r'\[(candle_reaction|running_tick|pattern|key_level)\]')
                     parts = _re.split(mod_pat, r_text)
                     seen = set()
                     vote_rows = []
@@ -1147,9 +1149,10 @@ try:
 except ImportError:
     # Fallback for contexts where core.constants isn't importable (e.g.
     # standalone test scripts). Keeps the local tuple as a safety net.
+    # FIX (MODULE-PRUNE-2026-08-03): removed indicator, otc_pattern,
+    # trend_follow — these modules have been deleted.
     _MODULE_NAMES = (
-        "candle_reaction", "running_tick", "pattern",
-        "indicator", "key_level", "otc_pattern", "trend_follow",
+        "candle_reaction", "running_tick", "pattern", "key_level",
     )
 
 

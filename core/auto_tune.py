@@ -69,22 +69,20 @@ _apply_lock = threading.Lock()
 _AUTO_TUNE_MAX_ROWS = AUTO_TUNE_MAX_ROWS
 
 # Static (baseline) weights — the starting point. Auto-tune adjusts from here.
+# FIX (MODULE-PRUNE-2026-08-03): removed indicator, otc_pattern, trend_follow
+# entries — these modules have been deleted from the codebase.
 STATIC_WEIGHTS_OTC = {
     "candle_reaction": 1.3,
     "running_tick":    1.0,
     "pattern":         1.0,
-    "indicator":       1.0,
     "key_level":       0.7,
-    "otc_pattern":     0.9,
 }
 
 STATIC_WEIGHTS_REAL = {
     "candle_reaction": 1.3,
     "running_tick":    1.0,
     "pattern":         1.0,
-    "indicator":       1.2,
     "key_level":       0.8,
-    "trend_follow":    0.1,
 }
 
 

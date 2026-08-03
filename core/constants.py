@@ -28,14 +28,15 @@ DB_PATH = os.environ.get(
 #   - module_performance_report.py    (CLI version of /api/stats)
 #   - static/js/common.js             (frontend module breakdown display)
 #   - engines/base/blender.py         (_module_breakdown helper)
+#
+# FIX (MODULE-PRUNE-2026-08-03): removed "indicator", "otc_pattern",
+# "trend_follow" — these 3 modules have been deleted from the codebase.
+# Both engines now run the same 4 shared modules.
 MODULE_NAMES = (
     "candle_reaction",
     "running_tick",
     "pattern",
-    "indicator",
     "key_level",
-    "otc_pattern",      # OTC engine's 6th module (mean-reversion)
-    "trend_follow",     # Real engine's 6th module (momentum continuation)
 )
 
 # Human-readable display names for the UI.
@@ -43,20 +44,18 @@ MODULE_DISPLAY_NAMES = {
     "candle_reaction": "Candle Reaction",
     "running_tick":    "Running Tick",
     "pattern":         "Pattern",
-    "indicator":       "Indicator",
     "key_level":       "Key Level",
-    "otc_pattern":     "OTC Pattern",
-    "trend_follow":    "Trend Follow",
 }
 
-# Modules used by each engine (5 shared + 1 engine-specific).
+# Modules used by each engine.
+# FIX (MODULE-PRUNE-2026-08-03): both engines now use the same 4 modules.
+# The engine-specific 6th module concept (otc_pattern / trend_follow) has
+# been removed — those modules are deleted.
 OTC_MODULES = (
-    "candle_reaction", "running_tick", "pattern",
-    "indicator", "key_level", "otc_pattern",
+    "candle_reaction", "running_tick", "pattern", "key_level",
 )
 REAL_MODULES = (
-    "candle_reaction", "running_tick", "pattern",
-    "indicator", "key_level", "trend_follow",
+    "candle_reaction", "running_tick", "pattern", "key_level",
 )
 
 # Allowed candle periods (seconds). Whitelisted to prevent bogus streams

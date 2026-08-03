@@ -16,8 +16,8 @@
      - Redundant client-side WS message filter REMOVED — the server's
        broadcast() now filters by interested_cids per stream, so each
        client only receives messages for assets it actually subscribed to.
-     - MODULE_NAMES single source of truth on JS side (7 modules including
-       trend_follow); only the active engine's 6th module is shown.
+     - MODULE_NAMES single source of truth on JS side (4 modules — both
+       engines use the same shared set).
      - Responsive chart: chart.applyOptions({width, height}) on window resize.
      - Mobile-friendly: pinch-to-zoom disabled on chart container via CSS
        touch-action:none (LightweightCharts handles touch internally).
@@ -42,29 +42,24 @@ const TICK_TAPE_MAX = 40;
 const HISTORY_MAX = 100;
 
 /* ─── MODULE NAMES — single source of truth (mirrors core.constants.MODULE_NAMES) ──
-   7 modules total: 5 shared + 1 OTC-specific (otc_pattern) + 1 Real-specific
-   (trend_follow). Each engine displays only its own 6 modules. */
+   FIX (MODULE-PRUNE-2026-08-03): reduced from 7 modules to 4. Removed
+   indicator, otc_pattern, trend_follow — these modules have been deleted
+   from the codebase. Both engines now use the same 4 shared modules. */
 const MODULE_NAMES = [
   'candle_reaction',
   'running_tick',
   'pattern',
-  'indicator',
   'key_level',
-  'otc_pattern',     // OTC engine's 6th module
-  'trend_follow',    // Real engine's 6th module
 ];
 const MODULE_DISPLAY = {
   'candle_reaction': 'Candle Reaction',
   'running_tick':    'Running Tick',
   'pattern':         'Pattern',
-  'indicator':       'Indicator',
   'key_level':       'Key Level',
-  'otc_pattern':     'OTC Pattern',
-  'trend_follow':    'Trend Follow',
 };
-// Active engine's 6-module set (5 shared + engine-specific).
-const OTC_MODULES  = ['candle_reaction','running_tick','pattern','indicator','key_level','otc_pattern'];
-const REAL_MODULES = ['candle_reaction','running_tick','pattern','indicator','key_level','trend_follow'];
+// Both engines use the same 4 modules now.
+const OTC_MODULES  = ['candle_reaction','running_tick','pattern','key_level'];
+const REAL_MODULES = ['candle_reaction','running_tick','pattern','key_level'];
 
 /* ─── STATE (reset on every initApp call) ────────────────────────────────── */
 let ws = null, reconnectTimer = null, reconnectAttempts = 0;

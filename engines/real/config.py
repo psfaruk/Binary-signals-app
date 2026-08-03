@@ -1,7 +1,11 @@
-"""engines/real/config.py — AUTO-CALIBRATED CONFIG v3 (2026-08-03)
+"""engines/real/config.py — AUTO-CALIBRATED CONFIG v4 (2026-08-03)
 
 Generated from live Railway brain data (~1280 graded signals).
 Per-pair per-module weights calibrated against actual win rates.
+
+FIX (MODULE-PRUNE-2026-08-03): removed `indicator` and `trend_follow`
+modules entirely. Both engines now run the same 4 shared modules:
+candle_reaction, running_tick, pattern, key_level.
 
 Calibration methodology (DEEP_v3, 2026-08-03):
 - Pairs with < 40% win rate (and >= 8 samples) -> DISABLED entirely
@@ -18,46 +22,41 @@ Date: 2026-08-03
 """
 from engines.base.blender import BlenderConfig
 from engines.base.per_pair import PairWeightAdapter
-from engines.base.modules.trend_follow import analyze as _trend_follow_analyze
 from core.constants import REAL_MODULES as _MODULES
 
 
 # ── Reliability tier multipliers (data-driven) ──────────────────────────
-# USER FIX #5 (2026-08-03): LEVEL reliability 0.8 -> 1.0.
-# Restored to let the per-pair weight be the sole dampener/booster
-# (removes the double-dampen issue from BUG #8 in the source audit).
+# FIX (MODULE-PRUNE-2026-08-03): removed "INDICATOR" and "TREND" tiers —
+# the corresponding modules have been deleted.
 RELIABILITY = {
     "PATTERN":   1.0,
-    "LEVEL":   1.0,   # was 0.8 — restored
-    "TREND":   1.0,
-    "INDICATOR":   0.9,
-    "CANDLE":   1.0,
-    "MICRO":   0.7,
+    "LEVEL":     1.0,
+    "CANDLE":    1.0,
+    "MICRO":     0.7,
 }
 
 
 # ── DEFAULT_WEIGHTS — for pairs with insufficient data (< 8 samples) ──
+# FIX (MODULE-PRUNE-2026-08-03): removed indicator + trend_follow entries.
 DEFAULT_WEIGHTS = {
     "candle_reaction":   1.0,
-    "running_tick":   1.0,
-    "pattern":   1.0,
-    "indicator":   0.9,
-    "key_level":   0.8,
-    "trend_follow":   0.1,
+    "running_tick":      1.0,
+    "pattern":           1.0,
+    "key_level":         0.8,
 }
 
 
 # ── PER-PAIR CALIBRATED WEIGHTS (auto-generated from live data) ────────
+# FIX (MODULE-PRUNE-2026-08-03): removed indicator + trend_follow from
+# every pair's weights dict. Comments for those entries are also removed.
 PAIR_CONFIGS = {
     "AUDUSD": {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=46%) (n=28)
-            "running_tick":   1.5,   # boost (acc=65% >= 55.0%) (n=34)
-            "pattern":   1.0,   # baseline (acc=55%) (n=22)
-            "indicator":   1.0,   # baseline (no data)
-            "key_level":   1.0,   # baseline (no data)
-            "trend_follow":   1.0,   # baseline (no data)
+            "running_tick":      1.5,   # boost (acc=65% >= 55.0%) (n=34)
+            "pattern":           1.0,   # baseline (acc=55%) (n=22)
+            "key_level":         1.0,   # baseline (no data)
         },
         "description": "Calibrated: 56.0% win (n=84)",
     },
@@ -65,11 +64,9 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=51%) (n=49)
-            "running_tick":   1.0,   # baseline (acc=53%) (n=60)
-            "pattern":   1.0,   # baseline (acc=48%) (n=46)
-            "indicator":   1.0,   # baseline (no data)
-            "key_level":   1.0,   # baseline (acc=50%) (n=34)
-            "trend_follow":   1.0,   # baseline (no data)
+            "running_tick":      1.0,   # baseline (acc=53%) (n=60)
+            "pattern":           1.0,   # baseline (acc=48%) (n=46)
+            "key_level":         1.0,   # baseline (acc=50%) (n=34)
         },
         "description": "Calibrated: 50.8% win (n=189)",
     },
@@ -83,8 +80,6 @@ weight_adapter = PairWeightAdapter(
 )
 
 CONFIG = BlenderConfig(
-    module_6_name="trend_follow",
-    module_6_fn=_trend_follow_analyze,
     reliability=RELIABILITY,
     weight_adapter=weight_adapter,
     module_names=_MODULES,

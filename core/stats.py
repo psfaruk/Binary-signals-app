@@ -6,7 +6,7 @@ the same logic was duplicated 90% between:
   - server.py /api/stats endpoint        (returns JSON to frontend)
   - module_performance_report.py CLI     (prints formatted text)
 
-Both had drifted out of sync — neither included `trend_follow` in their
+FIX (MODULE-PRUNE-2026-08-03): indicator / otc_pattern / trend_follow removed.
 MODULE_NAMES dict, so Real-engine signals were silently undercounted.
 
 This module exposes one function `compute_module_stats(db_path)` that

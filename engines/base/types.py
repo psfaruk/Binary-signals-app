@@ -17,7 +17,8 @@ Direction = Literal["CALL", "PUT", "NEUTRAL"]
 SignalType = Literal["REVERSAL", "CONTINUATION"]
 ReliabilityTier = Literal[
     "PATTERN", "LEVEL", "CANDLE", "MICRO",
-    "INDICATOR", "OTC", "TREND",
+    # FIX (MODULE-PRUNE-2026-08-03): removed "INDICATOR", "OTC", "TREND"
+    # — the indicator / otc_pattern / trend_follow modules have been deleted.
 ]
 
 __all__ = [
@@ -47,17 +48,13 @@ class ModuleResult:
         confidence: 0-100 (module's own confidence in its vote)
         signal_type: REVERSAL or CONTINUATION (used for regime weighting)
         reliability: tier key for weight multiplier
-        group: correlation group — actual groups emitted by modules include
-            BODY, BODY_CONT, WICK, WICK_CONT, MICRO_SR, FIB, SR_FLIP,
-            TRENDLINE, IND_RSI, IND_MACD, IND_EMA, IND_BB, IND_STOCH,
-            TREND_MOMENTUM, TREND_EMA, TREND_BREAKOUT, TREND_EXHAUST,
-            TREND_PULLBACK, TREND_DIVERGE, OTC_MEANREV, OTC_RARITY,
-            OTC_ZSCORE, OTC_PCTILE, OTC_ALTERNATE, OTC_MOMENTUM,
-            OTC_TRENDSTREAK, MICRO, LEVEL, PATTERN.
-            FIX (DEEP-AUDIT-2026-07-26 / F-04-23): replaced stale enumeration
-            (was "BODY, WICK, PATTERN_*, LEVEL, STAT, MICRO, OTC, INDICATOR,
-            TREND") which listed dead "STAT" and missed 25+ actual groups.
-            (Audit A-02 #29, A-06 #29.)
+        group: correlation group — actual groups emitted by the remaining
+            4 modules include BODY, BODY_CONT, WICK, WICK_CONT, MICRO_SR,
+            FIB, SR_FLIP, TRENDLINE, MICRO, LEVEL, PATTERN_REVERSAL,
+            PATTERN_CONTINUATION.
+            FIX (MODULE-PRUNE-2026-08-03): removed IND_* / TREND_* / OTC_*
+            groups — the indicator / otc_pattern / trend_follow modules
+            have been deleted from the codebase.
         reasons: list of human-readable reason strings
     """
     module_name: str
