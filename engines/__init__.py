@@ -42,10 +42,11 @@ from engines import real as _real_engine
 # loses >=65% of trades with >=5 samples. Signals during these windows are
 # suppressed (returned as NEUTRAL with reason="trap_hour").
 from engines.base.trap_hours import is_trap_hour as _is_trap_hour, trap_reason as _trap_reason
-# USER FIX #8 (2026-08-03): disabled-pairs blocklist. Pairs with chronically
-# low (< 45%) win rate are suppressed entirely — no signal emitted regardless
-# of what the modules vote.
-from engines.base.disabled_pairs import is_pair_disabled as _is_pair_disabled, disabled_reason as _disabled_reason
+# USER FIX #8 (2026-08-03, REVISED): pairs with chronically low win rate
+# now get a CONFIDENCE PENALTY (not full block). The original full-block
+# approach suppressed too many signals and the live app showed no
+# direction guidance for these pairs.
+from engines.base.disabled_pairs import pair_penalty as _pair_penalty, penalty_reason as _penalty_reason
 
 __all__ = ["predict", "otc", "real", "category_of"]
 # TODO (DEEP-AUDIT-2026-07-26 / F-03-08): BlenderConfig is intentionally NOT
@@ -148,30 +149,20 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # Log and fall through to the normal prediction path.
         print(f"[engines] trap-hour check failed for {asset}: {_trap_exc}")
 
-    # USER FIX #8 (2026-08-03): DISABLED-PAIRS BLOCKLIST.
+    # USER FIX #8 (2026-08-03, REVISED): PAIR CONFIDENCE PENALTY.
     # Pairs with chronically low (< 45%) win rate over 200+ graded signals
-    # are suppressed entirely. The engine returns NEUTRAL with reason=
-    # "pair_disabled" for these assets, regardless of what the modules vote.
-    # The user can still SEE the chart and watch the price — only the signal
-    # emission is blocked.
+    # get a confidence penalty (×0.5-0.6) instead of being fully blocked.
+    # The original full-block approach suppressed too many signals.
+    # Now the engine still runs and produces a signal, but the final
+    # confidence is dampened so the user sees a weaker conviction.
+    _pair_mult = 1.0
+    _pair_pen_reason = ""
     try:
-        if _is_pair_disabled(asset):
-            _reason = _disabled_reason(asset)
-            return {
-                "signal": "NEUTRAL",
-                "confidence": 0,
-                "strength": "WEAK",
-                "score": 0.0,
-                "reasons": [_reason] if _reason else ["pair disabled"],
-                "modules": {},
-                "regime": "pair_disabled",
-                "category": category if category in ("otc", "real") else "otc",
-                "pair_disabled": True,
-                "disabled_reason": _reason,
-                "skipped": True,
-            }
-    except Exception as _disabled_exc:
-        print(f"[engines] disabled-pair check failed for {asset}: {_disabled_exc}")
+        _pair_mult = _pair_penalty(asset)
+        if _pair_mult < 1.0:
+            _pair_pen_reason = _penalty_reason(asset)
+    except Exception as _pen_exc:
+        print(f"[engines] pair-penalty check failed for {asset}: {_pen_exc}")
 
     # FIX (DEEP-AUDIT-2026-07-26 / F-03-06): previously `detected = category_of(asset)`
     # was always computed even when the caller explicitly passed category. Now
@@ -229,6 +220,27 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # always 'otc' or 'real'.
     result = copy.deepcopy(result)
     result["category"] = category
+
+    # USER FIX #8 (2026-08-03, REVISED): apply pair confidence penalty.
+    # If the asset is in the PENALIZED_PAIRS map, multiply the final
+    # confidence by the dampening factor. This happens AFTER the engine
+    # has produced its signal, so the direction (CALL/PUT) is preserved
+    # — only the displayed conviction is reduced.
+    if _pair_mult < 1.0 and result.get("signal") in ("CALL", "PUT"):
+        _orig_conf = result.get("confidence", 0)
+        _new_conf = round(_orig_conf * _pair_mult)
+        result["confidence"] = _new_conf
+        # If the penalty drops confidence below the NEUTRAL threshold,
+        # convert to NEUTRAL so the user doesn't trade on a weak signal.
+        if _new_conf < 25:
+            result["signal"] = "NEUTRAL"
+            result["confidence"] = 0
+            result["strength"] = "NEUTRAL"
+        # Append the penalty reason for transparency.
+        if _pair_pen_reason:
+            result.setdefault("reasons", []).append(
+                f"{_pair_pen_reason} (confidence {_orig_conf} -> {_new_conf})")
+
     return result
 
 

@@ -1,42 +1,65 @@
-"""engines/base/disabled_pairs.py — Disable pairs with chronically low win rate.
+"""engines/base/disabled_pairs.py — Pairs with chronically low win rate.
 
-USER FIX #8 (2026-08-03): pairs with < 45% aggregate win rate are
-DISABLED entirely — the engine returns NEUTRAL with reason="pair_disabled"
-for these assets, regardless of what the modules vote.
+USER FIX #8 (2026-08-03, REVISED after live deploy):
+The original Fix #8 SUPPRESSED signals entirely for pairs with < 45%
+win rate. But this caused the live app to show NO signals on these
+pairs — the user could not see ANY directional guidance even when the
+engine had a strong consensus.
 
-Live brain data (/api/stats pairs) shows these pairs have negative
-expected value over 200+ graded signals — the engine's per-module
-dampening cannot rescue them, so the cleanest fix is to suppress them
-entirely. The user can still SEE the chart and watch the price, but no
-signal will be emitted.
+REVISED approach (2026-08-03): these pairs are NOT blocked — they still
+produce signals, but the engines/__init__.py predict() router applies
+a confidence penalty (×0.6) to dampen the displayed conviction. This
+matches the brain's per-pair dampening philosophy without completely
+hiding the signal.
 
-Regeneration: re-run /home/z/my-project/scripts/generate_calibration.py
-after ~1000 more signals accumulate; it refreshes this list from the
-latest /api/stats pairs endpoint.
+The is_pair_disabled() / disabled_reason() functions are kept for
+backward compatibility but now return False / "" — no pair is fully
+blocked. The PENALIZED_PAIRS dict below is what the router actually
+uses to apply the dampening multiplier.
 """
 
-# Set of asset names with chronically low (< 45%) win rate.
+# Pairs with chronically low win rate that get a confidence penalty.
+# These pairs are NOT blocked — they still produce signals, but the
+# router multiplies the final confidence by the listed factor.
+#
 # Source: live /api/stats on Railway production, 2026-08-03.
 # Threshold: aggregate win rate < 45% AND >= 50 graded signals.
-DISABLED_PAIRS = frozenset({
-    "USDCOP_otc",    # 44.9% win (n=205) — 5 of 6 modules dampened, still losing
-    "BRLUSD_otc",    # 45.1% win (n=266) — worst pair, all modules dampened
-    "USDBDT_otc",    # 45.9% win (n=209) — otc_pattern + indicator disabled
-    "GBPUSD_otc",    # 33.3% win (n=24)  — small sample but extremely poor
-    # USDMXN_otc (25% n=5) and USDCHF (0% n=6) are below threshold but have
-    # too few samples to be confidently disabled — left active for now.
-})
+PENALIZED_PAIRS = {
+    "USDCOP_otc":    0.6,   # 44.9% win (n=205)
+    "BRLUSD_otc":    0.6,   # 45.1% win (n=266)
+    "USDBDT_otc":    0.6,   # 45.9% win (n=209)
+    "GBPUSD_otc":    0.5,   # 33.3% win (n=24) — heavier penalty
+}
+
+# Backward-compat: empty set — no pair is fully blocked anymore.
+# (Was: frozenset of pair names that returned NEUTRAL.)
+DISABLED_PAIRS = frozenset()
 
 
 def is_pair_disabled(asset: str) -> bool:
-    """Return True if the asset is in the disabled-pairs blocklist."""
-    return asset in DISABLED_PAIRS
+    """Return True if the asset is fully blocked. Always False now —
+    see module docstring for the revised approach (confidence penalty
+    instead of full suppression).
+    """
+    return False
 
 
 def disabled_reason(asset: str) -> str:
-    """Return a human-readable reason for suppression, or empty string."""
-    if is_pair_disabled(asset):
-        return (f"_PAIR_DISABLED: {asset} is in the disabled-pairs blocklist "
-                f"(chronically < 45% win rate over 200+ graded signals). "
-                f"Signal suppressed to prevent negative-EV trades.")
+    """Return a human-readable reason for full block. Always empty now."""
     return ""
+
+
+def pair_penalty(asset: str) -> float:
+    """Return the confidence multiplier for a penalized pair (0.5-1.0).
+    Returns 1.0 if the pair is not in the penalty map (no penalty).
+    """
+    return PENALIZED_PAIRS.get(asset, 1.0)
+
+
+def penalty_reason(asset: str) -> str:
+    """Return a human-readable reason for the penalty, or empty string."""
+    mult = PENALIZED_PAIRS.get(asset)
+    if mult is None or mult == 1.0:
+        return ""
+    return (f"_PAIR_PENALTY: {asset} has chronically low win rate "
+            f"-> confidence ×{mult:.2f} (live data shows < 45% win)")

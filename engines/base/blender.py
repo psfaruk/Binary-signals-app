@@ -764,31 +764,26 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # NEUTRAL if the group counts are ALSO tied. Total==0 (all signals
     # suppressed) still returns NEUTRAL — no consensus to break.
     #
-    # USER FIX #3 (2026-08-03): RANGE regime suppression — moved HERE
-    # (before the net==0 tiebreaker) so it intercepts ALL signals when
-    # the market is ranging, regardless of whether scores tie or not.
-    # Live brain data shows RANGE regime has only 44% win rate.
-    if _is_ranging:
-        all_reasons.append(
-            f"_RANGE_SUPPRESS: regime=RANGE (str={_trend_strength:.2f}) "
-            f"-> NEUTRAL (historical win rate only 44% in this regime)")
-        # FIX (USER FIX #3, 2026-08-03): _algo_strategy_name is not yet
-        # computed at this point (it's computed later in the algo-strategy
-        # block). Use a getattr-safe fallback so the return dict still
-        # has the strategy key for downstream consumers.
-        _strat_name = locals().get('_algo_strategy_name', 'default')
-        _strat_reason = locals().get('_algo_strategy_reason', '')
-        return {
-            "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
-            "score": 0, "reasons": all_reasons,
-            "regime": regime, "agree": 0,
-            "total": total_groups, "signals_fired": total_groups,
-            "modules": _module_breakdown(adjusted, all_results, module_names),
-            "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
-            "strategy": _strat_name,
-            "strategy_reason": _strat_reason,
-            "range_suppressed": True,
-        }
+    # USER FIX #3 (2026-08-03, REVISED): RANGE regime suppression.
+    # Live brain data (/api/brain/insights REGIME_PATTERN) shows the engine
+    # wins only 44% in RANGE regime (154/348).
+    #
+    # IMPORTANT CORRECTION (2026-08-03, after live deploy): the original
+    # Fix #3 suppressed ALL signals when is_ranging==True. But Quotex OTC
+    # pairs are classified as RANGE ~81% of the time (random_walk algo),
+    # so this suppressed nearly ALL OTC signals — only 9 predictions in
+    # several hours vs 1280 before. Win rate dropped to 33%.
+    #
+    # REVISED approach: only suppress when the RANGE is EXTREME — i.e.,
+    # trend_strength is very low (< 0.1) AND not volatile (volatility_pct
+    # < 1.5x). This still catches the worst ranging periods but lets
+    # mild/moderate ranging markets produce signals (with dampened
+    # confidence via the existing SIDEWAYS_RANGE_DAMPEN -5 above).
+    #
+    # This check is performed LATER in the flow (after confidence + abs_net
+    # + majority_group_n + has_pattern_confluence are all computed) so we
+    # can apply the ultra-consensus exception. See the second RANGE block
+    # below near the LOW_CONF_SKIP check.
 
     if total == 0:
         call_g = set(r.group for r, e in adjusted if r.direction == "CALL")
@@ -797,6 +792,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # already returns 0 for two empty sets — the `if (call_g or put_g)
         # else 0` guard was redundant. Removed.
         maj_n = max(len(call_g), len(put_g))
+        # FIX (USER FIX #7+#8, 2026-08-03): include strategy keys so
+        # downstream consumers (tests, DB log) don't crash when all
+        # votes were suppressed by direction lock. Use safe fallback
+        # because _algo_strategy_name is computed later in the flow.
+        _strat = locals().get('_algo_strategy_name', 'default')
+        _strat_r = locals().get('_algo_strategy_reason', '')
         return {
             "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
             "score": 0, "reasons": all_reasons or ["CONFLICTING_SIGNALS"],
@@ -804,6 +805,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             "total": total_groups, "signals_fired": total_groups,
             "modules": _module_breakdown(adjusted, all_results, module_names),
             "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
+            "strategy": _strat,
+            "strategy_reason": _strat_r,
         }
     if net == 0:
         # Score tie — try group-count tiebreaker.
@@ -1726,11 +1729,37 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # consumers expecting NEUTRAL signals to have confidence=0.
     # FIX (DEEP-AUDIT-2026-07-26 / F-02-97): use centralised constant
     # LOW_CONF_SKIP_THRESHOLD (was magic 20).
-    # NOTE (USER FIX #3, 2026-08-03): the RANGE suppression block has been
-    # moved EARLIER in the predict() flow (to just after the net/total
-    # computation, before the net==0 tiebreaker) so it intercepts ALL
-    # signals when the market is ranging. The previous location here was
-    # unreachable when net==0 triggered an early NEUTRAL return.
+    # NOTE (USER FIX #3, 2026-08-03, REVISED): the RANGE suppression block
+    # has been moved HERE (after confidence + abs_net + majority_group_n
+    # + has_pattern_confluence are all computed). The original location
+    # earlier in the flow was unreachable for some signals AND when moved
+    # before net==0 it caused UnboundLocalError on `confidence`. Now it's
+    # in the right place: only fires for EXTREME ranging markets (low
+    # trend_strength + low volatility) and exempts ultra-consensus signals.
+    _is_extreme_ranging = (
+        _is_ranging
+        and _trend_strength < 0.10
+        and _volatility_pct < 1.5
+    )
+    if _is_extreme_ranging and not (
+        confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
+        and has_pattern_confluence
+    ):
+        all_reasons.append(
+            f"_RANGE_SUPPRESS: EXTREME RANGE (str={_trend_strength:.2f}, "
+            f"vol={_volatility_pct:.1f}x) -> NEUTRAL (historical win rate "
+            f"only 44% in this regime)")
+        return {
+            "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
+            "score": net, "reasons": all_reasons,
+            "regime": regime, "agree": agree, "total": total_groups,
+            "signals_fired": total_groups,
+            "modules": _module_breakdown(adjusted, all_results, module_names),
+            "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
+            "strategy": _algo_strategy_name,
+            "strategy_reason": _algo_strategy_reason,
+            "range_suppressed": True,
+        }
     _low_conf_threshold = LOW_CONF_SKIP_OTC if asset.endswith("_otc") else LOW_CONF_SKIP_REAL
     if confidence < _low_conf_threshold:
         all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < {_low_conf_threshold} -> NEUTRAL")
