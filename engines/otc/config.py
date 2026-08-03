@@ -28,8 +28,11 @@ from core.constants import OTC_MODULES as _MODULES
 # ── Reliability tier multipliers (data-driven) ──────────────────────────
 # FIX (MODULE-PRUNE-2026-08-03): removed "INDICATOR", "OTC", "TREND" tiers —
 # the corresponding modules have been deleted.
+# FIX (POST-PRUNE-TUNE-2026-08-03): boosted PATTERN 1.3 → 1.4 to compensate
+# for the lost OTC ×1.4 tier (otc_pattern module). This restores the
+# effective confidence of OTC signals to pre-prune levels.
 RELIABILITY = {
-    "PATTERN":   1.3,
+    "PATTERN":   1.4,
     "LEVEL":     1.0,
     "CANDLE":    1.0,
     "MICRO":     0.7,

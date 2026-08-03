@@ -28,8 +28,11 @@ from core.constants import REAL_MODULES as _MODULES
 # ── Reliability tier multipliers (data-driven) ──────────────────────────
 # FIX (MODULE-PRUNE-2026-08-03): removed "INDICATOR" and "TREND" tiers —
 # the corresponding modules have been deleted.
+# FIX (POST-PRUNE-TUNE-2026-08-03): boosted PATTERN 1.0 → 1.2 to compensate
+# for the lost INDICATOR + TREND tiers. Pattern module is now the primary
+# trend-continuation detector in Real markets.
 RELIABILITY = {
-    "PATTERN":   1.0,
+    "PATTERN":   1.2,
     "LEVEL":     1.0,
     "CANDLE":    1.0,
     "MICRO":     0.7,

@@ -66,9 +66,9 @@ EDGE_FACTOR_BASE = 0.5                    # PROB 89 (edge_factor baseline)
 EDGE_FACTOR_NET_MARGIN_WEIGHT = 0.5       # PROB 89
 CONFIDENCE_SCALE = 100                   # PROB 90 (sqrt -> percentage scale)
 
-SINGLE_GROUP_CAP_HIGH_MIN = 6            # PROB 20 / 91 (raw_majority >= 6)
+SINGLE_GROUP_CAP_HIGH_MIN = 4            # raw_majority >= 4 (was 6)
 SINGLE_GROUP_CAP_HIGH = 55
-SINGLE_GROUP_CAP_MID_MIN = 4            # raw_majority >= 4
+SINGLE_GROUP_CAP_MID_MIN = 3            # raw_majority >= 3 (was 4)
 SINGLE_GROUP_CAP_MID = 48
 SINGLE_GROUP_CAP_LOW = 42
 
@@ -91,8 +91,8 @@ HTF_ALIGNED_BONUS = 5                    # PROB 46 (HTF +5)
 HTF_COUNTER_PENALTY = 5                  # PROB 46 (HTF -5)
 
 ULTRA_CONSENSUS_CONF_MIN = 75           # PROB 96
-ULTRA_CONSENSUS_ABS_NET_MIN = 8
-ULTRA_CONSENSUS_GROUPS_MIN = 4
+ULTRA_CONSENSUS_ABS_NET_MIN = 5         # was 8 — adjusted for 4-module engine (MODULE-PRUNE-2026-08-03)
+ULTRA_CONSENSUS_GROUPS_MIN = 3          # was 4 — adjusted for 4-module engine (all 3+ groups agreeing = ultra-consensus)
 
 LOW_CONF_SKIP_THRESHOLD = 20             # PROB 97 (confidence < 20 -> NEUTRAL)
 # FIX (WINRATE-BOOST #3, 2026-07-28): per-engine low-confidence skip threshold.
@@ -343,6 +343,36 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         collapsed_wick.module_name = "candle_reaction"  # keep source label
         collapsed_wick.group = "WICK"  # normalize for breakdown display
         grouped_results.append(collapsed_wick)
+
+    # ── Step 3.5: Pattern-aware conflict resolution (NEW, MODULE-PRUNE-2026-08-03) ─
+    # FIX (POST-PRUNE-TUNE-2026-08-03): with indicator/otc_pattern/trend_follow
+    # removed, candle_reaction's "big body → reversal" and "streak → reversal"
+    # signals can fire OPPOSITE to a clear pattern signal (e.g., bullish
+    # engulfing). candle_reaction has reliability CANDLE ×1.0, pattern has
+    # PATTERN ×1.3-1.4 — pattern is more reliable. When they conflict on the
+    # SAME candle, dampen candle_reaction's conflicting reversal vote by 50%.
+    #
+    # Logic: if pattern module emitted a REVERSAL signal in direction X, and
+    # candle_reaction emitted a REVERSAL signal in direction OPPOSITE to X
+    # on the same candle, halve candle_reaction's score/confidence.
+    pattern_reversal_dirs = set()
+    candle_reversal_indices = []
+    for idx, r in enumerate(grouped_results):
+        if r.module_name == "pattern" and r.signal_type == "REVERSAL":
+            pattern_reversal_dirs.add(r.direction)
+        if r.module_name == "candle_reaction" and r.signal_type == "REVERSAL":
+            candle_reversal_indices.append(idx)
+
+    if pattern_reversal_dirs and candle_reversal_indices:
+        for idx in candle_reversal_indices:
+            cr = grouped_results[idx]
+            # Check if candle_reaction's direction conflicts with any pattern reversal
+            if cr.direction not in pattern_reversal_dirs:
+                # Conflict — dampen candle_reaction's vote
+                cr.score = max(1, cr.score // 2)
+                cr.confidence = max(20, cr.confidence // 2)
+                cr.reasons.append("_PATTERN_CONFLICT: candle_reaction reversal "
+                                  "conflicts with pattern reversal — score halved")
 
     # ── Step 4: Exhaustion gate detection ────────────────────────────────
     # FIX (2026-07-18, structural bias): the original exhaustion gate had
@@ -1726,7 +1756,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # generous). Now requires confidence >= MEDIUM_CONFIDENCE_FLOOR (30)
     # for the standalone MEDIUM tier; signals with abs_net >= 2 but low
     # confidence fall through to WEAK (next elif).
-    if (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
+    if (confidence >= 65 and abs_net >= 3 and majority_group_n >= 2
             and has_pattern_confluence):
         strength = "STRONG"
     elif (confidence >= ULTRA_CONSENSUS_CONF_MIN
@@ -1735,8 +1765,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # NEW: ultra-strong consensus without pattern confluence.
         strength = "STRONG"
         all_reasons.append(
-            "_ULTRA_CONSENSUS: 4+ groups, abs_net>=8 -> STRONG (no pattern needed)")
-    elif (confidence >= 65 and abs_net >= 5 and majority_group_n >= 2
+            "_ULTRA_CONSENSUS: 3+ groups, abs_net>=5 -> STRONG (no pattern needed)")
+    elif (confidence >= 65 and abs_net >= 3 and majority_group_n >= 2
           and not has_pattern_confluence):
         strength = "MEDIUM"
         all_reasons.append("_DOWNGRADE: STRONG->MEDIUM (no strong pattern confluence)")
