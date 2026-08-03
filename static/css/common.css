@@ -1657,3 +1657,63 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   overflow:hidden;
   text-overflow:ellipsis;
 }
+
+/* ═══ NEW (ALWAYS-SIGNAL-2026-08-03): refresh button + module stats ═══ */
+
+#refresh-btn{
+  background:none;border:1px solid var(--border);color:var(--text);
+  font-size:14px;padding:4px 8px;border-radius:4px;cursor:pointer;
+  transition:all .15s;
+}
+#refresh-btn:hover{
+  background:var(--card);border-color:var(--text-dim);
+}
+#refresh-btn.spin{
+  animation:chart-spin .7s linear infinite;
+}
+@keyframes chart-spin{
+  from{transform:rotate(0deg)}
+  to{transform:rotate(360deg)}
+}
+
+/* Per-module stats (Stats tab → By Module section) */
+.module-stats-hero{
+  display:flex;justify-content:space-between;align-items:baseline;
+  padding:6px 0;margin-bottom:6px;border-bottom:1px solid var(--border);
+}
+.module-stats-overall{font-size:14px;font-weight:700;color:var(--text)}
+.module-stats-meta{font-size:10px;color:var(--text-dim)}
+.module-stats-rows{display:flex;flex-direction:column;gap:6px}
+.module-stats-row{
+  display:grid;grid-template-columns:90px 1fr 70px 100px;
+  align-items:center;gap:8px;padding:6px 8px;border-radius:4px;
+  background:var(--card);cursor:pointer;transition:background .15s;
+}
+.module-stats-row:hover{background:rgba(255,255,255,.08)}
+.module-stats-row:focus{outline:2px solid var(--text-dim);outline-offset:2px}
+.module-stats-name{font-size:10px;color:var(--text-dim);text-transform:uppercase;font-weight:600}
+.module-stats-pct.none .pct-num{color:var(--text-dim)}
+.module-stats-pct.good .pct-num{color:#4caf50}
+.module-stats-pct.mid .pct-num{color:#ffc107}
+.module-stats-pct.bad .pct-num{color:#f44336}
+.pct-num{font-size:13px;font-weight:700;display:block}
+.breakdown-meta{font-size:9px;color:var(--text-dim);display:block;margin-top:1px}
+.module-stats-callput{display:flex;gap:6px;font-size:9px;justify-content:flex-end}
+.cp-call{color:#4caf50}
+.cp-put{color:#f44336}
+.mini-btn{
+  background:none;border:1px solid var(--border);color:var(--text-dim);
+  font-size:11px;padding:1px 6px;border-radius:3px;cursor:pointer;
+  margin-left:6px;transition:all .15s;
+}
+.mini-btn:hover{color:var(--text);border-color:var(--text-dim);background:var(--card)}
+
+/* Breakdown bar (reused for module + regime + strength) */
+.breakdown-bar{
+  height:6px;background:rgba(255,255,255,.08);border-radius:3px;
+  overflow:hidden;position:relative;
+}
+.breakdown-bar-fill{
+  height:100%;border-radius:3px;transition:width .3s ease;
+}
+.breakdown-bar-fill.correct{background:linear-gradient(90deg,#4caf50,#66bb6a)}

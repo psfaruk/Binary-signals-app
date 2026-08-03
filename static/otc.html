@@ -45,6 +45,8 @@
       </div>
       <span class="spacer"></span>
       <button id="sound-btn" type="button" aria-pressed="false" aria-label="Unmute sounds">🔇</button>
+      <button id="refresh-btn" type="button" aria-label="Refresh data" title="Refresh candles + history + stats now">🔄</button>
+      <span id="last-refresh-label" class="hint" style="font-size:9px;color:var(--text-dim);min-width:60px;text-align:right">never</span>
       <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): initial aria-label is
            'Unmute sounds' to match the initial sound-enabled=false state.
            common.js updates this dynamically on toggle. -->
@@ -142,6 +144,16 @@
         <div class="accuracy-section">
           <div class="accuracy-section-title">By Regime</div>
           <div id="acc-regime-breakdown"><div class="accuracy-empty">No data</div></div>
+        </div>
+        <!-- FIX (ALWAYS-SIGNAL-2026-08-03): per-module stats from /api/stats -->
+        <div class="accuracy-section">
+          <div class="accuracy-section-title">
+            By Module (4-Module Engine)
+            <button id="acc-module-refresh" type="button" class="mini-btn" title="Refresh module stats from DB">↻</button>
+          </div>
+          <div id="acc-module-breakdown">
+            <div class="accuracy-empty">Click ↻ to load module stats</div>
+          </div>
         </div>
       </div>
 

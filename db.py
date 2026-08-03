@@ -1060,7 +1060,12 @@ def get_recent_signals(asset, period, limit=50, before_ctime=None):
     # FIX (DEEP-AUDIT-2026-07-26 / F-14-05): switched to _read_cursor() —
     # SELECT-only, no spurious commit/fsync on context exit.
     with _read_cursor() as c:
-        base = """SELECT ctime, signal, accuracy, score, confidence,
+        # FIX (ALWAYS-SIGNAL-2026-08-03): added `asset, period` to SELECT
+        # so the frontend can display which pair each signal belongs to
+        # and filter history by pair. Previously these columns were omitted
+        # because the WHERE clause already filtered by asset/period, but
+        # the frontend's history filter needs them in the response.
+        base = """SELECT asset, period, ctime, signal, accuracy, score, confidence,
                    strength, agree, theories, actual, regime, zone,
                    tags, postmortem, right_codes, wrong_codes,
                    a_open, a_close, reasons

@@ -1093,11 +1093,16 @@ class QuotexFeed:
 
                 # OTC list entry — only if an OTC instrument exists
                 if otc:
-                    status = "otc" if otc["open"] else "closed"
+                    # FIX (ALWAYS-SIGNAL-2026-08-03): force status="otc" for ALL
+                    # curated OTC pairs. Quotex's is_open flag flickers False
+                    # mid-session on OTC pairs (confirmed broker-side glitch),
+                    # causing pairs to disappear from the dropdown and streams
+                    # to be demoted/evicted. User requirement: "১৮ টি পেয়ার
+                    # সব সময় লাইভ থাকার কথা" — all 18 pairs always live.
+                    status = "otc"
                     floor = PAYOUT_FLOOR_OTC
                     payout = otc["payout"]
-                    locked = status == "otc" and (
-                        payout is None or payout < floor)
+                    locked = False  # OTC pairs bypass payout floor lock
                     otc_pairs.append({
                         "asset":   otc["asset"],
                         "display": otc["display"],
@@ -4493,9 +4498,14 @@ class QuotexFeed:
         # and their normal open/closed hours.
         eligible_all = set()
         for p in self._pairs_list:
-            if p["status"] not in ("live", "otc"):
+            # FIX (ALWAYS-SIGNAL-2026-08-03): OTC pairs are always eligible
+            # regardless of status (Quotex is_open flickers). Real pairs
+            # must be "live" and not locked.
+            is_curated_otc = p["asset"].endswith("_otc")
+            is_live_real = (not is_curated_otc) and p["status"] == "live" and not p.get("locked")
+            if not (is_curated_otc or is_live_real):
                 continue
-            if p["asset"].endswith("_otc"):
+            if is_curated_otc:
                 # OTC pair — always eligible (bypass payout floor).
                 eligible_all.add((p["asset"], 60))
             elif not p.get("locked"):
@@ -4579,9 +4589,13 @@ class QuotexFeed:
         # gated by their open/closed status and payout floor.
         eligible_assets = set()
         for p in self._pairs_list:
-            if p["status"] not in ("live", "otc"):
+            # FIX (ALWAYS-SIGNAL-2026-08-03): OTC pairs always eligible
+            # regardless of Quotex's is_open flicker. Real pairs need live status.
+            is_curated_otc = p["asset"].endswith("_otc")
+            is_live_real = (not is_curated_otc) and p["status"] == "live" and not p.get("locked")
+            if not (is_curated_otc or is_live_real):
                 continue
-            if p["asset"].endswith("_otc"):
+            if is_curated_otc:
                 # OTC pair — always eligible (bypass payout floor).
                 eligible_assets.add(p["asset"])
             elif not p.get("locked"):

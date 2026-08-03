@@ -92,6 +92,7 @@ let _resizeTimer = null;
 // #stat-active-cat / #stat-signals / #stat-winrate). The pagehide cleanup
 // references were also removed.
 let _countdownInterval = null, _keepaliveInterval = null;
+let _historyRefreshInterval = null;  // FIX (ALWAYS-SIGNAL-2026-08-03): 30s auto-refresh
 
 /* Active tab — 'chart' (default) | 'history' | 'accuracy' */
 let currentTab = 'chart';
@@ -1002,7 +1003,10 @@ function addHistory(signal, accuracy, detail){
     }
     return;
   }
-  signalHistory.push({ signal, accuracy: accuracy || 'pending', detail: detail || null });
+  // FIX (ALWAYS-SIGNAL-2026-08-03): add `asset` to top-level so the
+  // history pair-filter and delete button work. detail.asset comes from
+  // the server (added to SELECT in db.py) or falls back to currentAsset.
+  signalHistory.push({ signal, accuracy: accuracy || 'pending', detail: detail || null, asset: (detail && detail.asset) || currentAsset });
   if(signalHistory.length > HISTORY_MAX) signalHistory.shift();
   renderHistory();
   setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
@@ -1043,7 +1047,7 @@ function onServerSignals(sigs, asset, period){
   const incoming = [];
   for(const key of orderedCtimes){
     const s = serverByCtime[key];
-    incoming.push({ signal: s.signal, accuracy: s.accuracy, detail: s });
+    incoming.push({ signal: s.signal, accuracy: s.accuracy, detail: s, asset: s.asset || asset });
   }
   // Determine if this is a pagination response (server sent before_ctime
   // in the response — server.py includes it when the request had it).
@@ -1558,6 +1562,105 @@ function _renderRegimeBreakdown(){
   container.innerHTML = html;
 }
 
+/* ─── NEW (ALWAYS-SIGNAL-2026-08-03): PER-MODULE STATS from /api/stats ────
+   User requirement: "আমি চাই এখানে চারটি মডেল আছে সেই মডেল এর ও হিস্টোরি আমি
+   যেনো দেখতে পাই, কোনো মডেল কি রকম parmames করছে"
+
+   Fetches /api/stats (DB-backed, all graded signals) and renders a per-module
+   win-rate breakdown. Click a module row to see per-pair drill-down. */
+let _moduleStatsCache = null;
+let _moduleStatsLoading = false;
+
+async function renderModuleStats(){
+  const container = $('acc-module-breakdown');
+  if(!container) return;
+  if(_moduleStatsLoading) return;
+  _moduleStatsLoading = true;
+  container.innerHTML = '<div class="accuracy-empty">Loading module stats…</div>';
+  try{
+    const r = await fetch('/api/stats');
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    _moduleStatsCache = data;
+    const modules = data.modules || [];
+    if(!modules.length){
+      container.innerHTML = '<div class="accuracy-empty">No graded module votes yet</div>';
+      return;
+    }
+    let html = '';
+    // Hero summary
+    html += '<div class="module-stats-hero">'
+         +  '<span class="module-stats-overall">'
+         +  (data.overall_win_pct || 0).toFixed(1) + '% overall'
+         +  '</span>'
+         +  '<span class="module-stats-meta">'
+         +  (data.total_graded || 0) + ' graded · '
+         +  (data.total_correct || 0) + 'W / '
+         +  (data.total_wrong || 0) + 'L'
+         +  '</span>'
+         +  '</div>';
+    // Per-module rows
+    html += '<div class="module-stats-rows">';
+    modules.forEach(m => {
+      const pct = m.win_pct;
+      const pctCls = pct == null ? 'none'
+                   : pct >= 55 ? 'good'
+                   : pct >= 45 ? 'mid' : 'bad';
+      const callPct = m.call_win_pct;
+      const putPct  = m.put_win_pct;
+      const callStr = callPct == null ? '—' : callPct.toFixed(0) + '%';
+      const putStr  = putPct  == null ? '—' : putPct.toFixed(0) + '%';
+      const total   = m.total || 0;
+      const barWidth = pct == null ? 0 : pct;
+      html += '<div class="module-stats-row" '
+           +  'data-module="' + esc(m.module) + '" '
+           +  'onclick="window._showModulePairDetail(\'' + esc(m.module) + '\')" '
+           +  'role="button" tabindex="0" title="Click to see per-pair breakdown">'
+           +  '<span class="module-stats-name">' + esc(m.display_name) + '</span>'
+           +  '<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:' + barWidth + '%"></div></div>'
+           +  '<span class="module-stats-pct ' + pctCls + '">'
+           +  '<span class="pct-num">' + (pct == null ? '—' : pct.toFixed(1) + '%') + '</span>'
+           +  '<span class="breakdown-meta">' + (m.correct || 0) + '/' + total + '</span>'
+           +  '</span>'
+           +  '<span class="module-stats-callput">'
+           +  '<span class="cp-call">CALL ' + callStr + '</span>'
+           +  '<span class="cp-put">PUT ' + putStr + '</span>'
+           +  '</span>'
+           +  '</div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  } catch(e){
+    container.innerHTML = '<div class="accuracy-empty">Failed to load: ' + esc(e.message) + '</div>';
+  } finally {
+    _moduleStatsLoading = false;
+  }
+}
+
+window._showModulePairDetail = async function(moduleName){
+  // Drill-down: fetch /api/module-analysis and show per-pair rows for this module
+  try{
+    const r = await fetch('/api/module-analysis');
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const rows = (data.pair_modules || []).filter(r => r.module_name === moduleName);
+    if(!rows.length){
+      alert('No per-pair data for module: ' + moduleName);
+      return;
+    }
+    let msg = 'Per-pair breakdown — ' + moduleName + '\n\n';
+    rows.sort((a,b) => (b.win_pct || 0) - (a.win_pct || 0));
+    rows.forEach(r => {
+      msg += (r.asset || '?').padEnd(14) + ' '
+           + (r.win_pct == null ? '—' : r.win_pct.toFixed(0) + '%').padStart(4) + ' '
+           + (r.correct || 0) + '/' + (r.total || 0) + '\n';
+    });
+    alert(msg);
+  } catch(e){
+    alert('Error: ' + e.message);
+  }
+};
+
 /* ─── TAB SWITCHING ────────────────────────────────────────────────────────
    switchTab(name): toggles the .active class on the 3 tab buttons and the
    3 tab panes. Also fires tab-specific refresh logic so the just-shown
@@ -1590,6 +1693,8 @@ function switchTab(tabName){
     setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
   } else if(tabName === 'accuracy'){
     renderAccuracyTab();
+    // FIX (ALWAYS-SIGNAL-2026-08-03): also refresh per-module stats from DB
+    if(typeof renderModuleStats === 'function') renderModuleStats();
   } else if(tabName === 'chart'){
     // The chart's autoSize handles hidden→visible resizes, but on some
     // browsers the chart needs an explicit nudge after being display:none.
@@ -2361,6 +2466,15 @@ function wireEvents(){
   const clearAllBtn = $('history-clear-all-btn');
   if(clearAllBtn) clearAllBtn.addEventListener('click', () => window._clearAllSignals());
 
+  // FIX (ALWAYS-SIGNAL-2026-08-03): module stats refresh button on Stats tab
+  const moduleRefreshBtn = $('acc-module-refresh');
+  if(moduleRefreshBtn){
+    moduleRefreshBtn.addEventListener('click', () => {
+      _moduleStatsCache = null;  // force refetch
+      renderModuleStats();
+    });
+  }
+
   // Sound toggle.
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): update aria-label dynamically
   // so screen readers announce "Unmute sounds" / "Mute sounds" based on state.
@@ -2658,6 +2772,56 @@ function initApp(category){
     }
   }, 15000);
 
+  // FIX (ALWAYS-SIGNAL-2026-08-03): 30-second auto-refresh of signal history
+  // + stats so the user always sees fresh data without manual interaction.
+  // User requirement: "অ্যাপ টি অটো রিফ্রেশ হয় না ... ডেটা গুলো যেনো রিফ্রেশ হয় অটো সেভ হবে"
+  if(_historyRefreshInterval){ clearInterval(_historyRefreshInterval); }
+  _historyRefreshInterval = setInterval(() => {
+    if(ws && ws.readyState === WebSocket.OPEN){
+      loadServerHistory();
+      // Refresh stats tab if visible
+      if(currentTab === 'accuracy'){
+        if(typeof renderModuleStats === 'function') renderModuleStats();
+      }
+      // Update last-refresh label
+      const lbl = $('last-refresh-label');
+      if(lbl){
+        lbl.textContent = '↻ ' + new Date().toLocaleTimeString('en-US',
+          {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+      }
+    }
+  }, 30000);
+
+  // FIX (ALWAYS-SIGNAL-2026-08-03): manual refresh button — re-subscribes +
+  // reloads history + re-fetches pairs. User requirement: "একটা বাটন যোগ করবেন।
+  // যেনো আমি মেনয়ালি করতে পারি।"
+  const refreshBtn = $('refresh-btn');
+  if(refreshBtn){
+    refreshBtn.addEventListener('click', () => {
+      refreshBtn.classList.add('spin');
+      if(ws && ws.readyState === WebSocket.OPEN){
+        // Re-subscribe for fresh candle snapshot + prediction
+        send({ type: 'subscribe', asset: currentAsset, period: currentPeriod, category: currentCategory });
+        // Reload signal history from DB
+        loadServerHistory();
+        // Re-fetch pairs list (in case broker flickered a pair open/closed)
+        send({ type: 'pairs' });
+        // Refresh module stats if on accuracy tab
+        if(currentTab === 'accuracy' && typeof renderModuleStats === 'function'){
+          renderModuleStats();
+        }
+      }
+      // Update label
+      const lbl = $('last-refresh-label');
+      if(lbl){
+        lbl.textContent = '↻ ' + new Date().toLocaleTimeString('en-US',
+          {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+      }
+      // Remove spin animation after 1s
+      setTimeout(() => refreshBtn.classList.remove('spin'), 1000);
+    });
+  }
+
   // Clean up on page hide — clear intervals + close WS + dispose chart.
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-14 + F-17-16): removed cleanup for
   // the deleted _marketStatusInterval and _tickRateInterval.
@@ -2691,6 +2855,7 @@ function onPageHide(){
   try{
     if(_countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
     if(_keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
+    if(_historyRefreshInterval){ clearInterval(_historyRefreshInterval); _historyRefreshInterval = null; }  // FIX (ALWAYS-SIGNAL-2026-08-03)
     if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
     if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
     if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
