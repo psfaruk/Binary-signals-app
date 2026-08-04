@@ -39,10 +39,27 @@ Now the signal_type is determined REGIME-CONDITIONALLY:
 """
 from core.analysis import detect_candle_patterns
 from engines.base.types import ModuleResult, MarketContext
+from core.constants import is_theory_disabled
 
 # Patterns that are ALWAYS reversal (structural reversal patterns).
 # These represent exhaustion/rejection at extremes and don't have a
 # meaningful continuation interpretation.
+#
+# ═══════════════════════════════════════════════════════════════════════
+# DISABLED (THEORY-PRUNE-2026-08-04): the following patterns had win-rate
+# < 50% on production samples and have been moved to DISABLED_PATTERNS
+# below. They are still detected by detect_candle_patterns (so they appear
+# in the UI breakdown) but their ModuleResult is suppressed before voting.
+#   - BULL_HARAMI   → "Bullish Harami"     42.9% win rate, n=7
+#   - MORNING_STAR  → "Morning Star"        40.0% win rate, n=5
+# To re-enable: remove from DISABLED_PATTERNS below AND from
+# DISABLED_THEORIES in core/constants.py.
+# ═══════════════════════════════════════════════════════════════════════
+DISABLED_PATTERNS = frozenset({
+    "BULL_HARAMI",     # 42.9% win rate, n=7
+    "MORNING_STAR",    # 40.0% win rate, n=5
+})
+
 ALWAYS_REVERSAL = {
     "MORNING_STAR", "EVENING_STAR",        # 3-candle reversal at extreme
     "TWEEZER_TOP", "TWEEZER_BOTTOM",        # rejection at same price level
@@ -106,6 +123,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     for pat in patterns:
         name = pat["name"]
         direction = pat["direction"]
+
+        # FIX (THEORY-PRUNE-2026-08-04): skip disabled patterns (BULL_HARAMI,
+        # MORNING_STAR — both had < 50% win rate on production samples).
+        if name in DISABLED_PATTERNS:
+            continue
 
         if name in ALWAYS_REVERSAL:
             sig_type = "REVERSAL"

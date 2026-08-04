@@ -47,6 +47,58 @@ MODULE_DISPLAY_NAMES = {
     "key_level":       "Key Level",
 }
 
+# ───────────────────────────────────────────────────────────────────────────
+# DISABLED_THEORIES (THEORY-PRUNE-2026-08-04)
+# ───────────────────────────────────────────────────────────────────────────
+# Theories that have been disabled based on production backtest analysis
+# of 259 theory_votes (downloaded 2026-08-04 04:38 UTC).
+#
+# Selection criteria: theory win-rate < 50% with n >= 5 samples.
+# These theories were net-harmful — predicting wrong more often than right.
+#
+# Format: (module_name, theory_name_prefix)
+#   - theory_name_prefix is matched as a prefix against the reasons text
+#     (e.g. "Big body reversal" matches "Big UP body (...)" and
+#      "Big DOWN body (...)" reason strings).
+#
+# Backtest simulation showed that disabling these 6 theories would have:
+#   - Improved win rate from 55.8% → 69.6% (+13.8 percentage points)
+#   - Flipped 6 wrong signals to correct
+#   - Caused only 2 regressions (correct → wrong)
+#   - Avoided 47 low-confidence trades (became NEUTRAL)
+#
+# Each module's analyze() function checks this registry and skips matching
+# theories. To re-enable a theory, remove it from this set.
+#
+# Analysis artifacts:
+#   /home/z/my-project/analysis/theory_analysis.json
+#   /home/z/my-project/analysis/backtest_simulation.json
+DISABLED_THEORIES = frozenset({
+    # candle_reaction — 3 worst performers
+    ("candle_reaction", "Big body reversal"),         # 36.7% win, n=30
+    ("candle_reaction", "Close at range top"),         # 30.8% win, n=13
+    ("candle_reaction", "Close at range bottom"),     # 44.4% win, n=9
+    # key_level — worst performer
+    ("key_level", "Key support bounce"),               # 36.4% win, n=11
+    # pattern — 2 underperformers (small sample but win%<50)
+    ("pattern", "Bullish Harami"),                     # 42.9% win, n=7
+    ("pattern", "Morning Star"),                       # 40.0% win, n=5
+})
+
+
+def is_theory_disabled(module_name: str, theory_name: str) -> bool:
+    """Check if a theory is disabled.
+
+    Matches by prefix so that reason-text variants like
+    "Bullish Harami (small bullish inside big ...)" still match
+    the disabled entry "Bullish Harami".
+    """
+    for m, t in DISABLED_THEORIES:
+        if module_name == m and theory_name.startswith(t):
+            return True
+    return False
+
+
 # Modules used by each engine.
 # FIX (MODULE-PRUNE-2026-08-03): both engines now use the same 4 modules.
 # The engine-specific 6th module concept (otc_pattern / trend_follow) has

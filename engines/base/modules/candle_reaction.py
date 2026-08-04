@@ -14,6 +14,7 @@ Signals:
 Volatility-scaled thresholds adapt to market noise level.
 """
 from engines.base.types import ModuleResult, MarketContext
+from core.constants import is_theory_disabled
 
 
 def analyze(candles, ctx: MarketContext) -> list:
@@ -178,7 +179,19 @@ def analyze(candles, ctx: MarketContext) -> list:
     # False), so the doji case was already unreachable in practice —
     # but the structural elif fix is still important for correctness
     # and to prevent regressions if the threshold changes.
-    if len(candles) >= 10:
+    #
+    # ═══════════════════════════════════════════════════════════════════════
+    # DISABLED (THEORY-PRUNE-2026-08-04): "Big body reversal" theory had
+    # 36.7% win rate on 30 production samples (n=30, the WORST performer
+    # by absolute volume). The trend-aware dampening above was insufficient
+    # — even dampened, this signal still over-fired on momentum candles
+    # and biased the engine toward counter-trend reversals. Backtest
+    # simulation showed removing it would flip 6 wrong signals to correct
+    # with only 2 regressions. To re-enable, remove the `if False:` guard
+    # below (or remove "Big body reversal" from DISABLED_THEORIES in
+    # core/constants.py).
+    # ═══════════════════════════════════════════════════════════════════════
+    if False and len(candles) >= 10:
         # AUDIT-4-01 FIX (2026-07-25): the previous median window INCLUDED
         # the current candle's body in its own comparison set. The current
         # candle is at index -1; if it has a large body, it inflates the
@@ -341,7 +354,21 @@ def analyze(candles, ctx: MarketContext) -> list:
     # is trend CONTINUATION (momentum push), not reversal. The signal
     # still fires (in case the trend IS exhausting), but with dampened
     # conviction so the blender doesn't get a strong counter-trend vote.
-    if rng > 0:
+    #
+    # ═══════════════════════════════════════════════════════════════════════
+    # DISABLED (THEORY-PRUNE-2026-08-04): both branches of SIGNAL 4 had
+    # very poor win rates in production:
+    #   - "Close at range top" → 30.8% win rate (n=13) — 2nd worst theory
+    #   - "Close at range bottom" → 44.4% win rate (n=9)
+    # Root cause: on 1-minute forex candles, closing at the top/bottom of
+    # the candle's own range is almost always a momentum continuation
+    # signal, not a reversal. The trend-aware dampening helped in strong
+    # trends but the signal still fired (and lost) in RANGE regime where
+    # most of the wrong predictions occurred. To re-enable, remove the
+    # `if False:` guard below or remove these theories from
+    # DISABLED_THEORIES in core/constants.py.
+    # ═══════════════════════════════════════════════════════════════════════
+    if False and rng > 0:
         close_pos = max(0, min(100, (c - l) / rng * 100))
         # FIX (DEEP-AUDIT-2026-07-26 / F-10-16, A-05 ISSUE S5): .get() for
         # close_percentile cold-start safety (defaults to neutral 50).

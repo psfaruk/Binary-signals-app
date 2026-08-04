@@ -21,6 +21,7 @@ Original signals kept:
 Reliability: LEVEL ×1.3 (key levels are structurally important in real markets)
 """
 from engines.base.types import ModuleResult, MarketContext
+from core.constants import is_theory_disabled
 
 
 # FIX (DEEP-AUDIT-2026-07-26 / F-09-01): removed dead `import math` and
@@ -101,10 +102,24 @@ def analyze(candles, ctx: MarketContext) -> list:
                         reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → PUT (failed breakout, 70% win rate)"]))
             elif action == "bounce":
                 if lvl_type == "support":
-                    results.append(ModuleResult(
-                        module_name="key_level", direction="CALL", score=3, confidence=65,
-                        signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                        reasons=[f"Key support bounce ({lvl_price:.5f}, {dist:.2f} ATR) → CALL boost"]))
+                    # ═══════════════════════════════════════════════════════════════════════
+                    # DISABLED (THEORY-PRUNE-2026-08-04): "Key support bounce"
+                    # had 36.4% win rate on 11 production samples — the worst
+                    # key_level theory. On 1-minute forex candles, "bounce
+                    # off a key support" almost always precedes a breakdown
+                    # (support gives way) rather than a reversal. The mirror
+                    # theory "Key resistance bounce" (75% win rate, n=8) is
+                    # KEPT — asymmetry is real: support breaks more often
+                    # than resistance breaks down on 1m candles.
+                    # To re-enable, remove this `if False:` guard or remove
+                    # ("key_level", "Key support bounce") from
+                    # DISABLED_THEORIES in core/constants.py.
+                    # ═══════════════════════════════════════════════════════════════════════
+                    if False:
+                        results.append(ModuleResult(
+                            module_name="key_level", direction="CALL", score=3, confidence=65,
+                            signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                            reasons=[f"Key support bounce ({lvl_price:.5f}, {dist:.2f} ATR) → CALL boost"]))
                 else:
                     results.append(ModuleResult(
                         module_name="key_level", direction="PUT", score=3, confidence=65,
