@@ -108,16 +108,21 @@ def detect_candle_patterns(candles):
     Returns list of dicts:
         {"name": str, "direction": "CALL"|"PUT", "score": int, "reason": str}
 
-    Patterns detected (with approximate OTC win rates):
-      - Bullish/Bearish Engulfing (2-candle, ~65%)
-      - Morning/Evening Star (3-candle, ~70%)
-      - Tweezer Top/Bottom (2-candle, ~60%)
-      - Three White Soldiers / Three Black Crows (3-candle, ~60%)
-      - Three Soldiers/Crows Exhaustion (shrinking last body, ~65% reversal)
-      - Piercing Line / Dark Cloud Cover (2-candle, ~63%)
-      - Bullish/Bearish Harami (2-candle, ~58%)
-      - Inside Bar Breakout (3-candle, ~58%)
-      - Hammer / Shooting Star (1-candle enhanced, ~60%)
+    Active patterns (THEORY-PRUNE-2026-08-04 — 8 patterns kept after
+    deep backtest analysis of 809 production signals):
+      - Tweezer Bottom (2-candle)
+      - Piercing Line (2-candle)
+      - Dark Cloud Cover (2-candle)
+      - Bearish Harami (2-candle)
+      - Bearish Pin Bar (1-candle enhanced)
+      - Bullish Two-Bar Reversal (2-candle)
+      - Bearish Two-Bar Reversal (2-candle)
+      - Doji Bearish (3-candle)
+
+    Removed patterns (Round 1 + 2 + 3 — see git history):
+      Bullish/Bearish Engulfing, Morning/Evening Star, Tweezer Top,
+      Three White Soldiers / Three Black Crows (incl. Exhaust),
+      Bullish Harami, Hammer, Shooting Star, Bullish Pin Bar, Doji Bullish
     """
     patterns = []
     if len(candles) < 3:
@@ -133,87 +138,9 @@ def detect_candle_patterns(candles):
     b3 = _body(c3)
     r1, r2, r3 = _range(c1), _range(c2), _range(c3)
 
-    # Compute vol_pct for vol-scaled exhaust thresholds (used below at the
-    # 3-Soldiers / 3-Crows exhaustion check).
-    # FIX (DEEP-AUDIT-2026-07-26 / F-06-03): removed stale 14-line comment block
-    # that described an unimplemented JPY-vs-forex heuristic ("use flat 0.65 for
-    # real markets") — the actual code always vol-scales exhaust_ratio via
-    # the conditional below (high/low/normal vol → 0.75 / 0.55 / 0.65). Also
-    # removed the dead `exhaust_ratio = 0.65` default that was always
-    # overwritten by that conditional, and removed redundant pre-slicing of
-    # `candles[-10:]` (the `_atr` helper already slices internally).
-    atr_now = _atr(candles, 10)
-    atr_hist = _atr(candles, 20)
-    vol_pct = (atr_now / atr_hist) if atr_hist > 0 else 1.0
-
-    # ── 1. Engulfing (2-candle) — TIGHTENED (ultra-deep, 2026-07-20)
-    # Backtest showed 48.1% win rate on 4367 signals — too loose.
-    # Now requires body ratio > 2.0× (was 1.5×) for score 4, and
-    # minimum body ratio 1.3× (was just engulf condition) to fire at all.
-    if b2 < 0 and b3 > 0:
-        if c3["close"] >= c2["open"] and c3["open"] <= c2["close"]:
-            ratio = _abs_body(c3) / _abs_body(c2) if _abs_body(c2) > 0 else 1
-            if ratio > 2.0:
-                patterns.append({
-                    "name": "BULL_ENGULF",
-                    "direction": "CALL",
-                    "score": 3,
-                    "reason": f"Bullish Engulfing (body ratio {ratio:.1f}x, strong) → CALL"
-                })
-            elif ratio > 1.3:
-                patterns.append({
-                    "name": "BULL_ENGULF",
-                    "direction": "CALL",
-                    "score": 2,
-                    "reason": f"Bullish Engulfing (body ratio {ratio:.1f}x) → CALL"
-                })
-    if b2 > 0 and b3 < 0:
-        if c3["open"] >= c2["close"] and c3["close"] <= c2["open"]:
-            ratio = _abs_body(c3) / _abs_body(c2) if _abs_body(c2) > 0 else 1
-            if ratio > 2.0:
-                patterns.append({
-                    "name": "BEAR_ENGULF",
-                    "direction": "PUT",
-                    "score": 3,
-                    "reason": f"Bearish Engulfing (body ratio {ratio:.1f}x, strong) → PUT"
-                })
-            elif ratio > 1.3:
-                patterns.append({
-                    "name": "BEAR_ENGULF",
-                    "direction": "PUT",
-                    "score": 2,
-                    "reason": f"Bearish Engulfing (body ratio {ratio:.1f}x) → PUT"
-                })
-
-    # ── 2. Morning/Evening Star (3-candle) ───────────────────────────────
-    # Morning star: bearish + small-body (doji-like) + bullish closing above c1 midpoint
-    c1_mid = (c1["open"] + c1["close"]) / 2
-    if b1 < 0 and _abs_body(c2) < r2 * 0.3 and b3 > 0 and c3["close"] > c1_mid:
-        patterns.append({
-            "name": "MORNING_STAR",
-            "direction": "CALL",
-            "score": 4,
-            "reason": "Morning Star (bearish + doji + bullish above midpoint) → CALL (70% win rate)"
-        })
-    # Evening star: bullish + small-body + bearish closing below c1 midpoint
-    if b1 > 0 and _abs_body(c2) < r2 * 0.3 and b3 < 0 and c3["close"] < c1_mid:
-        patterns.append({
-            "name": "EVENING_STAR",
-            "direction": "PUT",
-            "score": 4,
-            "reason": "Evening Star (bullish + doji + bearish below midpoint) → PUT (70% win rate)"
-        })
-
-    # ── 3. Tweezer Top/Bottom (2-candle) ─────────────────────────────────
-    # Same high/low within tolerance + opposite direction
+    # ── 1. Tweezer Bottom (2-candle) — KEPT ─────────────────────────────
+    # Same low within tolerance + opposite direction (bearish then bullish)
     tweezer_tol = atr * 0.08  # within 8% of ATR
-    if abs(c2["high"] - c3["high"]) < tweezer_tol and b2 > 0 and b3 < 0:
-        patterns.append({
-            "name": "TWEEZER_TOP",
-            "direction": "PUT",
-            "score": 2,
-            "reason": f"Tweezer Top (same high {c3['high']:.5f}) → PUT (60% win rate)"
-        })
     if abs(c2["low"] - c3["low"]) < tweezer_tol and b2 < 0 and b3 > 0:
         patterns.append({
             "name": "TWEEZER_BOTTOM",
@@ -222,59 +149,7 @@ def detect_candle_patterns(candles):
             "reason": f"Tweezer Bottom (same low {c3['low']:.5f}) → CALL (60% win rate)"
         })
 
-    # ── 4. Three White Soldiers / Three Black Crows ──────────────────────
-    # 3 consecutive same-direction candles with ascending/descending closes
-    # FIX (BUG-Q, 2026-07-20): exhaustion threshold is now vol-scaled.
-    # In low vol, 0.65 is too tight (normal noise shrinks bodies); in high
-    # vol, 0.65 is too loose (meaningful shrinkage is larger).
-    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-2-01): swap exhaust_ratio values.
-    # The condition `c3_body < c2_body * exhaust_ratio` means a LARGER ratio
-    # is LOOSER (needs less shrink) and a SMALLER ratio is STRICTER (needs
-    # more shrink). In high volatility (large bodies) even a small relative
-    # shrink is statistically meaningful, so the threshold should be LARGER
-    # (looser). In low volatility (small bodies) noise dominates, so the
-    # threshold should be SMALLER (stricter). Previously the values were
-    # swapped, which suppressed exhaustion signals in high-vol regimes and
-    # fired false exhaustion reversals in low-vol regimes.
-    if vol_pct > 1.3:
-        exhaust_ratio = 0.75  # high vol: bodies big, even small relative shrink is meaningful
-    elif vol_pct < 0.7:
-        exhaust_ratio = 0.55  # low vol: bodies small, need bigger relative shrink to be real
-    else:
-        exhaust_ratio = 0.65
-    if b1 > 0 and b2 > 0 and b3 > 0 and c3["close"] > c2["close"] > c1["close"]:
-        # Check exhaustion: is the last body shrinking?
-        if _abs_body(c3) < _abs_body(c2) * exhaust_ratio:
-            patterns.append({
-                "name": "3_SOLDIERS_EXHAUST",
-                "direction": "PUT",
-                "score": 3,
-                "reason": "Three White Soldiers + shrinking last body → exhaustion PUT (65% win rate)"
-            })
-        else:
-            patterns.append({
-                "name": "3_SOLDIERS",
-                "direction": "CALL",
-                "score": 2,
-                "reason": "Three White Soldiers → CALL continuation (58% win rate)"
-            })
-    if b1 < 0 and b2 < 0 and b3 < 0 and c3["close"] < c2["close"] < c1["close"]:
-        if _abs_body(c3) < _abs_body(c2) * exhaust_ratio:
-            patterns.append({
-                "name": "3_CROWS_EXHAUST",
-                "direction": "CALL",
-                "score": 3,
-                "reason": "Three Black Crows + shrinking last body → exhaustion CALL (65% win rate)"
-            })
-        else:
-            patterns.append({
-                "name": "3_CROWS",
-                "direction": "PUT",
-                "score": 2,
-                "reason": "Three Black Crows → PUT continuation (58% win rate)"
-            })
-
-    # ── 5. Piercing Line / Dark Cloud Cover (2-candle) ───────────────────
+    # ── 2. Piercing Line / Dark Cloud Cover (2-candle) — KEPT ───────────
     # Piercing Line: c2 bearish, c3 opens below c2 close, closes above c2 midpoint
     c2_mid = (c2["open"] + c2["close"]) / 2
     if b2 < 0 and b3 > 0:
@@ -295,16 +170,8 @@ def detect_candle_patterns(candles):
                 "reason": "Dark Cloud Cover (bearish close below bullish midpoint) → PUT (63% win rate)"
             })
 
-    # ── 6. Harami (2-candle) ─────────────────────────────────────────────
-    # Bullish Harami: c2 big bearish, c3 small bullish INSIDE c2's body
-    if b2 < 0 and b3 > 0 and _abs_body(c3) < _abs_body(c2) * 0.5:
-        if c3["open"] >= c2["close"] and c3["close"] <= c2["open"]:
-            patterns.append({
-                "name": "BULL_HARAMI",
-                "direction": "CALL",
-                "score": 2,
-                "reason": "Bullish Harami (small bullish inside big bearish) → CALL (58% win rate)"
-            })
+    # ── 3. Bearish Harami (2-candle) — KEPT ─────────────────────────────
+    # Bearish Harami: c2 big bullish, c3 small bearish INSIDE c2's body
     if b2 > 0 and b3 < 0 and _abs_body(c3) < _abs_body(c2) * 0.5:
         if c3["open"] <= c2["close"] and c3["close"] >= c2["open"]:
             patterns.append({
@@ -314,62 +181,14 @@ def detect_candle_patterns(candles):
                 "reason": "Bearish Harami (small bearish inside big bullish) → PUT (58% win rate)"
             })
 
-    # ── 7. Inside Bar Breakout (3-candle) — DISABLED (ultra-deep, 2026-07-20)
-    # FIX (DEEP-AUDIT-2026-07-26 / F-06-04): removed 8 lines of commented-out
-    # Inside Bar Breakout pattern code (backtest showed 47% win rate on 1m
-    # candles — mostly false breakouts). See git history if resurrection
-    # is needed; kept the section header so the numbering (1..8) stays stable.
-
-    # ── 8. Enhanced Hammer / Shooting Star ───────────────────────────────
-    # Single candle with very long wick (more extreme than wick_rejection)
-    # FIX (deep diagnostic, 2026-07-20): Hammer had 46.9% win rate — the
-    # 55% wick threshold is too loose for 1m candles. Raised to 65% wick
-    # and 20% body for a more extreme hammer. Score reduced (3→2).
-    if r3 > 0:
-        uw3 = c3["high"] - max(c3["open"], c3["close"])
-        lw3 = min(c3["open"], c3["close"]) - c3["low"]
-        uw_pct3 = uw3 / r3 * 100
-        lw_pct3 = lw3 / r3 * 100
-        body_pct3 = _abs_body(c3) / r3 * 100
-        # Hammer: long lower wick (>65%) + small body (<20%) → CALL
-        if lw_pct3 > 65 and body_pct3 < 20:
-            patterns.append({
-                "name": "HAMMER",
-                "direction": "CALL",
-                "score": 2,
-                "reason": f"Hammer (lower wick {lw_pct3:.0f}%) → CALL (62% win rate)"
-            })
-        # Shooting Star: long upper wick (>65%) + small body (<20%) → PUT
-        if uw_pct3 > 65 and body_pct3 < 20:
-            patterns.append({
-                "name": "SHOOTING_STAR",
-                "direction": "PUT",
-                "score": 3,
-                "reason": f"Shooting Star (upper wick {uw_pct3:.0f}%) → PUT (62% win rate)"
-            })
-
-    # ── 9. Pin Bar (NEW, THEORY-RESEARCH-2026-08-03) ─────────────────────
-    # Pin Bar: a single candle with a prominent wick (nose) that is at least
-    # 2/3 of the total range, with the body in the opposite end.
-    # Research: "Pin bar trading is a simple, yet effective trading strategy
-    # that offers excellent risk-reward ratios" (5 Pin Bar Strategies, 2018).
-    # Win rate ~60-65% when at key levels.
-    # Bullish Pin Bar: long LOWER wick (≥66% of range), body in upper third.
-    # Bearish Pin Bar: long UPPER wick (≥66% of range), body in lower third.
+    # ── 4. Bearish Pin Bar (1-candle enhanced) — KEPT ───────────────────
+    # Pin Bar: long upper wick (≥66% of range), body in lower third.
     if r3 > 0 and atr > 0:
         uw3 = c3["high"] - max(c3["open"], c3["close"])
         lw3 = min(c3["open"], c3["close"]) - c3["low"]
         uw_pct3 = uw3 / r3 * 100
         lw_pct3 = lw3 / r3 * 100
         body_pct3 = _abs_body(c3) / r3 * 100
-        # Bullish Pin Bar: lower wick ≥66%, body ≤33%, close in upper half
-        if lw_pct3 >= 66 and body_pct3 <= 33 and b3 >= 0:
-            patterns.append({
-                "name": "BULL_PIN_BAR",
-                "direction": "CALL",
-                "score": 3,
-                "reason": f"Bullish Pin Bar (lower wick {lw_pct3:.0f}%, body {body_pct3:.0f}%) → CALL (63% win rate)"
-            })
         # Bearish Pin Bar: upper wick ≥66%, body ≤33%, close in lower half
         if uw_pct3 >= 66 and body_pct3 <= 33 and b3 <= 0:
             patterns.append({
@@ -379,20 +198,13 @@ def detect_candle_patterns(candles):
                 "reason": f"Bearish Pin Bar (upper wick {uw_pct3:.0f}%, body {body_pct3:.0f}%) → PUT (63% win rate)"
             })
 
-    # ── 10. Two-Bar Reversal (NEW, THEORY-RESEARCH-2026-08-03) ───────────
+    # ── 5. Two-Bar Reversal (2-candle) — KEPT ───────────────────────────
     # Two-Bar Reversal: two consecutive candles of opposite direction where
     # the second candle's body completely engulfs or matches the first,
     # AND the second candle closes near the first candle's open.
-    # Research: "The two-bar reversal can be highly effective in the right
-    # context" (Two-Bar Reversal Pattern Trading Guide).
-    # Bullish Two-Bar Reversal: c2 bearish (big), c3 bullish (big), c3 closes
-    # near c2's open (reversal of the down move).
-    # Bearish Two-Bar Reversal: c2 bullish (big), c3 bearish (big), c3 closes
-    # near c2's open (reversal of the up move).
     if atr > 0 and _abs_body(c2) > atr * 0.3 and _abs_body(c3) > atr * 0.3:
-        # Bullish: c2 down, c3 up, c3 closes near c2 open
+        # Bullish Two-Bar Reversal: c2 down, c3 up, c3 closes near c2 open
         if b2 < 0 and b3 > 0 and abs(c3["close"] - c2["open"]) < atr * 0.15:
-            # Both bodies should be comparable in size (within 50% of each other)
             if _abs_body(c3) > _abs_body(c2) * 0.5:
                 patterns.append({
                     "name": "BULL_TWO_BAR_REV",
@@ -400,7 +212,7 @@ def detect_candle_patterns(candles):
                     "score": 3,
                     "reason": f"Bullish Two-Bar Reversal (c2 down, c3 up, close near c2 open) → CALL (62% win rate)"
                 })
-        # Bearish: c2 up, c3 down, c3 closes near c2 open
+        # Bearish Two-Bar Reversal: c2 up, c3 down, c3 closes near c2 open
         if b2 > 0 and b3 < 0 and abs(c3["close"] - c2["open"]) < atr * 0.15:
             if _abs_body(c3) > _abs_body(c2) * 0.5:
                 patterns.append({
@@ -410,10 +222,9 @@ def detect_candle_patterns(candles):
                     "reason": f"Bearish Two-Bar Reversal (c2 up, c3 down, close near c2 open) → PUT (62% win rate)"
                 })
 
-    # ── 11. Doji Reversal (NEW, THEORY-RESEARCH-2026-08-03) ──────────────
-    # Doji after a trend: a doji (open≈close) after consecutive same-direction
-    # candles signals indecision and potential reversal.
-    # Research: Doji at key levels after a trend is a classic reversal signal.
+    # ── 6. Doji Bearish (3-candle) — KEPT ───────────────────────────────
+    # Doji after uptrend: a doji (open≈close) after consecutive bullish
+    # candles signals indecision and potential bearish reversal.
     if r3 > 0 and atr > 0:
         body_pct3 = _abs_body(c3) / r3 * 100
         # Doji: body <10% of range
@@ -426,16 +237,9 @@ def detect_candle_patterns(candles):
                     "score": 2,
                     "reason": f"Doji after uptrend (body {body_pct3:.0f}%) → PUT reversal (58% win rate)"
                 })
-            # After downtrend (c1, c2 both bearish) → bullish reversal signal
-            if b1 < 0 and b2 < 0 and c3["close"] > c3["open"] - (r3 * 0.05):
-                patterns.append({
-                    "name": "DOJI_BULLISH",
-                    "direction": "CALL",
-                    "score": 2,
-                    "reason": f"Doji after downtrend (body {body_pct3:.0f}%) → CALL reversal (58% win rate)"
-                })
 
     return patterns
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

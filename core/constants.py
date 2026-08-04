@@ -48,113 +48,24 @@ MODULE_DISPLAY_NAMES = {
 }
 
 # ───────────────────────────────────────────────────────────────────────────
-# DISABLED_THEORIES (THEORY-PRUNE-2026-08-04)
+# THEORY-PRUNE-2026-08-04 (PHYSICAL DELETION)
 # ───────────────────────────────────────────────────────────────────────────
-# Theories that have been disabled based on production backtest analysis
-# of 259 theory_votes (downloaded 2026-08-04 04:38 UTC).
+# After 3 rounds of backtest-driven disabling (Round 1, 2, 3), 20 of 35
+# theories were found net-harmful. They have now been PHYSICALLY DELETED
+# from the source code (engines/base/modules/*, core/analysis.py) —
+# not just disabled via `if False:` guards.
 #
-# Selection criteria: theory win-rate < 50% with n >= 5 samples.
-# These theories were net-harmful — predicting wrong more often than right.
+# The DISABLED_THEORIES frozenset and is_theory_disabled() helper have
+# been removed since they are no longer needed.
 #
-# Format: (module_name, theory_name_prefix)
-#   - theory_name_prefix is matched as a prefix against the reasons text
-#     (e.g. "Big body reversal" matches "Big UP body (...)" and
-#      "Big DOWN body (...)" reason strings).
+# See git history (commits ff0f610, a730d22, 1e3c6dd, d69f25b) for the
+# original disabling logic and backtest analysis.
 #
-# Backtest simulation showed that disabling these 6 theories would have:
-#   - Improved win rate from 55.8% → 69.6% (+13.8 percentage points)
-#   - Flipped 6 wrong signals to correct
-#   - Caused only 2 regressions (correct → wrong)
-#   - Avoided 47 low-confidence trades (became NEUTRAL)
-#
-# Each module's analyze() function checks this registry and skips matching
-# theories. To re-enable a theory, remove it from this set.
-#
-# Analysis artifacts:
-#   /home/z/my-project/analysis/theory_analysis.json
-#   /home/z/my-project/analysis/backtest_simulation.json
-DISABLED_THEORIES = frozenset({
-    # ── Round 1 (THEORY-PRUNE-2026-08-04, 120 signals, 7min window) ──
-    # candle_reaction — 3 worst performers
-    ("candle_reaction", "Big body reversal"),         # 36.7% win, n=30
-    ("candle_reaction", "Close at range top"),         # 30.8% win, n=13
-    ("candle_reaction", "Close at range bottom"),     # 44.4% win, n=9
-    # key_level — worst performer
-    ("key_level", "Key support bounce"),               # 36.4% win, n=11
-    # pattern — 2 underperformers (small sample but win%<50)
-    ("pattern", "Bullish Harami"),                     # 42.9% win, n=7
-    ("pattern", "Morning Star"),                       # 40.0% win, n=5
-
-    # ── Round 2 (THEORY-PRUNE-2-2026-08-04, 383 signals, 21min window) ──
-    # After push of Round 1, fresh data revealed MORE theories that were
-    # net-harmful on a larger sample. The Round 1 sample was too small to
-    # detect these — they appeared OK at n=20-30 but degraded at n=70+.
-    #
-    # candle_reaction / Streak reversal — biggest over-firer in the system
-    # 38% win rate, n=81. When combined with Three White Soldiers/Crows
-    # (continuation pattern) it's a 100% disagreement conflict — Streak
-    # says reversal, Soldiers says continuation. Streak loses 68% of the time.
-    ("candle_reaction", "Streak reversal"),
-    # key_level / Fibonacci retracement — 43% win, n=77. Most over-fires
-    # of any key_level theory. When paired with Resistance wick rejection
-    # or Three White Soldiers, win rate drops to 0%.
-    ("key_level", "Fibonacci retracement"),
-    # key_level / Key resistance bounce — 38% win, n=32. Was 75% on the
-    # small initial sample but reversed to 38% on the larger sample —
-    # classic small-sample bias. Disabling.
-    ("key_level", "Key resistance bounce"),
-    # key_level / Resistance wick rejection — 33% win, n=27. When paired
-    # with Fibonacci, win rate is 0% (n=6).
-    ("key_level", "Resistance wick rejection"),
-    # pattern / Bearish Engulfing — 27% win, n=33. Was 67% on initial
-    # sample, reversed to 27%. Small-sample bias.
-    ("pattern", "Bearish Engulfing"),
-    # pattern / Three White Soldiers — 32% win, n=31. Always CALL-biased
-    # and conflicts 100% with Streak reversal (reversal vs continuation).
-    ("pattern", "Three White Soldiers"),
-    # pattern / Three Black Crows — 41% win, n=17. Mirror of Three White
-    # Soldiers, always PUT-biased, conflicts with Streak reversal.
-    ("pattern", "Three Black Crows"),
-    # key_level / Close near prev high — 17% win, n=6. Very small but
-    # very bad — disabling preemptively.
-    ("key_level", "Close near prev high"),
-
-    # ── Round 3 (THEORY-PRUNE-3-2026-08-04, agree-but-lose analysis) ──
-    # Disagreement analysis showed 88.7% of signals already have 100%
-    # consensus (because so many theories were already disabled). But win
-    # rate was still only 49.5% — theories AGREE but they're WRONG.
-    #
-    # Root cause discovered: ALL remaining theories are 100% direction-
-    # biased (always CALL or always PUT, regardless of market regime).
-    # A theory that always votes CALL cannot adapt to a downtrend, so
-    # when it forms a "consensus" with other CALL-biased theories, the
-    # consensus is still wrong half the time.
-    #
-    # Round 3 disables direction-biased theories with win% < 55% and
-    # n >= 8. These are "agree-but-lose" theories.
-    ("candle_reaction", "Lower wick rejection"),     # 42% win, n=36, always CALL
-    ("pattern", "Hammer"),                            # 44% win, n=18, always CALL
-    ("pattern", "Doji Bullish"),                      # 44% win, n=9,  always CALL
-    ("pattern", "Bullish Pin Bar"),                   # 46% win, n=13, always CALL
-    ("pattern", "Evening Star"),                      # 47% win, n=15, always PUT
-    ("pattern", "Tweezer Top"),                       # 47% win, n=19, always PUT
-    ("pattern", "Shooting Star"),                     # 50% win, n=26, always PUT
-    ("pattern", "Bullish Engulfing"),                 # 52% win, n=23, always CALL
-    ("candle_reaction", "Upper wick rejection"),      # 52% win, n=42, always PUT
-})
-
-
-def is_theory_disabled(module_name: str, theory_name: str) -> bool:
-    """Check if a theory is disabled.
-
-    Matches by prefix so that reason-text variants like
-    "Bullish Harami (small bullish inside big ...)" still match
-    the disabled entry "Bullish Harami".
-    """
-    for m, t in DISABLED_THEORIES:
-        if module_name == m and theory_name.startswith(t):
-            return True
-    return False
+# Active theories (15) now live exclusively in:
+#   - engines/base/modules/candle_reaction.py (SIGNAL 6 only)
+#   - engines/base/modules/key_level.py (Signals 1, 3, 6, 7)
+#   - engines/base/modules/pattern.py (8 patterns)
+#   - engines/base/modules/running_tick.py (Micro composite)
 
 
 # ───────────────────────────────────────────────────────────────────────────
