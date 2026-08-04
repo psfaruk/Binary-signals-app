@@ -779,37 +779,66 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # We don't force NEUTRAL here (preserves always-signal mode), but we
     # dampen confidence to reflect the disagreement.
     #
-    # If CONSENSUS_FILTER_ENABLED=1 (default) and CONSENSUS_STRICT=1 (env),
-    # disagreement signals become NEUTRAL (no trade).
+    # If CONSENSUS_FILTER_ENABLED=1 (default) and CONSENSUS_STRICT=1 (default
+    # after Round 3), disagreement signals become NEUTRAL (no trade).
+    #
+    # CONSENSUS_MIN_PCT (default 100) requires N% of theories to agree.
+    # CONSENSUS_MIN_GROUPS (default 2) requires at least N theories to
+    # vote in the same direction.
     _consensus_dampen = 1.0  # multiplier applied to confidence later
     _consensus_strict_neutral = False
     try:
-        from core.constants import CONSENSUS_FILTER_ENABLED, CONSENSUS_MIN_GROUPS
-        import os as _os
-        _consensus_strict = _os.environ.get("CONSENSUS_STRICT", "0") == "1"
-        if CONSENSUS_FILTER_ENABLED and call_groups and put_groups:
-            # Disagreement detected
-            if _consensus_strict:
-                _consensus_strict_neutral = True
+        from core.constants import (CONSENSUS_FILTER_ENABLED, CONSENSUS_MIN_GROUPS,
+                                      CONSENSUS_MIN_PCT, CONSENSUS_STRICT)
+        if CONSENSUS_FILTER_ENABLED:
+            # Compute agreement % at the theory level (not group level)
+            # call_groups / put_groups are sets of group names that voted each direction
+            n_call_groups = len(call_groups)
+            n_put_groups = len(put_groups)
+            total_voting_groups = n_call_groups + n_put_groups
+            if total_voting_groups > 0:
+                majority_n = max(n_call_groups, n_put_groups)
+                agreement_pct = 100.0 * majority_n / total_voting_groups
             else:
-                # Soft dampening: reduce confidence by 30% on disagreement
-                _consensus_dampen = 0.7
-                all_reasons.append(
-                    f"_CONSENSUS_DISAGREE: {len(call_groups)} CALL groups vs "
-                    f"{len(put_groups)} PUT groups -> confidence dampened "
-                    f"(set CONSENSUS_STRICT=1 to make this NEUTRAL)")
-        # Min-groups check: require at least CONSENSUS_MIN_GROUPS groups
-        # agreeing on the final direction.
-        if CONSENSUS_FILTER_ENABLED and not _consensus_strict_neutral:
-            _final_groups = call_groups if (net >= 0) else put_groups
-            if len(_final_groups) < CONSENSUS_MIN_GROUPS:
-                if _consensus_strict:
+                agreement_pct = 0
+
+            # Check 1: disagreement (both CALL and PUT groups present)
+            has_disagreement = n_call_groups > 0 and n_put_groups > 0
+
+            # Check 2: agreement % below threshold
+            below_agreement_threshold = agreement_pct < CONSENSUS_MIN_PCT
+
+            # Check 3: not enough groups voting in majority direction
+            majority_groups_count = n_call_groups if n_call_groups > n_put_groups else n_put_groups
+            below_min_groups = majority_groups_count < CONSENSUS_MIN_GROUPS
+
+            should_suppress = has_disagreement or below_agreement_threshold or below_min_groups
+
+            if should_suppress:
+                if CONSENSUS_STRICT:
                     _consensus_strict_neutral = True
-                else:
-                    _consensus_dampen *= 0.6
                     all_reasons.append(
-                        f"_CONSENSUS_MIN_GROUPS: only {len(_final_groups)} group(s) "
-                        f"agree (min {CONSENSUS_MIN_GROUPS}) -> confidence dampened")
+                        f"_CONSENSUS_STRICT: agreement={agreement_pct:.0f}% "
+                        f"(min {CONSENSUS_MIN_PCT}%), majority_groups={majority_groups_count} "
+                        f"(min {CONSENSUS_MIN_GROUPS}), disagreement={'yes' if has_disagreement else 'no'} "
+                        f"-> NEUTRAL")
+                else:
+                    # Soft dampening mode
+                    if has_disagreement:
+                        _consensus_dampen *= 0.7
+                        all_reasons.append(
+                            f"_CONSENSUS_DISAGREE: {n_call_groups} CALL vs {n_put_groups} PUT "
+                            f"-> confidence ×0.7")
+                    if below_agreement_threshold:
+                        _consensus_dampen *= 0.8
+                        all_reasons.append(
+                            f"_CONSENSUS_LOW_AGREE: {agreement_pct:.0f}% < {CONSENSUS_MIN_PCT}% "
+                            f"-> confidence ×0.8")
+                    if below_min_groups:
+                        _consensus_dampen *= 0.6
+                        all_reasons.append(
+                            f"_CONSENSUS_MIN_GROUPS: {majority_groups_count} < {CONSENSUS_MIN_GROUPS} "
+                            f"-> confidence ×0.6")
     except Exception:
         pass  # defensive — never break prediction over a consensus check
 

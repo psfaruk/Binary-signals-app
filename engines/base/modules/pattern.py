@@ -69,6 +69,16 @@ DISABLED_PATTERNS = frozenset({
     "3_SOLDIERS",
     # Three Black Crows — 41% win rate, n=17. Mirror of Three White Soldiers.
     "3_CROWS",
+
+    # Round 3 (THEORY-PRUNE-3-2026-08-04, agree-but-lose)
+    # All patterns below are 100% direction-biased and have win%<55%.
+    # They agree with other theories on direction but still lose half the time.
+    "HAMMER",            # 44% win, n=18, always CALL
+    "SHOOTING_STAR",     # 50% win, n=26, always PUT
+    "EVENING_STAR",      # 47% win, n=15, always PUT
+    "TWEEZER_TOP",       # 47% win, n=19, always PUT
+    "BULL_PIN_BAR",      # 46% win, n=13, always CALL
+    "DOJI_BULLISH",      # 44% win, n=9,  always CALL
 })
 
 ALWAYS_REVERSAL = {

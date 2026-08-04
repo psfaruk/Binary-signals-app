@@ -320,7 +320,18 @@ def analyze(candles, ctx: MarketContext) -> list:
     # Now: skip Signal 3 entirely when the trend strongly opposes the
     # reversal direction. Keep firing when trend is RANGE/VOLATILE or
     # aligned with the reversal (counter-trend exhaustion case).
-    if rng > 0:
+    #
+    # ═══════════════════════════════════════════════════════════════════════
+    # DISABLED (THEORY-PRUNE-3-2026-08-04): Both branches of SIGNAL 3 had
+    # poor win rates and are 100% direction-biased (Upper always PUT,
+    # Lower always CALL), regardless of market regime:
+    #   - Upper wick rejection: 52% win, n=42, always PUT
+    #   - Lower wick rejection: 42% win, n=36, always CALL
+    # The trend-aligned exclusion above helped but was insufficient.
+    # To re-enable: remove these theories from DISABLED_THEORIES in
+    # core/constants.py AND remove the `if False:` guard below.
+    # ═══════════════════════════════════════════════════════════════════════
+    if False and rng > 0:
         upper_wick = h - max(o, c)
         lower_wick = min(o, c) - l
         uw_pct = upper_wick / rng * 100

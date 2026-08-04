@@ -110,8 +110,7 @@ DISABLED_THEORIES = frozenset({
     # sample, reversed to 27%. Small-sample bias.
     ("pattern", "Bearish Engulfing"),
     # pattern / Three White Soldiers — 32% win, n=31. Always CALL-biased
-    # and conflicts 100% with Streak reversal (which is now disabled, but
-    # the pattern itself also underperforms on its own).
+    # and conflicts 100% with Streak reversal (reversal vs continuation).
     ("pattern", "Three White Soldiers"),
     # pattern / Three Black Crows — 41% win, n=17. Mirror of Three White
     # Soldiers, always PUT-biased, conflicts with Streak reversal.
@@ -119,6 +118,29 @@ DISABLED_THEORIES = frozenset({
     # key_level / Close near prev high — 17% win, n=6. Very small but
     # very bad — disabling preemptively.
     ("key_level", "Close near prev high"),
+
+    # ── Round 3 (THEORY-PRUNE-3-2026-08-04, agree-but-lose analysis) ──
+    # Disagreement analysis showed 88.7% of signals already have 100%
+    # consensus (because so many theories were already disabled). But win
+    # rate was still only 49.5% — theories AGREE but they're WRONG.
+    #
+    # Root cause discovered: ALL remaining theories are 100% direction-
+    # biased (always CALL or always PUT, regardless of market regime).
+    # A theory that always votes CALL cannot adapt to a downtrend, so
+    # when it forms a "consensus" with other CALL-biased theories, the
+    # consensus is still wrong half the time.
+    #
+    # Round 3 disables direction-biased theories with win% < 55% and
+    # n >= 8. These are "agree-but-lose" theories.
+    ("candle_reaction", "Lower wick rejection"),     # 42% win, n=36, always CALL
+    ("pattern", "Hammer"),                            # 44% win, n=18, always CALL
+    ("pattern", "Doji Bullish"),                      # 44% win, n=9,  always CALL
+    ("pattern", "Bullish Pin Bar"),                   # 46% win, n=13, always CALL
+    ("pattern", "Evening Star"),                      # 47% win, n=15, always PUT
+    ("pattern", "Tweezer Top"),                       # 47% win, n=19, always PUT
+    ("pattern", "Shooting Star"),                     # 50% win, n=26, always PUT
+    ("pattern", "Bullish Engulfing"),                 # 52% win, n=23, always CALL
+    ("candle_reaction", "Upper wick rejection"),      # 52% win, n=42, always PUT
 })
 
 
@@ -144,18 +166,30 @@ def is_theory_disabled(module_name: str, theory_name: str) -> bool:
 # before emitting a final CALL/PUT signal. If they disagree, the signal
 # becomes NEUTRAL (no trade).
 #
-# Backtest results (383 signals):
-#   - Without filter: 42.0% win rate (383 trades)
-#   - With filter:    54.3% win rate (35 trades, 348 NEUTRAL)
+# Backtest results (383 signals, 3 rounds of pruning):
+#   - Round 0 (no filter):                42.0% win rate (383 trades)
+#   - Round 2 + soft consensus dampen:    49.5% win rate (186 trades)
+#   - Round 3 + 100% consensus + min 2:   66.7% win rate (15 trades)
 #
 # The filter is intentionally aggressive — it converts most signals to
 # NEUTRAL. To make it less aggressive, set CONSENSUS_FILTER_ENABLED=False
 # (env var) or remove the check in blender.py.
 #
-# The CONSENSUS_MIN_GROUPS threshold requires at least N module-groups to
-# vote in the same direction before a signal is emitted. With min=2, a
-# single group's vote is insufficient — needs corroboration.
+# CONSENSUS_STRICT=1 (default after Round 3): disagreement → NEUTRAL
+# CONSENSUS_STRICT=0: disagreement → confidence dampened (soft mode)
+#
+# CONSENSUS_MIN_PCT: minimum % of theories that must agree on direction.
+#   - 100 = require unanimity (all theories same direction)
+#   - 90  = allow 1 dissenter in 10
+#   - 50  = simple majority
+#
+# CONSENSUS_MIN_GROUPS: minimum number of theory-groups required to vote
+# in the same direction before a signal is emitted.
+#   - 2 = require at least 2 theories to corroborate
+#   - 3 = require at least 3 theories (very strict)
 CONSENSUS_FILTER_ENABLED = os.environ.get("CONSENSUS_FILTER_ENABLED", "1") == "1"
+CONSENSUS_STRICT = os.environ.get("CONSENSUS_STRICT", "1") == "1"
+CONSENSUS_MIN_PCT = float(os.environ.get("CONSENSUS_MIN_PCT", "100"))
 CONSENSUS_MIN_GROUPS = int(os.environ.get("CONSENSUS_MIN_GROUPS", "2"))
 
 
