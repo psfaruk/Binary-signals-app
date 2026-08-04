@@ -773,6 +773,46 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     net = call_score - put_score
     total = call_score + put_score
 
+    # ── CONSENSUS FILTER (CONSENSUS-FILTER-2026-08-04) ────────────────────
+    # When theories disagree (some CALL groups, some PUT groups), the
+    # signal's win rate drops significantly (30.6% vs 43.0% for consensus).
+    # We don't force NEUTRAL here (preserves always-signal mode), but we
+    # dampen confidence to reflect the disagreement.
+    #
+    # If CONSENSUS_FILTER_ENABLED=1 (default) and CONSENSUS_STRICT=1 (env),
+    # disagreement signals become NEUTRAL (no trade).
+    _consensus_dampen = 1.0  # multiplier applied to confidence later
+    _consensus_strict_neutral = False
+    try:
+        from core.constants import CONSENSUS_FILTER_ENABLED, CONSENSUS_MIN_GROUPS
+        import os as _os
+        _consensus_strict = _os.environ.get("CONSENSUS_STRICT", "0") == "1"
+        if CONSENSUS_FILTER_ENABLED and call_groups and put_groups:
+            # Disagreement detected
+            if _consensus_strict:
+                _consensus_strict_neutral = True
+            else:
+                # Soft dampening: reduce confidence by 30% on disagreement
+                _consensus_dampen = 0.7
+                all_reasons.append(
+                    f"_CONSENSUS_DISAGREE: {len(call_groups)} CALL groups vs "
+                    f"{len(put_groups)} PUT groups -> confidence dampened "
+                    f"(set CONSENSUS_STRICT=1 to make this NEUTRAL)")
+        # Min-groups check: require at least CONSENSUS_MIN_GROUPS groups
+        # agreeing on the final direction.
+        if CONSENSUS_FILTER_ENABLED and not _consensus_strict_neutral:
+            _final_groups = call_groups if (net >= 0) else put_groups
+            if len(_final_groups) < CONSENSUS_MIN_GROUPS:
+                if _consensus_strict:
+                    _consensus_strict_neutral = True
+                else:
+                    _consensus_dampen *= 0.6
+                    all_reasons.append(
+                        f"_CONSENSUS_MIN_GROUPS: only {len(_final_groups)} group(s) "
+                        f"agree (min {CONSENSUS_MIN_GROUPS}) -> confidence dampened")
+    except Exception:
+        pass  # defensive — never break prediction over a consensus check
+
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-24): when net == 0 (perfect
     # score tie), use GROUP COUNT as a tiebreaker before returning NEUTRAL.
     # A 3-CALL-group vs 1-PUT-group tie (where PUT has higher per-group
@@ -925,6 +965,26 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # round 59). The difference is small but consistent with the round()
     # fixes applied to all the multipliers downstream.
     confidence = _round_half_up(math.sqrt(vote_ratio * weight_ratio * edge_factor) * CONFIDENCE_SCALE)
+
+    # CONSENSUS-FILTER-2026-08-04: apply dampening from disagreement / min-groups
+    # check. _consensus_dampen is 1.0 by default, 0.7 on disagreement, 0.42 if
+    # both disagreement AND min-groups fail. This is applied BEFORE the
+    # calibration caps so the caps still enforce hard upper bounds.
+    try:
+        if _consensus_dampen < 1.0:
+            confidence = _round_half_up(confidence * _consensus_dampen)
+    except NameError:
+        pass  # _consensus_dampen not set (e.g. early return path)
+
+    # If consensus strict mode fired, return NEUTRAL here (before any other
+    # confidence calibration can override it).
+    try:
+        if _consensus_strict_neutral:
+            all_reasons.append("_CONSENSUS_STRICT: returning NEUTRAL due to disagreement")
+            return _neutral(all_reasons, regime, asset, weight_adapter,
+                             ctx, module_names=module_names, htf_trend=htf_trend)
+    except NameError:
+        pass
 
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-14): the HTF alignment bonus
     # (+5/-5) was previously applied HERE, BEFORE the single-group cap and

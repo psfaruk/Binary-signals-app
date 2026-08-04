@@ -74,6 +74,7 @@ MODULE_DISPLAY_NAMES = {
 #   /home/z/my-project/analysis/theory_analysis.json
 #   /home/z/my-project/analysis/backtest_simulation.json
 DISABLED_THEORIES = frozenset({
+    # ── Round 1 (THEORY-PRUNE-2026-08-04, 120 signals, 7min window) ──
     # candle_reaction — 3 worst performers
     ("candle_reaction", "Big body reversal"),         # 36.7% win, n=30
     ("candle_reaction", "Close at range top"),         # 30.8% win, n=13
@@ -83,6 +84,41 @@ DISABLED_THEORIES = frozenset({
     # pattern — 2 underperformers (small sample but win%<50)
     ("pattern", "Bullish Harami"),                     # 42.9% win, n=7
     ("pattern", "Morning Star"),                       # 40.0% win, n=5
+
+    # ── Round 2 (THEORY-PRUNE-2-2026-08-04, 383 signals, 21min window) ──
+    # After push of Round 1, fresh data revealed MORE theories that were
+    # net-harmful on a larger sample. The Round 1 sample was too small to
+    # detect these — they appeared OK at n=20-30 but degraded at n=70+.
+    #
+    # candle_reaction / Streak reversal — biggest over-firer in the system
+    # 38% win rate, n=81. When combined with Three White Soldiers/Crows
+    # (continuation pattern) it's a 100% disagreement conflict — Streak
+    # says reversal, Soldiers says continuation. Streak loses 68% of the time.
+    ("candle_reaction", "Streak reversal"),
+    # key_level / Fibonacci retracement — 43% win, n=77. Most over-fires
+    # of any key_level theory. When paired with Resistance wick rejection
+    # or Three White Soldiers, win rate drops to 0%.
+    ("key_level", "Fibonacci retracement"),
+    # key_level / Key resistance bounce — 38% win, n=32. Was 75% on the
+    # small initial sample but reversed to 38% on the larger sample —
+    # classic small-sample bias. Disabling.
+    ("key_level", "Key resistance bounce"),
+    # key_level / Resistance wick rejection — 33% win, n=27. When paired
+    # with Fibonacci, win rate is 0% (n=6).
+    ("key_level", "Resistance wick rejection"),
+    # pattern / Bearish Engulfing — 27% win, n=33. Was 67% on initial
+    # sample, reversed to 27%. Small-sample bias.
+    ("pattern", "Bearish Engulfing"),
+    # pattern / Three White Soldiers — 32% win, n=31. Always CALL-biased
+    # and conflicts 100% with Streak reversal (which is now disabled, but
+    # the pattern itself also underperforms on its own).
+    ("pattern", "Three White Soldiers"),
+    # pattern / Three Black Crows — 41% win, n=17. Mirror of Three White
+    # Soldiers, always PUT-biased, conflicts with Streak reversal.
+    ("pattern", "Three Black Crows"),
+    # key_level / Close near prev high — 17% win, n=6. Very small but
+    # very bad — disabling preemptively.
+    ("key_level", "Close near prev high"),
 })
 
 
@@ -97,6 +133,30 @@ def is_theory_disabled(module_name: str, theory_name: str) -> bool:
         if module_name == m and theory_name.startswith(t):
             return True
     return False
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# CONSENSUS FILTER (CONSENSUS-FILTER-2026-08-04)
+# ───────────────────────────────────────────────────────────────────────────
+# When theories disagree (some vote CALL, some vote PUT on the same candle),
+# the signal's win rate drops to 30.6% — 12.4pp worse than consensus signals
+# (43.0%). This filter requires all module-groups to agree on direction
+# before emitting a final CALL/PUT signal. If they disagree, the signal
+# becomes NEUTRAL (no trade).
+#
+# Backtest results (383 signals):
+#   - Without filter: 42.0% win rate (383 trades)
+#   - With filter:    54.3% win rate (35 trades, 348 NEUTRAL)
+#
+# The filter is intentionally aggressive — it converts most signals to
+# NEUTRAL. To make it less aggressive, set CONSENSUS_FILTER_ENABLED=False
+# (env var) or remove the check in blender.py.
+#
+# The CONSENSUS_MIN_GROUPS threshold requires at least N module-groups to
+# vote in the same direction before a signal is emitted. With min=2, a
+# single group's vote is insufficient — needs corroboration.
+CONSENSUS_FILTER_ENABLED = os.environ.get("CONSENSUS_FILTER_ENABLED", "1") == "1"
+CONSENSUS_MIN_GROUPS = int(os.environ.get("CONSENSUS_MIN_GROUPS", "2"))
 
 
 # Modules used by each engine.

@@ -131,7 +131,21 @@ def analyze(candles, ctx: MarketContext) -> list:
         s4_score, s4_conf = 3, 60
         s3_score, s3_conf = 2, 55
 
-    if consec >= streak_thresh_5:
+    #
+    # ═══════════════════════════════════════════════════════════════════════
+    # DISABLED (THEORY-PRUNE-2-2026-08-04): "Streak reversal" had 38% win
+    # rate on n=81 production samples (the 2nd-worst by volume, after
+    # Fibonacci). The trend-aware dampening was insufficient because most
+    # signals fired in RANGE regime where dampening never triggers. This
+    # theory is also the principal party in the "Streak vs Soldiers" 100%
+    # disagreement conflict — Three White Soldiers/Crows (continuation)
+    # and Streak reversal fire on the same candle and contradict each other.
+    # When paired with Three White Soldiers, Streak reversal wins only 32%
+    # of the time. Disabling both sides of the conflict resolves it.
+    # To re-enable: remove from DISABLED_THEORIES in core/constants.py
+    # AND remove the `if False:` guard below.
+    # ═══════════════════════════════════════════════════════════════════════
+    if False and consec >= streak_thresh_5:
         if streak_dir == 1:
             results.append(ModuleResult(
                 module_name="candle_reaction", direction="PUT", score=s5_score, confidence=s5_conf,
@@ -142,7 +156,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                 module_name="candle_reaction", direction="CALL", score=s5_score, confidence=s5_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
                 reasons=[f"{consec}+ DOWN streak → CALL reversal ({s5_conf}% win rate, rarity={stats.get('streak_rarity', 0):.0%}, trend_str={trend_strength:.2f})"]))
-    elif consec >= streak_thresh_4:
+    elif False and consec >= streak_thresh_4:
         if streak_dir == 1:
             results.append(ModuleResult(
                 module_name="candle_reaction", direction="PUT", score=s4_score, confidence=s4_conf,
@@ -153,7 +167,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                 module_name="candle_reaction", direction="CALL", score=s4_score, confidence=s4_conf,
                 signal_type="REVERSAL", reliability="CANDLE", group="BODY",
                 reasons=[f"{consec}+ DOWN streak → CALL reversal ({s4_conf}% win rate, trend_str={trend_strength:.2f})"]))
-    elif consec >= streak_thresh_3:
+    elif False and consec >= streak_thresh_3:
         if streak_dir == 1:
             results.append(ModuleResult(
                 module_name="candle_reaction", direction="PUT", score=s3_score, confidence=s3_conf,

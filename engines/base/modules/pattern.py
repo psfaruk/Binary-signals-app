@@ -56,8 +56,19 @@ from core.constants import is_theory_disabled
 # DISABLED_THEORIES in core/constants.py.
 # ═══════════════════════════════════════════════════════════════════════
 DISABLED_PATTERNS = frozenset({
+    # Round 1 (THEORY-PRUNE-2026-08-04, n<10 samples)
     "BULL_HARAMI",     # 42.9% win rate, n=7
     "MORNING_STAR",    # 40.0% win rate, n=5
+
+    # Round 2 (THEORY-PRUNE-2-2026-08-04, larger sample revealed regression)
+    # Bearish Engulfing was 67% on small sample (n=10) but reversed to
+    # 27% on larger sample (n=33). Classic small-sample bias.
+    "BEAR_ENGULF",
+    # Three White Soldiers — 32% win rate, n=31. Always CALL-biased and
+    # conflicts 100% with Streak reversal (reversal vs continuation).
+    "3_SOLDIERS",
+    # Three Black Crows — 41% win rate, n=17. Mirror of Three White Soldiers.
+    "3_CROWS",
 })
 
 ALWAYS_REVERSAL = {

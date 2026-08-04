@@ -96,10 +96,18 @@ def analyze(candles, ctx: MarketContext) -> list:
                         signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
                         reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → CALL (failed breakdown, 70% win rate)"]))
                 else:
-                    results.append(ModuleResult(
-                        module_name="key_level", direction="PUT", score=4, confidence=70,
-                        signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                        reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → PUT (failed breakout, 70% win rate)"]))
+                    # ═══════════════════════════════════════════════════════════════════════
+                    # DISABLED (THEORY-PRUNE-2-2026-08-04): "Resistance wick
+                    # rejection" had 33% win rate on n=27 production samples.
+                    # When paired with Fibonacci retracement, win rate drops
+                    # to 0% (n=6). The mirror "Support wick rejection"
+                    # (55.6% win, n=18) is KEPT — asymmetry persists.
+                    # ═══════════════════════════════════════════════════════════════════════
+                    if False:
+                        results.append(ModuleResult(
+                            module_name="key_level", direction="PUT", score=4, confidence=70,
+                            signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                            reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → PUT (failed breakout, 70% win rate)"]))
             elif action == "bounce":
                 if lvl_type == "support":
                     # ═══════════════════════════════════════════════════════════════════════
@@ -121,10 +129,19 @@ def analyze(candles, ctx: MarketContext) -> list:
                             signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
                             reasons=[f"Key support bounce ({lvl_price:.5f}, {dist:.2f} ATR) → CALL boost"]))
                 else:
-                    results.append(ModuleResult(
-                        module_name="key_level", direction="PUT", score=3, confidence=65,
-                        signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                        reasons=[f"Key resistance bounce ({lvl_price:.5f}, {dist:.2f} ATR) → PUT boost"]))
+                    # ═══════════════════════════════════════════════════════════════════════
+                    # DISABLED (THEORY-PRUNE-2-2026-08-04): "Key resistance
+                    # bounce" had 38% win rate on n=32 production samples.
+                    # This theory was 75% on the small initial sample (n=8)
+                    # but reversed to 38% on the larger sample — classic
+                    # small-sample bias. When paired with Fibonacci, win
+                    # rate drops to 25% (n=8).
+                    # ═══════════════════════════════════════════════════════════════════════
+                    if False:
+                        results.append(ModuleResult(
+                            module_name="key_level", direction="PUT", score=3, confidence=65,
+                            signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                            reasons=[f"Key resistance bounce ({lvl_price:.5f}, {dist:.2f} ATR) → PUT boost"]))
             # FIX (F-09-05): breakout action branch removed (was dead `pass`
             # block). Breakouts on 1m candles had 47.3% win rate
             # (ultra-deep backtest) — intentionally disabled.
@@ -162,28 +179,36 @@ def analyze(candles, ctx: MarketContext) -> list:
         eps = max(abs(close) * EPS_PRICE_SCALE, _granularity * EPS_GRANULARITY_SCALE)
 
         if abs(close - prev_high) < tol:
-            if close < prev_high - eps:
-                results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=1, confidence=52,
-                    signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
-                    reasons=[f"Close near prev high ({prev_high:.5f}) → PUT rejection"]))
-            elif close > prev_high + eps:
-                # FIX (THEORY-LOGIC-FIX-2026-08-03): regime-conditional signal_type.
-                # In TREND_DOWN, breaking above prev high is a COUNTER-TREND reversal
-                # (should be dampened, not boosted). In TREND_UP, it's genuine continuation.
-                # Previously hardcoded CONTINUATION → blender boosted counter-trend false signals.
-                _sig_type = "CONTINUATION"
-                _score, _conf = 1, 52
-                if is_trending and trend_strength > 0.5:
-                    if trend_regime == "TREND_DOWN":
-                        _sig_type = "REVERSAL"  # counter-trend breakout attempt
-                        _score, _conf = 1, 48  # dampen
-                    elif trend_regime == "TREND_UP":
-                        _score, _conf = 2, 56  # trend-aligned — boost
-                results.append(ModuleResult(
-                    module_name="key_level", direction="CALL", score=_score, confidence=_conf,
-                    signal_type=_sig_type, reliability="LEVEL", group="MICRO_SR",
-                    reasons=[f"Close above prev high ({prev_high:.5f}) → CALL breakout ({_sig_type})"]))
+            # ═══════════════════════════════════════════════════════════════════════
+            # DISABLED (THEORY-PRUNE-2-2026-08-04): both branches of
+            # "Close near prev high" had very poor win rates:
+            #   - "Close near prev high"     → 17% win, n=6  (worst of all theories)
+            #   - "Close above prev high (breakout)" → 0% win, n=2
+            # The mirror pair "Close near/below prev low" is KEPT (50-57% win).
+            # ═══════════════════════════════════════════════════════════════════════
+            if False:
+                if close < prev_high - eps:
+                    results.append(ModuleResult(
+                        module_name="key_level", direction="PUT", score=1, confidence=52,
+                        signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
+                        reasons=[f"Close near prev high ({prev_high:.5f}) → PUT rejection"]))
+                elif close > prev_high + eps:
+                    # FIX (THEORY-LOGIC-FIX-2026-08-03): regime-conditional signal_type.
+                    # In TREND_DOWN, breaking above prev high is a COUNTER-TREND reversal
+                    # (should be dampened, not boosted). In TREND_UP, it's genuine continuation.
+                    # Previously hardcoded CONTINUATION → blender boosted counter-trend false signals.
+                    _sig_type = "CONTINUATION"
+                    _score, _conf = 1, 52
+                    if is_trending and trend_strength > 0.5:
+                        if trend_regime == "TREND_DOWN":
+                            _sig_type = "REVERSAL"  # counter-trend breakout attempt
+                            _score, _conf = 1, 48  # dampen
+                        elif trend_regime == "TREND_UP":
+                            _score, _conf = 2, 56  # trend-aligned — boost
+                    results.append(ModuleResult(
+                        module_name="key_level", direction="CALL", score=_score, confidence=_conf,
+                        signal_type=_sig_type, reliability="LEVEL", group="MICRO_SR",
+                        reasons=[f"Close above prev high ({prev_high:.5f}) → CALL breakout ({_sig_type})"]))
 
         elif abs(close - prev_low) < tol:
             if close > prev_low + eps:
@@ -210,8 +235,23 @@ def analyze(candles, ctx: MarketContext) -> list:
     # SIGNAL 4: Fibonacci Retracement (NEW — real market classic)
     # Find recent swing high → low (or low → high), check if price is at
     # 38.2%, 50%, or 61.8% retracement level.
+    #
     # ═══════════════════════════════════════════════════════════════════════
-    if len(candles) >= FIB_WINDOW_SIZE and atr > 0:
+    # DISABLED (THEORY-PRUNE-2-2026-08-04): "Fibonacci retracement" had
+    # 43% win rate on n=77 production samples — the SINGLE MOST OVER-FIRING
+    # theory in the system. Worse, it creates toxic combos:
+    #   - Fibonacci + Streak reversal     →  8% win (n=13)
+    #   - Fibonacci + Three White Soldiers →  0% win (n=7)
+    #   - Fibonacci + Bearish Engulfing    → 12% win (n=8)
+    #   - Fibonacci + Resistance wick rej  →  0% win (n=6)
+    # When Fibonacci fires alongside other theories, it almost always loses.
+    # On 1-minute forex candles, "Fibonacci retracement levels" are too
+    # noisy — every candle has multiple plausible Fib levels within ATR
+    # tolerance, so the signal fires indiscriminately.
+    # To re-enable: remove ("key_level", "Fibonacci retracement") from
+    # DISABLED_THEORIES in core/constants.py AND remove the `if False:` guard.
+    # ═══════════════════════════════════════════════════════════════════════
+    if False and len(candles) >= FIB_WINDOW_SIZE and atr > 0:
         window = candles[-FIB_WINDOW_SIZE:]
         swing_high = max(c["high"] for c in window)
         swing_low = min(c["low"] for c in window)
