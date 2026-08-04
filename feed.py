@@ -2488,6 +2488,7 @@ class QuotexFeed:
                     a_open=closed["open"], a_close=closed["close"],
                     regime=regime, zone=zone,
                     tags=",".join(tags), postmortem=pm,
+                    signal_quality=prediction.get("signal_quality"),
                 )
         except Exception as _e:
             # FIX (DEEP-AUDIT-2026-07-26 / F-01-39): already prints to stderr

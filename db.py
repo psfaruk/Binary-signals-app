@@ -221,6 +221,19 @@ def init():
                 print("[db] migrated signal_log: added `total` column")
         except Exception as _e:
             print(f"[db] signal_log `total` column migration skipped: {_e}")
+        # FIX (SIGNAL-QUALITY-2026-08-04): persist blender.py's independent
+        # signal_quality label (HIGH/MEDIUM/LOW/NONE — see
+        # engines/base/blender.py::_compute_signal_quality) so win-rate
+        # per tier can be measured over time instead of guessed at from
+        # tiny same-day samples. Column is nullable/additive — safe to
+        # deploy without touching existing rows (they read back as NULL).
+        try:
+            cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
+            if "signal_quality" not in cols:
+                c.execute("ALTER TABLE signal_log ADD COLUMN signal_quality TEXT")
+                print("[db] migrated signal_log: added `signal_quality` column")
+        except Exception as _e:
+            print(f"[db] signal_log `signal_quality` column migration skipped: {_e}")
         # Indexes — composite ctime index covers (asset, period) prefix
         # lookups too, so no separate ix_sl_asset_period is needed.
         # FIX (DEEP-AUDIT-2026-07-26 / F-14-07): dropped redundant
@@ -258,6 +271,12 @@ def init():
             print(f"[db] signal_log `category` column migration skipped: {_e}")
         # FIX (2026-07-17): index for per-category accuracy queries.
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_category ON signal_log(category, asset, period)")
+        # FIX (SIGNAL-QUALITY-2026-08-04): index for per-quality-tier
+        # win-rate queries (/api/quality-analysis).
+        try:
+            c.execute("CREATE INDEX IF NOT EXISTS ix_sl_quality ON signal_log(signal_quality, accuracy)")
+        except Exception as _e:
+            print(f"[db] ix_sl_quality index creation skipped: {_e}")
 
         # FIX (AUDIT-CRITICAL #003, 2026-07-21): add UNIQUE constraint on
         # (asset, period, ctime) so the same candle can NEVER produce two
@@ -922,8 +941,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         (asset,period,ctime,signal,score,confidence,theories,
                          actual,accuracy,strength,agree,right_codes,wrong_codes,
                          reasons,a_open,a_close,regime,zone,tags,postmortem,
-                         category,total,ts)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         category,total,ts,signal_quality)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(asset, period, ctime) DO UPDATE SET
                         signal=excluded.signal,
                         score=excluded.score,
@@ -944,7 +963,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         postmortem=excluded.postmortem,
                         category=excluded.category,
                         total=excluded.total,
-                        ts=excluded.ts
+                        ts=excluded.ts,
+                        signal_quality=excluded.signal_quality
                     """,
                     (asset, period, ctime, signal, score, confidence, _as_text(theories),
                      actual, accuracy,
@@ -954,7 +974,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                      kw.get("a_open"), kw.get("a_close"),
                      kw.get("regime"), kw.get("zone"),
                      _as_text(kw.get("tags")), kw.get("postmortem"),
-                     category, total_val, ts_val))
+                     category, total_val, ts_val, kw.get("signal_quality")))
             except sqlite3.Error as _conflict_err:
                 if "ON CONFLICT" in str(_conflict_err) and "UNIQUE" in str(_conflict_err).upper():
                     # Fallback path: no unique constraint exists, use
@@ -966,8 +986,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                             (asset,period,ctime,signal,score,confidence,theories,
                              actual,accuracy,strength,agree,right_codes,wrong_codes,
                              reasons,a_open,a_close,regime,zone,tags,postmortem,
-                             category,total,ts)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                             category,total,ts,signal_quality)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (asset, period, ctime, signal, score, confidence, _as_text(theories),
                          actual, accuracy,
@@ -977,7 +997,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                          kw.get("a_open"), kw.get("a_close"),
                          kw.get("regime"), kw.get("zone"),
                          _as_text(kw.get("tags")), kw.get("postmortem"),
-                         category, total_val, ts_val))
+                         category, total_val, ts_val, kw.get("signal_quality")))
                 else:
                     raise
             conn.commit()

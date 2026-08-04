@@ -1503,6 +1503,80 @@ async def theory_analysis(period: int = 60, min_samples: int = 3):
         return {"error": str(e), "hint": "theory_votes table may not exist yet — run db.init()"}
 
 
+# ─── NEW (SIGNAL-QUALITY-2026-08-04): quality-tier win-rate endpoint ──────
+# Every signal always fires (always-signal mode), but each one now also
+# carries an honest signal_quality label (HIGH/MEDIUM/LOW/NONE — see
+# engines/base/blender.py::_compute_signal_quality) that does NOT depend
+# on the CONSENSUS_STRICT/MIN_GROUPS env vars. This endpoint answers the
+# question those env-var flips couldn't settle: does the label actually
+# predict win rate? MIN_SAMPLES_FOR_QUALITY_DECISION guards against
+# repeating the same day's small-sample thrashing (see git history
+# 2026-08-04, e.g. a theory going from 75% win at n=8 to 38% at n=32) —
+# treat any tier's win_pct as provisional until it clears the minimum.
+MIN_SAMPLES_FOR_QUALITY_DECISION = 150
+
+
+@app.get("/api/quality-analysis")
+async def quality_analysis(period: int = 60, hours: int = 0):
+    """Win-rate broken down by signal_quality tier (HIGH/MEDIUM/LOW/NONE).
+
+    Args:
+      period: candle period in seconds (default 60).
+      hours: if > 0, restrict to signals logged in the last N hours
+        (ctime >= now - hours*3600). 0 = all history.
+
+    Returns:
+      tiers: [{signal_quality, correct, wrong, total, win_pct, reliable}]
+        `reliable` is False until total >= MIN_SAMPLES_FOR_QUALITY_DECISION —
+        surfaced explicitly so the number isn't mistaken for a settled fact.
+      min_samples_required: the threshold used for `reliable`.
+    """
+    try:
+        conn = _db._conn()
+        try:
+            where = "WHERE period=? AND accuracy IN ('correct','wrong')"
+            params = [period]
+            if hours > 0:
+                where += " AND ctime >= ?"
+                params.append(int(time.time()) - hours * 3600)
+
+            rows = conn.execute(f"""
+                SELECT COALESCE(signal_quality, 'UNLABELED') as tier,
+                       SUM(CASE WHEN accuracy='correct' THEN 1 ELSE 0 END) as correct,
+                       SUM(CASE WHEN accuracy='wrong' THEN 1 ELSE 0 END) as wrong,
+                       COUNT(*) as total
+                FROM signal_log
+                {where}
+                GROUP BY tier
+                ORDER BY CASE tier
+                    WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2
+                    WHEN 'LOW' THEN 3 ELSE 4 END
+            """, params).fetchall()
+
+            tiers = []
+            for r in rows:
+                total = r["total"] or 0
+                win_pct = round(100.0 * r["correct"] / total, 1) if total else 0
+                tiers.append({
+                    "signal_quality": r["tier"],
+                    "correct": r["correct"],
+                    "wrong": r["wrong"],
+                    "total": total,
+                    "win_pct": win_pct,
+                    "reliable": total >= MIN_SAMPLES_FOR_QUALITY_DECISION,
+                })
+
+            return {
+                "tiers": tiers,
+                "min_samples_required": MIN_SAMPLES_FOR_QUALITY_DECISION,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        _logger.exception("quality analysis failed")
+        return {"error": str(e), "hint": "signal_quality column may not exist yet — run db.init()"}
+
+
 @app.get("/api/pair-deep-stats/{asset}")
 async def pair_deep_stats(asset: str, period: int = 60):
     """Deep statistics for a specific pair — all the data needed for calibration.

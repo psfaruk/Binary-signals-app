@@ -96,6 +96,32 @@ CONSENSUS_STRICT = os.environ.get("CONSENSUS_STRICT", "0") == "1"  # default OFF
 CONSENSUS_MIN_PCT = float(os.environ.get("CONSENSUS_MIN_PCT", "50"))  # simple majority
 CONSENSUS_MIN_GROUPS = int(os.environ.get("CONSENSUS_MIN_GROUPS", "1"))  # single theory can trade
 
+# ───────────────────────────────────────────────────────────────────────────
+# READ THIS BEFORE RUNNING ANOTHER THEORY-PRUNE / CONSENSUS-TUNE ROUND
+# ───────────────────────────────────────────────────────────────────────────
+# 2026-08-04's 3 pruning rounds (ff0f610, a730d22, 1e3c6dd) each disabled
+# theories based on samples as small as n=5-30, then the NEXT round's
+# fresh data reversed several of those verdicts outright — e.g. "Key
+# resistance bounce" was 75% win at n=8 (kept), then 38% win at n=32
+# (disabled), same day. At n<50 on a ~50%-baseline process, the standard
+# error is 10-18pp — most of these "findings" were noise, not signal.
+# Round 3's own backtest (66.7% win, n=15) then failed to replicate in
+# production (41% win, n=151), which is what triggered the same-day
+# revert back to always-signal mode (commit 87a7882).
+#
+# Because CONSENSUS_STRICT/MIN_PCT/MIN_GROUPS are env-toggleable and were
+# flipped 3 times in one day, engines/base/blender.py now ALSO computes
+# signal_quality (HIGH/MEDIUM/LOW/NONE) independently of these knobs —
+# see _compute_signal_quality() — so signal honesty doesn't depend on
+# which way these env vars are currently set. Check real win rate per
+# tier at GET /api/quality-analysis before trusting any tier's number —
+# it reports `reliable: false` under MIN_SAMPLES_FOR_QUALITY_DECISION
+# (150, in server.py) for exactly this reason.
+#
+# Before disabling/enabling ANY theory again: require n >= 150 AND
+# agreement across at least 2 separate days, not one rolling window.
+# Same-day re-flipping is how we got here.
+
 
 # Modules used by each engine.
 # FIX (MODULE-PRUNE-2026-08-03): both engines now use the same 4 modules.

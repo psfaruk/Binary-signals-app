@@ -135,6 +135,35 @@ def _round_half_up(x: float) -> int:
     return int(math.floor(x + 0.5))
 
 
+def _compute_signal_quality(n_call_groups: int, n_put_groups: int) -> str:
+    """Honest, always-computed quality label for a CALL/PUT signal.
+
+    Deliberately independent of CONSENSUS_STRICT / CONSENSUS_MIN_PCT /
+    CONSENSUS_MIN_GROUPS (core/constants.py) — those are env-toggleable
+    and were flipped multiple times in a single day (2026-08-04), which
+    would silently change the meaning of this label if it depended on
+    them. This function always uses the same fixed rule:
+
+        HIGH   : 2+ independent theory-groups voted the same direction,
+                 and none voted the other way.
+        MEDIUM : exactly 1 theory-group voted, unopposed.
+        LOW    : theory-groups actively disagree (some CALL, some PUT),
+                 or nothing voted at all.
+
+    Use this for filtering/UI/analytics — it is NOT used to suppress or
+    alter the signal itself, so "always-signal mode" is unaffected.
+    """
+    majority = max(n_call_groups, n_put_groups)
+    minority = min(n_call_groups, n_put_groups)
+    if minority > 0:
+        return "LOW"
+    if majority >= 2:
+        return "HIGH"
+    if majority == 1:
+        return "MEDIUM"
+    return "LOW"
+
+
 # FIX (DEEP-AUDIT-2026-07-26 / F-02-05 / F-02-21): extracted the bin-cap
 # calibration logic (previously duplicated at lines ~744-760 and ~858-886)
 # into a single helper. Also fixes the 5-point discontinuous jump at the
@@ -691,6 +720,30 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
 
     call_groups = set(r.group for r, e in adjusted if r.direction == "CALL")
     put_groups = set(r.group for r, e in adjusted if r.direction == "PUT")
+
+    # FIX (SIGNAL-QUALITY-2026-08-04): "always-signal mode" (every candle
+    # must emit CALL/PUT) and "signal is trustworthy" are two different
+    # things that today's CONSENSUS_STRICT/MIN_GROUPS env vars conflate —
+    # they were flipped strict->soft->strict->soft multiple times in one
+    # day (see git history 2026-08-04) because tightening them to improve
+    # honesty also suppressed volume, and the business requirement won.
+    #
+    # signal_quality is a SEPARATE, always-computed label that does not
+    # depend on those toggles, so it can't be silently defeated by a
+    # future revert of CONSENSUS_STRICT. It reflects only how many
+    # independent theory-groups actually corroborated this candle's
+    # direction — nothing more:
+    #   HIGH   = 2+ theory-groups agree, zero groups dissent
+    #   MEDIUM = exactly 1 theory-group fired, nothing contradicted it
+    #   LOW    = theory-groups actively disagree (some CALL, some PUT) —
+    #            this is exactly the case production data showed drops
+    #            win rate to ~30-42% (see THEORY-PRUNE-2 commit a730d22)
+    # Every CALL/PUT signal still gets shown (always-signal requirement
+    # preserved) — signal_quality just tells the truth about it, so the
+    # frontend/premium tier can filter on it and its real win rate can be
+    # tracked over time (see /api/quality-analysis).
+    _signal_quality = _compute_signal_quality(len(call_groups), len(put_groups))
+
     # Original groups (before suppression) — used for the denominator.
     original_groups = set(r.group for r in grouped_results)
     fired_groups = call_groups | put_groups
@@ -900,6 +953,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
             "strategy": _strat,
             "strategy_reason": _strat_r,
+            # SIGNAL-QUALITY-2026-08-04: zero real votes fired — this is a
+            # last-candle-direction guess, always LOW regardless of groups.
+            "signal_quality": "LOW",
         }
     if net == 0:
         # Score tie — try group-count tiebreaker.
@@ -1920,6 +1976,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             "strategy": _algo_strategy_name,
             "strategy_reason": _algo_strategy_reason,
             "range_suppressed": True,
+            "signal_quality": "NONE",
         }
     _low_conf_threshold = LOW_CONF_SKIP_OTC if asset.endswith("_otc") else LOW_CONF_SKIP_REAL
     if confidence < _low_conf_threshold:
@@ -1933,6 +1990,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
             "strategy": _algo_strategy_name,
             "strategy_reason": _algo_strategy_reason,
+            "signal_quality": "NONE",
         }
 
     # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-3-22): if the strategy
@@ -1954,6 +2012,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
             "strategy": _algo_strategy_name,
             "strategy_reason": _algo_strategy_reason,
+            "signal_quality": "NONE",
         }
 
     return {
@@ -1981,6 +2040,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # without the fragile `'_algo_strategy_name' in dir()` idiom.
         "strategy": _algo_strategy_name,
         "strategy_reason": _algo_strategy_reason,
+        "signal_quality": _signal_quality,
     }
 
 
@@ -2227,5 +2287,5 @@ def _neutral(reasons, regime, asset="", weight_adapter=None, ctx=None,
         "score": 0, "reasons": reasons if isinstance(reasons, list) else [reasons],
         "regime": regime, "agree": 0, "total": 0, "signals_fired": 0,
         "modules": modules, "asset": asset, "profile": pair_profile,
-        "htf_trend": htf_trend,
+        "htf_trend": htf_trend, "signal_quality": "NONE",
     }
