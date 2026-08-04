@@ -72,36 +72,29 @@ MODULE_DISPLAY_NAMES = {
 # CONSENSUS FILTER (CONSENSUS-FILTER-2026-08-04)
 # ───────────────────────────────────────────────────────────────────────────
 # When theories disagree (some vote CALL, some vote PUT on the same candle),
-# the signal's win rate drops to 30.6% — 12.4pp worse than consensus signals
-# (43.0%). This filter requires all module-groups to agree on direction
-# before emitting a final CALL/PUT signal. If they disagree, the signal
-# becomes NEUTRAL (no trade).
+# the signal's win rate drops. This filter can dampen confidence or force
+# NEUTRAL on disagreement.
 #
-# Backtest results (383 signals, 3 rounds of pruning):
-#   - Round 0 (no filter):                42.0% win rate (383 trades)
-#   - Round 2 + soft consensus dampen:    49.5% win rate (186 trades)
-#   - Round 3 + 100% consensus + min 2:   66.7% win rate (15 trades)
+# IMPORTANT (USER REQUIREMENT 2026-08-04): every candle MUST produce a
+# CALL or PUT signal — "always-signal mode" is mandatory. Therefore the
+# default config below is SOFT mode (dampen confidence on disagreement)
+# rather than STRICT mode (force NEUTRAL).
 #
-# The filter is intentionally aggressive — it converts most signals to
-# NEUTRAL. To make it less aggressive, set CONSENSUS_FILTER_ENABLED=False
-# (env var) or remove the check in blender.py.
+# To enable strict mode (skip trades on disagreement), set:
+#   CONSENSUS_STRICT=1
+# To lower the agreement threshold:
+#   CONSENSUS_MIN_PCT=50  (simple majority)
+# To allow single-theory trades:
+#   CONSENSUS_MIN_GROUPS=1
 #
-# CONSENSUS_STRICT=1 (default after Round 3): disagreement → NEUTRAL
-# CONSENSUS_STRICT=0: disagreement → confidence dampened (soft mode)
-#
-# CONSENSUS_MIN_PCT: minimum % of theories that must agree on direction.
-#   - 100 = require unanimity (all theories same direction)
-#   - 90  = allow 1 dissenter in 10
-#   - 50  = simple majority
-#
-# CONSENSUS_MIN_GROUPS: minimum number of theory-groups required to vote
-# in the same direction before a signal is emitted.
-#   - 2 = require at least 2 theories to corroborate
-#   - 3 = require at least 3 theories (very strict)
+# Backtest reference (3 rounds of pruning, 383 signals):
+#   - No filter:        42.0% win rate (383 trades)
+#   - Soft dampen:      49.5% win rate (186 trades)
+#   - Strict + 100%:    66.7% win rate (15 trades) — but too few signals
 CONSENSUS_FILTER_ENABLED = os.environ.get("CONSENSUS_FILTER_ENABLED", "1") == "1"
-CONSENSUS_STRICT = os.environ.get("CONSENSUS_STRICT", "1") == "1"
-CONSENSUS_MIN_PCT = float(os.environ.get("CONSENSUS_MIN_PCT", "100"))
-CONSENSUS_MIN_GROUPS = int(os.environ.get("CONSENSUS_MIN_GROUPS", "2"))
+CONSENSUS_STRICT = os.environ.get("CONSENSUS_STRICT", "0") == "1"  # default OFF — always-signal mode
+CONSENSUS_MIN_PCT = float(os.environ.get("CONSENSUS_MIN_PCT", "50"))  # simple majority
+CONSENSUS_MIN_GROUPS = int(os.environ.get("CONSENSUS_MIN_GROUPS", "1"))  # single theory can trade
 
 
 # Modules used by each engine.
