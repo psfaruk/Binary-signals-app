@@ -41,9 +41,40 @@
         <span id="conn-label">—</span>
       </div>
       <span class="spacer"></span>
-      <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): initial aria-label is
-           'Unmute sounds' to match the initial sound-enabled=false state.
-           common.js updates this dynamically on toggle. -->
+      <!-- NEW (UI-V2-2026-08-05): overall win-rate button + dropdown -->
+      <div class="winrate-wrap" id="winrate-wrap">
+        <button id="winrate-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Show per-pair win rates" title="Overall win rate — click to see per-pair breakdown">
+          <span class="winrate-icon" aria-hidden="true">🎯</span>
+          <span class="winrate-pct" id="winrate-pct">—%</span>
+          <span class="winrate-trend" id="winrate-trend" aria-hidden="true"></span>
+        </button>
+        <div id="winrate-dropdown" class="winrate-dropdown" role="dialog" aria-modal="false" aria-label="Per-pair win rates" hidden>
+          <div class="winrate-dropdown-header">
+            <span class="winrate-dropdown-title">Win Rate by Pair</span>
+            <div class="winrate-dropdown-actions">
+              <button id="winrate-sort-btn" type="button" class="mini-btn" title="Toggle sort: by win rate / by name" aria-label="Toggle sort">↕</button>
+              <button id="winrate-refresh" type="button" class="mini-btn" title="Refresh now" aria-label="Refresh win rates">↻</button>
+              <button id="winrate-close" type="button" class="mini-btn" title="Close" aria-label="Close dropdown">✕</button>
+            </div>
+          </div>
+          <div class="winrate-dropdown-summary" id="winrate-summary">
+            <div class="winrate-summary-pill"><span class="pill-label">Overall</span><span class="pill-value" id="winrate-overall">—</span></div>
+            <div class="winrate-summary-pill"><span class="pill-label">Signals</span><span class="pill-value" id="winrate-signals">0</span></div>
+            <div class="winrate-summary-pill"><span class="pill-label">Best</span><span class="pill-value" id="winrate-best">—</span></div>
+            <div class="winrate-summary-pill"><span class="pill-label">Worst</span><span class="pill-value" id="winrate-worst">—</span></div>
+          </div>
+          <div class="winrate-dropdown-search">
+            <input type="search" id="winrate-search" placeholder="Filter pairs…" aria-label="Filter pairs in win-rate dropdown" />
+          </div>
+          <div class="winrate-dropdown-list" id="winrate-list" role="list">
+            <div class="winrate-empty">Loading…</div>
+          </div>
+          <div class="winrate-dropdown-footer" id="winrate-footer">
+            <span class="hint" id="winrate-updated">never updated</span>
+            <span class="hint">tap a pair to switch · Esc to close</span>
+          </div>
+        </div>
+      </div>
       <button id="sound-btn" type="button" aria-pressed="false" aria-label="Unmute sounds">🔇</button>
       <button id="refresh-btn" type="button" aria-label="Refresh data" title="Refresh candles + history + stats now">🔄</button>
       <span id="last-refresh-label" class="hint" style="font-size:9px;color:var(--text-dim);min-width:60px;text-align:right">never</span>
@@ -90,44 +121,115 @@
         </section>
       </div>
 
-      <!-- TAB: History -->
-      <!-- FIX (F-17-91): aria-labelledby + default option for #history-pair-select. -->
-      <!-- FIX (ALWAYS-SIGNAL-2026-08-03): added filter controls + delete buttons -->
+      <!-- TAB: History (UI-V2-2026-08-05: redesigned with summary cards, collapsible filters, sort/group/search) -->
       <div id="tab-history" class="tab-pane" role="tabpanel" aria-labelledby="tab-history-btn">
-        <div class="tab-history-header">
-          <select id="history-pair-select" aria-label="Select pair"><option value="">All pairs</option></select>
-          <select id="history-time-filter" aria-label="Time filter">
-            <option value="0.25">Last 15 min</option>
-            <option value="1" selected>Last 1 hour</option>
-            <option value="4">Last 4 hours</option>
-            <option value="8">Last 8 hours</option>
-            <option value="12">Last 12 hours</option>
-            <option value="24">Last 24 hours</option>
-            <option value="168">Last 7 days</option>
-            <option value="0">All time</option>
-          </select>
-          <select id="history-direction-filter" aria-label="Direction filter">
-            <option value="">All directions</option>
-            <option value="CALL">CALL only</option>
-            <option value="PUT">PUT only</option>
-          </select>
-          <select id="history-accuracy-filter" aria-label="Result filter">
-            <option value="">All results</option>
-            <option value="correct">Wins only</option>
-            <option value="wrong">Losses only</option>
-            <option value="draw">Draws only</option>
-            <option value="pending">Pending</option>
-          </select>
-          <button id="history-clear-btn" class="btn-danger" title="Delete ALL signals for current filter">🗑 Clear Filtered</button>
-          <button id="history-clear-all-btn" class="btn-danger" title="Delete ALL signals (cannot undo)">🗑🗑 Clear ALL</button>
-          <span class="hint" id="history-count-hint">Loading…</span>
+        <!-- Summary mini-cards (live updated) -->
+        <div class="history-summary-grid" id="history-summary-grid">
+          <div class="summary-card summary-total" data-tooltip="Total signals in current filter">
+            <div class="summary-label">Total</div>
+            <div class="summary-value" id="hist-sum-total">0</div>
+          </div>
+          <div class="summary-card summary-wins" data-tooltip="Wins (correct predictions)">
+            <div class="summary-label">Wins</div>
+            <div class="summary-value" id="hist-sum-wins">0</div>
+          </div>
+          <div class="summary-card summary-losses" data-tooltip="Losses (wrong predictions)">
+            <div class="summary-label">Losses</div>
+            <div class="summary-value" id="hist-sum-losses">0</div>
+          </div>
+          <div class="summary-card summary-rate" data-tooltip="Win rate over current filter">
+            <div class="summary-label">Win Rate</div>
+            <div class="summary-value" id="hist-sum-rate">—</div>
+          </div>
+          <div class="summary-card summary-pending" data-tooltip="Signals still awaiting outcome">
+            <div class="summary-label">Pending</div>
+            <div class="summary-value" id="hist-sum-pending">0</div>
+          </div>
+          <div class="summary-card summary-streak" data-tooltip="Current consecutive win/loss streak">
+            <div class="summary-label">Streak</div>
+            <div class="summary-value" id="hist-sum-streak">—</div>
+          </div>
+        </div>
+
+        <!-- Collapsible filter bar -->
+        <div class="history-controls-wrap">
+          <button id="history-filter-toggle" type="button" class="history-filter-toggle" aria-expanded="true" aria-controls="history-controls">
+            <span class="toggle-arrow">▼</span>
+            <span class="toggle-label">Filters &amp; Tools</span>
+            <span class="hint" id="history-count-hint">Loading…</span>
+          </button>
+          <div id="history-controls" class="history-controls">
+            <div class="control-row">
+              <label class="control-label">Pair</label>
+              <select id="history-pair-select" aria-label="Select pair"><option value="">All pairs</option></select>
+            </div>
+            <div class="control-row">
+              <label class="control-label">Time</label>
+              <select id="history-time-filter" aria-label="Time filter">
+                <option value="0.25">Last 15 min</option>
+                <option value="1" selected>Last 1 hour</option>
+                <option value="4">Last 4 hours</option>
+                <option value="8">Last 8 hours</option>
+                <option value="12">Last 12 hours</option>
+                <option value="24">Last 24 hours</option>
+                <option value="168">Last 7 days</option>
+                <option value="0">All time</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <label class="control-label">Direction</label>
+              <select id="history-direction-filter" aria-label="Direction filter">
+                <option value="">All directions</option>
+                <option value="CALL">CALL only</option>
+                <option value="PUT">PUT only</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <label class="control-label">Result</label>
+              <select id="history-accuracy-filter" aria-label="Result filter">
+                <option value="">All results</option>
+                <option value="correct">Wins only</option>
+                <option value="wrong">Losses only</option>
+                <option value="draw">Draws only</option>
+                <option value="pending">Pending</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <label class="control-label">Sort</label>
+              <select id="history-sort-filter" aria-label="Sort order">
+                <option value="newest" selected>Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="best">Best result first</option>
+                <option value="worst">Worst result first</option>
+                <option value="strong">Strongest first</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <label class="control-label">Group</label>
+              <select id="history-group-filter" aria-label="Group by">
+                <option value="" selected>No grouping</option>
+                <option value="pair">By pair</option>
+                <option value="direction">By direction</option>
+                <option value="result">By result</option>
+                <option value="hour">By hour</option>
+              </select>
+            </div>
+            <div class="control-row control-row--grow">
+              <label class="control-label">Search</label>
+              <input type="search" id="history-search" placeholder="pair, time, strength…" aria-label="Search history" />
+            </div>
+            <div class="control-row control-row--actions">
+              <button id="history-clear-btn" class="btn-danger" title="Delete ALL signals for current filter">🗑 Clear Filtered</button>
+              <button id="history-clear-all-btn" class="btn-danger" title="Delete ALL signals (cannot undo)">🗑🗑 Clear ALL</button>
+            </div>
+          </div>
         </div>
         <div id="history-list"></div>
       </div>
 
-      <!-- TAB: Accuracy -->
+      <!-- TAB: Accuracy (UI-V2-2026-08-05: redesigned with sub-tab navigation) -->
       <div id="tab-accuracy" class="tab-pane" role="tabpanel" aria-labelledby="tab-accuracy-btn">
-        <!-- FIX (ALWAYS-SIGNAL-2026-08-03): pair selector for per-pair module stats -->
+        <!-- Shared filter bar -->
         <div class="stats-filter-bar">
           <label class="stats-filter-label">Pair:</label>
           <select id="stats-pair-select" aria-label="Select pair for stats">
@@ -136,50 +238,94 @@
           <button id="acc-module-refresh" type="button" class="mini-btn" title="Refresh module stats from DB">↻ Refresh</button>
           <span class="hint" id="stats-context-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">App-wide</span>
         </div>
-        <div class="accuracy-hero">
-          <div class="accuracy-hero-pct" id="acc-hero-pct">—</div>
-          <div class="accuracy-hero-detail" id="acc-hero-detail">No data</div>
-        </div>
-        <div class="accuracy-stats-grid">
-          <div class="accuracy-stat"><div class="stat-label">Total</div><div class="stat-value" id="acc-total">0</div></div>
-          <div class="accuracy-stat correct"><div class="stat-label">Wins</div><div class="stat-value" id="acc-wins">0</div></div>
-          <div class="accuracy-stat wrong"><div class="stat-label">Loss</div><div class="stat-value" id="acc-losses">0</div></div>
-          <div class="accuracy-stat draw"><div class="stat-label">Draw</div><div class="stat-value" id="acc-draws">0</div></div>
-        </div>
-        <div class="accuracy-section">
-          <div class="accuracy-section-title">By Strength</div>
-          <div id="acc-strength-breakdown"><div class="accuracy-empty">No data</div></div>
-        </div>
-        <div class="accuracy-section">
-          <div class="accuracy-section-title">By Regime</div>
-          <div id="acc-regime-breakdown"><div class="accuracy-empty">No data</div></div>
-        </div>
-        <!-- FIX (ALWAYS-SIGNAL-2026-08-03): per-module stats from /api/stats -->
-        <div class="accuracy-section">
-          <div class="accuracy-section-title">
-            By Module (4-Module Engine)
-            <span class="hint" id="acc-module-context" style="font-size:9px;color:var(--text-dim);margin-left:auto">App-wide</span>
+
+        <!-- Sub-tab navigation -->
+        <nav class="stats-subtabs" role="tablist" aria-label="Statistics views">
+          <button class="stats-subtab active" data-subtab="overview" role="tab" aria-selected="true">📊 Overview</button>
+          <button class="stats-subtab" data-subtab="modules" role="tab" aria-selected="false">🧩 Modules</button>
+          <button class="stats-subtab" data-subtab="theories" role="tab" aria-selected="false">🔬 Theories</button>
+          <button class="stats-subtab" data-subtab="pairs" role="tab" aria-selected="false">💱 Per Pair</button>
+          <button class="stats-subtab" data-subtab="time" role="tab" aria-selected="false">⏰ Time Patterns</button>
+        </nav>
+
+        <!-- Sub-tab: Overview -->
+        <div class="stats-subpane active" data-subpane="overview">
+          <div class="accuracy-hero">
+            <div class="accuracy-hero-pct" id="acc-hero-pct">—</div>
+            <div class="accuracy-hero-detail" id="acc-hero-detail">No data</div>
           </div>
-          <div id="acc-module-breakdown">
-            <div class="accuracy-empty">Loading module stats…</div>
+          <div class="accuracy-stats-grid">
+            <div class="accuracy-stat" data-tooltip="Total graded signals"><div class="stat-label">Total</div><div class="stat-value" id="acc-total">0</div></div>
+            <div class="accuracy-stat correct" data-tooltip="Predictions that matched the actual outcome"><div class="stat-label">Wins</div><div class="stat-value" id="acc-wins">0</div></div>
+            <div class="accuracy-stat wrong" data-tooltip="Predictions that did not match"><div class="stat-label">Loss</div><div class="stat-value" id="acc-losses">0</div></div>
+            <div class="accuracy-stat draw" data-tooltip="Signals where the candle closed unchanged"><div class="stat-label">Draw</div><div class="stat-value" id="acc-draws">0</div></div>
           </div>
-          <!-- NEW: per-pair drill-down panel (hidden by default, shown when a module row is clicked) -->
-          <div id="acc-module-pair-detail" class="module-pair-detail" style="display:none">
-            <div class="module-pair-detail-header">
-              <span class="module-pair-detail-title">Per-pair breakdown</span>
-              <button class="mini-btn" onclick="document.getElementById('acc-module-pair-detail').style.display='none'">✕ Close</button>
+          <div class="accuracy-section">
+            <div class="accuracy-section-title" data-tooltip="Win rate grouped by signal strength">By Strength</div>
+            <div id="acc-strength-breakdown"><div class="accuracy-empty">No data</div></div>
+          </div>
+          <div class="accuracy-section">
+            <div class="accuracy-section-title" data-tooltip="Win rate grouped by detected market regime">By Regime</div>
+            <div id="acc-regime-breakdown"><div class="accuracy-empty">No data</div></div>
+          </div>
+        </div>
+
+        <!-- Sub-tab: Modules -->
+        <div class="stats-subpane" data-subpane="modules">
+          <div class="accuracy-section">
+            <div class="accuracy-section-title">
+              By Module (4-Module Engine)
+              <span class="hint" id="acc-module-context" style="font-size:9px;color:var(--text-dim);margin-left:auto">App-wide</span>
             </div>
-            <div id="acc-module-pair-detail-rows"></div>
+            <div id="acc-module-breakdown">
+              <div class="accuracy-empty">Loading module stats…</div>
+            </div>
+            <div id="acc-module-pair-detail" class="module-pair-detail" style="display:none">
+              <div class="module-pair-detail-header">
+                <span class="module-pair-detail-title">Per-pair breakdown</span>
+                <button class="mini-btn" onclick="document.getElementById('acc-module-pair-detail').style.display='none'">✕ Close</button>
+              </div>
+              <div id="acc-module-pair-detail-rows"></div>
+            </div>
           </div>
         </div>
-        <!-- FIX (ALWAYS-SIGNAL-2026-08-03): per-THEORY breakdown -->
-        <div class="accuracy-section">
-          <div class="accuracy-section-title">
-            By Theory (Individual Signals)
-            <span class="hint" id="theory-count-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">Loading…</span>
+
+        <!-- Sub-tab: Theories -->
+        <div class="stats-subpane" data-subpane="theories">
+          <div class="accuracy-section">
+            <div class="accuracy-section-title">
+              By Theory (Individual Signals)
+              <span class="hint" id="theory-count-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">Loading…</span>
+            </div>
+            <div id="acc-theory-breakdown">
+              <div class="accuracy-empty">Loading theory stats…</div>
+            </div>
           </div>
-          <div id="acc-theory-breakdown">
-            <div class="accuracy-empty">Loading theory stats…</div>
+        </div>
+
+        <!-- Sub-tab: Per Pair (NEW — uses /api/pair-deep-stats/{asset}) -->
+        <div class="stats-subpane" data-subpane="pairs">
+          <div class="accuracy-section">
+            <div class="accuracy-section-title">
+              Per-Pair Deep Stats
+              <span class="hint" id="pair-deep-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">Select a pair above</span>
+            </div>
+            <div id="pair-deep-stats-container">
+              <div class="accuracy-empty">Pick a pair from the dropdown above to see deep stats — overall win rate, regime distribution, strength distribution, hourly patterns, and more.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sub-tab: Time Patterns (NEW — uses /api/time-patterns) -->
+        <div class="stats-subpane" data-subpane="time">
+          <div class="accuracy-section">
+            <div class="accuracy-section-title">
+              Time-of-Day Patterns
+              <span class="hint" id="time-patterns-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">All pairs</span>
+            </div>
+            <div id="time-patterns-container">
+              <div class="accuracy-empty">Loading time patterns…</div>
+            </div>
           </div>
         </div>
       </div>

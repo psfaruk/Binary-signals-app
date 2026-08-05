@@ -2705,7 +2705,10 @@ function wireEvents(){
       renderModuleStats();
       _theoryStatsCache = null;  // force refetch for new pair
       renderTheoryStats();
-    });
+        // UI-V2 (2026-08-05): also refresh deep-stats + time-patterns sub-panes
+      if(_currentStatsSubtab === "pairs" && typeof renderPairDeepStats === "function") renderPairDeepStats();
+      if(_currentStatsSubtab === "time" && typeof renderTimePatterns === "function") renderTimePatterns();
+  });
   }
 
   // Sound toggle.
@@ -2841,6 +2844,13 @@ function wireEvents(){
       }
     });
   }
+
+  // ── UI-V2 (2026-08-05): wire new components ──
+  if(typeof wireWinRateButton === "function") wireWinRateButton();
+  if(typeof wireStatsSubtabs === "function") wireStatsSubtabs();
+  if(typeof wireHistoryFilterToggle === "function") wireHistoryFilterToggle();
+  if(typeof wireHistoryExtraControls === "function") wireHistoryExtraControls();
+  if(typeof initTooltipSystem === "function") initTooltipSystem();
 }
 
 /* ─── INIT ───────────────────────────────────────────────────────────────── */
@@ -2974,6 +2984,9 @@ function initApp(category){
 
   // Boot.
   safeInit();
+  // UI-V2 (2026-08-05): initial win-rate fetch (delayed 800ms to not block boot).
+  setTimeout(() => { if(typeof refreshWinRate === "function") refreshWinRate(); }, 800);
+
 
   // Periodic intervals — countdown + keepalive.
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-23, HIGH): countdown interval widened
@@ -3024,6 +3037,14 @@ function initApp(category){
       }
     }
   }, 30000);
+
+  // UI-V2 (2026-08-05): win-rate auto-refresh — every 30s, refresh the header
+  // button label (always) + the dropdown list (only if visible).
+  if(_winRateRefreshInterval){ clearInterval(_winRateRefreshInterval); }
+  _winRateRefreshInterval = setInterval(() => {
+    refreshWinRate();
+  }, 30000);
+
 
   // FIX (ALWAYS-SIGNAL-2026-08-03): manual refresh button — re-subscribes +
   // reloads history + re-fetches pairs. User requirement: "একটা বাটন যোগ করবেন।
@@ -3089,6 +3110,7 @@ function onPageHide(){
     if(_countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
     if(_keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
     if(_historyRefreshInterval){ clearInterval(_historyRefreshInterval); _historyRefreshInterval = null; }  // FIX (ALWAYS-SIGNAL-2026-08-03)
+    if(_winRateRefreshInterval){ clearInterval(_winRateRefreshInterval); _winRateRefreshInterval = null; }
     if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
     if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
     if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -3112,5 +3134,1023 @@ function onPageShow(e){
 // (real.js / otc.js) can call it.
 global.initApp = initApp;
 global.setCategory = setCategory;
+
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI-V2 (2026-08-05): Header Win-Rate Button + Dropdown
+   ═══════════════════════════════════════════════════════════════════════════
+   Fetches /api/stats, computes:
+     - Overall win rate (header button label)
+     - Per-pair win rate (dropdown list, sorted by win rate desc)
+     - Best/worst pair (summary pills)
+     - Total signal count
+   Auto-refreshes every 30s. Click button to toggle dropdown; click pair to
+   switch the active asset. Esc / click-outside closes the dropdown. */
+
+let _winRateCache = null;
+let _winRateSortMode = 'rate';  // 'rate' or 'name'
+let _winRateSearchQ = '';
+let _winRateRefreshInterval = null;
+
+async function fetchWinRateStats(){
+  try{
+    const r = await fetch('/api/stats?_t=' + Date.now());
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  }catch(e){
+    console.warn('[winrate] fetch failed:', e.message);
+    return null;
+  }
+}
+
+function computePairWinRates(statsData){
+  /* The /api/stats payload has:
+       modules: [...]
+       pairs: { "EURUSD_otc": { "candle_reaction": {...}, "pattern": {...}, ... }, ... }
+     Each per-pair-per-module entry has: total, correct, wrong, win_pct.
+     We aggregate per pair to get an overall pair win rate. */
+  if(!statsData || !statsData.pairs) return [];
+  const result = [];
+  const pairsObj = statsData.pairs;
+  for(const asset in pairsObj){
+    if(!Object.prototype.hasOwnProperty.call(pairsObj, asset)) continue;
+    const modulesObj = pairsObj[asset];
+    let total = 0, correct = 0, wrong = 0;
+    for(const modKey in modulesObj){
+      if(!Object.prototype.hasOwnProperty.call(modulesObj, modKey)) continue;
+      const m = modulesObj[modKey];
+      if(!m) continue;
+      total += (m.total || 0);
+      correct += (m.correct || 0);
+      wrong += (m.wrong || 0);
+    }
+    const graded = correct + wrong;
+    const winPct = graded > 0 ? Math.round((correct / graded) * 100) : null;
+    result.push({
+      asset: asset,
+      display: prettyPairName(asset),
+      total: total,
+      correct: correct,
+      wrong: wrong,
+      graded: graded,
+      win_pct: winPct,
+    });
+  }
+  return result;
+}
+
+function prettyPairName(asset){
+  if(!asset) return '—';
+  let s = String(asset).replace(/_(otc|real)$/i, '');
+  // EURUSD → EUR/USD
+  if(s.length === 6 && /^[A-Z]{6}$/.test(s)){
+    return s.slice(0,3) + '/' + s.slice(3);
+  }
+  // Otherwise just return as-is (already a display name) — fallback
+  return s;
+}
+
+function classifyPct(pct){
+  if(pct == null) return 'none';
+  if(pct >= 55) return 'good';
+  if(pct >= 45) return 'mid';
+  return 'bad';
+}
+
+function renderWinRateButton(statsData){
+  /* Update the header button label with overall win rate */
+  const btnEl = $('winrate-pct');
+  if(!btnEl) return;
+  let overallPct = null;
+  let totalGraded = 0;
+  if(statsData){
+    totalGraded = (statsData.total_graded_signals || statsData.total_graded || 0);
+    if(statsData.overall_win_pct != null){
+      overallPct = Math.round(statsData.overall_win_pct);
+    } else if(statsData.total_correct != null && totalGraded > 0){
+      overallPct = Math.round((statsData.total_correct / totalGraded) * 100);
+    }
+  }
+  if(overallPct == null){
+    btnEl.textContent = '—%';
+    btnEl.className = 'winrate-pct';
+  } else {
+    btnEl.textContent = overallPct + '%';
+    btnEl.className = 'winrate-pct ' + classifyPct(overallPct);
+  }
+  /* Update trend indicator (subtle up/down arrow based on best pair) */
+  const trendEl = $('winrate-trend');
+  if(trendEl){
+    if(overallPct != null && overallPct >= 55) trendEl.textContent = '▲';
+    else if(overallPct != null && overallPct < 45) trendEl.textContent = '▼';
+    else trendEl.textContent = '';
+  }
+}
+
+function renderWinRateDropdown(statsData){
+  const listEl = $('winrate-list');
+  if(!listEl) return;
+  const pairs = computePairWinRates(statsData);
+
+  /* Summary pills */
+  const overallEl = $('winrate-overall');
+  const signalsEl = $('winrate-signals');
+  const bestEl = $('winrate-best');
+  const worstEl = $('winrate-worst');
+
+  const overallPct = statsData && statsData.overall_win_pct != null
+    ? Math.round(statsData.overall_win_pct) : null;
+  if(overallEl){
+    if(overallPct == null){ overallEl.textContent = '—'; overallEl.className = 'pill-value'; }
+    else { overallEl.textContent = overallPct + '%'; overallEl.className = 'pill-value ' + classifyPct(overallPct); }
+  }
+  const totalGraded = statsData ? (statsData.total_graded_signals || statsData.total_graded || 0) : 0;
+  if(signalsEl) signalsEl.textContent = totalGraded;
+
+  /* Best/Worst — based on graded pairs only */
+  const gradedPairs = pairs.filter(p => p.graded > 0);
+  if(gradedPairs.length > 0){
+    const best = gradedPairs.slice().sort((a,b) => (b.win_pct||0) - (a.win_pct||0))[0];
+    const worst = gradedPairs.slice().sort((a,b) => (a.win_pct||0) - (b.win_pct||0))[0];
+    if(bestEl){
+      bestEl.textContent = best.display + ' ' + (best.win_pct != null ? best.win_pct + '%' : '—');
+      bestEl.className = 'pill-value ' + classifyPct(best.win_pct);
+    }
+    if(worstEl){
+      worstEl.textContent = worst.display + ' ' + (worst.win_pct != null ? worst.win_pct + '%' : '—');
+      worstEl.className = 'pill-value ' + classifyPct(worst.win_pct);
+    }
+  } else {
+    if(bestEl){ bestEl.textContent = '—'; bestEl.className = 'pill-value'; }
+    if(worstEl){ worstEl.textContent = '—'; worstEl.className = 'pill-value'; }
+  }
+
+  /* Filter by search query */
+  let filtered = pairs;
+  if(_winRateSearchQ){
+    const q = _winRateSearchQ.toLowerCase();
+    filtered = filtered.filter(p =>
+      p.asset.toLowerCase().indexOf(q) !== -1 ||
+      p.display.toLowerCase().indexOf(q) !== -1
+    );
+  }
+
+  /* Sort */
+  if(_winRateSortMode === 'name'){
+    filtered.sort((a,b) => a.display.localeCompare(b.display));
+  } else {
+    /* rate: by win_pct desc, but pairs with no graded data go to bottom */
+    filtered.sort((a,b) => {
+      if(a.win_pct == null && b.win_pct == null) return 0;
+      if(a.win_pct == null) return 1;
+      if(b.win_pct == null) return -1;
+      return b.win_pct - a.win_pct;
+    });
+  }
+
+  /* Render list */
+  if(filtered.length === 0){
+    listEl.innerHTML = '<div class="winrate-empty">No pairs match.</div>';
+    return;
+  }
+  let html = '';
+  for(const p of filtered){
+    const cls = classifyPct(p.win_pct);
+    const pctText = p.win_pct != null ? p.win_pct + '%' : '—';
+    const barWidth = p.win_pct != null ? p.win_pct : 0;
+    const isCurrent = (p.asset === currentAsset);
+    const metaText = p.graded > 0
+      ? (p.correct + 'W / ' + p.wrong + 'L · ' + p.graded + ' graded')
+      : (p.total > 0 ? p.total + ' ungraded' : 'no data');
+    html += '<div class="winrate-row' + (isCurrent ? ' current' : '') + '" '
+         +  'data-asset="' + esc(p.asset) + '" role="listitem" '
+         +  'tabindex="0" '
+         +  'title="' + esc(p.display) + ' — ' + metaText + '">'
+         +  '<div>'
+         +    '<div class="wr-pair-name">' + esc(p.display) + (isCurrent ? ' ●' : '') + '</div>'
+         +    '<div class="wr-pair-meta">' + metaText + '</div>'
+         +  '</div>'
+         +  '<div class="wr-pair-bar"><div class="wr-pair-bar-fill ' + cls + '" style="width:' + barWidth + '%"></div></div>'
+         +  '<div class="wr-pair-pct ' + cls + '">' + pctText + '</div>'
+         +  '</div>';
+  }
+  listEl.innerHTML = html;
+
+  /* Wire click on each row */
+  listEl.querySelectorAll('.winrate-row').forEach(row => {
+    const handler = (e) => {
+      e.stopPropagation();
+      const asset = row.getAttribute('data-asset');
+      if(!asset) return;
+      /* Switch to this pair via the topbar #pair-select */
+      const topbarSelect = $('pair-select');
+      if(topbarSelect){
+        topbarSelect.value = asset;
+        try{ topbarSelect.dispatchEvent(new Event('change', {bubbles:true})); }catch(_){}
+      }
+      /* Close dropdown after switch */
+      toggleWinRateDropdown(false);
+    };
+    row.addEventListener('click', handler);
+    row.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); handler(e); }
+    });
+  });
+
+  /* Updated-at footer */
+  const updEl = $('winrate-updated');
+  if(updEl){
+    updEl.textContent = 'updated ' + new Date().toLocaleTimeString('en-US',
+      {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+  }
+}
+
+function toggleWinRateDropdown(forceState){
+  const dd = $('winrate-dropdown');
+  const btn = $('winrate-btn');
+  if(!dd || !btn) return;
+  const willShow = (typeof forceState === 'boolean')
+    ? forceState
+    : dd.hasAttribute('hidden');
+  if(willShow){
+    dd.removeAttribute('hidden');
+    btn.setAttribute('aria-expanded', 'true');
+    /* Focus the search input for quick filtering */
+    setTimeout(() => {
+      const searchEl = $('winrate-search');
+      if(searchEl){ try{ searchEl.focus(); }catch(_){} }
+    }, 50);
+    /* Trigger an immediate refresh */
+    refreshWinRate();
+  } else {
+    dd.setAttribute('hidden', '');
+    btn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+async function refreshWinRate(){
+  const statsData = await fetchWinRateStats();
+  if(!statsData){
+    const listEl = $('winrate-list');
+    if(listEl) listEl.innerHTML = '<div class="winrate-empty">Failed to load. Will retry in 30s.</div>';
+    return;
+  }
+  _winRateCache = statsData;
+  renderWinRateButton(statsData);
+  renderWinRateDropdown(statsData);
+}
+
+function wireWinRateButton(){
+  const btn = $('winrate-btn');
+  if(!btn) return;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleWinRateDropdown();
+  });
+
+  /* Close button */
+  const closeBtn = $('winrate-close');
+  if(closeBtn){
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleWinRateDropdown(false);
+    });
+  }
+
+  /* Refresh button */
+  const refreshBtn = $('winrate-refresh');
+  if(refreshBtn){
+    refreshBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      refreshBtn.classList.add('spin');
+      refreshWinRate().finally(() => {
+        setTimeout(() => refreshBtn.classList.remove('spin'), 600);
+      });
+    });
+  }
+
+  /* Sort toggle */
+  const sortBtn = $('winrate-sort-btn');
+  if(sortBtn){
+    sortBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _winRateSortMode = (_winRateSortMode === 'rate') ? 'name' : 'rate';
+      if(_winRateCache) renderWinRateDropdown(_winRateCache);
+    });
+  }
+
+  /* Search input */
+  const searchEl = $('winrate-search');
+  if(searchEl){
+    let _wrSearchTimer = null;
+    searchEl.addEventListener('input', (e) => {
+      clearTimeout(_wrSearchTimer);
+      _wrSearchTimer = setTimeout(() => {
+        _winRateSearchQ = e.target.value || '';
+        if(_winRateCache) renderWinRateDropdown(_winRateCache);
+      }, 150);
+    });
+    /* Prevent clicks on search from closing the dropdown */
+    searchEl.addEventListener('click', (e) => e.stopPropagation());
+  }
+
+  /* Click-outside closes dropdown */
+  document.addEventListener('click', (e) => {
+    const dd = $('winrate-dropdown');
+    const wrap = $('winrate-wrap');
+    if(dd && !dd.hasAttribute('hidden')){
+      if(wrap && !wrap.contains(e.target)){
+        toggleWinRateDropdown(false);
+      }
+    }
+  });
+
+  /* Escape closes dropdown */
+  document.addEventListener('keydown', (e) => {
+    if(e.key === 'Escape'){
+      const dd = $('winrate-dropdown');
+      if(dd && !dd.hasAttribute('hidden')){
+        toggleWinRateDropdown(false);
+      }
+    }
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI-V2: Tooltip System
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+let _tooltipEl = null;
+let _tooltipShowTimer = null;
+let _tooltipHideTimer = null;
+
+function initTooltipSystem(){
+  if(_tooltipEl) return;
+  _tooltipEl = document.createElement('div');
+  _tooltipEl.id = 'ui-tooltip';
+  _tooltipEl.setAttribute('role', 'tooltip');
+  _tooltipEl.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(_tooltipEl);
+
+  /* Delegate mouseover/mouseout/focus/blur on document */
+  document.addEventListener('mouseover', (e) => {
+    const target = e.target.closest('[data-tooltip]');
+    if(!target) return;
+    const text = target.getAttribute('data-tooltip');
+    if(!text) return;
+    clearTimeout(_tooltipHideTimer);
+    clearTimeout(_tooltipShowTimer);
+    _tooltipShowTimer = setTimeout(() => {
+      showTooltip(target, text);
+    }, 350);
+  });
+  document.addEventListener('mouseout', (e) => {
+    const target = e.target.closest && e.target.closest('[data-tooltip]');
+    if(!target) return;
+    clearTimeout(_tooltipShowTimer);
+    _tooltipHideTimer = setTimeout(() => hideTooltip(), 120);
+  });
+  document.addEventListener('focusin', (e) => {
+    const target = e.target.closest && e.target.closest('[data-tooltip]');
+    if(!target) return;
+    const text = target.getAttribute('data-tooltip');
+    if(!text) return;
+    clearTimeout(_tooltipHideTimer);
+    showTooltip(target, text);
+  });
+  document.addEventListener('focusout', (e) => {
+    const target = e.target.closest && e.target.closest('[data-tooltip]');
+    if(!target) return;
+    _tooltipHideTimer = setTimeout(() => hideTooltip(), 120);
+  });
+  /* Hide on scroll — tooltip position would be wrong otherwise */
+  window.addEventListener('scroll', () => hideTooltip(), {passive:true, capture:true});
+}
+
+function showTooltip(target, text){
+  if(!_tooltipEl) return;
+  _tooltipEl.textContent = text;
+  _tooltipEl.classList.add('show');
+  _tooltipEl.setAttribute('aria-hidden', 'false');
+  /* Position: prefer above-right of target; flip if no room */
+  const r = target.getBoundingClientRect();
+  const tw = _tooltipEl.offsetWidth;
+  const th = _tooltipEl.offsetHeight;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left = r.left + (r.width / 2) - (tw / 2);
+  let top = r.top - th - 6;
+  if(top < 8){ top = r.bottom + 6; }  /* flip below */
+  if(left < 8) left = 8;
+  if(left + tw > vw - 8) left = vw - tw - 8;
+  _tooltipEl.style.left = left + 'px';
+  _tooltipEl.style.top = top + 'px';
+}
+
+function hideTooltip(){
+  if(!_tooltipEl) return;
+  _tooltipEl.classList.remove('show');
+  _tooltipEl.setAttribute('aria-hidden', 'true');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI-V2: History Summary Cards + Sort/Group/Search
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function renderHistorySummary(filtered){
+  /* filtered = already-filtered array of signalHistory entries */
+  const total = filtered.length;
+  const wins = filtered.filter(h => h.accuracy === 'correct').length;
+  const losses = filtered.filter(h => h.accuracy === 'wrong').length;
+  const draws = filtered.filter(h => h.accuracy === 'draw').length;
+  const pending = filtered.filter(h => !h.accuracy || h.accuracy === 'pending').length;
+  const graded = wins + losses;
+  const rate = graded > 0 ? Math.round((wins / graded) * 100) : null;
+  /* Streak: walk from newest, count consecutive same-result */
+  let streak = 0;
+  let streakType = '';
+  for(let i = filtered.length - 1; i >= 0; i--){
+    const a = filtered[i].accuracy;
+    if(a === 'correct' || a === 'wrong'){
+      if(!streakType) streakType = a;
+      if(a === streakType) streak++;
+      else break;
+    } else {
+      break;
+    }
+  }
+
+  _setText('hist-sum-total',   String(total));
+  _setText('hist-sum-wins',    String(wins));
+  _setText('hist-sum-losses',  String(losses));
+  _setText('hist-sum-pending', String(pending));
+
+  const rateEl = $('hist-sum-rate');
+  if(rateEl){
+    if(rate == null){
+      rateEl.textContent = '—';
+      rateEl.className = 'summary-value';
+    } else {
+      rateEl.textContent = rate + '%';
+      rateEl.className = 'summary-value ' + classifyPct(rate);
+    }
+  }
+  const streakEl = $('hist-sum-streak');
+  if(streakEl){
+    if(streak === 0){
+      streakEl.textContent = '—';
+      streakEl.className = 'summary-value';
+    } else {
+      streakEl.textContent = (streakType === 'correct' ? 'W' : 'L') + streak;
+      streakEl.className = 'summary-value ' + (streakType === 'correct' ? 'good' : 'bad');
+    }
+  }
+}
+
+function applyHistorySortAndGroup(displayHistory){
+  /* Read sort + group */
+  const sortEl = $('history-sort-filter');
+  const groupEl = $('history-group-filter');
+  const sortMode = sortEl ? sortEl.value : 'newest';
+  const groupMode = groupEl ? groupEl.value : '';
+
+  /* Sort */
+  let sorted = displayHistory.slice();
+  if(sortMode === 'newest'){
+    sorted.sort((a,b) => ((b.detail && b.detail.ctime) || 0) - ((a.detail && a.detail.ctime) || 0));
+  } else if(sortMode === 'oldest'){
+    sorted.sort((a,b) => ((a.detail && a.detail.ctime) || 0) - ((b.detail && b.detail.ctime) || 0));
+  } else if(sortMode === 'best'){
+    sorted.sort((a,b) => {
+      const av = (a.accuracy === 'correct') ? 1 : (a.accuracy === 'wrong') ? -1 : 0;
+      const bv = (b.accuracy === 'correct') ? 1 : (b.accuracy === 'wrong') ? -1 : 0;
+      return bv - av;
+    });
+  } else if(sortMode === 'worst'){
+    sorted.sort((a,b) => {
+      const av = (a.accuracy === 'correct') ? 1 : (a.accuracy === 'wrong') ? -1 : 0;
+      const bv = (b.accuracy === 'correct') ? 1 : (b.accuracy === 'wrong') ? -1 : 0;
+      return av - bv;
+    });
+  } else if(sortMode === 'strong'){
+    const rank = {STRONG:3, MEDIUM:2, WEAK:1};
+    sorted.sort((a,b) => {
+      const av = rank[(a.detail && a.detail.strength) || ''] || 0;
+      const bv = rank[(b.detail && b.detail.strength) || ''] || 0;
+      return bv - av;
+    });
+  }
+
+  /* Group */
+  if(!groupMode){
+    return [{name:'', items:sorted}];
+  }
+  const groups = {};
+  for(const h of sorted){
+    let key = '';
+    if(groupMode === 'pair'){
+      key = h.asset || '(unknown)';
+    } else if(groupMode === 'direction'){
+      key = h.signal || '(none)';
+    } else if(groupMode === 'result'){
+      key = h.accuracy || 'pending';
+    } else if(groupMode === 'hour'){
+      const ct = h.detail && h.detail.ctime;
+      key = ct ? String(new Date(ct * 1000).getHours()) + ':00' : '??';
+    }
+    if(!groups[key]) groups[key] = [];
+    groups[key].push(h);
+  }
+  /* Convert to array, sort groups by name (or by hour for hour mode) */
+  let groupArr = Object.keys(groups).map(k => ({name:k, items:groups[k]}));
+  if(groupMode === 'hour'){
+    groupArr.sort((a,b) => a.name.localeCompare(b.name));
+  } else {
+    groupArr.sort((a,b) => a.name.localeCompare(b.name));
+  }
+  return groupArr;
+}
+
+/* Override renderHistory to add summary + sort + group + search */
+const _origRenderHistory = renderHistory;
+renderHistory = function(){
+  const historyList = $('history-list');
+  if(!historyList) return;
+
+  const onHistoryTab = (currentTab === 'history');
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  /* Read all filters */
+  const timeFilterEl  = $('history-time-filter');
+  const dirFilterEl   = $('history-direction-filter');
+  const accFilterEl   = $('history-accuracy-filter');
+  const pairFilterEl  = $('history-pair-select');
+  const searchEl      = $('history-search');
+
+  const hoursFilter = timeFilterEl ? parseFloat(timeFilterEl.value) : 1;
+  const dirFilter   = dirFilterEl ? dirFilterEl.value : '';
+  const accFilter   = accFilterEl ? accFilterEl.value : '';
+  const pairFilter  = pairFilterEl ? pairFilterEl.value : '';
+  const searchQ     = (searchEl ? searchEl.value : '').toLowerCase().trim();
+
+  const cutoff = (hoursFilter && hoursFilter > 0) ? nowSec - (hoursFilter * 3600) : 0;
+
+  /* Apply filters */
+  let displayHistory = signalHistory.filter(h => {
+    if(!h || !h.detail) return false;
+    const ct = h.detail.ctime;
+    if(cutoff > 0 && ct && ct < cutoff) return false;
+    if(dirFilter && h.signal !== dirFilter) return false;
+    if(accFilter && h.accuracy !== accFilter) return false;
+    if(pairFilter && h.asset !== pairFilter) return false;
+    if(searchQ){
+      const hay = ((h.asset || '') + ' ' + (h.signal || '') + ' ' + (h.accuracy || '') + ' '
+        + (h.detail && h.detail.strength ? h.detail.strength : '') + ' '
+        + (ct ? new Date(ct * 1000).toLocaleTimeString() : '')).toLowerCase();
+      if(hay.indexOf(searchQ) === -1) return false;
+    }
+    return true;
+  });
+
+  /* Update summary cards */
+  renderHistorySummary(displayHistory);
+
+  /* Update count hint */
+  const hintEl = $('history-count-hint');
+  if(hintEl){
+    const total = displayHistory.length;
+    const wins = displayHistory.filter(h => h.accuracy === 'correct').length;
+    const losses = displayHistory.filter(h => h.accuracy === 'wrong').length;
+    const pending = displayHistory.filter(h => !h.accuracy || h.accuracy === 'pending').length;
+    hintEl.textContent = total + ' signals · ' + wins + 'W / ' + losses + 'L / ' + pending + '⏳';
+  }
+
+  if(!displayHistory.length){
+    historyList.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:16px;text-align:center">'
+      + 'No signals match the current filter'
+      + '</div>';
+    return;
+  }
+
+  /* Apply sort + group */
+  const groups = applyHistorySortAndGroup(displayHistory);
+
+  /* Render */
+  let html = '';
+  for(const grp of groups){
+    if(grp.name){
+      const wins = grp.items.filter(h => h.accuracy === 'correct').length;
+      const losses = grp.items.filter(h => h.accuracy === 'wrong').length;
+      const graded = wins + losses;
+      const pct = graded > 0 ? Math.round((wins / graded) * 100) + '%' : '—';
+      html += '<div class="history-group-header">'
+           +  '<span>' + esc(grp.name) + '</span>'
+           +  '<span class="grp-count">' + grp.items.length + ' signals · ' + wins + 'W / ' + losses + 'L · ' + pct + '</span>'
+           +  '</div>';
+    }
+    /* Render rows in this group — newest-first within group (already sorted) */
+    for(let i = grp.items.length - 1; i >= 0; i--){
+      const h = grp.items[i];
+      let iconEmoji, iconLabel;
+      if(h.accuracy === 'correct'){ iconEmoji = '✅'; iconLabel = 'WIN'; }
+      else if(h.accuracy === 'wrong'){ iconEmoji = '❌'; iconLabel = 'LOSS'; }
+      else if(h.accuracy === 'draw'){ iconEmoji = '➖'; iconLabel = 'DRAW'; }
+      else { iconEmoji = '⏳'; iconLabel = 'WAIT'; }
+      const sigCls = h.signal === 'CALL' ? 'call' : h.signal === 'PUT' ? 'put' : 'neutral';
+      const strength = h.detail ? h.detail.strength : '';
+      const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
+      const strengthLetter = strength ? strength[0] : '·';
+      const strengthTitle = strength ? ('Strength: ' + strength) : 'No strength';
+      const scoreVal = h.detail ? h.detail.score : null;
+      const score = scoreVal != null ? ((scoreVal >= 0 ? '+' : '') + scoreVal) : '';
+      const scoreCls = scoreVal != null ? (scoreVal >= 0 ? 'pos' : 'neg') : '';
+      const accCls = h.accuracy === 'correct' ? ' correct'
+                   : h.accuracy === 'wrong'   ? ' wrong'
+                   : h.accuracy === 'draw'    ? ' draw'
+                   : h.accuracy === 'pending' ? ' pending'
+                   : '';
+      const time = (h.detail && h.detail.ctime)
+        ? new Date(h.detail.ctime * 1000).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false})
+        : '--:--';
+      const assetLabel = h.asset ? esc(h.asset) : '';
+      const clickKey = (h.detail && h.detail.ctime) ? String(h.detail.ctime) : '';
+      const clickable = clickKey ? 'onclick="window._showSignalDetail(\'' + clickKey + '\')" role="button" tabindex="0" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();window._showSignalDetail(\'' + clickKey + '\')}"' : '';
+      const deleteBtn = clickKey
+        ? '<span class="history-delete-btn" onclick="event.stopPropagation();window._deleteSignal(\'' + esc(h.asset) + '\',' + (h.detail.period||60) + ',' + clickKey + ')" title="Delete this signal">🗑</span>'
+        : '';
+      /* Tooltip preview */
+      const tipText = esc((h.asset || '') + ' · ' + (h.signal || '') + ' · ' + (strength || '') + ' · ' + (h.accuracy || 'pending') + ' · score ' + (score || '—'));
+      html += '<div class="history-row' + accCls + '" ' + clickable + ' data-tooltip="' + tipText + '">'
+           +  '<span class="history-time">' + time + '</span>'
+           +  '<span class="history-asset" style="font-size:9px;color:var(--text-dim);min-width:70px">' + assetLabel + '</span>'
+           +  '<span class="history-signal ' + sigCls + '">' + esc(h.signal) + '</span>'
+           +  '<span class="history-strength ' + strengthCls + '" title="' + esc(strengthTitle) + '">' + strengthLetter + '</span>'
+           +  '<span class="history-score ' + scoreCls + '">' + (score || '—') + '</span>'
+           +  '<span class="history-icon">'
+           +    '<span class="icon-emoji">' + iconEmoji + '</span>'
+           +    '<span class="icon-label">' + iconLabel + '</span>'
+           +  '</span>'
+           +  deleteBtn
+           +  '</div>';
+    }
+  }
+
+  /* Load-more button (always render on history tab) */
+  if(onHistoryTab){
+    const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
+      ? signalHistory[0].detail.ctime : 0;
+    if(oldestCtime){
+      html += '<div id="history-load-more" class="history-load-more" '
+           +  'onclick="window._loadMoreHistory()" role="button" tabindex="0" '
+           +  'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();window._loadMoreHistory()}">'
+           +  'Load older signals ↓</div>';
+    }
+  }
+  historyList.innerHTML = html;
+};
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI-V2: Stats Sub-tab Navigation
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+let _currentStatsSubtab = 'overview';
+
+function switchStatsSubtab(name){
+  _currentStatsSubtab = name;
+  /* Update buttons */
+  document.querySelectorAll('.stats-subtab').forEach(btn => {
+    const isActive = btn.dataset.subtab === name;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-selected', String(isActive));
+  });
+  /* Update panes */
+  document.querySelectorAll('.stats-subpane').forEach(pane => {
+    pane.classList.toggle('active', pane.dataset.subpane === name);
+  });
+  /* Lazy-load content for sub-tabs that need fetching */
+  if(name === 'pairs'){
+    renderPairDeepStats();
+  } else if(name === 'time'){
+    renderTimePatterns();
+  } else if(name === 'modules'){
+    if(typeof renderModuleStats === 'function') renderModuleStats();
+  } else if(name === 'theories'){
+    if(typeof renderTheoryStats === 'function') renderTheoryStats();
+  } else if(name === 'overview'){
+    if(typeof renderAccuracyTab === 'function') renderAccuracyTab();
+  }
+}
+
+function wireStatsSubtabs(){
+  document.querySelectorAll('.stats-subtab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const name = btn.dataset.subtab;
+      if(name) switchStatsSubtab(name);
+    });
+    btn.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter' || e.key === ' '){
+        e.preventDefault(); btn.click();
+      }
+    });
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI-V2: Per-Pair Deep Stats (uses /api/pair-deep-stats/{asset})
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+let _pairDeepStatsCache = null;
+
+async function fetchPairDeepStats(asset){
+  if(!asset) return null;
+  try{
+    const r = await fetch('/api/pair-deep-stats/' + encodeURIComponent(asset) + '?_t=' + Date.now());
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  }catch(e){
+    console.warn('[pair-deep-stats] fetch failed:', e.message);
+    return null;
+  }
+}
+
+async function renderPairDeepStats(){
+  const container = $('pair-deep-stats-container');
+  const hintEl = $('pair-deep-hint');
+  if(!container) return;
+  const pairSelect = $('stats-pair-select');
+  const asset = pairSelect ? pairSelect.value : '';
+  if(!asset){
+    container.innerHTML = '<div class="accuracy-empty">Pick a pair from the dropdown above to see deep stats — overall win rate, regime distribution, strength distribution, hourly patterns, and more.</div>';
+    if(hintEl) hintEl.textContent = 'Select a pair above';
+    return;
+  }
+  if(hintEl) hintEl.textContent = 'Loading ' + prettyPairName(asset) + '…';
+  container.innerHTML = '<div class="accuracy-empty">Loading deep stats for ' + esc(prettyPairName(asset)) + '…</div>';
+
+  const data = await fetchPairDeepStats(asset);
+  if(!data){
+    container.innerHTML = '<div class="accuracy-empty">Failed to load deep stats. Will retry on next refresh.</div>';
+    if(hintEl) hintEl.textContent = 'Failed';
+    return;
+  }
+  _pairDeepStatsCache = data;
+
+  const winPct = data.win_pct != null ? Math.round(data.win_pct) : null;
+  const cls = classifyPct(winPct);
+  let html = '';
+
+  /* Hero block */
+  html += '<div class="deep-stat-block">'
+       +  '<div class="deep-stat-block-title">Overall — ' + esc(prettyPairName(asset)) + '</div>'
+       +  '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:6px 0">'
+       +    '<div style="font-size:28px;font-weight:800;font-family:var(--mono);color:' + (winPct == null ? 'var(--text-dim)' : (cls === 'good' ? '#4caf50' : cls === 'mid' ? '#ffc107' : '#f44336')) + '">' + (winPct == null ? '—' : winPct + '%') + '</div>'
+       +    '<div style="font-size:11px;color:var(--text-dim)">' + (data.correct || 0) + 'W / ' + (data.wrong || 0) + 'L · ' + (data.total_signals || 0) + ' signals</div>'
+       +  '</div></div>';
+
+  /* Module breakdown */
+  if(Array.isArray(data.module_votes) && data.module_votes.length){
+    html += '<div class="deep-stat-block">'
+         +  '<div class="deep-stat-block-title">Module Votes (per direction)</div>';
+    const grouped = {};
+    for(const v of data.module_votes){
+      const key = v.module_name + ' · ' + (v.direction || '?');
+      grouped[key] = v;
+    }
+    Object.keys(grouped).sort().forEach(k => {
+      const v = grouped[k];
+      const pct = v.win_pct != null ? Math.round(v.win_pct) : null;
+      const cls2 = classifyPct(pct);
+      const barW = pct != null ? pct : 0;
+      html += '<div class="deep-stat-row" data-tooltip="' + esc(k) + ' — ' + (v.correct || 0) + 'W / ' + (v.wrong || 0) + 'L">'
+           +  '<span class="ds-label">' + esc(k) + '</span>'
+           +  '<span class="ds-bar"><span class="ds-bar-fill ' + (cls2 === 'good' ? 'good' : cls2 === 'mid' ? 'mid' : cls2 === 'bad' ? 'bad' : 'none') + '" style="width:' + barW + '%"></span></span>'
+           +  '<span class="ds-value ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
+           +  '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* Regime distribution */
+  if(Array.isArray(data.regime_distribution) && data.regime_distribution.length){
+    html += '<div class="deep-stat-block"><div class="deep-stat-block-title">Regime Distribution</div>';
+    const grouped = {};
+    for(const r of data.regime_distribution){
+      const key = r.regime || '(none)';
+      if(!grouped[key]) grouped[key] = {correct:0, wrong:0, draw:0};
+      if(r.accuracy === 'correct') grouped[key].correct += (r.count || 0);
+      else if(r.accuracy === 'wrong') grouped[key].wrong += (r.count || 0);
+      else grouped[key].draw += (r.count || 0);
+    }
+    Object.keys(grouped).sort().forEach(k => {
+      const g = grouped[k];
+      const total = g.correct + g.wrong;
+      const pct = total > 0 ? Math.round((g.correct / total) * 100) : null;
+      const cls2 = classifyPct(pct);
+      const barW = pct != null ? pct : 0;
+      html += '<div class="deep-stat-row" data-tooltip="' + esc(k) + ': ' + g.correct + 'W / ' + g.wrong + 'L / ' + g.draw + 'D">'
+           +  '<span class="ds-label">' + esc(k) + '</span>'
+           +  '<span class="ds-bar"><span class="ds-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
+           +  '<span class="ds-value ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
+           +  '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* Strength distribution */
+  if(Array.isArray(data.strength_distribution) && data.strength_distribution.length){
+    html += '<div class="deep-stat-block"><div class="deep-stat-block-title">Strength Distribution</div>';
+    const grouped = {};
+    for(const s of data.strength_distribution){
+      const key = s.strength || '(none)';
+      if(!grouped[key]) grouped[key] = {correct:0, wrong:0};
+      if(s.accuracy === 'correct') grouped[key].correct += (s.count || 0);
+      else if(s.accuracy === 'wrong') grouped[key].wrong += (s.count || 0);
+    }
+    ['STRONG','MEDIUM','WEAK'].forEach(k => {
+      if(!grouped[k]) return;
+      const g = grouped[k];
+      const total = g.correct + g.wrong;
+      const pct = total > 0 ? Math.round((g.correct / total) * 100) : null;
+      const cls2 = classifyPct(pct);
+      const barW = pct != null ? pct : 0;
+      html += '<div class="deep-stat-row" data-tooltip="' + esc(k) + ': ' + g.correct + 'W / ' + g.wrong + 'L">'
+           +  '<span class="ds-label">' + esc(k) + '</span>'
+           +  '<span class="ds-bar"><span class="ds-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
+           +  '<span class="ds-value ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
+           +  '</div>';
+    });
+    html += '</div>';
+  }
+
+  /* Hourly patterns */
+  if(Array.isArray(data.hourly_patterns) && data.hourly_patterns.length){
+    html += '<div class="deep-stat-block"><div class="deep-stat-block-title">Hourly Patterns (UTC)</div>';
+    const sorted = data.hourly_patterns.slice().sort((a,b) => (a.hour_utc||0) - (b.hour_utc||0));
+    for(const h of sorted){
+      const pct = h.win_pct != null ? Math.round(h.win_pct) : (h.correct != null && h.total_signals > 0 ? Math.round((h.correct / h.total_signals) * 100) : null);
+      const cls2 = classifyPct(pct);
+      const barW = pct != null ? pct : 0;
+      const hr = String(h.hour_utc).padStart(2, '0') + ':00';
+      html += '<div class="time-pattern-row" data-tooltip="' + esc(hr) + ' UTC — ' + (h.correct||0) + 'W / ' + (h.wrong||0) + 'L">'
+           +  '<span class="tp-hour">' + hr + '</span>'
+           +  '<span class="tp-bar"><span class="tp-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
+           +  '<span class="tp-pct ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
+           +  '<span class="tp-count">' + (h.total_signals || 0) + '</span>'
+           +  '</div>';
+    }
+    html += '</div>';
+  }
+
+  container.innerHTML = html || '<div class="accuracy-empty">No deep stats available for this pair yet.</div>';
+  if(hintEl) hintEl.textContent = prettyPairName(asset) + ' · ' + (data.total_signals || 0) + ' signals';
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI-V2: Time Patterns (uses /api/time-patterns)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+let _timePatternsCache = null;
+let _timePatternsLoading = false;
+
+async function fetchTimePatterns(asset){
+  try{
+    const url = asset
+      ? '/api/time-patterns/' + encodeURIComponent(asset) + '?_t=' + Date.now()
+      : '/api/time-patterns?_t=' + Date.now();
+    const r = await fetch(url);
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return await r.json();
+  }catch(e){
+    console.warn('[time-patterns] fetch failed:', e.message);
+    return null;
+  }
+}
+
+async function renderTimePatterns(){
+  const container = $('time-patterns-container');
+  const hintEl = $('time-patterns-hint');
+  if(!container) return;
+  if(_timePatternsLoading) return;
+  _timePatternsLoading = true;
+
+  const pairSelect = $('stats-pair-select');
+  const asset = pairSelect ? pairSelect.value : '';
+
+  if(hintEl) hintEl.textContent = asset ? prettyPairName(asset) : 'All pairs';
+  container.innerHTML = '<div class="accuracy-empty">Loading time patterns…</div>';
+
+  const data = await fetchTimePatterns(asset);
+  _timePatternsLoading = false;
+  if(!data){
+    container.innerHTML = '<div class="accuracy-empty">Failed to load time patterns.</div>';
+    return;
+  }
+  _timePatternsCache = data;
+
+  /* The shape varies — handle both array-of-hours and {patterns:[...]} */
+  let rows = [];
+  if(Array.isArray(data)) rows = data;
+  else if(Array.isArray(data.patterns)) rows = data.patterns;
+  else if(Array.isArray(data.hourly_patterns)) rows = data.hourly_patterns;
+  else if(data.hours && Array.isArray(data.hours)) rows = data.hours;
+  else if(data.pairs){
+    /* Per-pair aggregate — show each pair's best hour */
+    const pairsArr = Object.keys(data.pairs).map(k => ({pair:k, hours:data.pairs[k]}));
+    if(pairsArr.length === 0){
+      container.innerHTML = '<div class="accuracy-empty">No time-pattern data yet.</div>';
+      return;
+    }
+    let html = '';
+    for(const p of pairsArr){
+      html += '<div class="deep-stat-block"><div class="deep-stat-block-title">' + esc(prettyPairName(p.pair)) + '</div>';
+      const hours = Array.isArray(p.hours) ? p.hours : (p.hours && p.hours.patterns ? p.hours.patterns : []);
+      const sorted = hours.slice().sort((a,b) => (a.hour_utc||0) - (b.hour_utc||0));
+      for(const h of sorted){
+        const pct = h.win_pct != null ? Math.round(h.win_pct) : (h.correct != null && h.total_signals > 0 ? Math.round((h.correct / h.total_signals) * 100) : null);
+        const cls2 = classifyPct(pct);
+        const barW = pct != null ? pct : 0;
+        const hr = String(h.hour_utc).padStart(2, '0') + ':00';
+        html += '<div class="time-pattern-row" data-tooltip="' + esc(hr) + ' UTC — ' + (h.correct||0) + 'W / ' + (h.wrong||0) + 'L">'
+             +  '<span class="tp-hour">' + hr + '</span>'
+             +  '<span class="tp-bar"><span class="tp-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
+             +  '<span class="tp-pct ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
+             +  '<span class="tp-count">' + (h.total_signals || 0) + '</span>'
+             +  '</div>';
+      }
+      html += '</div>';
+    }
+    container.innerHTML = html || '<div class="accuracy-empty">No time-pattern data yet.</div>';
+    return;
+  }
+
+  if(rows.length === 0){
+    container.innerHTML = '<div class="accuracy-empty">No time-pattern data yet.</div>';
+    return;
+  }
+  /* Sort by hour */
+  const sorted = rows.slice().sort((a,b) => (a.hour_utc||0) - (b.hour_utc||0));
+  let html = '<div class="deep-stat-block"><div class="deep-stat-block-title">Hourly Win Rate (UTC)</div>';
+  for(const h of sorted){
+    const pct = h.win_pct != null ? Math.round(h.win_pct) : (h.correct != null && h.total_signals > 0 ? Math.round((h.correct / h.total_signals) * 100) : null);
+    const cls2 = classifyPct(pct);
+    const barW = pct != null ? pct : 0;
+    const hr = String(h.hour_utc).padStart(2, '0') + ':00';
+    html += '<div class="time-pattern-row" data-tooltip="' + esc(hr) + ' UTC — ' + (h.correct||0) + 'W / ' + (h.wrong||0) + 'L">'
+         +  '<span class="tp-hour">' + hr + '</span>'
+         +  '<span class="tp-bar"><span class="tp-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
+         +  '<span class="tp-pct ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
+         +  '<span class="tp-count">' + (h.total_signals || 0) + '</span>'
+         +  '</div>';
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI-V2: History filter toggle (collapse/expand)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function wireHistoryFilterToggle(){
+  const toggleBtn = $('history-filter-toggle');
+  const controls = $('history-controls');
+  if(!toggleBtn || !controls) return;
+  /* Default: expanded on desktop, collapsed on mobile */
+  const isMobile = window.matchMedia('(max-width:768px)').matches;
+  if(isMobile){
+    toggleBtn.setAttribute('aria-expanded', 'false');
+    controls.setAttribute('hidden', '');
+  }
+  toggleBtn.addEventListener('click', () => {
+    const expanded = toggleBtn.getAttribute('aria-expanded') === 'true';
+    const newState = !expanded;
+    toggleBtn.setAttribute('aria-expanded', String(newState));
+    if(newState) controls.removeAttribute('hidden');
+    else controls.setAttribute('hidden', '');
+  });
+}
+
+/* Wire new search/sort/group dropdowns */
+function wireHistoryExtraControls(){
+  ['history-sort-filter','history-group-filter'].forEach(id => {
+    const el = $(id);
+    if(el) el.addEventListener('change', renderHistory);
+  });
+  const searchEl = $('history-search');
+  if(searchEl){
+    let _t = null;
+    searchEl.addEventListener('input', () => {
+      clearTimeout(_t);
+      _t = setTimeout(renderHistory, 150);
+    });
+  }
+}
+
 
 })(window);
