@@ -1395,11 +1395,20 @@ async def module_analysis(min_samples: int = 30):
         out = []
         for r in rows:
             d = dict(r)
-            lo, hi = _wilson_bounds(d.get("correct") or 0, d.get("total") or 0)
+            total = d.get("total") or 0
+            lo, hi = _wilson_bounds(d.get("correct") or 0, total)
             d["wilson_lo"] = lo
             d["wilson_hi"] = hi
-            # Distinguishable from a coin flip at 95% confidence.
-            d["reliable"] = lo > 50.0 or hi < 50.0
+            # Distinguishable from a coin flip at 95% confidence AND backed by
+            # enough samples to be worth acting on. The sample-count condition
+            # matters: `global_modules` is deliberately unfiltered (so every
+            # module stays visible even before it has data), which meant a
+            # module sitting at 13/17 produced an interval excluding 50% and
+            # got flagged reliable off 17 votes — the same false positive that
+            # previously had candle_reaction boosted on n=7. An interval can
+            # exclude 50% on a tiny sample purely by chance; requiring
+            # min_samples as well stops that from ever reading as evidence.
+            d["reliable"] = total >= min_samples and (lo > 50.0 or hi < 50.0)
             out.append(d)
         out.sort(key=lambda x: x["wilson_lo"], reverse=True)
         return out
