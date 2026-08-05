@@ -41,9 +41,19 @@ RELIABILITY = {
 
 # ── DEFAULT_WEIGHTS — for pairs with insufficient data (< 8 samples) ──
 # FIX (MODULE-PRUNE-2026-08-03): removed indicator + otc_pattern entries.
+# FIX (RUNNING-TICK-DISABLE-2026-08-05): running_tick weight set to 0.
+# Live theory_votes data (all 12 sub-signals + composite, n=460-7742)
+# confirmed every one sits at 48.7-51.4% with Wilson 95% lower bound below
+# OTC break-even (~51.8%) in all cases — the module votes but carries no
+# measurable predictive edge, so it was only ever injecting noise into
+# call_score/put_score. Kept in the pipeline (still fires, still logs to
+# theory_votes/module_votes) so the live log keeps accumulating in case
+# behavior ever changes, but its blend weight is locked at 0 everywhere
+# (also removed from core/auto_tune.py's STATIC_WEIGHTS so auto-tune can't
+# reintroduce a nonzero weight from a ~50% win rate reading as "KEEP").
 DEFAULT_WEIGHTS = {
     "candle_reaction":   1.0,
-    "running_tick":      1.0,
+    "running_tick":      0.0,
     "pattern":           1.0,
     "key_level":         0.8,
     # FIX (PROD-BACKTEST-2026-08-05 / NEW-MODULES): 4 new modules ported
@@ -65,7 +75,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=54%) (n=80)
-            "running_tick":      1.0,   # baseline (acc=54%) (n=90)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=54%) (n=90)
             "pattern":           0.5,   # dampened (acc=44% < 45.0%) (n=64)
             "key_level":         1.0,   # baseline (acc=51%) (n=49)
             "market_state":      0.8,
@@ -79,7 +89,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   0.5,   # dampened (acc=45% < 45.0%) (n=58)
-            "running_tick":      1.0,   # baseline (acc=46%) (n=71)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=46%) (n=71)
             "pattern":           0.5,   # dampened (acc=44% < 45.0%) (n=57)
             "key_level":         1.0,   # baseline (acc=47%) (n=32)
             "market_state":      0.8,
@@ -93,7 +103,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=48%) (n=66)
-            "running_tick":      1.0,   # baseline (acc=54%) (n=69)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=54%) (n=69)
             "pattern":           1.0,   # baseline (acc=48%) (n=56)
             "key_level":         1.0,   # baseline (acc=49%) (n=41)
             "market_state":      0.8,
@@ -107,7 +117,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=50%) (n=114)
-            "running_tick":      1.0,   # baseline (acc=53%) (n=123)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=53%) (n=123)
             "pattern":           1.0,   # baseline (acc=53%) (n=97)
             "key_level":         0.5,   # dampened (acc=40% < 45.0%) (n=67)
             "market_state":      0.8,
@@ -121,7 +131,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (no data)
-            "running_tick":      1.0,   # baseline (acc=53%) (n=105)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=53%) (n=105)
             "pattern":           1.0,   # baseline (acc=49%) (n=87)
             "key_level":         0.5,   # dampened (acc=43% < 45.0%) (n=46)
             "market_state":      0.8,
@@ -135,7 +145,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=49%) (n=97)
-            "running_tick":      1.0,   # baseline (acc=52%) (n=120)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=52%) (n=120)
             "pattern":           1.5,   # boost (acc=57% >= 55.0%) (n=87)
             "key_level":         0.5,   # dampened (acc=43% < 45.0%) (n=58)
             "market_state":      0.8,
@@ -149,7 +159,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   0.5,   # dampened (acc=44% < 45.0%) (n=59)
-            "running_tick":      0.5,   # dampened (acc=44% < 45.0%) (n=73)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was dampened (acc=44% < 45.0%) (n=73)
             "pattern":           0.5,   # dampened (acc=40% < 45.0%) (n=20)
             "key_level":         1.0,   # baseline (acc=47%) (n=32)
             "market_state":      0.8,
@@ -163,7 +173,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.8,   # STRONG (acc=67% >= 65.0%) (n=87)
-            "running_tick":      0.5,   # dampened (acc=44% < 45.0%) (n=109)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was dampened (acc=44% < 45.0%) (n=109)
             "pattern":           0.5,   # dampened (acc=39% < 45.0%) (n=90)
             "key_level":         1.5,   # boost (acc=65% >= 55.0%) (n=57)
             "market_state":      0.8,
@@ -177,7 +187,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=50%) (n=68)
-            "running_tick":      1.0,   # baseline (acc=55%) (n=88)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=55%) (n=88)
             "pattern":           1.0,   # baseline (acc=50%) (n=66)
             "key_level":         1.0,   # baseline (acc=49%) (n=47)
             "market_state":      0.8,
@@ -191,7 +201,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=49%) (n=41)
-            "running_tick":      1.0,   # baseline (acc=53%) (n=53)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=53%) (n=53)
             "pattern":           1.8,   # STRONG (acc=65% >= 65.0%) (n=40)
             "key_level":         1.0,   # baseline (no data)
             "market_state":      0.8,
@@ -205,7 +215,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=51%) (n=96)
-            "running_tick":      1.0,   # baseline (acc=54%) (n=114)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=54%) (n=114)
             "pattern":           1.5,   # boost (acc=57% >= 55.0%) (n=88)
             "key_level":         1.0,   # baseline (acc=50%) (n=60)
             "market_state":      0.8,
@@ -219,7 +229,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.5,   # boost (acc=59% >= 55.0%) (n=46)
-            "running_tick":      1.0,   # baseline (acc=47%) (n=49)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=47%) (n=49)
             "pattern":           1.0,   # baseline (acc=50%) (n=46)
             "key_level":         1.5,   # boost (acc=59% >= 55.0%) (n=32)
             "market_state":      0.8,

@@ -41,9 +41,13 @@ RELIABILITY = {
 
 # ── DEFAULT_WEIGHTS — for pairs with insufficient data (< 8 samples) ──
 # FIX (MODULE-PRUNE-2026-08-03): removed indicator + trend_follow entries.
+# FIX (RUNNING-TICK-DISABLE-2026-08-05): running_tick weight set to 0 — see
+# the matching comment in engines/otc/config.py for the full rationale
+# (all 12 sub-signals + composite confirmed no edge on live theory_votes
+# data, n=460-7742, also delisted from core/auto_tune.py STATIC_WEIGHTS).
 DEFAULT_WEIGHTS = {
     "candle_reaction":   1.0,
-    "running_tick":      1.0,
+    "running_tick":      0.0,
     "pattern":           1.0,
     "key_level":         0.8,
             "market_state":      0.8,
@@ -61,7 +65,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=46%) (n=28)
-            "running_tick":      1.5,   # boost (acc=65% >= 55.0%) (n=34)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was boost (acc=65% >= 55.0%) (n=34)
             "pattern":           1.0,   # baseline (acc=55%) (n=22)
             "key_level":         1.0,   # baseline (no data)
             "market_state":      0.8,
@@ -75,7 +79,7 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=51%) (n=49)
-            "running_tick":      1.0,   # baseline (acc=53%) (n=60)
+            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=53%) (n=60)
             "pattern":           1.0,   # baseline (acc=48%) (n=46)
             "key_level":         1.0,   # baseline (acc=50%) (n=34)
             "market_state":      0.8,

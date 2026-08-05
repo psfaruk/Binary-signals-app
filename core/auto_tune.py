@@ -71,16 +71,24 @@ _AUTO_TUNE_MAX_ROWS = AUTO_TUNE_MAX_ROWS
 # Static (baseline) weights — the starting point. Auto-tune adjusts from here.
 # FIX (MODULE-PRUNE-2026-08-03): removed indicator, otc_pattern, trend_follow
 # entries — these modules have been deleted from the codebase.
+# FIX (RUNNING-TICK-DISABLE-2026-08-05): removed running_tick from both
+# dicts. Live theory_votes data (12 sub-signals + composite, n=460-7742)
+# confirmed no measurable edge — every one sits at 48.7-51.4% with Wilson
+# 95% lower bound below break-even. A ~50% win rate maps to tuning status
+# "KEEP" (only <45% dampens, only <35% disables), so leaving running_tick
+# in this dict would let auto-tune keep reinflating its weight toward 1.0
+# from the module's own DEFAULT_WEIGHTS=0 (see engines/{otc,real}/config.py)
+# every time apply_tuned_weights_to_engines() runs. compute_tuned_weights()
+# only iterates modules present here, so omitting the key means
+# DEFAULT_WEIGHTS["running_tick"] is never touched by auto-tune again.
 STATIC_WEIGHTS_OTC = {
     "candle_reaction": 1.3,
-    "running_tick":    1.0,
     "pattern":         1.0,
     "key_level":       0.7,
 }
 
 STATIC_WEIGHTS_REAL = {
     "candle_reaction": 1.3,
-    "running_tick":    1.0,
     "pattern":         1.0,
     "key_level":       0.8,
 }
