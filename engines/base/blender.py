@@ -164,6 +164,57 @@ def _compute_signal_quality(n_call_groups: int, n_put_groups: int) -> str:
     return "LOW"
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  EMPIRICAL CONFIDENCE CALIBRATION (WALK-FORWARD-2026-08-05)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Measured on 5 days of real Quotex history across all 19 live pairs, replayed
+# walk-forward with no lookahead (38,986 graded signals). The final 2 days were
+# held out entirely and never consulted while these numbers were derived.
+#
+#   agree=0   46.45%   n=  973   95% CI [43.34, 49.60]   <- confirmed sub-coin-flip
+#   agree=1   49.53%   n=36116   95% CI [49.02, 50.05]
+#   agree=2   50.40%   n= 1887   95% CI [48.14, 52.65]
+#   agree>=3      —    n<50 in the backtest; live history has 42 samples at
+#                      ~64%, which is far too few to bake in. Held at 51.5.
+#
+# `agree` is the count of independent theory-groups voting the winning
+# direction. It is the ONLY engine output with a monotone relationship to the
+# outcome — displayed confidence, strength tier and regime were all flat at
+# 48-51% across their entire range.
+#
+# Why calibrate at all: before this, `confidence` was the output of a sqrt
+# formula followed by ~25 sequential multipliers, dampeners, bonuses and caps,
+# none individually validated. It ranged 15-54 and every 5-point bucket in that
+# range won 48.3-50.9% — the number could not be sorted or thresholded on. Now
+# it reads as a win-probability estimate, so a caller can compare it directly
+# against a pair's break-even, 100/(1+payout): 51.8% at 93% payout, 56.8% at
+# 76%, 71.4% at 40%.
+#
+# HONESTY NOTE: this makes the number MEANINGFUL, not BIGGER. Most signals now
+# display 49-51 because that is what they actually win. A displayed 50 against
+# a 51.8 break-even is a losing bet, and the UI should be able to say so.
+_CALIBRATION_BY_AGREE = {0: 46.5, 1: 49.5, 2: 50.4}
+_CALIBRATION_AGREE_3_PLUS = 51.5
+# Raw pipeline confidence still breaks ties WITHIN a tier, but only over a
+# +/- this many points — its measured spread does not justify more.
+_CALIBRATION_TIEBREAK_SPAN = 2.0
+
+
+def _calibrated_confidence(raw_confidence: int, agree: int) -> int:
+    """Map raw pipeline confidence to a measured expected-win-percentage.
+
+    The tier is set by `agree` (the only feature with measured predictive
+    power); `raw_confidence` is retained only to order signals within a tier,
+    scaled into a +/-2 point band so it can never overturn the tier.
+    """
+    base = _CALIBRATION_BY_AGREE.get(agree)
+    if base is None:
+        base = _CALIBRATION_AGREE_3_PLUS if agree >= 3 else _CALIBRATION_BY_AGREE[0]
+    # Raw confidence spans roughly 10-62 after the caps; normalise to [-1, 1].
+    span = max(0.0, min(1.0, (raw_confidence - 10) / 52.0))
+    return _round_half_up(base + (2 * span - 1) * _CALIBRATION_TIEBREAK_SPAN)
+
+
 # FIX (DEEP-AUDIT-2026-07-26 / F-02-05 / F-02-21): extracted the bin-cap
 # calibration logic (previously duplicated at lines ~744-760 and ~858-886)
 # into a single helper. Also fixes the 5-point discontinuous jump at the
@@ -246,19 +297,40 @@ def _apply_calibration_caps(confidence: int, total_groups: int,
     # engine's overconfidence but did not actually improve win rate.
     # The new caps clamp displayed confidence closer to the actual win
     # rate ceiling, so users don't over-bet on weak signals.
+    # FIX (WALK-FORWARD-2026-08-05 / MONOTONICITY BUG): the previous cap
+    # ladder was NOT monotone, so a WEAKER raw signal could display a HIGHER
+    # confidence than a stronger one. Concretely, with override=0:
+    #     raw  49  ->  49   (the "< 50: leave unchanged" branch)
+    #     raw  60  ->  45
+    #     raw  70  ->  50
+    #     raw  90  ->  55
+    #     raw 100  ->  50
+    # So raw 49 displayed 49 while raw 60 displayed 45, and raw 100 displayed
+    # LESS than raw 90. Two order inversions. This is a large part of why the
+    # displayed number carries no information: live data shows the conf 20-29
+    # bucket winning 52.4% and the conf 40-49 bucket winning 37.5%, and the
+    # walk-forward run shows every bucket from 15 to 54 sitting flat at
+    # 48.3-50.9%. Sorting or thresholding on this value was meaningless.
+    #
+    # The caps below are non-decreasing, and `min(raw, cap(raw))` of two
+    # non-decreasing functions is itself non-decreasing — so ordering is now
+    # preserved end to end. Ceiling values track the measured win-rate
+    # ceiling (nothing in 39k walk-forward signals exceeded ~53%), which is
+    # why even the top bin caps at 62 rather than 90+.
     if confidence >= 100:
-        confidence = min(confidence, max(50, override))
+        confidence = min(confidence, max(62, override))
     elif confidence >= 90:
-        confidence = min(confidence, max(55, override))
+        confidence = min(confidence, max(60, override))
     elif confidence >= 80:
-        confidence = min(confidence, max(55, override))   # was 60 -> 55
+        confidence = min(confidence, max(58, override))
     elif confidence >= 70:
-        confidence = min(confidence, max(50, override))   # was 60 -> 50
+        confidence = min(confidence, max(55, override))
     elif confidence >= 60:
-        confidence = min(confidence, max(45, override))   # was 60 -> 45
+        confidence = min(confidence, max(50, override))
     elif confidence >= 50:
-        confidence = min(confidence, max(40, override))   # NEW: was uncapped
-    # < 50: leave unchanged (already low-confidence path)
+        confidence = min(confidence, max(45, override))
+    else:
+        confidence = min(confidence, max(40, override))
     return confidence
 
 
@@ -938,6 +1010,17 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # fallback. User requirement: every candle must produce CALL or PUT.
         _last_candle = candles[-1] if candles else {}
         _last_body = (_last_candle.get("close", 0) - _last_candle.get("open", 0)) if _last_candle else 0
+        # TESTED AND REJECTED (WALK-FORWARD-2026-08-05): on the 5-day training
+        # split this path won only 46.45% (n=973, 95% CI [43.34, 49.60]), which
+        # looked like a confirmed losing rule, so fading the previous candle
+        # instead of following it was tried. It did NOT replicate: on the
+        # held-out final 2 days, following won 50.99% (n=404) while fading won
+        # 46.56% (n=131). The train result was noise — this branch fires rarely
+        # enough that a 973-sample estimate still swings ~5pp between periods.
+        #
+        # Left as-is deliberately. Do not re-flip this without a fresh
+        # walk-forward run showing the effect on BOTH splits; the repo's
+        # history is full of exactly this kind of single-split reversal.
         _fallback_signal = "CALL" if _last_body >= 0 else "PUT"
         _strat = locals().get('_algo_strategy_name', 'default')
         _strat_r = locals().get('_algo_strategy_reason', '')
@@ -945,7 +1028,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             f"_FALLBACK: all votes suppressed (total=0) -> using last candle "
             f"direction {_fallback_signal} (always-signal mode)")
         return {
-            "signal": _fallback_signal, "confidence": 15, "strength": "WEAK",
+            "signal": _fallback_signal,
+            "confidence": _calibrated_confidence(15, maj_n),
+            "raw_confidence": 15, "strength": "WEAK",
             "score": 1, "reasons": all_reasons or ["FALLBACK_SIGNAL"],
             "regime": regime, "agree": maj_n,
             "total": total_groups, "signals_fired": total_groups,
@@ -985,6 +1070,8 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             # User requirement: every candle must produce CALL or PUT.
             _last_candle = candles[-1] if candles else {}
             _last_body = (_last_candle.get("close", 0) - _last_candle.get("open", 0)) if _last_candle else 0
+            # Fading instead of following was tested and rejected here too —
+            # see the `total == 0` fallback above for the measurement.
             signal = "CALL" if _last_body >= 0 else "PUT"
             _tiebreaker_score = 1
             maj_n = max(len(call_g), len(put_g))
@@ -1967,7 +2054,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             f"vol={_volatility_pct:.1f}x) -> NEUTRAL (historical win rate "
             f"only 44% in this regime)")
         return {
-            "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
+            "signal": "NEUTRAL", "confidence": 0, "raw_confidence": 0, "strength": "NEUTRAL",
             "score": net, "reasons": all_reasons,
             "regime": regime, "agree": agree, "total": total_groups,
             "signals_fired": total_groups,
@@ -1982,7 +2069,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     if confidence < _low_conf_threshold:
         all_reasons.append(f"_LOW_CONF_SKIP: confidence {confidence} < {_low_conf_threshold} -> NEUTRAL")
         return {
-            "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
+            "signal": "NEUTRAL", "confidence": 0, "raw_confidence": 0, "strength": "NEUTRAL",
             "score": net, "reasons": all_reasons,
             "regime": regime, "agree": agree, "total": total_groups,
             "signals_fired": total_groups,
@@ -2004,7 +2091,7 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         all_reasons.append(
             f"_ALGO_STRATEGY: confidence {confidence} < strategy min → NEUTRAL")
         return {
-            "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
+            "signal": "NEUTRAL", "confidence": 0, "raw_confidence": 0, "strength": "NEUTRAL",
             "score": net, "reasons": all_reasons,
             "regime": regime, "agree": agree, "total": total_groups,
             "signals_fired": total_groups,
@@ -2017,7 +2104,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
 
     return {
         "signal": signal,
-        "confidence": confidence,
+        # WALK-FORWARD-2026-08-05: `confidence` is now a calibrated expected
+        # win percentage (see _calibrated_confidence). The pre-calibration
+        # pipeline value is preserved as `raw_confidence` so the existing
+        # tuning/diagnostic endpoints can still see what the blender produced.
+        "confidence": _calibrated_confidence(confidence, agree),
+        "raw_confidence": confidence,
         "strength": strength,
         # FIX (DEEP-AUDIT-2026-07-26 / F-02-04): when the group-count
         # tiebreaker fired (net == 0 but group counts differ), return the
@@ -2283,7 +2375,7 @@ def _neutral(reasons, regime, asset="", weight_adapter=None, ctx=None,
         if module_names:
             modules = _module_breakdown([], [], module_names)
     return {
-        "signal": "NEUTRAL", "confidence": 0, "strength": "NEUTRAL",
+        "signal": "NEUTRAL", "confidence": 0, "raw_confidence": 0, "strength": "NEUTRAL",
         "score": 0, "reasons": reasons if isinstance(reasons, list) else [reasons],
         "regime": regime, "agree": 0, "total": 0, "signals_fired": 0,
         "modules": modules, "asset": asset, "profile": pair_profile,

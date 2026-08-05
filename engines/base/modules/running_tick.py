@@ -303,7 +303,22 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
     call_n = sum(1 for d, s, _ in sub_votes if d == "CALL")
     put_n = sum(1 for d, s, _ in sub_votes if d == "PUT")
 
-    reasons_str = " | ".join(r for _, _, r in sub_votes)
+    # FIX (THEORY-TRACKING-2026-08-05): tag each sub-signal with the direction
+    # it voted. Previously this joined only the reason text, so once the 12
+    # sub-signals were collapsed into one composite vote there was no way to
+    # recover which sub-signal wanted CALL and which wanted PUT — and
+    # db._extract_theory_votes had no `running_tick` entry at all, so the
+    # module that fires on 96% of live signals contributed ZERO rows to
+    # theory_votes. Every per-theory report was therefore built from the three
+    # modules that drive ~25% of signals, while the dominant one was invisible.
+    # It also cannot be backtested (Quotex history is OHLC only, no ticks), so
+    # live logging is the only way to ever measure these sub-signals.
+    #
+    # The `[CALL]`/`[PUT]` tag is parsed back out in db._extract_theory_votes.
+    # It sits AFTER the `[running_tick]` module prefix that blender.py adds, so
+    # the existing "module name = text between the first [ ]" parse is
+    # unaffected.
+    reasons_str = " | ".join(f"[{d}] {r}" for d, _, r in sub_votes)
 
     if call_sum == put_sum:
         return []  # exact tie — no vote

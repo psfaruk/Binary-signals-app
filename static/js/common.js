@@ -1782,7 +1782,12 @@ async function renderTheoryStats(){
 
   try{
     if(!_theoryStatsCache){
-      const r = await fetch('/api/theory-analysis?min_samples=1');
+      // FIX (THEORY-TRACKING-2026-08-05): was min_samples=1. A single graded
+      // candle rendered as a "100% win rate" theory sitting at the top of the
+      // list, which is how the 58-71% figures in the module docstrings came
+      // about. 30 is still small — the interval shown next to each row is the
+      // honest indicator, not the percentage.
+      const r = await fetch('/api/theory-analysis?min_samples=30');
       if(!r.ok) throw new Error('HTTP ' + r.status);
       _theoryStatsCache = await r.json();
     }
@@ -1807,15 +1812,21 @@ async function renderTheoryStats(){
       return;
     }
 
-    // Sort by win_pct descending
-    theories.sort((a,b) => (b.win_pct || 0) - (a.win_pct || 0));
+    // FIX (THEORY-TRACKING-2026-08-05): sort by the 95% lower bound, not the
+    // point estimate — a theory that went 3-for-3 should not outrank one that
+    // is 1100-for-2000. Falls back to win_pct for older API responses.
+    theories.sort((a,b) => ((b.wilson_lo ?? b.win_pct ?? 0) - (a.wilson_lo ?? a.win_pct ?? 0)));
 
     let html = '<div class="theory-stats-rows">';
     theories.forEach(t => {
       const pct = t.win_pct;
+      const lo = t.wilson_lo, hi = t.wilson_hi;
+      // Colour on the LOWER BOUND, so a wide-interval theory cannot show
+      // green off a lucky streak. 51.8% is break-even at a 93% OTC payout.
       const pctCls = pct == null ? 'none'
-                   : pct >= 55 ? 'good'
-                   : pct >= 45 ? 'mid' : 'bad';
+                   : (lo != null && lo > 51.8) ? 'good'
+                   : (hi != null && hi < 50) ? 'bad'
+                   : 'mid';
       const barWidth = pct == null ? 0 : pct;
       const total = t.total || 0;
       const correct = t.correct || 0;
@@ -1828,7 +1839,11 @@ async function renderTheoryStats(){
            +  '<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:' + barWidth + '%"></div></div>'
            +  '<div class="theory-row-stats">'
            +  '<span class="theory-pct ' + pctCls + '">' + (pct == null ? '—' : pct.toFixed(1) + '%') + '</span>'
-           +  '<span class="theory-meta">' + correct + 'W / ' + wrong + 'L (n=' + total + ')</span>'
+           +  '<span class="theory-meta">' + correct + 'W / ' + wrong + 'L (n=' + total + ')'
+           +  (lo == null ? ''
+               : ' · 95% CI ' + lo.toFixed(1) + '–' + hi.toFixed(1) + '%'
+                 + (t.reliable ? '' : ' · not distinguishable from a coin flip'))
+           +  '</span>'
            +  '</div>'
            +  '</div>';
     });

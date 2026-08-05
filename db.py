@@ -703,7 +703,36 @@ def _category_for_asset(asset):
 #       "S/R flip", "Trendline breakout"
 import re as _re_module
 
+# FIX (THEORY-TRACKING-2026-08-05): canonical names for running_tick's 12
+# sub-signals. `_THEORY_GROUPS` already carried a 'Micro composite': 'MICRO'
+# entry, but `_THEORY_PATTERNS` had no 'running_tick' key — and
+# _extract_theory_votes skips any module missing from that dict — so not one
+# running_tick row was ever written despite the module voting on 96% of live
+# signals. These names are matched against the per-sub-signal reason text
+# emitted by engines/base/modules/running_tick.py.
+_RUNNING_TICK_SUB_THEORIES = [
+    (r'ending (UP/BUYER|DOWN/SELLER)',      'Tick ending direction'),
+    (r'(buyer|seller) pressure',            'Buyer/seller pressure'),
+    (r'(buyer|seller) reaction from',       'Extreme reaction'),
+    (r'orderflow: big ticks',               'Order flow imbalance'),
+    (r'VAP migrating',                      'VAP migration'),
+    (r'V-(top|bottom):',                    'V-shape reversal'),
+    (r'momentum shift:',                    'Momentum shift'),
+    (r'tick acceleration',                  'Tick acceleration'),
+    (r'tick deceleration',                  'Tick deceleration'),
+    (r'live (bull|bear) wick',              'Live wick rejection'),
+    (r'time-decay:',                        'Time-decay pressure shift'),
+    (r'last-N exhaustion',                  'Last-N exhaustion'),
+    (r'last-N recovery',                    'Last-N recovery'),
+    (r'all 3 phases',                       'Phase momentum'),
+]
+
 _THEORY_PATTERNS = {
+    # running_tick is handled by a dedicated branch in _extract_theory_votes
+    # (its reason format is a composite, not a single "X → CALL" line), but it
+    # must be present here so the `module not in _THEORY_PATTERNS` guard lets
+    # it through.
+    'running_tick': [],
     'candle_reaction': [
         (r'(\d+)\+\s*(UP|DOWN)\s+streak', 'Streak reversal'),
         (r'Big\s+(UP|DOWN)\s+body', 'Big body reversal'),
@@ -809,6 +838,74 @@ _THEORY_GROUPS = {
 }
 
 
+def _vote_correct(direction, actual):
+    """1 if `direction` matched `actual`, 0 if not, None if the candle drew."""
+    if actual not in ('UP', 'DOWN'):
+        return None
+    return 1 if ((direction == 'CALL' and actual == 'UP') or
+                 (direction == 'PUT' and actual == 'DOWN')) else 0
+
+
+def _extract_running_tick_votes(reason_str, asset, period, ctime, actual,
+                                category, regime, strength, ts_val):
+    """Build theory_votes rows for one running_tick composite reason.
+
+    Emits one row for the composite vote plus one row per tagged sub-signal.
+    Sub-signal rows carry the direction that sub-signal voted, which may
+    OPPOSE the composite — that is the point: it lets a sub-signal that
+    consistently votes against the eventual winner be identified and dropped.
+
+    See engines/base/modules/running_tick.py for the emitting format.
+    """
+    rows = []
+
+    # Composite direction: "Micro composite CALL (" / "... PUT ("
+    comp = _re_module.search(r'Micro composite\s+(CALL|PUT)\b', reason_str)
+    if not comp:
+        return rows
+    comp_dir = comp.group(1)
+    # CONTINUATION vs REVERSAL is stated in the parenthetical type_reason.
+    comp_type = ('CONTINUATION' if 'continues' in reason_str.lower()
+                 else 'REVERSAL')
+    eff_match = _re_module.search(r'\(eff=(\d+)\)', reason_str)
+    effective_score = int(eff_match.group(1)) if eff_match else None
+
+    rows.append((
+        None, asset, period, ctime, 'running_tick',
+        'Micro composite', 'MICRO', comp_dir, comp_type,
+        None, None, effective_score,
+        _vote_correct(comp_dir, actual), category, regime, strength, ts_val,
+    ))
+
+    # Sub-signals: everything after the first ": ", split on " | ",
+    # each prefixed with its own [CALL]/[PUT] tag.
+    body = reason_str.split(': ', 1)
+    if len(body) < 2:
+        return rows
+    for chunk in body[1].split(' | '):
+        tag = _re_module.match(r'\s*\[(CALL|PUT)\]\s*(.+)', chunk)
+        if not tag:
+            continue
+        sub_dir, sub_text = tag.group(1), tag.group(2)
+        name = None
+        for pat, canonical in _RUNNING_TICK_SUB_THEORIES:
+            if _re_module.search(pat, sub_text, _re_module.IGNORECASE):
+                name = canonical
+                break
+        if not name:
+            # Unrecognised sub-signal — keep it under a stable truncated label
+            # rather than dropping it, so a newly added sub-signal still shows
+            # up in the report instead of silently vanishing.
+            name = sub_text.strip()[:40] or 'Unknown micro signal'
+        rows.append((
+            None, asset, period, ctime, 'running_tick',
+            name, 'MICRO_SUB', sub_dir, comp_type,
+            None, None, None,
+            _vote_correct(sub_dir, actual), category, regime, strength, ts_val,
+        ))
+    return rows
+
+
 def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, regime, strength, ts_val):
     """Parse reason strings and extract per-theory vote rows for theory_votes.
 
@@ -829,6 +926,22 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
             continue
         module = reason_str[1:end_bracket].strip()
         if module not in _THEORY_PATTERNS:
+            continue
+
+        # FIX (THEORY-TRACKING-2026-08-05): running_tick emits ONE composite
+        # ModuleResult whose reason bundles every sub-signal that fired:
+        #   "[running_tick] Micro composite PUT (continues prior down, 3
+        #    signals): [PUT] ending DOWN/SELLER (100%) | [PUT] seller
+        #    pressure (56%) | [CALL] V-bottom: ..."
+        # Record BOTH levels: the composite (so the module finally appears in
+        # theory_votes at all) and each tagged sub-signal with the direction
+        # IT voted — which is the only way to find out which of the 12
+        # sub-signals carry the module's weight, since none of them can be
+        # backtested against OHLC-only history.
+        if module == 'running_tick':
+            rows.extend(_extract_running_tick_votes(
+                reason_str, asset, period, ctime, actual,
+                category, regime, strength, ts_val))
             continue
 
         # Extract direction

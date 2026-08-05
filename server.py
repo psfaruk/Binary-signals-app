@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -1430,14 +1431,47 @@ async def module_analysis():
 # ─── NEW (ALWAYS-SIGNAL-2026-08-03): per-THEORY analysis endpoint ──────────
 # User requirement: "কোনটার ভিতরে কি কি কতগুলো করে theory আছে?
 # সেই theory গুলো কেমন পারফেমস করছে? কোন পেয়ার এ কেমন?"
+def _wilson_bounds(correct: int, total: int, z: float = 1.96):
+    """95% Wilson score interval for a win rate, returned as (lo, hi) percent.
+
+    FIX (THEORY-TRACKING-2026-08-05): every theory-pruning round in this repo
+    was justified by a bare `win_pct` on a handful of samples, and each round
+    picked a different "best" set because a bare win_pct on n=13 carries a
+    confidence interval roughly +/-27 points. Shipping the interval alongside
+    the point estimate makes that impossible to overlook.
+    """
+    if total <= 0:
+        return (0.0, 0.0)
+    p = correct / total
+    denom = 1 + z * z / total
+    centre = p + z * z / (2 * total)
+    margin = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total))
+    return (round(100 * (centre - margin) / denom, 1),
+            round(100 * (centre + margin) / denom, 1))
+
+
 @app.get("/api/theory-analysis")
-async def theory_analysis(period: int = 60, min_samples: int = 3):
+async def theory_analysis(period: int = 60, min_samples: int = 30):
     """Per-theory win-rate analysis from the theory_votes table.
 
     Returns:
-      global_theories: [{module_name, theory_name, theory_group, correct, total, win_pct}]
-      pair_theories: [{asset, module_name, theory_name, correct, total, win_pct}]
+      global_theories: [{module_name, theory_name, theory_group, correct,
+                         total, win_pct, wilson_lo, wilson_hi, reliable}]
+      pair_theories:   same shape, plus `asset`
       total_theory_records: int
+
+    FIX (THEORY-TRACKING-2026-08-05): `min_samples` default raised from 3 to
+    30, and rows now carry a 95% Wilson interval plus a `reliable` flag
+    (True only when the interval excludes 50%, i.e. the theory is
+    distinguishable from a coin flip at all). Sorted by `wilson_lo`, not
+    `win_pct` — sorting by the point estimate put whatever theory had gone
+    3-for-3 at the top of the list, which is how the module docstrings ended
+    up claiming 58-71% win rates for signals that measure 48-52% over tens of
+    thousands of samples.
+
+    A 95% interval that spans 50% means "no evidence either way" — not
+    "promising". Break-even for a 93%-payout OTC pair is 51.8%, so a theory
+    is only actionable when `wilson_lo` clears that.
     """
     try:
         conn = _db._conn()
@@ -1456,6 +1490,7 @@ async def theory_analysis(period: int = 60, min_samples: int = 3):
             global_theories = []
             for r in global_rows:
                 win_pct = round(100.0 * r["correct"] / r["total"], 1) if r["total"] else 0
+                lo, hi = _wilson_bounds(r["correct"] or 0, r["total"] or 0)
                 global_theories.append({
                     "module_name": r["module_name"],
                     "theory_name": r["theory_name"],
@@ -1463,7 +1498,15 @@ async def theory_analysis(period: int = 60, min_samples: int = 3):
                     "correct": r["correct"],
                     "total": r["total"],
                     "win_pct": win_pct,
+                    "wilson_lo": lo,
+                    "wilson_hi": hi,
+                    # Distinguishable from a coin flip at 95% confidence.
+                    "reliable": lo > 50.0 or hi < 50.0,
                 })
+            # Rank by the lower bound: a theory that is 3-for-3 sorts below one
+            # that is 1100-for-2000, which is the correct ordering for deciding
+            # what to keep.
+            global_theories.sort(key=lambda t: t["wilson_lo"], reverse=True)
 
             # Per-pair per-theory accuracy
             pair_rows = conn.execute("""
@@ -1479,6 +1522,7 @@ async def theory_analysis(period: int = 60, min_samples: int = 3):
             pair_theories = []
             for r in pair_rows:
                 win_pct = round(100.0 * r["correct"] / r["total"], 1) if r["total"] else 0
+                lo, hi = _wilson_bounds(r["correct"] or 0, r["total"] or 0)
                 pair_theories.append({
                     "asset": r["asset"],
                     "module_name": r["module_name"],
@@ -1487,6 +1531,9 @@ async def theory_analysis(period: int = 60, min_samples: int = 3):
                     "correct": r["correct"],
                     "total": r["total"],
                     "win_pct": win_pct,
+                    "wilson_lo": lo,
+                    "wilson_hi": hi,
+                    "reliable": lo > 50.0 or hi < 50.0,
                 })
 
             total = conn.execute("SELECT COUNT(*) as n FROM theory_votes WHERE period=?", (period,)).fetchone()
@@ -1634,15 +1681,24 @@ async def pair_deep_stats(asset: str, period: int = 60):
             """, (asset, period))
             tag_data = [dict(r) for r in cur.fetchall()]
 
-            # Confidence distribution
+            # Confidence distribution.
+            # FIX (WALK-FORWARD-2026-08-05): re-bucketed. `confidence` is now a
+            # calibrated expected-win-percentage (see blender._calibrated_
+            # confidence), so it lives in a narrow 44-56 band instead of the old
+            # 10-60 spread. The previous buckets ('<20', '20-39', '40-59',
+            # '60-74', '75+') dumped essentially every signal into '40-59',
+            # making this endpoint useless for calibration checking. These
+            # buckets straddle the break-even range that actually matters:
+            # 51.8% at 93% payout, 56.8% at 76%, 71.4% at 40%.
             cur.execute("""
                 SELECT
                     CASE
-                        WHEN confidence < 20 THEN '<20'
-                        WHEN confidence < 40 THEN '20-39'
-                        WHEN confidence < 60 THEN '40-59'
-                        WHEN confidence < 75 THEN '60-74'
-                        ELSE '75+'
+                        WHEN confidence < 46 THEN '<46'
+                        WHEN confidence < 49 THEN '46-48'
+                        WHEN confidence < 51 THEN '49-50'
+                        WHEN confidence < 53 THEN '51-52'
+                        WHEN confidence < 57 THEN '53-56'
+                        ELSE '57+'
                     END as conf_bucket,
                     accuracy,
                     COUNT(*) as count

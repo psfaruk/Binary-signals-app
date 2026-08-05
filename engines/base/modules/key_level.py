@@ -5,12 +5,21 @@ After THEORY-PRUNE-2026-08-04 (3 rounds), this module keeps only the
 key-level signals that performed well in production backtesting.
 
 Active signals:
-  1. Support wick rejection (LEVEL group) — 58% win, n=154
-  3. Close near/below prev low (MICRO_SR group) — 55-57% win
-  6. S/R flip (SR_FLIP group) — 50% win, small sample
-  7. Trendline breakout (TRENDLINE group) — kept, not yet backtested
+  1. Support wick rejection (LEVEL group) — 49.6% measured, n=9581
+  3. Close NEAR prev low → CALL bounce (MICRO_SR group) — 49.4%, n=2709
+  6. S/R flip (SR_FLIP group) — 49.2-49.8%, n=1886-2020
+  7. Trendline breakout (TRENDLINE group) — kept, fires too rarely to measure
+
+Measured win rates above are from a walk-forward run over 5 days of real
+Quotex history, all 19 live pairs (WALK-FORWARD-2026-08-05). They replace
+the previous in-sample figures, which were counted off a few dozen live
+signals and overstated every theory by 5-10pp. None of these signals has a
+demonstrated edge — they are kept because none has a demonstrated ANTI-edge
+either, and they feed the group-consensus count.
 
 Removed signals (see git history):
+  - Close BELOW prev low / breakdown (47.3% win, n=2536 walk-forward — the
+    only theory with a confirmed anti-edge; removed WALK-FORWARD-2026-08-05)
   - Resistance wick rejection (33% win, n=27)
   - Key support bounce (36% win, n=11)
   - Key resistance bounce (38% win, n=32)
@@ -90,20 +99,20 @@ def analyze(candles, ctx: MarketContext) -> list:
                     module_name="key_level", direction="CALL", score=1, confidence=52,
                     signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close near prev low ({prev_low:.5f}) → CALL bounce"]))
-            elif close < prev_low - eps:
-                # regime-conditional signal_type (mirror of removed prev_high branch)
-                _sig_type = "CONTINUATION"
-                _score, _conf = 1, 52
-                if is_trending and trend_strength > 0.5:
-                    if trend_regime == "TREND_UP":
-                        _sig_type = "REVERSAL"  # counter-trend breakdown attempt
-                        _score, _conf = 1, 48  # dampen
-                    elif trend_regime == "TREND_DOWN":
-                        _score, _conf = 2, 56  # trend-aligned — boost
-                results.append(ModuleResult(
-                    module_name="key_level", direction="PUT", score=_score, confidence=_conf,
-                    signal_type=_sig_type, reliability="LEVEL", group="MICRO_SR",
-                    reasons=[f"Close below prev low ({prev_low:.5f}) → PUT breakdown ({_sig_type})"]))
+            # REMOVED (WALK-FORWARD-2026-08-05): "Close below prev low → PUT
+            # breakdown" measured 47.3% over n=2536 on 5 days of real Quotex
+            # history across all 19 pairs (95% CI [45.4, 49.2] — the whole
+            # interval sits below 50%, so this is a confirmed anti-edge, not
+            # noise). It was the ONLY theory of the 15 active ones whose CI
+            # excluded 50%. The docstring above claimed "55-57% win"; that
+            # figure came from an in-sample count on a few dozen live signals.
+            #
+            # The bounce side of this branch (close > prev_low) measured 49.4%
+            # (n=2709) — indistinguishable from a coin flip, so it stays: it
+            # contributes to group consensus without a measured negative edge.
+            #
+            # Reproduce with: scripts/live_backtest/backtest_theories.py
+            pass
 
     # ═══════════════════════════════════════════════════════════════════════
     # SIGNAL 6: Support/Resistance Flip (KEPT — 50% win, small sample)
