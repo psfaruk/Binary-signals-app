@@ -532,8 +532,32 @@ async def token_status():
     token_dead = bool(getattr(feed, "_token_dead_at", 0))
     try:
         client = getattr(feed, "_client", None)
-        authorized = bool(getattr(client, "_authorized", False)) if client else False
-        connected = bool(getattr(client, "_connected", False)) if client else False
+        # FIX (DATA-AUDIT-2026-08-05): `_authorized`/`_connected` only exist
+        # on quotex_ws.QuotexWSClient (QX_USE_RAW_WS=1) — the same
+        # backend-specific-attribute bug the LIVE-TICK-RELIABILITY-2026-07-31
+        # fix above already found and fixed for consecutive_rejects/token_dead,
+        # but missed here. The default production backend
+        # (pyquotex.stable_api.Quotex, QX_USE_RAW_WS=0) never sets either
+        # attribute, so `getattr(client, "_authorized", False)` and
+        # `getattr(client, "_connected", False)` silently returned False
+        # FOREVER — this endpoint reported "disconnected" even while the
+        # feed was live and streaming (confirmed: /healthz + /api/status
+        # showed connected:true and candles were closing every 60s in the
+        # logs, while this endpoint said "disconnected" the whole time).
+        # `feed._connected` is the backend-agnostic, authoritative flag set
+        # by QuotexFeed._connect() for BOTH backends — and for pyquotex,
+        # _connect() only returns True after the client's own auth check
+        # succeeds (see feed.py's `ok, reason = await self._client.connect()`
+        # call), so `feed._connected` already implies authorized on that
+        # backend. Use the client-level flags when present (raw-WS backend,
+        # which can be connected-but-not-yet-authorized), and fall back to
+        # `feed._connected` otherwise.
+        if hasattr(client, "_authorized") or hasattr(client, "_connected"):
+            authorized = bool(getattr(client, "_authorized", False))
+            connected = bool(getattr(client, "_connected", False))
+        else:
+            authorized = bool(feed._connected)
+            connected = bool(feed._connected)
         if authorized and connected:
             connection_status = "live_authorized"
         elif connected and not authorized:
