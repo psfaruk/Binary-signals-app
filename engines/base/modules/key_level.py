@@ -8,6 +8,10 @@ Active signals:
   1. Support wick rejection (LEVEL group) — 49.6% measured, n=9581
   3. Close NEAR prev low → CALL bounce (MICRO_SR group) — 49.4%, n=2709
   6. S/R flip (SR_FLIP group) — 49.2-49.8%, n=1886-2020
+     resistance→support side: coin flip, 51.6% UP over n=215 live,
+     95% CI [45.0, 58.2]. Its 2026-08-05 CALL→PUT inversion was
+     falsified out-of-sample and reverted 2026-08-06 — see the comment
+     at SIGNAL 6 before proposing another direction change.
   7. Trendline breakout (TRENDLINE group) — kept, fires too rarely to measure
 
 Measured win rates above are from a walk-forward run over 5 days of real
@@ -79,7 +83,15 @@ def analyze(candles, ctx: MarketContext) -> list:
                     results.append(ModuleResult(
                         module_name="key_level", direction="CALL", score=4, confidence=70,
                         signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                        reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → CALL (failed breakdown, 70% win rate)"]))
+                        # FIX (2026-08-06): the reason text claimed "70% win
+                        # rate" — that number was just `confidence=70` restated
+                        # as if it were a measured result, and it rendered in
+                        # the UI as one. This module's own docstring measures
+                        # this signal at 49.6% (n=9581 walk-forward); live
+                        # theory_votes put it at 50.8% (n=1280). Claim removed
+                        # rather than corrected: no win rate belongs in a reason
+                        # string, because nothing keeps it in sync with the data.
+                        reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → CALL (failed breakdown)"]))
                 # Resistance wick rejection removed (Round 2 — 33% win, n=27)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -127,25 +139,45 @@ def analyze(candles, ctx: MarketContext) -> list:
             lvl_type = level["type"]
             if lvl_type == "resistance" and prev["close"] > lvl_price and close > lvl_price:
                 if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:
-                    # FIX (PROD-BACKTEST-2026-08-05 / FIX-1): flipped CALL → PUT.
-                    # Production data (7,699 signals, 2026-08-04..08-05):
-                    #   S/R flip (resistance→support) CALL (n=105) won 43.81%;
-                    #   PUT would win 56.19%. Lift from flip = +12.38pp.
-                    # n < 150 but lift is the LARGEST of any theory in the data.
-                    # Textbook says "broken resistance becomes support = bullish
-                    # continuation = CALL", but 1-minute binary-option data shows
-                    # the opposite: when price breaks resistance and stays near
-                    # it, the next candle tends to reverse DOWN. The theory name
-                    # "resistance→support" is a textbook label; the data says the
-                    # pattern is actually a fakeout / bull-trap.
-                    # NOTE: this is the highest-confidence single fix in the
-                    # commit despite the smaller n, because the lift is so large
-                    # (~12pp) that even at n=105 the Wilson 95% lower bound on
-                    # the flip win rate clears 50%.
+                    # REVERTED (2026-08-06): PROD-BACKTEST-2026-08-05 / FIX-1
+                    # flipped this branch CALL → PUT, predicting 56.19% from an
+                    # in-sample count of n=105 ("the highest-confidence single
+                    # fix in the commit"). It then ran in production for ~7
+                    # hours and was falsified out-of-sample:
+                    #
+                    #   era        voted   n     won
+                    #   pre-flip   CALL    114   43.9%
+                    #   post-flip  PUT     101   39.6%   <- predicted 56.2%
+                    #
+                    # PUT's 95% CI is [30.6, 49.4] — it excludes the 56.2% the
+                    # flip was justified by, missing it by 16.6pp. Flipping the
+                    # direction on a stationary pattern MUST turn 43.9% into
+                    # 56.1%; it produced 39.6% instead, which means the trigger
+                    # population is not stationary at all. What actually
+                    # happened is that the market's tendency on this setup
+                    # changed sign across the deploy boundary: 56.1% DOWN
+                    # before, 60.4% UP after. The flip was fitted to one side
+                    # of that swing and landed on the wrong side of the next.
+                    #
+                    # Pooled over both eras the trigger is a coin flip:
+                    # 111/215 = 51.6% UP, 95% CI [45.0, 58.2]. Neither CALL nor
+                    # PUT has any measured edge, so this reverts to the textbook
+                    # label rather than keeping a direction chosen by noise.
+                    # The "56.2% measured n=105" text was also being rendered in
+                    # the UI as if it were a validated win rate — it never was.
+                    #
+                    # Kept (not deleted) on the same grounds as the other
+                    # signals in this module: no demonstrated anti-edge either,
+                    # and it feeds the SR_FLIP group-consensus count. It fires
+                    # on only 1.47% of signals.
+                    #
+                    # Template for this revert: the `agree=0` fallback inversion
+                    # in blender.py — hypothesis from train, verdict from
+                    # holdout, revert when it does not replicate.
                     results.append(ModuleResult(
-                        module_name="key_level", direction="PUT", score=2, confidence=57,
-                        signal_type="REVERSAL", reliability="LEVEL", group="SR_FLIP",
-                        reasons=[f"Broken resistance now support ({lvl_price:.5f}) → PUT (fakeout reversal, 56.2% measured n=105)"]))
+                        module_name="key_level", direction="CALL", score=2, confidence=57,
+                        signal_type="CONTINUATION", reliability="LEVEL", group="SR_FLIP",
+                        reasons=[f"Broken resistance now support ({lvl_price:.5f}) → CALL (continuation of original breakout)"]))
                     break
             elif lvl_type == "support" and prev["close"] < lvl_price and close < lvl_price:
                 if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:

@@ -355,15 +355,23 @@ def test_bug11_trend_follow_avg_body():
 
 # ─── BUG-12: candle_reaction.py — reason shows actual ratio ─────────────
 def test_bug12_actual_ratio_in_reason():
-    """Reason text should show actual_ratio, not just body_mult threshold."""
-    from engines.base.modules import candle_reaction
-    src = inspect.getsource(candle_reaction.analyze)
-    has_actual_ratio = "actual_ratio = abs(body) / median_body" in src
-    shows_both = "actual_ratio:.1f}x median [thresh {body_mult}x]" in src
-    test("BUG-12: computes actual_ratio",
-         has_actual_ratio, f"actual_ratio computed: {has_actual_ratio}")
-    test("BUG-12: reason shows both actual and threshold",
-         shows_both, f"both shown: {shows_both}")
+    """SKIPPED — the signal this guarded was deleted.
+
+    FIX (2026-08-06): this asserted that candle_reaction.analyze contains
+    `actual_ratio = abs(body) / median_body` and a reason string showing
+    "{actual_ratio:.1f}x median [thresh {body_mult}x]". THEORY-PRUNE-2026-08-04
+    deleted SIGNALS 1-5 and 7 from that module, and with them every use of
+    median_body / body_mult — the module now has only SIGNAL 6 (rising/falling
+    closes momentum), which has no body-multiple threshold at all. So the test
+    was asserting the presence of code that no longer exists and could never
+    pass again. It was invisible until today because the BUG-10/BUG-11 stale
+    NameErrors aborted the run before reaching it.
+
+    Skipped rather than deleted, matching how BUG-02/BUG-10/BUG-11 were handled
+    when their modules were pruned.
+    """
+    print("BUG-12: SKIPPED — candle_reaction SIGNALS 1-5/7 deleted "
+          "(THEORY-PRUNE-2026-08-04); median_body/body_mult no longer exist")
 
 
 # ─── BUG-13: algorithm_monitor.py — UNIQUE index + INSERT OR IGNORE ──────
@@ -499,11 +507,17 @@ def main():
     print()
 
     print("BUG-10: otc_pattern.py — dead code removed")
-    test_bug10_dead_code_removed()
+    # FIX (2026-08-06): was calling `test_bug10_dead_code_removed()`, which has
+    # not existed since MODULE-PRUNE-2026-08-03 renamed it to
+    # `test_bug10_otc_pattern_dead_code`. The stale name raised NameError and
+    # aborted the whole run here, so BUG-10 through BUG-16 never executed —
+    # which is how the S/R flip regression in BUG-01 went unnoticed too.
+    test_bug10_otc_pattern_dead_code()
     print()
 
     print("BUG-11: trend_follow.py — avg_body excludes current candle")
-    test_bug11_avg_body_excludes_current()
+    # FIX (2026-08-06): same stale-rename NameError as BUG-10 above.
+    test_bug11_trend_follow_avg_body()
     print()
 
     print("BUG-12: candle_reaction.py — reason shows actual ratio")

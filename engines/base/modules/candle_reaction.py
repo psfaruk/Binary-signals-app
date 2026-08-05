@@ -59,7 +59,11 @@ def analyze(candles, ctx: MarketContext) -> list:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="CALL", score=3, confidence=62,
                     signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
-                    reasons=[f"Rising closes momentum (3 UP, str={trend_strength:.2f}) → CALL continuation (62% win rate)"]))
+                    # FIX (2026-08-06): "(62% win rate)" removed — it was
+                    # `confidence=62` restated as a measured result and shown
+                    # to users as one. See the module docstring for what is
+                    # actually measured.
+                    reasons=[f"Rising closes momentum (3 UP, str={trend_strength:.2f}) → CALL continuation"]))
         # Monotonic falling closes
         elif c1_close > c2_close > c3_close:
             if (r1 > 0 and r2 > 0 and rng > 0
@@ -68,6 +72,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="PUT", score=3, confidence=62,
                     signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
-                    reasons=[f"Falling closes momentum (3 DOWN, str={trend_strength:.2f}) → PUT continuation (62% win rate)"]))
+                    # FIX (2026-08-06): "(62% win rate)" removed — see above.
+                    reasons=[f"Falling closes momentum (3 DOWN, str={trend_strength:.2f}) → PUT continuation"]))
 
     return results
