@@ -20,11 +20,13 @@ Architecture:
     6 independent modules → Smart Blender → final prediction
 
     Module 1: candle_reaction  — single-candle price action
-    Module 2: running_tick     — tick microstructure composite
-    Module 3: pattern          — multi-candle patterns (boosted)
-    Module 4: indicator        — RSI, MACD, EMA, Bollinger, Stochastic (boosted)
-    Module 5: key_level        — support/resistance, round numbers (boosted)
-    Module 6: trend_follow     — momentum continuation, EMA alignment, breakouts
+    Module 2: pattern          — multi-candle patterns (boosted)
+    Module 3: indicator        — RSI, MACD, EMA, Bollinger, Stochastic (boosted)
+    Module 4: key_level        — support/resistance, round numbers (boosted)
+    Module 5: trend_follow     — momentum continuation, EMA alignment, breakouts
+
+    (running_tick — tick microstructure composite — removed 2026-08-05,
+    no measured edge on live data; see core/constants.py MODULE_NAMES.)
 
     Tuned for real-market behavior:
       - Indicators (RSI/MACD/EMA) are MORE reliable (boosted to ×1.2)

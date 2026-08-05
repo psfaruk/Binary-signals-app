@@ -34,9 +34,13 @@ DB_PATH = os.environ.get(
 # Both engines now run the same 4 shared modules.
 # FIX (PROD-BACKTEST-2026-08-05 / NEW-MODULES): added 4 new modules ported
 # from the user-supplied analyze_eoc.py file.
+# FIX (RUNNING-TICK-REMOVE-2026-08-05): removed "running_tick" — live
+# theory_votes data (12 sub-signals + composite, n=460-7742) confirmed no
+# measurable edge (all 48.7-51.4%, Wilson 95% lower bound below break-even
+# in every case). Module deleted (engines/base/modules/running_tick.py),
+# unwired from engines/base/blender.py.
 MODULE_NAMES = (
     "candle_reaction",
-    "running_tick",
     "pattern",
     "key_level",
     "market_state",
@@ -48,7 +52,6 @@ MODULE_NAMES = (
 # Human-readable display names for the UI.
 MODULE_DISPLAY_NAMES = {
     "candle_reaction": "Candle Reaction",
-    "running_tick":    "Running Tick",
     "pattern":         "Pattern",
     "key_level":       "Key Level",
     "market_state":    "Market State",
@@ -75,7 +78,8 @@ MODULE_DISPLAY_NAMES = {
 #   - engines/base/modules/candle_reaction.py (SIGNAL 6 only)
 #   - engines/base/modules/key_level.py (Signals 1, 3, 6, 7)
 #   - engines/base/modules/pattern.py (8 patterns)
-#   - engines/base/modules/running_tick.py (Micro composite)
+# running_tick (Micro composite) was removed 2026-08-05 — see MODULE_NAMES
+# comment above.
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -147,11 +151,11 @@ CONSENSUS_MIN_GROUPS = int(os.environ.get("CONSENSUS_MIN_GROUPS", "1"))  # singl
 # adapter will auto-calibrate them over the next 24h as live brain data
 # comes in. See engines/{otc,real}/config.py for the weights.
 OTC_MODULES = (
-    "candle_reaction", "running_tick", "pattern", "key_level",
+    "candle_reaction", "pattern", "key_level",
     "market_state", "wickwall", "divergence", "tickrun",
 )
 REAL_MODULES = (
-    "candle_reaction", "running_tick", "pattern", "key_level",
+    "candle_reaction", "pattern", "key_level",
     "market_state", "wickwall", "divergence", "tickrun",
 )
 

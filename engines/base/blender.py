@@ -36,9 +36,10 @@ from typing import Callable
 # the unused-import warning.
 from engines.base.types import ModuleResult
 from engines.base.context import compute_context
+# FIX (RUNNING-TICK-REMOVE-2026-08-05): removed running_tick import — see
+# core/constants.py MODULE_NAMES comment for rationale (no measured edge).
 from engines.base.modules import (
     candle_reaction as mod_candle,
-    running_tick as mod_tick,
     pattern as mod_pattern,
     key_level as mod_keylevel,
 )
@@ -365,7 +366,9 @@ class BlenderConfig:
     FIX (MODULE-PRUNE-2026-08-03): removed module_6_name / module_6_fn
     fields. The engine-specific 6th modules (otc_pattern, trend_follow)
     have been deleted from the codebase. Both engines now run the same
-    4 shared modules: candle_reaction, running_tick, pattern, key_level.
+    3 shared modules: candle_reaction, pattern, key_level (running_tick
+    removed 2026-08-05 — no measured edge, see core/constants.py), plus
+    4 newer modules (market_state, wickwall, divergence, tickrun).
     """
     reliability: dict
     weight_adapter: PairWeightAdapter
@@ -430,18 +433,19 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # ── Step 1: Compute shared context ONCE ──────────────────────────────
     ctx = compute_context(candles)
 
-    # ── Step 2: Run all 4 modules ────────────────────────────────
+    # ── Step 2: Run all 3 modules ────────────────────────────────
     # FIX (MODULE-PRUNE-2026-08-03): removed indicator module and the
     # engine-specific 6th module (otc_pattern / trend_follow). Both
-    # engines now run the same 4 shared modules.
+    # engines now run the same 3 shared modules.
+    # FIX (RUNNING-TICK-REMOVE-2026-08-05): removed the running_tick call —
+    # confirmed no measured edge on live data, see core/constants.py.
     all_results = []
     all_results += mod_candle.analyze(candles, ctx)
-    all_results += mod_tick.analyze(candles, ticks, micro, ctx)
     all_results += mod_pattern.analyze(candles, ctx)
     all_results += mod_keylevel.analyze(candles, ctx)
     # FIX (PROD-BACKTEST-2026-08-05 / NEW-MODULES): invoke the 4 new modules.
     # market_state, wickwall, divergence take (candles, ctx).
-    # tickrun takes (candles, ticks, ctx) like running_tick.
+    # tickrun takes (candles, ticks, ctx) (like the now-removed running_tick).
     all_results += mod_market_state.analyze(candles, ctx)
     all_results += mod_wickwall.analyze(candles, ctx)
     all_results += mod_divergence.analyze(candles, ctx)

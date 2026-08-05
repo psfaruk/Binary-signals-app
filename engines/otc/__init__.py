@@ -16,14 +16,16 @@ Public API:
     result = predict(candles, ticks, micro, asset="EURUSD_otc")
 
 Architecture:
-    6 independent modules → Smart Blender → final prediction
+    Independent modules → Smart Blender → final prediction
 
-    Module 1: candle_reaction  — single-candle price action
-    Module 2: running_tick     — tick microstructure composite
-    Module 3: pattern          — multi-candle patterns (engulfing, star, etc.)
-    Module 4: indicator        — RSI, MACD, EMA, Bollinger, Stochastic
-    Module 5: key_level        — support/resistance, round numbers
-    Module 6: otc_pattern      — OTC-specific mean-reversion patterns (per-pair weight 0.4-1.8)
+    candle_reaction — single-candle price action
+    pattern         — multi-candle patterns (engulfing, star, etc.)
+    key_level       — support/resistance, round numbers
+    market_state, wickwall, divergence, tickrun — added 2026-08-05
+
+    (running_tick — tick microstructure composite — removed 2026-08-05,
+    no measured edge on live data; see core/constants.py MODULE_NAMES.
+    indicator, otc_pattern — removed 2026-08-03.)
 
     Tuned for OTC mean-reversion behavior:
       - otc_pattern module gets bonus (×1.2 reliability; per-pair weight 0.4-1.8 depending on mean-reversion strength)

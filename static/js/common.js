@@ -44,22 +44,23 @@ const HISTORY_MAX = 100;
 /* ─── MODULE NAMES — single source of truth (mirrors core.constants.MODULE_NAMES) ──
    FIX (MODULE-PRUNE-2026-08-03): reduced from 7 modules to 4. Removed
    indicator, otc_pattern, trend_follow — these modules have been deleted
-   from the codebase. Both engines now use the same 4 shared modules. */
+   from the codebase. Both engines now use the same shared modules.
+   FIX (RUNNING-TICK-REMOVE-2026-08-05): removed running_tick — confirmed
+   no measured edge on live data (12 sub-signals + composite, n=460-7742,
+   all below break-even). See core/constants.py MODULE_NAMES comment. */
 const MODULE_NAMES = [
   'candle_reaction',
-  'running_tick',
   'pattern',
   'key_level',
 ];
 const MODULE_DISPLAY = {
   'candle_reaction': 'Candle Reaction',
-  'running_tick':    'Running Tick',
   'pattern':         'Pattern',
   'key_level':       'Key Level',
 };
-// Both engines use the same 4 modules now.
-const OTC_MODULES  = ['candle_reaction','running_tick','pattern','key_level'];
-const REAL_MODULES = ['candle_reaction','running_tick','pattern','key_level'];
+// Both engines use the same modules now.
+const OTC_MODULES  = ['candle_reaction','pattern','key_level'];
+const REAL_MODULES = ['candle_reaction','pattern','key_level'];
 
 /* ─── STATE (reset on every initApp call) ────────────────────────────────── */
 let ws = null, reconnectTimer = null, reconnectAttempts = 0;

@@ -4,8 +4,12 @@ Generated from live Railway brain data (~1280 graded signals).
 Per-pair per-module weights calibrated against actual win rates.
 
 FIX (MODULE-PRUNE-2026-08-03): removed `indicator` and `trend_follow`
-modules entirely. Both engines now run the same 4 shared modules:
-candle_reaction, running_tick, pattern, key_level.
+modules entirely. Both engines now run the same shared modules.
+
+FIX (RUNNING-TICK-REMOVE-2026-08-05): removed `running_tick` entirely
+(module deleted, weight entries removed below). See the matching comment
+in engines/otc/config.py for the full rationale (12 sub-signals +
+composite confirmed no edge on live theory_votes data, n=460-7742).
 
 Calibration methodology (DEEP_v3, 2026-08-03):
 - Pairs with < 40% win rate (and >= 8 samples) -> DISABLED entirely
@@ -31,6 +35,8 @@ from core.constants import REAL_MODULES as _MODULES
 # FIX (POST-PRUNE-TUNE-2026-08-03): boosted PATTERN 1.0 → 1.2 to compensate
 # for the lost INDICATOR + TREND tiers. Pattern module is now the primary
 # trend-continuation detector in Real markets.
+# NOTE: "MICRO" tier is still used by tickrun and market_state — do not
+# remove it just because running_tick (its original user) was deleted.
 RELIABILITY = {
     "PATTERN":   1.2,
     "LEVEL":     1.0,
@@ -41,31 +47,28 @@ RELIABILITY = {
 
 # ── DEFAULT_WEIGHTS — for pairs with insufficient data (< 8 samples) ──
 # FIX (MODULE-PRUNE-2026-08-03): removed indicator + trend_follow entries.
-# FIX (RUNNING-TICK-DISABLE-2026-08-05): running_tick weight set to 0 — see
-# the matching comment in engines/otc/config.py for the full rationale
-# (all 12 sub-signals + composite confirmed no edge on live theory_votes
-# data, n=460-7742, also delisted from core/auto_tune.py STATIC_WEIGHTS).
+# FIX (RUNNING-TICK-REMOVE-2026-08-05): removed running_tick entry.
 DEFAULT_WEIGHTS = {
     "candle_reaction":   1.0,
-    "running_tick":      0.0,
     "pattern":           1.0,
     "key_level":         0.8,
-            "market_state":      0.8,
-            "wickwall":          0.5,
-            "divergence":        0.5,
-            "tickrun":           0.5,
+    "market_state":      0.8,
+    "wickwall":          0.5,
+    "divergence":        0.5,
+    "tickrun":           0.5,
 }
 
 
 # ── PER-PAIR CALIBRATED WEIGHTS (auto-generated from live data) ────────
 # FIX (MODULE-PRUNE-2026-08-03): removed indicator + trend_follow from
 # every pair's weights dict. Comments for those entries are also removed.
+# FIX (RUNNING-TICK-REMOVE-2026-08-05): removed running_tick from every
+# pair's weights dict.
 PAIR_CONFIGS = {
     "AUDUSD": {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=46%) (n=28)
-            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was boost (acc=65% >= 55.0%) (n=34)
             "pattern":           1.0,   # baseline (acc=55%) (n=22)
             "key_level":         1.0,   # baseline (no data)
             "market_state":      0.8,
@@ -79,7 +82,6 @@ PAIR_CONFIGS = {
         "profile": "calibrated",
         "weights": {
             "candle_reaction":   1.0,   # baseline (acc=51%) (n=49)
-            "running_tick":      0.0,   # DISABLED (no edge, 2026-08-05) — was baseline (acc=53%) (n=60)
             "pattern":           1.0,   # baseline (acc=48%) (n=46)
             "key_level":         1.0,   # baseline (acc=50%) (n=34)
             "market_state":      0.8,
