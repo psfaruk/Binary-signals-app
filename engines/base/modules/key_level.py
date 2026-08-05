@@ -7,11 +7,17 @@ key-level signals that performed well in production backtesting.
 Active signals:
   1. Support wick rejection (LEVEL group) — 49.6% measured, n=9581
   3. Close NEAR prev low → CALL bounce (MICRO_SR group) — 49.4%, n=2709
-  6. S/R flip (SR_FLIP group) — 49.2-49.8%, n=1886-2020
-     resistance→support side: coin flip, 51.6% UP over n=215 live,
-     95% CI [45.0, 58.2]. Its 2026-08-05 CALL→PUT inversion was
-     falsified out-of-sample and reverted 2026-08-06 — see the comment
-     at SIGNAL 6 before proposing another direction change.
+  6. S/R flip (SR_FLIP group) — remeasured 2026-08-06 by walk-forward over
+     191,482 real candles / 19 pairs:
+       resistance→support (emits CALL): 50.7% UP, n=2786, 95% CI [48.9, 52.6]
+         CALL wins 50.7%, PUT wins 49.3%. Its 2026-08-05 CALL→PUT inversion
+         was falsified and reverted — read the comment at SIGNAL 6 before
+         proposing another direction change.
+       support→resistance (emits PUT):  48.2% UP, n=2760, 95% CI [46.3, 50.0]
+         i.e. PUT wins 51.8% [50.0, 53.7] — the best-looking theory in the
+         whole engine and correctly signed, but its lower bound still sits
+         below the 51.8% OTC break-even, so it is NOT actionable. Worth
+         monitoring, not worth a code change.
   7. Trendline breakout (TRENDLINE group) — kept, fires too rarely to measure
 
 Measured win rates above are from a walk-forward run over 5 days of real
@@ -165,6 +171,24 @@ def analyze(candles, ctx: MarketContext) -> list:
                     # label rather than keeping a direction chosen by noise.
                     # The "56.2% measured n=105" text was also being rendered in
                     # the UI as if it were a validated win rate — it never was.
+                    #
+                    # CORRECTION (same day, walk-forward over 191,482 real
+                    # candles / 19 pairs, n=2,786 triggers — 13x the live
+                    # sample): the revert is CONFIRMED, but the "not
+                    # stationary / tendency changed sign" reasoning above is
+                    # NOT. The underlying rate is 50.7% UP, 95% CI [48.9,
+                    # 52.6], and a chi-square homogeneity test across 6
+                    # chronological slices gives 6.0 on df=5 — i.e. entirely
+                    # consistent with a CONSTANT rate, no time-drift at all.
+                    # The live 43.9% -> 39.6% swing was ordinary sampling
+                    # noise at n~100 per era, not a regime change; do not
+                    # repeat that explanation.
+                    # What the large sample does settle: CALL wins 50.7% and
+                    # PUT wins 49.3%, so the 2026-08-05 flip moved this branch
+                    # to the *worse* side, and reverting to CALL is right.
+                    # It still clears nothing — 48.9 lower bound vs the 51.8%
+                    # OTC break-even — so this stays a no-edge signal kept
+                    # only for group consensus.
                     #
                     # Kept (not deleted) on the same grounds as the other
                     # signals in this module: no demonstrated anti-edge either,
