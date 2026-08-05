@@ -1310,15 +1310,25 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # isn't yet computed at this call site (early in the function), use
     # the locals().get fallback.
     _eff_groups_for_cap = locals().get("effective_total_groups", total_groups)
-    # FIX (2026-07-27 / strong-unreachable): pass abs_net/majority_group_n
-    # so the ultra-consensus override (see _apply_calibration_caps) can
-    # raise the ceiling to 75 when earned. has_pattern_confluence isn't
-    # computed until Step 9 (below) — not available at this call site.
-    confidence = _apply_calibration_caps(
-        confidence, _eff_groups_for_cap, net_margin,
-        abs_net=abs(net), majority_group_n=majority_group_n)
 
-    # ── Step 9: Pattern confluence check for STRONG ──────────────────────
+    # ── Step 8.5: Pattern confluence check for STRONG ─────────────────────
+    # FIX (PROD-BACKTEST-2026-08-05 / BUG-1): previously this block ran at
+    # "Step 9" (AFTER the first _apply_calibration_caps call). The cap
+    # function only clamps DOWN — `min(confidence, max(cap, override))` —
+    # so once the first cap call already dropped confidence to <= 55, the
+    # second cap call could raise the CEILING to 65 (via the
+    # has_pattern_confluence override) but could NOT raise the VALUE
+    # itself. Result: the STRONG-via-pattern-confluence path at line ~1998
+    # (which requires confidence >= 65) was effectively UNREACHABLE for
+    # every signal, because no signal ever reached 65. The dev's
+    # "strong-unreachable" fix from 2026-07-27 was half-correct: it added
+    # the override mechanism but missed the call-ordering bug. Production
+    # data (7,699 signals, 2026-08-04..08-05) shows ZERO STRONG-via-pattern
+    # signals in signal_log. This fix moves the computation BEFORE the
+    # first cap call so the override is honored at the FIRST cap
+    # application, allowing genuinely-strong consensus + pattern agreement
+    # to reach the STRONG tier.
+    #
     # FIX (BUG-BQ, 2026-07-20): pattern_agrees only checked reliability ==
     # "PATTERN", missing "OTC" reliability (otc_pattern module). An OTC
     # pattern agreement now counts toward pattern confluence.
@@ -1343,6 +1353,15 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         for r, e in adjusted
     )
     has_pattern_confluence = pattern_agrees and strong_non_pattern_agrees
+
+    # FIX (PROD-BACKTEST-2026-08-05 / BUG-1): now pass has_pattern_confluence
+    # to the FIRST cap call so the 65-override can lift the ceiling before
+    # the value is clamped down. Previously this was passed only to the
+    # second call, where it had no effect (see comment above).
+    confidence = _apply_calibration_caps(
+        confidence, _eff_groups_for_cap, net_margin,
+        abs_net=abs(net), majority_group_n=majority_group_n,
+        has_pattern_confluence=has_pattern_confluence)
 
     agree = majority_group_n
     abs_net = abs(net)

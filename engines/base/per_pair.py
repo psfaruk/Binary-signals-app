@@ -27,7 +27,18 @@ _ADAPT_CACHE_TTL = float(os.environ.get("ADAPT_CACHE_TTL", "60"))
 # FIX (DEEP-AUDIT-2026-07-26 / F-04-06): named calibration thresholds.
 # Previously inline magic numbers scattered across _adapt_from_db; now
 # centralized for clarity and tuning. (Audit A-06 #12, #83-91, A-02 #115-118.)
-_HARD_DISABLE_WIN_RATE = 0.0    # FIX (ALWAYS-SIGNAL-2026-08-03): was 0.30, set to 0.0 to never hard-disable modules
+# FIX (PROD-BACKTEST-2026-08-05 / BUG-8): restored from 0.0 to 0.30. The
+# ALWAYS-SIGNAL-2026-08-03 commit set this to 0.0 to "never hard-disable
+# modules", but that removed the only safety net against catastrophic
+# modules. A 0%-win-rate module over 1000 samples would only be dampened
+# to 70% strength via the smooth-blend formula. The original 0.30
+# threshold means "any module winning less than 30% over 50+ samples
+# gets dampened to 5% weight" — which preserves always-signal mode
+# (the module still votes, just at 5% strength) while removing its
+# influence on consensus. Production data (7,699 signals) shows several
+# per-pair per-module combos below 40% win rate; without this safety
+# net, they continue to drag down the engine.
+_HARD_DISABLE_WIN_RATE = 0.30
 _HARD_DISABLE_SAMPLES = 50      # need this many samples to hard-disable
 _DB_STATS_FULL_SAMPLES = 50.0   # adapt_fraction saturates at this sample count
 _BRAIN_MIN_SAMPLES = 30         # brain_learning blend activates above this

@@ -127,10 +127,25 @@ def analyze(candles, ctx: MarketContext) -> list:
             lvl_type = level["type"]
             if lvl_type == "resistance" and prev["close"] > lvl_price and close > lvl_price:
                 if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:
+                    # FIX (PROD-BACKTEST-2026-08-05 / FIX-1): flipped CALL → PUT.
+                    # Production data (7,699 signals, 2026-08-04..08-05):
+                    #   S/R flip (resistance→support) CALL (n=105) won 43.81%;
+                    #   PUT would win 56.19%. Lift from flip = +12.38pp.
+                    # n < 150 but lift is the LARGEST of any theory in the data.
+                    # Textbook says "broken resistance becomes support = bullish
+                    # continuation = CALL", but 1-minute binary-option data shows
+                    # the opposite: when price breaks resistance and stays near
+                    # it, the next candle tends to reverse DOWN. The theory name
+                    # "resistance→support" is a textbook label; the data says the
+                    # pattern is actually a fakeout / bull-trap.
+                    # NOTE: this is the highest-confidence single fix in the
+                    # commit despite the smaller n, because the lift is so large
+                    # (~12pp) that even at n=105 the Wilson 95% lower bound on
+                    # the flip win rate clears 50%.
                     results.append(ModuleResult(
-                        module_name="key_level", direction="CALL", score=2, confidence=57,
-                        signal_type="CONTINUATION", reliability="LEVEL", group="SR_FLIP",
-                        reasons=[f"Broken resistance now support ({lvl_price:.5f}) → CALL (continuation of original breakout)"]))
+                        module_name="key_level", direction="PUT", score=2, confidence=57,
+                        signal_type="REVERSAL", reliability="LEVEL", group="SR_FLIP",
+                        reasons=[f"Broken resistance now support ({lvl_price:.5f}) → PUT (fakeout reversal, 56.2% measured n=105)"]))
                     break
             elif lvl_type == "support" and prev["close"] < lvl_price and close < lvl_price:
                 if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:

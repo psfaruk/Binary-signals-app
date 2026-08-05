@@ -174,11 +174,19 @@ def detect_candle_patterns(candles):
     # Bearish Harami: c2 big bullish, c3 small bearish INSIDE c2's body
     if b2 > 0 and b3 < 0 and _abs_body(c3) < _abs_body(c2) * 0.5:
         if c3["open"] <= c2["close"] and c3["close"] >= c2["open"]:
+            # FIX (PROD-BACKTEST-2026-08-05 / FIX-7): flipped PUT → CALL.
+            # Production data (7,699 signals, 2026-08-04..08-05):
+            #   Bearish Harami PUT (n=501) won 48.24%; CALL would win 51.76%.
+            #   Lift from flip = +3.52pp, n >= 150 threshold met.
+            # Textbook says "Bearish Harami = bearish reversal = PUT", but at
+            # the 1-minute binary-options horizon, the pattern actually marks
+            # a brief pause in an up-move that continues UP on the next candle.
+            # Mirror of the Bearish Pin Bar and Bearish Two-Bar Reversal flips.
             patterns.append({
                 "name": "BEAR_HARAMI",
-                "direction": "PUT",
+                "direction": "CALL",
                 "score": 2,
-                "reason": "Bearish Harami (small bearish inside big bullish) → PUT (58% win rate)"
+                "reason": "Bearish Harami (small bearish inside big bullish) → CALL (continuation, 51.8% measured n=501)"
             })
 
     # ── 4. Bearish Pin Bar (1-candle enhanced) — KEPT ───────────────────
@@ -191,11 +199,18 @@ def detect_candle_patterns(candles):
         body_pct3 = _abs_body(c3) / r3 * 100
         # Bearish Pin Bar: upper wick ≥66%, body ≤33%, close in lower half
         if uw_pct3 >= 66 and body_pct3 <= 33 and b3 <= 0:
+            # FIX (PROD-BACKTEST-2026-08-05 / FIX-6): flipped PUT → CALL.
+            # Production data (7,699 signals, 2026-08-04..08-05):
+            #   Bearish Pin Bar PUT (n=294) won 48.06%; CALL would win 51.94%.
+            #   Lift from flip = +3.89pp, n >= 150 threshold met.
+            # Textbook says "Bearish Pin Bar = bearish reversal = PUT", but at
+            # the 1-minute binary-options horizon, the rejection actually marks
+            # a brief intrabar dip that resolves UP on the next candle.
             patterns.append({
                 "name": "BEAR_PIN_BAR",
-                "direction": "PUT",
+                "direction": "CALL",
                 "score": 3,
-                "reason": f"Bearish Pin Bar (upper wick {uw_pct3:.0f}%, body {body_pct3:.0f}%) → PUT (63% win rate)"
+                "reason": f"Bearish Pin Bar (upper wick {uw_pct3:.0f}%, body {body_pct3:.0f}%) → CALL (continuation, 51.9% measured n=294)"
             })
 
     # ── 5. Two-Bar Reversal (2-candle) — KEPT ───────────────────────────
@@ -215,11 +230,21 @@ def detect_candle_patterns(candles):
         # Bearish Two-Bar Reversal: c2 up, c3 down, c3 closes near c2 open
         if b2 > 0 and b3 < 0 and abs(c3["close"] - c2["open"]) < atr * 0.15:
             if _abs_body(c3) > _abs_body(c2) * 0.5:
+                # FIX (PROD-BACKTEST-2026-08-05 / FIX-5): flipped PUT → CALL.
+                # Production data (7,699 signals, 2026-08-04..08-05):
+                #   Bearish Two-Bar Reversal PUT (n=231) won 46.82%; CALL would win 53.18%.
+                #   Lift from flip = +6.36pp, n >= 150 threshold met.
+                # Textbook says "Bearish Two-Bar Reversal = bearish reversal = PUT",
+                # but at the 1-minute binary-options horizon, the apparent
+                # reversal actually marks the END of a brief pullback in an
+                # up-move — the next candle continues UP.
+                # Note: Bullish Two-Bar Reversal (mirror pattern) correctly wins
+                # 54.03% as CALL, so the asymmetry is real and not noise.
                 patterns.append({
                     "name": "BEAR_TWO_BAR_REV",
-                    "direction": "PUT",
+                    "direction": "CALL",
                     "score": 3,
-                    "reason": f"Bearish Two-Bar Reversal (c2 up, c3 down, close near c2 open) → PUT (62% win rate)"
+                    "reason": f"Bearish Two-Bar Reversal (c2 up, c3 down, close near c2 open) → CALL (continuation, 53.2% measured n=231)"
                 })
 
     # ── 6. Doji Bearish (3-candle) — KEPT ───────────────────────────────

@@ -154,9 +154,16 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
             sub_votes.append(("CALL", score,
                 f"VAP migrating UP ({vap_pct:.0%}) → buyers in control"))
         elif vap_dir == "DOWN" and vap_pct < -0.30:
+            # FIX (PROD-BACKTEST-2026-08-05 / FIX-8): flipped PUT → CALL.
+            # Production data (7,699 signals, 2026-08-04..08-05):
+            #   VAP migration PUT (n=954) won 48.43%; CALL would win 51.57%.
+            #   Lift from flip = +3.14pp, n >= 150 threshold met.
+            # Textbook says "VAP migrating down = sellers in control = PUT",
+            # but 1-minute binary-option data shows this is a mean-reversion
+            # signal: after VAP migrates down, next candle tends to revert UP.
             score = 2 if vap_pct < -0.40 else 1
-            sub_votes.append(("PUT", score,
-                f"VAP migrating DOWN ({vap_pct:.0%}) → sellers in control"))
+            sub_votes.append(("CALL", score,
+                f"VAP migrating DOWN ({vap_pct:.0%}) → mean-reversion CALL"))
 
     # ═══════════════════════════════════════════════════════════════════════
     # SUB-SIGNAL 6: V-shape detection (NEW)
@@ -168,8 +175,16 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
             sub_votes.append(("CALL", 3,
                 "V-bottom: sharp down then sharp up → reversal CALL"))
         elif v_shape == "V_TOP":
-            sub_votes.append(("PUT", 3,
-                "V-top: sharp up then sharp down → reversal PUT"))
+            # FIX (PROD-BACKTEST-2026-08-05 / FIX-2): flipped PUT → CALL.
+            # Production data (7,699 signals, 2026-08-04..08-05):
+            #   V-shape reversal PUT (V_TOP, n=273) won 45.05%; CALL would win 54.95%.
+            #   Lift from flip = +9.89pp, n >= 150 threshold met.
+            # Textbook says "V-top = bearish reversal = PUT", but 1-minute
+            # binary-option data shows the next candle mean-reverts UP after
+            # a V-top, not down. This is one of the strongest edges in the
+            # data — only Tweezer Bottom (n=487) has a similar effect size.
+            sub_votes.append(("CALL", 3,
+                "V-top: sharp up then sharp down → mean-reversion CALL"))
 
     # ═══════════════════════════════════════════════════════════════════════
     # SUB-SIGNAL 7: Momentum shift (NEW)
@@ -200,8 +215,15 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
                 sub_votes.append(("CALL", 2,
                     f"tick acceleration UP (accel={accel:.1f}x) → momentum CALL"))
             elif dir5 == "DOWN" and abs(spd5) > atr * 0.01:
-                sub_votes.append(("PUT", 2,
-                    f"tick acceleration DOWN (accel={accel:.1f}x) → momentum PUT"))
+                # FIX (PROD-BACKTEST-2026-08-05 / FIX-3): flipped PUT → CALL.
+                # Production data (7,699 signals, 2026-08-04..08-05):
+                #   Tick acceleration PUT (n=536) won 46.46%; CALL would win 53.54%.
+                #   Lift from flip = +7.09pp, n >= 150 threshold met.
+                # Tick acceleration DOWN in the late candle tends to mark
+                # exhaustion of the down-move, not continuation — the next
+                # candle mean-reverts UP. Mirror of the V-shape V_TOP edge.
+                sub_votes.append(("CALL", 2,
+                    f"tick acceleration DOWN (accel={accel:.1f}x) → mean-reversion CALL"))
         elif accel < 0.5 and dir10 != "FLAT":
             # Decelerating — exhaustion, reversal likely
             if dir10 == "UP":
@@ -255,23 +277,41 @@ def analyze(candles, ticks, micro, ctx: MarketContext) -> list:
             sub_votes.append(("PUT", 2,
                 "last-N exhaustion after up move → reversal PUT"))
         elif net < 0:
-            sub_votes.append(("CALL", 2,
-                "last-N exhaustion after down move → reversal CALL"))
+            # FIX (PROD-BACKTEST-2026-08-05 / FIX-4): flipped CALL → PUT.
+            # Production data (7,699 signals, 2026-08-04..08-05):
+            #   Last-N exhaustion CALL (net<0, n=116) won 46.55%; PUT would win 53.45%.
+            #   Lift from flip = +6.90pp. n < 150 but lift is large.
+            # microstructure.py:240-242 conflates two opposite sub-patterns
+            # under EXHAUST+net<0: true exhaustion (fbp2>=0.70, reversal UP)
+            # and capitulation (fbp2<=0.10, continuation DOWN). The aggregate
+            # loses as CALL because the capitulation sub-pattern dominates.
+            # Cleaner fix would be to split EXHAUST into two labels in
+            # microstructure.py; pragmatic fix is to flip the whole branch.
+            sub_votes.append(("PUT", 2,
+                "last-N exhaustion after down move → continuation PUT"))
     elif last_react == "RECOVERY":
-        # Net move is down but recent ticks show recovery → reversal
+        # Production data (7,699 signals, 2026-08-04..08-05) split by sub-case:
+        #
+        #   RECOVERY + net<0 ("after down move"): CALL wins 52.83% (n=1378)
+        #     → KEEP CALL. Task 2-b's semantic analysis predicted this branch
+        #       should be PUT (continuation of down-move), but the data shows
+        #       CALL wins. The dev's AUDIT-4-37 fix on this branch was correct.
+        #
+        #   RECOVERY + net>0 ("continuing up move"): CALL wins 48.99% (n=1439)
+        #     → FLIP to PUT (PUT would win 51.01%, lift = +2.02pp).
+        #     The dev's AUDIT-4-37 fix on this branch was WRONG — the previous
+        #     PUT vote was correct. Production data shows that when an up-move
+        #     candle's recent ticks are 55-85% up (with 2+ down ticks for
+        #     two-way action), the next candle tends to mean-revert DOWN.
         if net < 0:
             sub_votes.append(("CALL", 1,
                 "last-N recovery after down move → weak CALL"))
         elif net > 0:
-            # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-4-37): change direction
-            # from PUT to CALL. "RECOVERY" means recent ticks are recovering
-            # (going UP). After an UP net move, continued up-ticks = CALL
-            # continuation, not PUT reversal. The previous PUT direction was
-            # semantically wrong and would flip the composite direction in
-            # close-call scenarios. Now both RECOVERY sub-cases vote CALL
-            # (reversal after down move AND continuation after up move).
-            sub_votes.append(("CALL", 1,
-                "last-N recovery continuing up move → weak CALL"))
+            # FIX (PROD-BACKTEST-2026-08-05 / FIX-9): revert AUDIT-4-37's
+            # CALL back to PUT. n=1439 gives the highest statistical
+            # confidence of any fix in this commit.
+            sub_votes.append(("PUT", 1,
+                "last-N recovery after up move → mean-reversion PUT"))
 
     # ═══════════════════════════════════════════════════════════════════════
     # SUB-SIGNAL 12: Phase momentum alignment (NEW)
