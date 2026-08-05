@@ -1365,12 +1365,23 @@ async def patterns_for_asset(asset: str):
 
 
 @app.get("/api/module-analysis")
-async def module_analysis():
+async def module_analysis(min_samples: int = 30):
     """Deep per-module per-pair per-direction analysis from module_votes table.
 
     FIX (DEEP_v2 2026-07-30): new endpoint that queries the module_votes
     table (added in this version) to provide queryable per-module accuracy
     without requiring regex parsing of reasons JSON.
+
+    FIX (MODULE-TRACKING-2026-08-05): rows now carry a 95% Wilson interval and
+    a `reliable` flag, `min_samples` defaults to 30 (the per-pair query used a
+    bare `HAVING total >= 3`), and results sort by the interval's LOWER bound
+    instead of the raw `win_pct`. This is the same correction already applied
+    to /api/theory-analysis — it had been missed here, so the dashboard's
+    Modules-tab per-pair drill-down still ranked by point estimate and floated
+    tiny samples to the top: USDCHF_otc showed "62%" off 32/52, whose Wilson
+    lower bound is ~48% — below the ~51.8% OTC break-even, i.e. no evidence of
+    an edge at all. Splitting one ~50% engine across 19 pairs guarantees a few
+    such buckets by chance alone.
 
     Returns:
     - Per-module global accuracy (all pairs combined)
@@ -1379,6 +1390,20 @@ async def module_analysis():
     - Best/worst modules per pair
     - Recommended calibration actions
     """
+    def _decorate(rows):
+        """Attach Wilson bounds + reliability, then sort by the lower bound."""
+        out = []
+        for r in rows:
+            d = dict(r)
+            lo, hi = _wilson_bounds(d.get("correct") or 0, d.get("total") or 0)
+            d["wilson_lo"] = lo
+            d["wilson_hi"] = hi
+            # Distinguishable from a coin flip at 95% confidence.
+            d["reliable"] = lo > 50.0 or hi < 50.0
+            out.append(d)
+        out.sort(key=lambda x: x["wilson_lo"], reverse=True)
+        return out
+
     try:
         with _db._read_cursor() as cur:
             # Global per-module accuracy
@@ -1390,9 +1415,8 @@ async def module_analysis():
                 FROM module_votes
                 WHERE vote_correct IS NOT NULL
                 GROUP BY module_name
-                ORDER BY win_pct DESC
             """)
-            global_modules = [dict(r) for r in cur.fetchall()]
+            global_modules = _decorate(cur.fetchall())
 
             # Per-pair per-module accuracy
             cur.execute("""
@@ -1403,10 +1427,9 @@ async def module_analysis():
                 FROM module_votes
                 WHERE vote_correct IS NOT NULL
                 GROUP BY asset, module_name
-                HAVING total >= 3
-                ORDER BY asset, win_pct DESC
-            """)
-            pair_modules = [dict(r) for r in cur.fetchall()]
+                HAVING total >= ?
+            """, (min_samples,))
+            pair_modules = _decorate(cur.fetchall())
 
             # Per-pair per-module per-direction
             cur.execute("""
@@ -1446,6 +1469,10 @@ async def module_analysis():
             "pair_module_directions": pair_module_dirs,
             "pair_summary": pair_summary,
             "total_vote_records": sum(m['total'] for m in global_modules),
+            "min_samples": min_samples,
+            # Break-even at a 93% OTC payout. A win_pct above this means
+            # nothing unless wilson_lo also clears it.
+            "breakeven_pct": 51.8,
         }
     except Exception as e:
         _logger.exception("module analysis failed")

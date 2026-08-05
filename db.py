@@ -696,43 +696,43 @@ def _category_for_asset(asset):
 #   candle_reaction: "Streak reversal", "Big body reversal", "Upper wick rejection",
 #       "Lower wick rejection", "Close at range top", "Close at range bottom",
 #       "Rising closes momentum", "Falling closes momentum"
-#   running_tick: "Micro composite" (single composite vote with sub-signals)
 #   pattern: pattern name (e.g., "Bullish Engulfing", "Morning Star", "Hammer")
 #   key_level: "Support wick rejection", "Resistance wick rejection", "Key support bounce",
 #       "Key resistance bounce", "Close near prev high/low", "Fibonacci retracement",
 #       "S/R flip", "Trendline breakout"
 import re as _re_module
 
-# FIX (THEORY-TRACKING-2026-08-05): canonical names for running_tick's 12
-# sub-signals. `_THEORY_GROUPS` already carried a 'Micro composite': 'MICRO'
-# entry, but `_THEORY_PATTERNS` had no 'running_tick' key — and
-# _extract_theory_votes skips any module missing from that dict — so not one
-# running_tick row was ever written despite the module voting on 96% of live
-# signals. These names are matched against the per-sub-signal reason text
-# emitted by engines/base/modules/running_tick.py.
-_RUNNING_TICK_SUB_THEORIES = [
-    (r'ending (UP/BUYER|DOWN/SELLER)',      'Tick ending direction'),
-    (r'(buyer|seller) pressure',            'Buyer/seller pressure'),
-    (r'(buyer|seller) reaction from',       'Extreme reaction'),
-    (r'orderflow: big ticks',               'Order flow imbalance'),
-    (r'VAP migrating',                      'VAP migration'),
-    (r'V-(top|bottom):',                    'V-shape reversal'),
-    (r'momentum shift:',                    'Momentum shift'),
-    (r'tick acceleration',                  'Tick acceleration'),
-    (r'tick deceleration',                  'Tick deceleration'),
-    (r'live (bull|bear) wick',              'Live wick rejection'),
-    (r'time-decay:',                        'Time-decay pressure shift'),
-    (r'last-N exhaustion',                  'Last-N exhaustion'),
-    (r'last-N recovery',                    'Last-N recovery'),
-    (r'all 3 phases',                       'Phase momentum'),
-]
+# ── Single source of truth for module names ────────────────────────────────
+# FIX (MODULE-TRACKING-2026-08-05): this import used to live ~800 lines further
+# down (next to per_module_accuracy) while the module_votes writer in
+# log_signal carried its OWN hardcoded regex alternation
+# `(candle_reaction|running_tick|pattern|key_level)`. Any module added after
+# that regex was written therefore wrote ZERO rows to module_votes, and
+# _extract_theory_votes dropped it as well via its
+# `module not in _THEORY_PATTERNS` guard. That silently blinded
+# /api/module-analysis (and the dashboard's Modules-tab per-pair drill-down)
+# to market_state, wickwall, divergence and tickrun — over half the live
+# engine. Hoisting the import here lets BOTH writers derive from MODULE_NAMES,
+# so a newly added module is tracked automatically from its first signal.
+try:
+    from core.constants import MODULE_NAMES as _MODULE_NAMES
+except ImportError:
+    # Fallback for contexts where core.constants isn't importable (e.g.
+    # standalone test scripts). Keeps a local tuple as a safety net.
+    _MODULE_NAMES = (
+        "candle_reaction", "pattern", "key_level",
+        "market_state", "wickwall", "divergence", "tickrun",
+    )
 
+# Matches a "[module_name]" tag for any module the engine actually runs.
+_MODULE_TAG_RE = _re_module.compile(
+    r'\[(' + '|'.join(_re_module.escape(m) for m in _MODULE_NAMES) + r')\]')
+
+# Per-module regexes that turn reason text into a canonical theory name.
+# A module absent from this dict is NOT skipped — _extract_theory_votes falls
+# back to naming the theory after its reason text, so newly added modules are
+# tracked from day one and can be given explicit names here later.
 _THEORY_PATTERNS = {
-    # running_tick is handled by a dedicated branch in _extract_theory_votes
-    # (its reason format is a composite, not a single "X → CALL" line), but it
-    # must be present here so the `module not in _THEORY_PATTERNS` guard lets
-    # it through.
-    'running_tick': [],
     'candle_reaction': [
         (r'(\d+)\+\s*(UP|DOWN)\s+streak', 'Streak reversal'),
         (r'Big\s+(UP|DOWN)\s+body', 'Big body reversal'),
@@ -783,8 +783,35 @@ _THEORY_PATTERNS = {
         (r'Trendline breakout above', 'Trendline breakout (bullish)'),
         (r'Trendline breakdown below', 'Trendline breakdown (bearish)'),
     ],
-    'running_tick': [
-        (r'Micro composite', 'Micro composite'),
+    # FIX (MODULE-TRACKING-2026-08-05): explicit tables for the four modules
+    # added 2026-08-05. Without them the fallback would name each theory after
+    # its raw reason text — which embeds the live price and percentages
+    # ("WICKWALL Lower-wick cluster x3.0 at 1.0842") — so every single signal
+    # would register as its OWN theory with n=1 and nothing would ever
+    # aggregate. Patterns below match only the invariant part of each string.
+    # Source formats: engines/base/modules/{market_state,wickwall,divergence,
+    # tickrun}.py
+    'market_state': [
+        (r'MARKET_STATE\s+CONTINUATION', 'Market state: continuation'),
+        (r'MARKET_STATE\s+EXHAUSTION', 'Market state: exhaustion'),
+        (r'MARKET_STATE\s+REVERSAL', 'Market state: reversal'),
+        (r'MARKET_STATE\s+TRAP', 'Market state: trap'),
+        (r'MARKET_STATE\s+RANGE', 'Market state: range fade'),
+    ],
+    'wickwall': [
+        (r'Lower-wick cluster', 'Lower-wick cluster (support)'),
+        (r'Upper-wick cluster', 'Upper-wick cluster (resistance)'),
+    ],
+    'divergence': [
+        (r'DIVERGENCE\s+Bearish', 'Bearish divergence'),
+        (r'DIVERGENCE\s+Bullish', 'Bullish divergence'),
+    ],
+    'tickrun': [
+        (r'TICKSWEEP\s+Upper stop-hunt', 'Tick sweep: upper stop-hunt'),
+        (r'TICKSWEEP\s+Lower stop-hunt', 'Tick sweep: lower stop-hunt'),
+        (r'ABSORBWALL.*upper band', 'Absorb wall: upper band'),
+        (r'ABSORBWALL.*lower band', 'Absorb wall: lower band'),
+        (r'LATEFLIP\s+Control transfer', 'Late flip: control transfer'),
     ],
 }
 
@@ -835,6 +862,23 @@ _THEORY_GROUPS = {
     'S/R flip (support→resistance)': 'SR_FLIP',
     'Trendline breakout (bullish)': 'TRENDLINE',
     'Trendline breakdown (bearish)': 'TRENDLINE',
+    # FIX (MODULE-TRACKING-2026-08-05): groups for the four modules added
+    # 2026-08-05. Without an entry here every one of their theories reported
+    # as theory_group 'UNKNOWN' in /api/theory-analysis.
+    'Market state: continuation': 'MARKET_STATE',
+    'Market state: exhaustion': 'MARKET_STATE',
+    'Market state: reversal': 'MARKET_STATE',
+    'Market state: trap': 'MARKET_STATE',
+    'Market state: range fade': 'MARKET_STATE',
+    'Lower-wick cluster (support)': 'WICKWALL',
+    'Upper-wick cluster (resistance)': 'WICKWALL',
+    'Bearish divergence': 'DIVERGENCE',
+    'Bullish divergence': 'DIVERGENCE',
+    'Tick sweep: upper stop-hunt': 'TICKRUN_SWEEP',
+    'Tick sweep: lower stop-hunt': 'TICKRUN_SWEEP',
+    'Absorb wall: upper band': 'TICKRUN_ABSORB',
+    'Absorb wall: lower band': 'TICKRUN_ABSORB',
+    'Late flip: control transfer': 'TICKRUN_FLIP',
 }
 
 
@@ -846,64 +890,12 @@ def _vote_correct(direction, actual):
                  (direction == 'PUT' and actual == 'DOWN')) else 0
 
 
-def _extract_running_tick_votes(reason_str, asset, period, ctime, actual,
-                                category, regime, strength, ts_val):
-    """Build theory_votes rows for one running_tick composite reason.
-
-    Emits one row for the composite vote plus one row per tagged sub-signal.
-    Sub-signal rows carry the direction that sub-signal voted, which may
-    OPPOSE the composite — that is the point: it lets a sub-signal that
-    consistently votes against the eventual winner be identified and dropped.
-
-    See engines/base/modules/running_tick.py for the emitting format.
-    """
-    rows = []
-
-    # Composite direction: "Micro composite CALL (" / "... PUT ("
-    comp = _re_module.search(r'Micro composite\s+(CALL|PUT)\b', reason_str)
-    if not comp:
-        return rows
-    comp_dir = comp.group(1)
-    # CONTINUATION vs REVERSAL is stated in the parenthetical type_reason.
-    comp_type = ('CONTINUATION' if 'continues' in reason_str.lower()
-                 else 'REVERSAL')
-    eff_match = _re_module.search(r'\(eff=(\d+)\)', reason_str)
-    effective_score = int(eff_match.group(1)) if eff_match else None
-
-    rows.append((
-        None, asset, period, ctime, 'running_tick',
-        'Micro composite', 'MICRO', comp_dir, comp_type,
-        None, None, effective_score,
-        _vote_correct(comp_dir, actual), category, regime, strength, ts_val,
-    ))
-
-    # Sub-signals: everything after the first ": ", split on " | ",
-    # each prefixed with its own [CALL]/[PUT] tag.
-    body = reason_str.split(': ', 1)
-    if len(body) < 2:
-        return rows
-    for chunk in body[1].split(' | '):
-        tag = _re_module.match(r'\s*\[(CALL|PUT)\]\s*(.+)', chunk)
-        if not tag:
-            continue
-        sub_dir, sub_text = tag.group(1), tag.group(2)
-        name = None
-        for pat, canonical in _RUNNING_TICK_SUB_THEORIES:
-            if _re_module.search(pat, sub_text, _re_module.IGNORECASE):
-                name = canonical
-                break
-        if not name:
-            # Unrecognised sub-signal — keep it under a stable truncated label
-            # rather than dropping it, so a newly added sub-signal still shows
-            # up in the report instead of silently vanishing.
-            name = sub_text.strip()[:40] or 'Unknown micro signal'
-        rows.append((
-            None, asset, period, ctime, 'running_tick',
-            name, 'MICRO_SUB', sub_dir, comp_type,
-            None, None, None,
-            _vote_correct(sub_dir, actual), category, regime, strength, ts_val,
-        ))
-    return rows
+# FIX (RUNNING-TICK-REMOVE-2026-08-05): `_extract_running_tick_votes` and its
+# `_RUNNING_TICK_SUB_THEORIES` name table were deleted along with the
+# running_tick module itself (no measured edge — see core/constants.py
+# MODULE_NAMES). The ~51k historical running_tick rows already in theory_votes
+# are untouched and stay queryable; nothing emits new ones because the engine
+# no longer runs the module.
 
 
 def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, regime, strength, ts_val):
@@ -925,23 +917,14 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
         if end_bracket == -1:
             continue
         module = reason_str[1:end_bracket].strip()
-        if module not in _THEORY_PATTERNS:
-            continue
-
-        # FIX (THEORY-TRACKING-2026-08-05): running_tick emits ONE composite
-        # ModuleResult whose reason bundles every sub-signal that fired:
-        #   "[running_tick] Micro composite PUT (continues prior down, 3
-        #    signals): [PUT] ending DOWN/SELLER (100%) | [PUT] seller
-        #    pressure (56%) | [CALL] V-bottom: ..."
-        # Record BOTH levels: the composite (so the module finally appears in
-        # theory_votes at all) and each tagged sub-signal with the direction
-        # IT voted — which is the only way to find out which of the 12
-        # sub-signals carry the module's weight, since none of them can be
-        # backtested against OHLC-only history.
-        if module == 'running_tick':
-            rows.extend(_extract_running_tick_votes(
-                reason_str, asset, period, ctime, actual,
-                category, regime, strength, ts_val))
+        # FIX (MODULE-TRACKING-2026-08-05): the guard was
+        # `if module not in _THEORY_PATTERNS: continue`, which silently dropped
+        # every module that had no hand-written regex table — i.e. all four
+        # modules added 2026-08-05. Gate on _MODULE_NAMES instead (so stray
+        # bracketed text still can't create junk rows) and let modules without
+        # an explicit pattern table fall through to the reason-text fallback
+        # naming below. New modules are now tracked from their first signal.
+        if module not in _MODULE_NAMES:
             continue
 
         # Extract direction
@@ -963,33 +946,35 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
         eff_match = _re_module.search(r'\(eff=(\d+)\)', reason_str)
         effective_score = int(eff_match.group(1)) if eff_match else None
 
-        # Extract theory name using module-specific patterns
+        # Extract theory name using module-specific patterns. Modules with no
+        # entry here (the newer ones) fall straight through to the fallback.
         theory_name = None
-        for pattern, name in _THEORY_PATTERNS[module]:
+        for pattern, name in _THEORY_PATTERNS.get(module, ()):
             if _re_module.search(pattern, reason_str, _re_module.IGNORECASE):
                 theory_name = name
                 break
 
         if not theory_name:
-            # Fallback: use first 40 chars of content after module prefix
-            content = reason_str[end_bracket + 1:].strip()[:40]
+            # Fallback: name the theory after its reason text. Trimmed at the
+            # arrow first so the label is the claim itself, not the direction
+            # and score suffix — otherwise the same theory would split into
+            # separate "…→ CALL" / "…→ PUT" rows and halve every sample count.
+            content = reason_str[end_bracket + 1:].split('→')[0].strip()[:40]
             theory_name = content or 'Unknown'
 
         theory_group = _THEORY_GROUPS.get(theory_name, 'UNKNOWN')
-
-        # Compute vote_correct
-        vote_correct = None
-        if actual and actual in ('UP', 'DOWN'):
-            vote_correct = 1 if (
-                (direction == 'CALL' and actual == 'UP') or
-                (direction == 'PUT' and actual == 'DOWN')
-            ) else 0
 
         rows.append((
             None, asset, period, ctime, module,
             theory_name, theory_group, direction, signal_type,
             None, None, effective_score,  # score, confidence, effective_score
-            vote_correct, category, regime, strength, ts_val
+            # FIX (MODULE-TRACKING-2026-08-05): use the shared `_vote_correct`
+            # helper instead of re-inlining the CALL/UP, PUT/DOWN comparison —
+            # this logic existed in three separate copies (here, in the
+            # module_votes writer in log_signal, and in the deleted
+            # running_tick extractor), which is how they drifted apart.
+            _vote_correct(direction, actual),
+            category, regime, strength, ts_val
         ))
 
     return rows
@@ -1130,11 +1115,18 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                     else:
                         r_list = reasons_text
                     r_text = ' ||| '.join(str(r) for r in r_list) if isinstance(r_list, list) else str(reasons_text)
-                    
-                    # FIX (MODULE-PRUNE-2026-08-03): removed indicator, otc_pattern, trend_follow
-                    # from the regex — these modules have been deleted.
-                    mod_pat = _re.compile(r'\[(candle_reaction|running_tick|pattern|key_level)\]')
-                    parts = _re.split(mod_pat, r_text)
+
+                    # FIX (MODULE-TRACKING-2026-08-05): this used a hardcoded
+                    # alternation `(candle_reaction|running_tick|pattern|key_level)`
+                    # that nobody updated when market_state, wickwall,
+                    # divergence and tickrun were added — those four wrote ZERO
+                    # rows to module_votes, so /api/module-analysis and the
+                    # dashboard's Modules-tab per-pair drill-down were blind to
+                    # more than half the running engine while still looking
+                    # complete. Now derived from MODULE_NAMES via the shared
+                    # `_MODULE_TAG_RE`, compiled once at import instead of on
+                    # every logged signal.
+                    parts = _MODULE_TAG_RE.split(r_text)
                     seen = set()
                     vote_rows = []
                     for i in range(1, len(parts), 2):
@@ -1147,17 +1139,17 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         if (mod, direction) in seen:
                             continue
                         seen.add((mod, direction))
-                        
-                        vote_correct = None
-                        if actual and actual in ('UP', 'DOWN'):
-                            vote_correct = 1 if (
-                                (direction == 'CALL' and actual == 'UP') or
-                                (direction == 'PUT' and actual == 'DOWN')
-                            ) else 0
-                        
+
+                        # Effective (post-weight) score of this vote, so the
+                        # table records how much the vote actually counted for
+                        # and not just its direction. Previously always NULL.
+                        eff_m = _re.search(r'\(eff=(\d+)\)', content)
+                        eff_score = int(eff_m.group(1)) if eff_m else None
+
                         vote_rows.append((
                             None, asset, period, ctime, mod, direction,
-                            vote_correct, None, None, None,
+                            _vote_correct(direction, actual),
+                            eff_score, None, None,
                             category, kw.get('regime'), kw.get('strength'), ts_val
                         ))
                     
@@ -1525,16 +1517,13 @@ def recent_accuracy(asset, period, n=20):
 # /api/stats (which uses core.constants.MODULE_NAMES) would show the new
 # module while per_module_accuracy (which used the local tuple) would
 # silently skip it. Now both use the single source of truth.
-try:
-    from core.constants import MODULE_NAMES as _MODULE_NAMES
-except ImportError:
-    # Fallback for contexts where core.constants isn't importable (e.g.
-    # standalone test scripts). Keeps the local tuple as a safety net.
-    # FIX (MODULE-PRUNE-2026-08-03): removed indicator, otc_pattern,
-    # trend_follow — these modules have been deleted.
-    _MODULE_NAMES = (
-        "candle_reaction", "running_tick", "pattern", "key_level",
-    )
+#
+# FIX (MODULE-TRACKING-2026-08-05): the try/except import that used to sit
+# here was a duplicate — `_MODULE_NAMES` is now defined once near the top of
+# this file (next to `_MODULE_TAG_RE`, which is built from it). Worse, this
+# copy's ImportError fallback was stale (`running_tick` still listed, the four
+# 2026-08-05 modules missing), so on any core.constants import failure it
+# would silently overwrite the correct definition with the outdated one.
 
 
 def per_module_accuracy(asset, period=60, n=200):

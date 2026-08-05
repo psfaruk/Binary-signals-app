@@ -1729,32 +1729,51 @@ window._showModulePairDetail = async function(moduleName){
   if(titleEl) titleEl.textContent = 'Per-pair breakdown — ' + moduleName;
 
   try{
-    const r = await fetch('/api/module-analysis');
+    // FIX (MODULE-TRACKING-2026-08-05): request min_samples and rank by the
+    // 95% Wilson LOWER bound, not the raw win %. This panel used to sort by
+    // point estimate against a `HAVING total >= 3` backend filter, so a pair
+    // that had gone 32/52 rendered as a green "62%" at the top of the list
+    // even though its interval reaches down to ~48% — under the ~51.8% OTC
+    // break-even. Splitting a ~50% engine across 19 pairs produces several
+    // such buckets from chance alone. Same fix the Theories tab already got.
+    const r = await fetch('/api/module-analysis?min_samples=30');
     if(!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
+    const breakeven = data.breakeven_pct != null ? data.breakeven_pct : 51.8;
     const rows = (data.pair_modules || []).filter(r => r.module_name === moduleName);
     if(!rows.length){
-      rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">No per-pair data for ' + esc(moduleName) + '</div>';
+      rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">No pair has '
+        + (data.min_samples || 30) + '+ graded votes for ' + esc(moduleName) + ' yet</div>';
       return;
     }
-    rows.sort((a,b) => (b.win_pct || 0) - (a.win_pct || 0));
+    rows.sort((a,b) => ((b.wilson_lo ?? b.win_pct ?? 0) - (a.wilson_lo ?? a.win_pct ?? 0)));
     let html = '<div class="module-pair-detail-rows">';
     rows.forEach(r => {
       const pct = r.win_pct;
+      const lo = r.wilson_lo, hi = r.wilson_hi;
+      // Colour on the LOWER bound so a lucky streak on a small sample cannot
+      // render green. Anything whose interval still spans 50% is "unproven".
       const pctCls = pct == null ? 'none'
-                   : pct >= 55 ? 'good'
-                   : pct >= 45 ? 'mid' : 'bad';
+                   : (lo != null && lo > breakeven) ? 'good'
+                   : (hi != null && hi < 50) ? 'bad' : 'mid';
       const barWidth = pct == null ? 0 : pct;
+      const ciStr = (lo != null && hi != null)
+                  ? ' <span style="color:var(--text-dim)">[' + lo.toFixed(1) + '–' + hi.toFixed(1) + ']</span>'
+                  : '';
       html += '<div class="module-pair-detail-row">'
            +  '<span class="mppd-asset">' + esc(r.asset || '?') + '</span>'
            +  '<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:' + barWidth + '%"></div></div>'
            +  '<span class="mppd-pct ' + pctCls + '">'
            +  (pct == null ? '—' : pct.toFixed(0) + '%')
            +  '</span>'
-           +  '<span class="mppd-meta">' + (r.correct || 0) + '/' + (r.total || 0) + '</span>'
+           +  '<span class="mppd-meta">' + (r.correct || 0) + '/' + (r.total || 0) + ciStr + '</span>'
            +  '</div>';
     });
     html += '</div>';
+    html += '<div class="accuracy-empty" style="padding:6px 8px;font-size:10px;line-height:1.5">'
+         +  'Sorted by the 95% confidence interval’s lower bound. Green only when that '
+         +  'lower bound clears break-even (' + breakeven + '%); a range spanning 50% means '
+         +  'no evidence of an edge either way.</div>';
     rowsContainer.innerHTML = html;
   } catch(e){
     rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">Error: ' + esc(e.message) + '</div>';
@@ -3269,8 +3288,14 @@ function renderWinRateDropdown(statsData){
   const totalGraded = statsData ? (statsData.total_graded_signals || statsData.total_graded || 0) : 0;
   if(signalsEl) signalsEl.textContent = totalGraded;
 
-  /* Best/Worst — based on graded pairs only */
-  const gradedPairs = pairs.filter(p => p.graded > 0);
+  /* Best/Worst — graded pairs with enough samples to mean anything.
+     FIX (MODULE-TRACKING-2026-08-05): the filter was `p.graded > 0`, so a pair
+     with a single graded signal showed as "best" at 100%. At n<30 on a ~50%
+     process the interval is roughly +/-18 points, and across 19 pairs an
+     extreme bucket appears by chance every refresh — the "best pair" pill
+     changed constantly while meaning nothing. */
+  const MIN_GRADED_FOR_RANK = 30;
+  const gradedPairs = pairs.filter(p => (p.graded || 0) >= MIN_GRADED_FOR_RANK);
   if(gradedPairs.length > 0){
     const best = gradedPairs.slice().sort((a,b) => (b.win_pct||0) - (a.win_pct||0))[0];
     const worst = gradedPairs.slice().sort((a,b) => (a.win_pct||0) - (b.win_pct||0))[0];
@@ -3283,8 +3308,9 @@ function renderWinRateDropdown(statsData){
       worstEl.className = 'pill-value ' + classifyPct(worst.win_pct);
     }
   } else {
-    if(bestEl){ bestEl.textContent = '—'; bestEl.className = 'pill-value'; }
-    if(worstEl){ worstEl.textContent = '—'; worstEl.className = 'pill-value'; }
+    const note = 'need ' + MIN_GRADED_FOR_RANK + '+ graded';
+    if(bestEl){ bestEl.textContent = note; bestEl.className = 'pill-value'; }
+    if(worstEl){ worstEl.textContent = note; worstEl.className = 'pill-value'; }
   }
 
   /* Filter by search query */
