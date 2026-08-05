@@ -46,6 +46,14 @@ DEFAULT_WEIGHTS = {
     "running_tick":      1.0,
     "pattern":           1.0,
     "key_level":         0.8,
+    # FIX (PROD-BACKTEST-2026-08-05 / NEW-MODULES): 4 new modules ported
+    # from analyze_eoc.py. Starting at LOW weight (0.5) so they don't
+    # dominate consensus until the per-pair adapter validates them
+    # against new production data over the next 24h.
+    "market_state":      0.8,   # main predictor — slightly higher default
+    "wickwall":          0.5,
+    "divergence":        0.5,
+    "tickrun":           0.5,
 }
 
 
@@ -60,6 +68,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=54%) (n=90)
             "pattern":           0.5,   # dampened (acc=44% < 45.0%) (n=64)
             "key_level":         1.0,   # baseline (acc=51%) (n=49)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 52.7% win (n=389)",
     },
@@ -70,6 +82,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=46%) (n=71)
             "pattern":           0.5,   # dampened (acc=44% < 45.0%) (n=57)
             "key_level":         1.0,   # baseline (acc=47%) (n=32)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 44.3% win (n=318)",
     },
@@ -80,6 +96,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=54%) (n=69)
             "pattern":           1.0,   # baseline (acc=48%) (n=56)
             "key_level":         1.0,   # baseline (acc=49%) (n=41)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 49.7% win (n=314)",
     },
@@ -90,6 +110,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=53%) (n=123)
             "pattern":           1.0,   # baseline (acc=53%) (n=97)
             "key_level":         0.5,   # dampened (acc=40% < 45.0%) (n=67)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 51.9% win (n=541)",
     },
@@ -100,6 +124,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=53%) (n=105)
             "pattern":           1.0,   # baseline (acc=49%) (n=87)
             "key_level":         0.5,   # dampened (acc=43% < 45.0%) (n=46)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 45.4% win (n=306)",
     },
@@ -110,6 +138,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=52%) (n=120)
             "pattern":           1.5,   # boost (acc=57% >= 55.0%) (n=87)
             "key_level":         0.5,   # dampened (acc=43% < 45.0%) (n=58)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 52.6% win (n=483)",
     },
@@ -120,6 +152,10 @@ PAIR_CONFIGS = {
             "running_tick":      0.5,   # dampened (acc=44% < 45.0%) (n=73)
             "pattern":           0.5,   # dampened (acc=40% < 45.0%) (n=20)
             "key_level":         1.0,   # baseline (acc=47%) (n=32)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 44.8% win (n=288)",
     },
@@ -130,6 +166,10 @@ PAIR_CONFIGS = {
             "running_tick":      0.5,   # dampened (acc=44% < 45.0%) (n=109)
             "pattern":           0.5,   # dampened (acc=39% < 45.0%) (n=90)
             "key_level":         1.5,   # boost (acc=65% >= 55.0%) (n=57)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 52.2% win (n=467)",
     },
@@ -140,6 +180,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=55%) (n=88)
             "pattern":           1.0,   # baseline (acc=50%) (n=66)
             "key_level":         1.0,   # baseline (acc=49%) (n=47)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 48.2% win (n=371)",
     },
@@ -150,6 +194,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=53%) (n=53)
             "pattern":           1.8,   # STRONG (acc=65% >= 65.0%) (n=40)
             "key_level":         1.0,   # baseline (no data)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 56.1% win (n=196)",
     },
@@ -160,6 +208,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=54%) (n=114)
             "pattern":           1.5,   # boost (acc=57% >= 55.0%) (n=88)
             "key_level":         1.0,   # baseline (acc=50%) (n=60)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 53.6% win (n=491)",
     },
@@ -170,6 +222,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=47%) (n=49)
             "pattern":           1.0,   # baseline (acc=50%) (n=46)
             "key_level":         1.5,   # boost (acc=59% >= 55.0%) (n=32)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 54.7% win (n=254)",
     },

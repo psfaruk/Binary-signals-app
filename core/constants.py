@@ -32,11 +32,17 @@ DB_PATH = os.environ.get(
 # FIX (MODULE-PRUNE-2026-08-03): removed "indicator", "otc_pattern",
 # "trend_follow" — these 3 modules have been deleted from the codebase.
 # Both engines now run the same 4 shared modules.
+# FIX (PROD-BACKTEST-2026-08-05 / NEW-MODULES): added 4 new modules ported
+# from the user-supplied analyze_eoc.py file.
 MODULE_NAMES = (
     "candle_reaction",
     "running_tick",
     "pattern",
     "key_level",
+    "market_state",
+    "wickwall",
+    "divergence",
+    "tickrun",
 )
 
 # Human-readable display names for the UI.
@@ -45,6 +51,10 @@ MODULE_DISPLAY_NAMES = {
     "running_tick":    "Running Tick",
     "pattern":         "Pattern",
     "key_level":       "Key Level",
+    "market_state":    "Market State",
+    "wickwall":        "Wick Wall",
+    "divergence":      "Divergence",
+    "tickrun":         "Tick Run (Sweep/Absorb/Flip)",
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -127,11 +137,22 @@ CONSENSUS_MIN_GROUPS = int(os.environ.get("CONSENSUS_MIN_GROUPS", "1"))  # singl
 # FIX (MODULE-PRUNE-2026-08-03): both engines now use the same 4 modules.
 # The engine-specific 6th module concept (otc_pattern / trend_follow) has
 # been removed — those modules are deleted.
+# FIX (PROD-BACKTEST-2026-08-05 / NEW-MODULES): added 4 new modules ported
+# from the user-supplied analyze_eoc.py file:
+#   - market_state : 5-state deep-analysis main predictor
+#   - wickwall     : repeated wick rejection zone detection
+#   - divergence   : price vs momentum swing divergence
+#   - tickrun      : TICKSWEEP + ABSORBWALL + LATEFLIP (raw-tick theories)
+# These are added to BOTH engines at low initial weight; the per-pair
+# adapter will auto-calibrate them over the next 24h as live brain data
+# comes in. See engines/{otc,real}/config.py for the weights.
 OTC_MODULES = (
     "candle_reaction", "running_tick", "pattern", "key_level",
+    "market_state", "wickwall", "divergence", "tickrun",
 )
 REAL_MODULES = (
     "candle_reaction", "running_tick", "pattern", "key_level",
+    "market_state", "wickwall", "divergence", "tickrun",
 )
 
 # Allowed candle periods (seconds). Whitelisted to prevent bogus streams

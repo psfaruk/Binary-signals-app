@@ -46,6 +46,10 @@ DEFAULT_WEIGHTS = {
     "running_tick":      1.0,
     "pattern":           1.0,
     "key_level":         0.8,
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
 }
 
 
@@ -60,6 +64,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.5,   # boost (acc=65% >= 55.0%) (n=34)
             "pattern":           1.0,   # baseline (acc=55%) (n=22)
             "key_level":         1.0,   # baseline (no data)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 56.0% win (n=84)",
     },
@@ -70,6 +78,10 @@ PAIR_CONFIGS = {
             "running_tick":      1.0,   # baseline (acc=53%) (n=60)
             "pattern":           1.0,   # baseline (acc=48%) (n=46)
             "key_level":         1.0,   # baseline (acc=50%) (n=34)
+            "market_state":      0.8,
+            "wickwall":          0.5,
+            "divergence":        0.5,
+            "tickrun":           0.5,
         },
         "description": "Calibrated: 50.8% win (n=189)",
     },

@@ -42,6 +42,23 @@ from engines.base.modules import (
     pattern as mod_pattern,
     key_level as mod_keylevel,
 )
+# FIX (PROD-BACKTEST-2026-08-05 / NEW-MODULES): added 4 new modules ported
+# from the user-supplied analyze_eoc.py file:
+#   - market_state : 5-state deep-analysis main predictor (CONTINUATION /
+#                    EXHAUSTION / REVERSAL / TRAP / RANGE)
+#   - wickwall     : repeated wick rejection zone detection
+#   - divergence   : price vs momentum swing divergence
+#   - tickrun      : TICKSWEEP + ABSORBWALL + LATEFLIP (raw-tick theories)
+# Each starts at low initial weight (configurable in engine config) so the
+# existing per-pair adapter can adjust without being overwhelmed. Per
+# production DB analysis (7,699 signals), the existing 4 modules all hover
+# at 49-50% win rate; these additions are evaluated individually below.
+from engines.base.modules import (
+    market_state as mod_market_state,
+    wickwall as mod_wickwall,
+    divergence as mod_divergence,
+    tickrun as mod_tickrun,
+)
 from engines.base.per_pair import PairWeightAdapter
 # USER FIX #7 (2026-08-03): per-pair per-module direction lock.
 # Filters out votes in the wrong direction for combos where live brain
@@ -422,6 +439,13 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     all_results += mod_tick.analyze(candles, ticks, micro, ctx)
     all_results += mod_pattern.analyze(candles, ctx)
     all_results += mod_keylevel.analyze(candles, ctx)
+    # FIX (PROD-BACKTEST-2026-08-05 / NEW-MODULES): invoke the 4 new modules.
+    # market_state, wickwall, divergence take (candles, ctx).
+    # tickrun takes (candles, ticks, ctx) like running_tick.
+    all_results += mod_market_state.analyze(candles, ctx)
+    all_results += mod_wickwall.analyze(candles, ctx)
+    all_results += mod_divergence.analyze(candles, ctx)
+    all_results += mod_tickrun.analyze(candles, ticks, ctx)
 
     # ── Step 3: Collapse correlated groups (BODY → 1 vote) ───────────────
     # FIX (Bug 10, deep audit 2026-07-19): previously only collapsed
