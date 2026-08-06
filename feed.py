@@ -969,6 +969,47 @@ class QuotexFeed:
         stream.base_candles = [dict(c) for c in closed]
         stream.base_ticks   = base_ticks
         stream._live_reeval_ticks = 0
+
+        # ── SIGNAL VERIFIER AGENT (PROD-2026-08-06) ──────────────────────
+        # Real-time multi-layer verification on actual candle + tick data.
+        # Sits between engine prediction and broadcast. Issues VETO/WEAKEN/
+        # CONFIRM verdict that can modify or kill the signal.
+        # Env toggle: QX_SIGNAL_VERIFIER=1 enables (default OFF for safety).
+        if os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1" and \
+                result.get("signal") in ("CALL", "PUT"):
+            try:
+                from core.signal_verifier import verify_signal
+                from datetime import datetime, timezone
+                _verify_hour = datetime.now(timezone.utc).hour
+                _tick_prices = [t for t in base_ticks if isinstance(t, (int, float))]
+                if hasattr(_tick_prices, '__len__') and len(_tick_prices) > 0 and \
+                        isinstance(_tick_prices[0], dict):
+                    _tick_prices = [t.get('price', t.get('close', 0))
+                                    for t in _tick_prices]
+                _verify = verify_signal(result, closed, _tick_prices,
+                                        stream.asset, _verify_hour)
+                _verdict = _verify.get("verdict", "PASS")
+                _adj = _verify.get("confidence_adjustment", 1.0)
+                if _verdict == "VETO":
+                    result["signal"] = "NEUTRAL"
+                    result["strength"] = "NEUTRAL"
+                    result["confidence"] = 0
+                    result.setdefault("reasons", []).append(
+                        f"_VERIFIER_VETO: {_verify.get('reason', '')[:200]}")
+                elif _verdict == "WEAKEN":
+                    _orig_conf = result.get("confidence", 0)
+                    result["confidence"] = int(_orig_conf * _adj)
+                    result.setdefault("reasons", []).append(
+                        f"_VERIFIER_WEAKEN: {_verify.get('reason', '')[:200]} "
+                        f"(conf {_orig_conf} -> {result['confidence']})")
+                elif _verdict == "CONFIRM":
+                    _orig_conf = result.get("confidence", 0)
+                    result["confidence"] = min(100, int(_orig_conf * _adj))
+                    result.setdefault("reasons", []).append(
+                        f"_VERIFIER_CONFIRM: {_verify.get('reason', '')[:200]}")
+            except Exception as _ve:
+                print(f"[feed] signal_verifier error for {stream.asset}: {_ve}")
+
         _reg = result.get("regime") or {}
         _regime = _reg.get("regime")
         if _reg.get("is_volatile"):
