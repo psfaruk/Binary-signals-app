@@ -1029,6 +1029,15 @@ class QuotexFeed:
                     result["confidence"] = 0
                     result.setdefault("reasons", []).append(
                         f"_VERIFIER_VETO: {_verify.get('reason', '')[:200]}")
+                elif _verdict == "FLIP":
+                    # FINAL MODE: Agent flipped the signal direction
+                    _final_sig = _verify.get("final_signal", "NEUTRAL")
+                    _orig_sig = _orig_signal
+                    result["signal"] = _final_sig
+                    result["confidence"] = max(result.get("confidence", 50), 55)
+                    result.setdefault("reasons", []).append(
+                        f"_AGENT_FINAL_FLIP: {_orig_sig}→{_final_sig} "
+                        f"{_verify.get('reason', '')[:200]}")
                 elif _verdict == "WEAKEN":
                     result["confidence"] = int(_orig_conf * _adj)
                     result.setdefault("reasons", []).append(

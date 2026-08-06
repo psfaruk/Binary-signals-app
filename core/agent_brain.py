@@ -458,21 +458,23 @@ class AssetModel:
 class AgentBrain:
     """Autonomous AI agent V2 with neural network.
 
-    Two modes:
-      - ACTIVE (QX_AGENT_BRAIN=1): agent processes ticks, evaluates signals,
-        AND modifies them (VETO/WEAKEN/CONFIRM).
-      - OBSERVE (default, no env var): agent processes ticks, evaluates signals,
-        learns from outcomes, BUT does NOT modify signals.
-        This lets users see the agent working in the dashboard without
-        risking signal quality until they explicitly enable it.
+    Three modes:
+      - OBSERVE (default): agent processes ticks, evaluates signals, learns,
+        BUT does NOT modify signals. Dashboard shows everything live.
+      - ACTIVE (QX_AGENT_BRAIN=1): agent can VETO/WEAKEN/CONFIRM the engine's
+        signal. Engine's direction is preserved unless agent disagrees strongly.
+      - FINAL (QX_AGENT_FINAL=1): AGENT MAKES THE FINAL DECISION.
+        Agent evaluates both CALL and PUT, picks whichever has higher P(win).
+        Can FLIP the engine's signal (CALL→PUT or PUT→CALL) if opposite
+        direction has higher P(win). Engine's signal becomes just a suggestion.
     """
 
     def __init__(self):
         self.models: Dict[str, AssetModel] = {}
         self.lock = threading.RLock()
-        # Agent is ALWAYS running (observing). The env var controls whether
-        # it MODIFIES signals (active mode) or just observes.
-        self.active_mode = os.environ.get("QX_AGENT_BRAIN", "0") == "1"
+        # Three modes (priority: FINAL > ACTIVE > OBSERVE)
+        self.final_mode = os.environ.get("QX_AGENT_FINAL", "0") == "1"
+        self.active_mode = self.final_mode or os.environ.get("QX_AGENT_BRAIN", "0") == "1"
         self.started_at = time.time()
         self.thoughts = deque(maxlen=THOUGHT_BUFFER_SIZE)
         self.total_ticks_processed = 0
@@ -482,10 +484,14 @@ class AgentBrain:
         self.total_confirm = 0
         self.total_weaken = 0
         self.total_pass = 0
+        # Final mode stats
+        self.total_flips = 0       # engine said X, agent flipped to Y
+        self.total_kept = 0        # agent kept engine's direction
+        self.total_neutralized = 0 # agent said NEUTRAL (no edge either way)
 
     @property
     def enabled(self):
-        """Always enabled for observation. Use active_mode to check if modifying."""
+        """Always enabled for observation. Use active_mode/final_mode for control."""
         return True
 
     def _get_model(self, asset: str) -> AssetModel:
@@ -520,8 +526,39 @@ class AgentBrain:
         except Exception as e:
             print(f"[agent] process_tick error {asset}: {e}")
 
+    def _forward_ensemble(self, model, features: List[float], signal: str) -> float:
+        """Monte Carlo dropout ensemble (5 passes). Returns calibrated P(win)."""
+        p_samples = []
+        for _ in range(5):
+            dropout_mask = [1.0 if random.random() > DROPOUT_PROB else 0.0
+                            for _ in range(HIDDEN_NEURONS)]
+            dir_indices = {0, 1, 3, 4, 7, 8, 10}
+            sign = 1.0 if signal == "CALL" else -1.0
+            adjusted = [f * sign if i in dir_indices else f
+                        for i, f in enumerate(features)]
+            hidden = [0.0] * HIDDEN_NEURONS
+            for j in range(HIDDEN_NEURONS):
+                if dropout_mask[j] == 0.0:
+                    continue
+                z = model.b1[j]
+                for i in range(NUM_FEATURES):
+                    z += model.W1[j][i] * adjusted[i]
+                hidden[j] = _relu(z)
+            scale = 1.0 / (1.0 - DROPOUT_PROB)
+            z_out = model.b2
+            for j in range(HIDDEN_NEURONS):
+                z_out += model.W2[j] * hidden[j] * scale
+            p_samples.append(_sigmoid(z_out))
+        p_raw = sum(p_samples) / len(p_samples)
+        return model.calibrate_p(p_raw)
+
     def evaluate(self, prediction: Dict[str, Any], asset: str,
                  closed_candles: List[Dict]) -> Dict[str, Any]:
+        """Evaluate a signal. Behavior depends on mode:
+           - OBSERVE: returns PASS (no modification), records P(win)
+           - ACTIVE: returns VETO/WEAKEN/CONFIRM based on P(win)
+           - FINAL: agent makes the FINAL decision, can FLIP signal direction
+        """
         if not self.enabled:
             return {"verdict": "PASS", "confidence_adjustment": 1.0,
                     "p_win": 0.5, "features": [], "reason": "agent disabled"}
@@ -535,40 +572,121 @@ class AgentBrain:
             model = self._get_model(asset)
             features = model.extract_features(closed_candles)
 
-            # ENSEMBLE: average predictions from 3 forward passes with
-            # different dropout patterns (Monte Carlo dropout).
-            # This reduces variance and improves calibration.
-            p_samples = []
-            for _ in range(5):
-                # Apply test-time dropout
-                dropout_mask = [1.0 if random.random() > DROPOUT_PROB else 0.0
-                                for _ in range(HIDDEN_NEURONS)]
-                # Directional feature adjustment
-                dir_indices = {0, 1, 3, 4, 7, 8, 10}
-                sign = 1.0 if signal == "CALL" else -1.0
-                adjusted = [f * sign if i in dir_indices else f
-                            for i, f in enumerate(features)]
-                # Forward with dropout
-                hidden = [0.0] * HIDDEN_NEURONS
-                for j in range(HIDDEN_NEURONS):
-                    if dropout_mask[j] == 0.0:
-                        continue
-                    z = model.b1[j]
-                    for i in range(NUM_FEATURES):
-                        z += model.W1[j][i] * adjusted[i]
-                    hidden[j] = _relu(z)
-                scale = 1.0 / (1.0 - DROPOUT_PROB)
-                z_out = model.b2
-                for j in range(HIDDEN_NEURONS):
-                    z_out += model.W2[j] * hidden[j] * scale
-                p_samples.append(_sigmoid(z_out))
+            # ── FINAL MODE: Agent makes the decision ─────────────────────
+            # Evaluate P(win) for BOTH directions, pick the better one.
+            if self.final_mode:
+                p_call = self._forward_ensemble(model, features, "CALL")
+                p_put = self._forward_ensemble(model, features, "PUT")
 
-            p_raw = sum(p_samples) / len(p_samples)
-            p_win = model.calibrate_p(p_raw)
+                # Decision: pick direction with higher P(win)
+                # But only if there's a meaningful edge (>= 0.52)
+                # Otherwise → NEUTRAL (no trade)
+                FINAL_EDGE_THRESHOLD = 0.52
+                NEUTRAL_THRESHOLD = 0.50
 
-            # Verdict based on calibrated P(win)
-            # In OBSERVE mode, always return PASS (don't modify signals)
-            # but still record what the agent WOULD have done.
+                if p_call >= FINAL_EDGE_THRESHOLD and p_call > p_put:
+                    final_signal = "CALL"
+                    final_p = p_call
+                    verdict = "CONFIRM" if signal == "CALL" else "FLIP"
+                elif p_put >= FINAL_EDGE_THRESHOLD and p_put > p_call:
+                    final_signal = "PUT"
+                    final_p = p_put
+                    verdict = "CONFIRM" if signal == "PUT" else "FLIP"
+                elif p_call < NEUTRAL_THRESHOLD and p_put < NEUTRAL_THRESHOLD:
+                    # No edge either way — NEUTRAL
+                    final_signal = "NEUTRAL"
+                    final_p = max(p_call, p_put)
+                    verdict = "VETO"
+                else:
+                    # Marginal — keep engine's signal but low confidence
+                    final_signal = signal
+                    final_p = p_call if signal == "CALL" else p_put
+                    verdict = "PASS"
+
+                flipped = (verdict == "FLIP")
+                neutralized = (final_signal == "NEUTRAL")
+
+                with self.lock:
+                    self.total_signals_evaluated += 1
+                    if flipped:
+                        self.total_flips += 1
+                    elif neutralized:
+                        self.total_neutralized += 1
+                    else:
+                        self.total_kept += 1
+                    if verdict == "CONFIRM": self.total_confirm += 1
+                    elif verdict == "VETO": self.total_veto += 1
+                    elif verdict == "FLIP": self.total_confirm += 1
+                    else: self.total_pass += 1
+
+                model.pending_signal = {
+                    "signal": final_signal,  # learn from FINAL decision
+                    "features": list(features),
+                    "p_win": final_p,
+                }
+
+                action = "FLIPPED" if flipped else ("NEUTRALIZED" if neutralized else "KEPT")
+                reason = (f"FINAL: {action} {signal}→{final_signal} "
+                          f"P(call)={p_call:.1%} P(put)={p_put:.1%} "
+                          f"samples={model.samples} acc={model.accuracy():.1%}")
+
+                emoji = "🔄" if flipped else ("🚫" if neutralized else "✅")
+                print(f"[agent] {emoji} FINAL {action} {asset} {signal}→{final_signal} "
+                      f"P(call)={p_call:.1%} P(put)={p_put:.1%}")
+
+                self._add_thought("evaluate", asset,
+                    f"FINAL {action}: {signal}→{final_signal} "
+                    f"P(call)={p_call:.1%} P(put)={p_put:.1%}",
+                    {"verdict": verdict, "p_win": final_p,
+                     "p_call": p_call, "p_put": p_put,
+                     "features": features, "signal": final_signal,
+                     "engine_signal": signal, "flipped": flipped,
+                     "neutralized": neutralized})
+
+                # Return verdict that feed.py can apply
+                if neutralized:
+                    return {
+                        "verdict": "VETO",
+                        "confidence_adjustment": 0.0,
+                        "p_win": final_p,
+                        "p_call": p_call, "p_put": p_put,
+                        "final_signal": "NEUTRAL",
+                        "flipped": False,
+                        "features": features,
+                        "feature_names": FEATURE_NAMES,
+                        "reason": reason,
+                        "layers": {},
+                    }
+                elif flipped:
+                    return {
+                        "verdict": "FLIP",
+                        "confidence_adjustment": 1.0,
+                        "p_win": final_p,
+                        "p_call": p_call, "p_put": p_put,
+                        "final_signal": final_signal,
+                        "flipped": True,
+                        "features": features,
+                        "feature_names": FEATURE_NAMES,
+                        "reason": reason,
+                        "layers": {},
+                    }
+                else:
+                    return {
+                        "verdict": "CONFIRM" if verdict == "CONFIRM" else "PASS",
+                        "confidence_adjustment": 1.1 if verdict == "CONFIRM" else 1.0,
+                        "p_win": final_p,
+                        "p_call": p_call, "p_put": p_put,
+                        "final_signal": final_signal,
+                        "flipped": False,
+                        "features": features,
+                        "feature_names": FEATURE_NAMES,
+                        "reason": reason,
+                        "layers": {},
+                    }
+
+            # ── ACTIVE / OBSERVE MODE: Evaluate engine's signal ──────────
+            p_win = self._forward_ensemble(model, features, signal)
+
             if p_win >= P_STRONG_CONFIRM:
                 verdict = "CONFIRM"
                 conf_mult = 1.2
@@ -663,10 +781,17 @@ class AgentBrain:
     def get_status(self) -> Dict[str, Any]:
         with self.lock:
             uptime = time.time() - self.started_at
+            if self.final_mode:
+                mode_str = "FINAL (agent makes decision)"
+            elif self.active_mode:
+                mode_str = "ACTIVE (modifying signals)"
+            else:
+                mode_str = "OBSERVE (learning, not modifying)"
             return {
                 "enabled": self.enabled,
                 "active_mode": self.active_mode,
-                "mode": "ACTIVE (modifying signals)" if self.active_mode else "OBSERVE (learning, not modifying)",
+                "final_mode": self.final_mode,
+                "mode": mode_str,
                 "uptime_seconds": round(uptime, 0),
                 "uptime_human": _human_duration(uptime),
                 "total_ticks_processed": self.total_ticks_processed,
@@ -676,6 +801,9 @@ class AgentBrain:
                 "total_confirm": self.total_confirm,
                 "total_weaken": self.total_weaken,
                 "total_pass": self.total_pass,
+                "total_flips": self.total_flips,
+                "total_kept": self.total_kept,
+                "total_neutralized": self.total_neutralized,
                 "assets_tracked": len(self.models),
                 "thought_count": len(self.thoughts),
                 "analyzer_type": "agent_brain_v2_neural",

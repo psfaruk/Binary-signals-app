@@ -3177,25 +3177,42 @@ function updateAgentStatus(s){
   const badge = $('verifier-status-badge');
   const hint = $('verifier-enable-hint');
   if(badge){
-    if(s.active_mode){
+    if(s.final_mode){
+      badge.textContent = '● FINAL';
+      badge.className = 'verifier-status-badge enabled';
+      badge.style.background = 'rgba(255,23,68,0.15)';
+      badge.style.color = '#ff1744';
+      badge.style.borderColor = 'rgba(255,23,68,0.4)';
+    } else if(s.active_mode){
       badge.textContent = '● ACTIVE';
       badge.className = 'verifier-status-badge enabled';
+      badge.style.background = '';
+      badge.style.color = '';
+      badge.style.borderColor = '';
     } else if(s.enabled){
       badge.textContent = '● OBSERVE';
       badge.className = 'verifier-status-badge enabled';
+      badge.style.background = '';
+      badge.style.color = '';
+      badge.style.borderColor = '';
     } else {
       badge.textContent = '○ DISABLED';
       badge.className = 'verifier-status-badge disabled';
     }
   }
-  // Show enable hint when in observe mode (suggesting activation)
+  // Show hint based on mode
   if(hint){
-    if(s.active_mode){
+    if(s.final_mode){
+      hint.style.display = 'block';
+      hint.innerHTML = '🔄 <b>FINAL mode.</b> Agent makes the FINAL decision — can FLIP CALL→PUT or PUT→CALL, or NEUTRALIZE. Engine signal is just a suggestion. Set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_FINAL=0</code> to disable.';
+      hint.style.background = 'rgba(255,23,68,0.05)';
+      hint.style.borderColor = 'rgba(255,23,68,0.3)';
+      hint.style.color = '#ff1744';
+    } else if(s.active_mode){
       hint.style.display = 'none';
     } else if(s.enabled){
-      // Observe mode — show different hint
       hint.style.display = 'block';
-      hint.innerHTML = '👁️ <b>OBSERVE mode.</b> Agent is learning but NOT modifying signals. To make it actively filter signals (VETO/WEAKEN/CONFIRM), set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_BRAIN=1</code> in Railway → Variables, then redeploy.';
+      hint.innerHTML = '👁️ <b>OBSERVE mode.</b> Agent is learning but NOT modifying signals. To make it actively filter signals, set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_BRAIN=1</code>. To let agent make FINAL decisions (can flip signals), set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_FINAL=1</code>.';
       hint.style.background = 'rgba(0,200,83,0.05)';
       hint.style.borderColor = 'rgba(0,200,83,0.3)';
       hint.style.color = '#00c853';
@@ -3208,7 +3225,22 @@ function updateAgentStatus(s){
   $('vstat-weaken').textContent = s.total_weaken || 0;
   $('vstat-confirm').textContent = s.total_confirm || 0;
   $('vstat-pass').textContent = s.total_pass || 0;
-  $('vstat-killed').textContent = s.total_signals_learned || 0;
+  // In final mode, show flips/kept/neutralized instead of learned
+  if(s.final_mode){
+    const killedEl = $('vstat-killed');
+    if(killedEl){
+      killedEl.parentElement.querySelector('.vstat-label').textContent = '🔄 Flipped';
+      killedEl.textContent = s.total_flips || 0;
+      killedEl.parentElement.querySelector('.vstat-sub').textContent = `${s.total_kept||0} kept, ${s.total_neutralized||0} neutral`;
+    }
+  } else {
+    const killedEl = $('vstat-killed');
+    if(killedEl){
+      killedEl.parentElement.querySelector('.vstat-label').textContent = 'Signals Learned';
+      killedEl.parentElement.querySelector('.vstat-sub').textContent = 'VETO→NEUTRAL';
+      killedEl.textContent = s.total_signals_learned || 0;
+    }
+  }
   $('vstat-uptime').textContent = s.uptime_human || '—';
   // Refresh live stream when new ticks arrive
   if(s.total_ticks_processed !== _agentLastTickCount && _agentLastTickCount !== -1){
