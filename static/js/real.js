@@ -1,36 +1,13 @@
-/* real.js — Real Market page bootstrap.
-   Loaded after common.js. Boots the app in "real" mode.
-
-   This file is one of TWO near-identical bootstrap files (real.js / otc.js)
-   — alltime_otc.js has been removed (USER REQUIREMENT 2026-08-03). The
-   only difference between the two is the category string passed to initApp().
-   Future refactor: consolidate into a single bootstrap.js that reads
-   `document.body.dataset.category` (set via `<body data-category="real">`
-   in each HTML). Until then, if you change this retry/boot pattern, you
-   MUST change it identically in otc.js. */
-(function(){
-  'use strict';
-  // FIX (DEEP-AUDIT-2026-07-26 / F-18-02): Hoist boot reference so a
-  // previously-registered DOMContentLoaded listener can be removed before
-  // re-adding — prevents potential double-boot if the IIFE somehow runs twice
-  // (defensive; not currently triggered by any caller).
-  function boot(){
-    if(typeof window.initApp !== 'function'){
-      // common.js not loaded yet — retry up to 50×100ms.
-      if(!boot._retries) boot._retries = 0;
-      if(++boot._retries > 50){
-        // FIX (DEEP-AUDIT-2026-07-26 / F-18-03): prefix console.error with
-        // a stable tag so ops can grep for it.
-        console.error('[bootstrap:real] common.js failed to load — initApp not found');
-        return;
-      }
-      return setTimeout(boot, 100);
-    }
-    window.initApp('real');
+/* real.js — Real Market page bootstrap. */
+(function(){'use strict';
+function boot(){
+  if(typeof window.initApp!=='function'){
+    if(!boot._retries)boot._retries=0;
+    if(++boot._retries>50){console.error('[bootstrap:real] common.js failed to load — initApp not found');return;}
+    return setTimeout(boot,100);
   }
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', boot);
-  } else {
-    boot();
-  }
+  window.initApp('real');
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot);
+else boot();
 })();

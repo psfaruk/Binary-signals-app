@@ -1,11 +1,4 @@
-/* otc.css — OTC Market page. Yellow accent.
-
-   This file is one of TWO near-identical 10-line accent-CSS files (real.css
-   / otc.css) — alltime_otc.css has been removed (USER REQUIREMENT 2026-08-03).
-   Only --accent / --accent-bg / --accent-border differ between the two.
-   Future refactor: consolidate via `<body class="theme-otc">` +
-   `:root.theme-otc{--accent:...}` overrides in common.css. Until then,
-   if you change the rule structure here, change it identically in real.css. */
+/* otc.css — OTC Market page. Yellow accent. */
 :root{
   --accent:#ffc107;
   --accent-bg:rgba(255,193,7,.12);

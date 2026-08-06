@@ -1,29 +1,11 @@
-"""
-Module: WICKWALL — Repeated wick rejection zone detection
-
-Detects repeated wick rejection zones — the "wick wall". When 3+ recent
-candles have lower wicks (or upper wicks) clustered near the same price,
-that price is a strong rejection zone. A candle touching it is likely to
-reverse.
-
-Returns:
-  - CALL when current candle's low touches a support wick wall
-  - PUT  when current candle's high touches a resistance wick wall
-
-This theory was ADDED in PROD-BACKTEST-2026-08-05 by user request —
-ported from the uploaded analyze_eoc.py file's WICKWALL block.
-"""
+"""Module: WICKWALL — Repeated wick rejection zone detection."""
 from engines.base.types import ModuleResult, MarketContext
 
 __all__ = ["analyze"]
 
 
 def _wick_wall(candles, lookback=20):
-    """Detect wick cluster walls.
-
-    Returns (support_walls, resistance_walls, avg_range) where each wall
-    is (price, weight) with weight >= 2.5.
-    """
+    """Detect wick cluster walls; returns (sup_walls, res_walls, avg_rng)."""
     recent = candles[-lookback:]
     if len(recent) < 4:
         return [], [], 0.0
@@ -54,7 +36,7 @@ def _wick_wall(candles, lookback=20):
                         total_w))
         return out
 
-    # Weight recent tips higher (recency-weighted)
+    # Recency-weighted tips.
     _low_tips = [(recent[i]["low"], 1.0 - i / n) for i in range(n)]
     _high_tips = [(recent[i]["high"], 1.0 - i / n) for i in range(n)]
 
@@ -95,10 +77,7 @@ def _round_level_strength(price):
 
 
 def analyze(candles, ctx: MarketContext) -> list:
-    """Detect wick-wall rejections.
-
-    Returns list of ModuleResult (0 or 1 result).
-    """
+    """Detect wick-wall rejections; returns 0 or 1 ModuleResult."""
     if len(candles) < 6:
         return []
 
@@ -116,7 +95,7 @@ def analyze(candles, ctx: MarketContext) -> list:
         _best_sup = max(sup_walls, key=lambda x: x[1])
         _sup_lvl, _sup_tch = _best_sup
         if _sup_tch >= 3 and abs(l - _sup_lvl) <= avg_rng * 0.25:
-            # Confluence bonus: key touches + round level
+            # Confluence bonus: key touches + round level.
             bonus = 0
             lbl = ""
             kt = _key_touches(candles, _sup_lvl)
@@ -136,7 +115,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                 signal_type="REVERSAL",
                 reliability="LEVEL",
                 group="WICKWALL",
-                reasons=[f"WICKWALL Lower-wick cluster x{_sup_tch:.1f} at {_sup_lvl:.5g}{lbl} → CALL (x{mag})"],
+                reasons=[f"WICKWALL Lower-wick cluster x{_sup_tch:.1f} at {_sup_lvl:.5g}{lbl} -> CALL (x{mag})"],
             ))
 
     if res_walls:
@@ -162,7 +141,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                 signal_type="REVERSAL",
                 reliability="LEVEL",
                 group="WICKWALL",
-                reasons=[f"WICKWALL Upper-wick cluster x{_res_tch:.1f} at {_res_lvl:.5g}{lbl} → PUT (x{mag})"],
+                reasons=[f"WICKWALL Upper-wick cluster x{_res_tch:.1f} at {_res_lvl:.5g}{lbl} -> PUT (x{mag})"],
             ))
 
     return results

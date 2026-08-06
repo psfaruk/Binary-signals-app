@@ -1,27 +1,9 @@
-"""
-Module: Candle Reaction Engine
-
-After THEORY-PRUNE-2026-08-04 (3 rounds), this module contains only ONE
-active signal: SIGNAL 6 (Rising/Falling closes momentum).
-
-All reversal signals (SIGNALS 1-5, 7) have been deleted because they
-were direction-biased and regime-blind — they fired even in strong
-trends when the reversal interpretation was wrong.
-
-Active signal:
-  6. Rising/falling closes momentum — 3+ candles with monotonically
-     rising (or falling) closes, each with a non-trivial body.
-     This is the definition of trend momentum.
-"""
+"""Module: Candle Reaction Engine — Rising/falling closes momentum signal."""
 from engines.base.types import ModuleResult, MarketContext
 
 
 def analyze(candles, ctx: MarketContext) -> list:
-    """Run trend-continuation signal (SIGNAL 6).
-
-    Returns list of ModuleResult objects. Only fires in strong trends
-    with trend_strength > 0.5.
-    """
+    """Run trend-continuation signal (SIGNAL 6). Fires only in strong trends."""
     results = []
     if not candles or len(candles) < 3:
         return results
@@ -37,11 +19,7 @@ def analyze(candles, ctx: MarketContext) -> list:
     trend_regime = regime.get("regime", "RANGE")
     trend_strength = regime.get("trend_strength", 0.0)
 
-    # ── CONTINUATION SIGNAL 6: Rising/falling closes momentum ────────────
-    # 3+ consecutive candles with monotonically rising closes + each body
-    # is non-trivial (>= 30% of range) = clean trend momentum.
-    # Gated on trend regime so it doesn't fire in RANGE markets where
-    # reversal interpretation is correct (but reversal signals are gone).
+    # SIGNAL 6: 3+ monotonic rising/falling closes with non-trivial bodies.
     if is_trending and trend_strength > 0.5 and len(candles) >= 3:
         c1_close = candles[-3]["close"]
         c2_close = candles[-2]["close"]
@@ -52,18 +30,13 @@ def analyze(candles, ctx: MarketContext) -> list:
         r2 = candles[-2]["high"] - candles[-2]["low"]
         # Monotonic rising closes
         if c1_close < c2_close < c3_close:
-            # Each body must be non-trivial (not dojis)
             if (r1 > 0 and r2 > 0 and rng > 0
                     and b1/r1 >= 0.30 and b2/r2 >= 0.30 and body_pct >= 30
                     and trend_regime == "TREND_UP"):
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="CALL", score=3, confidence=62,
                     signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
-                    # FIX (2026-08-06): "(62% win rate)" removed — it was
-                    # `confidence=62` restated as a measured result and shown
-                    # to users as one. See the module docstring for what is
-                    # actually measured.
-                    reasons=[f"Rising closes momentum (3 UP, str={trend_strength:.2f}) → CALL continuation"]))
+                    reasons=[f"Rising closes momentum (3 UP, str={trend_strength:.2f}) -> CALL continuation"]))
         # Monotonic falling closes
         elif c1_close > c2_close > c3_close:
             if (r1 > 0 and r2 > 0 and rng > 0
@@ -72,7 +45,6 @@ def analyze(candles, ctx: MarketContext) -> list:
                 results.append(ModuleResult(
                     module_name="candle_reaction", direction="PUT", score=3, confidence=62,
                     signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
-                    # FIX (2026-08-06): "(62% win rate)" removed — see above.
-                    reasons=[f"Falling closes momentum (3 DOWN, str={trend_strength:.2f}) → PUT continuation"]))
+                    reasons=[f"Falling closes momentum (3 DOWN, str={trend_strength:.2f}) -> PUT continuation"]))
 
     return results

@@ -18,9 +18,6 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse, Response
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-43): removed unused `HTMLResponse` import.
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-44): removed unused `StaticFiles` import
-#   (it was shadowed by the starlette import below at the static-file mount).
 
 # Load .env from project root (if it exists — Railway uses env vars directly)
 from dotenv import load_dotenv
@@ -30,8 +27,6 @@ if _env_path.exists():
     print("[server] .env ফাইল loaded")
 else:
     print("[server] .env ফাইল নেই — Railway env vars ব্যবহার করা হচ্ছে")
-# NOTE: Do NOT try to create .env on Railway (read-only filesystem).
-# Railway injects env vars directly — .env file is for local dev only.
 
 # Ensure QX_ROOT points to a valid temp dir on Linux/Mac
 if sys.platform != "win32":
@@ -40,35 +35,10 @@ if sys.platform != "win32":
 
 import db as _db
 
-# ════════════════════════════════════════════════════════════════════════════
-# SIMULATION MODE DISABLED (2026-07-25)
-# ════════════════════════════════════════════════════════════════════════════
-# The app now ALWAYS runs on live Quotex data. sim_feed.py is no longer
-# imported. If QX_TOKEN is missing, the server will still start (so the
-# /api/set-token endpoint is reachable to provision a token at runtime),
-# but the feed will be in a "no token" state and stream subscriptions will
-# return an error to clients. This is intentional — a loud failure is far
-# safer than a silent sim fallback that produces fake predictions.
-#
-# USE_SIM env var is now IGNORED (treated as 0 always). Setting it has no
-# effect — sim mode is structurally disabled.
-# ════════════════════════════════════════════════════════════════════════════
-
-# ── Quotex backend selection ────────────────────────────────────────────────
-# QX_USE_RAW_WS=0 (DEFAULT): vendored pyquotex with Firefox TLS cipher suite
-#                             → bypasses Cloudflare without Playwright/curl_cffi
-# QX_USE_RAW_WS=1:           raw WebSocket backend (quotex_ws.py)
-#                             → lighter but Cloudflare blocks login on datacenter IPs
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-45): the `_HAS_PYQUOTEX` and `_USE_RAW_WS`
-#   variables were computed at module load and NEVER referenced elsewhere in
-#   server.py — dead code. The print statements below are kept so the deploy
-#   log still shows which backend is in use.
 if os.environ.get("QX_USE_RAW_WS", "0") == "1":
-    print("[server] QX_USE_RAW_WS=1 — raw WebSocket backend "
-          "(pyquotex optional)")
+    print("[server] QX_USE_RAW_WS=1 — raw WebSocket backend " "(pyquotex optional)")
 else:
-    print("[server] QX_USE_RAW_WS=0 — vendored pyquotex with Firefox TLS "
-          "(Cloudflare bypass)")
+    print("[server] QX_USE_RAW_WS=0 — vendored pyquotex with Firefox TLS " "(Cloudflare bypass)")
 
 # Always import the real feed. sim_feed.py is no longer used.
 from feed import QuotexFeed as _Feed
@@ -90,10 +60,6 @@ if not _QX_TOKEN and not _QX_EMAIL:
 elif _QX_TOKEN:
     print(f"[server] ✅ QX_TOKEN found ({_QX_TOKEN[:8]}...{_QX_TOKEN[-4:]})")
 else:
-    # FIX (2026-07-26 / MANUAL-TOKEN-MODE): email/password is no longer
-    # attempted (Cloudflare blocks Railway IPs, and repeated failures
-    # caused Quotex to block the user's account). Operator MUST push a
-    # token via /api/set-token or set QX_TOKEN in Railway Variables.
     print("[server] ⚠️  QX_TOKEN not set — app will wait for a token.")
     print("[server]    Email/password login is DISABLED (Cloudflare blocks Railway IPs).")
     print("[server]    To get live data, push a token via ONE of:")
@@ -105,21 +71,10 @@ else:
 feed = _Feed()
 clients: dict[str, WebSocket] = {}   # cid -> ws
 cid_counter = 0
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-36): cap total concurrent WS clients to
-#   prevent unbounded FD growth. Override via `MAX_WS_CLIENTS` env var.
 _MAX_WS_CLIENTS = int(os.environ.get("MAX_WS_CLIENTS", "200"))
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-37): module-level logger so WS errors
-#   include a traceback instead of just `str(e)`.
 _logger = logging.getLogger("server")
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-68): read WS idle timeout ONCE at module
-#   load instead of parsing the env var on every new WS connection.
 _WS_IDLE_TIMEOUT = float(os.environ.get("WS_IDLE_TIMEOUT", "300.0"))
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-7): cap incoming WS text frame size to
-#   prevent a malicious client from triggering OOM via a 1GB JSON payload.
 _MAX_WS_MSG_BYTES = int(os.environ.get("MAX_WS_MSG_BYTES", str(1 << 20)))
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-6): origin whitelist for WS connections.
-#   Comma-separated list of allowed origins (default: localhost + 127.0.0.1
-#   on any port). Empty string disables the check (NOT recommended).
 _ALLOWED_WS_ORIGINS = [
     o.strip().lower() for o in os.environ.get(
         "ALLOWED_WS_ORIGINS",
@@ -127,15 +82,6 @@ _ALLOWED_WS_ORIGINS = [
     ).split(",") if o.strip()
 ]
 
-# FIX (LIVE-DATA-WS-FIX, 2026-07-26):
-# The F-13 hardening added an Origin whitelist, but Railway deployments
-# don't set ALLOWED_WS_ORIGINS — so the browser's Origin
-# (https://binary-signals-app-production.up.railway.app) was rejected
-# with 403 Forbidden, breaking the entire frontend ↔ backend WS link.
-#
-# Auto-detect the deployment's own public URL from common Railway env
-# vars and add it (plus its bare-host variant) to the whitelist.
-# Operators can still override via ALLOWED_WS_ORIGINS (comma-separated).
 def _autodetect_railway_origins():
     origins = set()
     # Railway provides these vars on every deployed service.
@@ -150,9 +96,6 @@ def _autodetect_railway_origins():
     # Also support `PORT`-based Railway preview domains.
     service_name = os.environ.get("RAILWAY_SERVICE_NAME", "").strip()
     if service_name:
-        # Railway preview URL pattern: <service>-<project>.up.railway.app
-        # We can't guess the full URL without more info, but at least
-        # the production domain should be auto-added above.
         pass
     return origins
 
@@ -162,24 +105,13 @@ if _auto_origins:
         if o not in _ALLOWED_WS_ORIGINS:
             _ALLOWED_WS_ORIGINS.append(o)
     print(f"[server] ✅ Auto-detected Railway WS origins: {sorted(_auto_origins)}")
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-64): patterns initialised once at startup;
-#   `/api/patterns*` endpoints no longer need to re-init on every request.
 _PATTERNS_INITIALIZED = False
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-2): per-endpoint asyncio locks so two
-#   concurrent POSTs to the expensive recompute endpoints can't double-recompute.
 _BRAIN_ANALYZE_LOCK = asyncio.Lock()
 _PATTERNS_REFRESH_LOCK = asyncio.Lock()
 _AUTO_TUNE_APPLY_LOCK = asyncio.Lock()
 
-
 def _check_admin_key(provided: Optional[str]) -> None:
-    """Constant-time admin-key comparison.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-26): previously admin-key checks used
-    `provided != expected` which leaks key length/prefix via response timing.
-    Now uses `hmac.compare_digest`. If ADMIN_KEY env var is unset, the
-    endpoint stays open (backwards-compatible for personal deployments).
-    """
+    """Constant-time admin-key comparison."""
     expected = os.environ.get("ADMIN_KEY", "").strip()
     if not expected:
         return
@@ -188,33 +120,8 @@ def _check_admin_key(provided: Optional[str]) -> None:
     if not hmac.compare_digest(provided.strip(), expected):
         raise HTTPException(status_code=403, detail="forbidden")
 
-
 async def broadcast(msg: dict):
-    """Push a message to connected clients — PARALLEL sends.
-
-    FIX (2026-07-15 audit): previously sent ALL messages to ALL clients,
-    wasteful when N viewers watch M different pairs (each got N×M msgs).
-    Now filters by asset/period: only clients interested in the message's
-    asset/period receive it. Messages without asset/period (pairs, status,
-    signals list) go to everyone.
-
-    FIX (Bug #15, 2026-07-17): the previous filter had a "stream not found
-    → send to all (safety)" fallback that fired when the asset's stream
-    had already been torn down (e.g., post idle-eviction). That caused
-    stale-asset messages to be broadcast to every viewer. Now if a stream
-    exists but has no interested_cids, we skip the broadcast for that
-    (asset, period); if no stream exists at all, we also skip — the
-    viewers are clearly not watching this asset anymore.
-
-    FIX (CANDLE-STUCK-FIX, 2026-07-23): when the real feed has fallen
-    back to sim_delegate mode, the stream's interested_cids are stored
-    in sim_delegate._streams, NOT feed._streams. The previous code only
-    checked feed._streams, so all sim_feed broadcasts were dropped
-    (target_cids=[] → skip). This was THE cause of 'signals come but
-    candle stuck' — the sim feed was producing ticks but they never
-    reached the browser. Now we check BOTH feed._streams AND
-    sim_delegate._streams.
-    """
+    """Push a message to connected clients — PARALLEL sends."""
     if not clients:
         return
     data = json.dumps(msg)
@@ -236,21 +143,12 @@ async def broadcast(msg: dict):
                     target_cids = list(stream.interested_cids)
                 # else: stream gone or no viewers → skip (was: send to all)
 
-            # FIX (CANDLE-STUCK-FIX): if not found in real feed, check
-            # sim_delegate. The sim feed's streams are stored separately.
             if not target_cids:
                 sim = getattr(feed, '_sim_delegate', None)
                 if sim is not None and hasattr(sim, '_streams'):
                     sim_stream = sim._streams.get(stream_key)
                     if sim_stream and sim_stream.interested_cids:
                         target_cids = list(sim_stream.interested_cids)
-        # FIX (DEEP-AUDIT-2026-07-26 / F-13-27): the previous bare
-        #   `except Exception:` swallowed every error AND defaulted to
-        #   broadcast-all — which would leak private pair data to clients
-        #   who never subscribed. Now we only swallow the narrow set of
-        #   attribute/lookup errors that the stream-registry lookup can
-        #   legitimately raise; any other exception propagates so it
-        #   shows up in logs instead of silently broadcasting to all.
         except (AttributeError, TypeError, KeyError):
             # On lookup error, skip the broadcast for this (asset, period)
             # rather than risk leaking the message to non-subscribers.
@@ -267,32 +165,13 @@ async def broadcast(msg: dict):
     if not tasks:
         return
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    # Remove dead clients
-    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-06): use BaseException so
-    # asyncio.CancelledError (a BaseException since 3.8) also triggers
-    # client removal. Otherwise dead clients accumulate and every future
-    # broadcast wastes time sending to them.
     for cid, result in zip(cids, results):
         if isinstance(result, BaseException):
             clients.pop(cid, None)
 
-
-# ── Lifespan handler (modern FastAPI — replaces deprecated on_event) ───────
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-101): `asynccontextmanager` was imported
-#   mid-file after route definitions; now imported at the top of the module.
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup + shutdown lifecycle (replaces @app.on_event).
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-3): `_db.init()`, `init_brain()`, and
-      `recompute_from_signal_log()` are all SYNCHRONOUS SQLite/Python calls
-      that previously ran directly inside the async lifespan — blocking the
-      event loop and risking the Railway healthcheck grace period. They
-      now run inside `asyncio.to_thread(...)` so the loop keeps serving
-      /healthz while the (potentially slow) init proceeds in a worker.
-    """
+    """Startup + shutdown lifecycle (replaces @app.on_event)."""
     global _PATTERNS_INITIALIZED
     print("[server] lifespan: startup beginning")
 
@@ -301,20 +180,14 @@ async def lifespan(app: FastAPI):
         # Initialize brain tables
         from core.brain import init_brain
         init_brain()
-        # Initialize time/session pattern tables (BACKTEST-2026-07-21)
         try:
             from core.time_patterns import init_patterns, recompute_from_signal_log
             init_patterns()
-            # Recompute patterns from existing signal_log on startup — this
-            # populates the time_session_patterns table so the blender can
-            # apply adjustments from the very first prediction.
             summary = recompute_from_signal_log(min_samples=3)
             total_patterns = sum(sum(dims.values()) for dims in summary.values()) if summary else 0
-            print(f"[server] patterns loaded: {total_patterns} entries across "
-                  f"{len(summary)} pairs")
+            print(f"[server] patterns loaded: {total_patterns} entries across " f"{len(summary)} pairs")
         except Exception as _e:
             print(f"[server] pattern init failed (non-fatal): {_e}")
-        # FIX (DATA-FLOW-2026-07-22): initialize algorithm-change monitor.
         try:
             from core.algorithm_monitor import init_algorithm_monitor
             init_algorithm_monitor()
@@ -325,39 +198,16 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(_sync_init)
     _PATTERNS_INITIALIZED = True
 
-    # Start feed in background task
-    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-07): add a done-callback so
-    # if feed.run() crashes during startup (e.g. _db.init failure or
-    # _auto_login_startup raising), the exception is logged instead of
-    # silently dying. Without this the server starts but never receives
-    # data and /api/status shows connected: False forever with no error.
     def _on_feed_done(task):
         if task.cancelled():
             return
         exc = task.exception()
         if exc:
             _logger.exception("feed task died", exc_info=exc)
-            print(f"[server] FATAL: feed task died: "
-                  f"{type(exc).__name__}: {exc}")
+            print(f"[server] FATAL: feed task died: " f"{type(exc).__name__}: {exc}")
         else:
-            # FIX (CRASH-FIX-2026-07-26 / SV-005): feed.run() returned
-            # NORMALLY (no exception, no cancellation). This should
-            # never happen — feed.run() is an infinite loop that only
-            # exits via cancellation or an unhandled exception. A
-            # normal return means the loop body completed and `return`
-            # was hit, which means the feed silently died. Without this
-            # branch, /api/status would show connected: False forever
-            # with ZERO error trail — the user sees "Loading…"
-            # indefinitely even though the server is up. Now we log
-            # loudly so the operator can investigate; on Railway the
-            # health check will catch the dead feed and restart the
-            # container if /healthz is configured to check feed_task.
-            _logger.error("feed task exited NORMALLY (unexpected) — "
-                         "this means feed.run() returned without raising. "
-                         "The feed is now dead; restart the container or "
-                         "investigate feed.run()'s exit paths.")
-            print("[server] FATAL: feed task exited normally (unexpected) "
-                  "— feed is dead. Restart the container.")
+            _logger.error("feed task exited NORMALLY (unexpected) — " "this means feed.run() returned without raising. " "The feed is now dead; restart the container or " "investigate feed.run()'s exit paths.")
+            print("[server] FATAL: feed task exited normally (unexpected) " "— feed is dead. Restart the container.")
             # Tag the task so /healthz can detect this state.
             app.state.feed_dead_normal_exit = True
     feed_task = asyncio.create_task(feed.run(broadcast))
@@ -375,29 +225,17 @@ async def lifespan(app: FastAPI):
     try:
         await feed_task
     except asyncio.CancelledError as _e:
-        print(f"[silent-except] server.py:368 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+        print(f"[silent-except] server.py:368 {type(_e).__name__}: {_e}")
         pass
     print("[server] lifespan: shutdown complete")
-
 
 app = FastAPI(lifespan=lifespan)
 static_dir = Path(__file__).parent / "static"
 
-# FIX (P0-ISSUE-013, 2026-07-22): serve static files with no-store (stronger
-# than no-cache). Safari's Back-Forward Cache (bfcache) and Chrome's disk
-# cache can serve stale JS even with `no-cache, must-revalidate` — `no-store`
-# forbids storing entirely. Combined with ETag revalidation, this guarantees
-# the browser ALWAYS fetches the latest version from the server.
-# This was the root cause of "বাকি গুল সুইচ করা যায় না" — old common.js
-# (without _nextCategory) was served from bfcache, so the switch button
-# had no click handler.
 from starlette.staticfiles import StaticFiles as _StarletteStaticFiles
 class _NoCacheStaticFiles(_StarletteStaticFiles):
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
-        # no-store: browser MUST NOT cache. Every load fetches from server.
-        # no-cache: redundant with no-store but kept for HTTP/1.0 compat.
-        # must-revalidate: redundant but explicit.
         resp.headers["Cache-Control"] = "no-store, no-cache, max-age=0, must-revalidate"
         resp.headers["Pragma"] = "no-cache"  # HTTP/1.0 legacy
         resp.headers["Expires"] = "0"        # HTTP/1.0 legacy
@@ -405,21 +243,10 @@ class _NoCacheStaticFiles(_StarletteStaticFiles):
 
 app.mount("/static", _NoCacheStaticFiles(directory=str(static_dir)), name="static")
 
-
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 def _auto_open_browser():
-    """Open the default browser to the app URL after server starts.
-    Runs in a background thread so it doesn't block the event loop.
-    Waits ~5 seconds for the server to be ready before opening.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-49, F-13-50, F-13-51, F-13-52):
-      Removed the local `import os as _os`, `import time as _time`, and
-      `import webbrowser as _wb` — these modules are now imported once at
-      the top of the module. Also broadened the AUTO_OPEN_BROWSER skip
-      check to recognise `"false"`, `"no"`, and `"off"` (not just `"0"`).
-    """
-    # FIX (F-13-52): accept any common false-y value, not just "0".
+    """Open the default browser to the app URL after server starts."""
     if os.environ.get("AUTO_OPEN_BROWSER", "1").lower() in ("0", "false", "no", "off"):
         return
 
@@ -427,9 +254,6 @@ def _auto_open_browser():
     url = f"http://localhost:{port}"
 
     def _open():
-        # FIX (F-13-53): poll /healthz until it returns 200 (or give up
-        # after ~10s) instead of a hard-coded 5s sleep — works on slow
-        # machines and is faster on quick ones.
         import urllib.request
         deadline = time.time() + 10.0
         while time.time() < deadline:
@@ -448,110 +272,33 @@ def _auto_open_browser():
 
     threading.Thread(target=_open, daemon=True).start()
 
-
 # (lifespan handler above replaces the deprecated @app.on_event startup/shutdown)
-
 
 # ── HTTP routes ───────────────────────────────────────────────────────────────
 
 @app.get("/healthz")
 async def healthz(request: Request):
-    """Railway healthcheck endpoint — returns 200 if the process is up.
-
-    Note: this returns ok:true even if QX_TOKEN is not set, so Railway's
-    healthcheck passes (the server must be up for /api/set-token to work).
-    Use /api/token-status to check whether the app has live credentials.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-38): previously this returned
-      `{"ok": True}` unconditionally — even if the feed task had crashed,
-      the container stayed "healthy" while serving zero data. We now also
-      expose `feed_connected` and `feed_task_alive` so Railway/ops can
-      fail the healthcheck on a dead feed by inspecting those fields.
-      The top-level `ok` flag stays True (backwards compat) so existing
-      Railway healthcheck configs keep working.
-    """
+    """Railway healthcheck endpoint — returns 200 if the process is up."""
     feed_task = getattr(request.app.state, "feed_task", None)
     feed_task_alive = bool(feed_task is not None and not feed_task.done())
     feed_dead_normal_exit = bool(getattr(request.app.state,
                                          "feed_dead_normal_exit", False))
-    # FIX (CRASH-FIX-2026-07-26 / SV-041): the previous healthz returned
-    # `ok: True` even when the feed task was DEAD, so Railway's health
-    # check passed while the app served zero data — the user saw
-    # "Loading…" forever. Now: if feed_task is dead OR exited normally,
-    # we still return ok: True (to keep the container alive so operators
-    # can fetch /api/token-status and debug logs), BUT surface
-    # `feed_healthy: False` so Railway healthcheck expressions can fail
-    # on this field if desired. The default healthcheck (just HTTP 200)
-    # still passes, preserving backward compat with existing deployments.
     feed_healthy = feed_task_alive and not feed_dead_normal_exit
-    return {
-        "ok": True,
-        "feed_connected": bool(getattr(feed, "_connected", False)),
-        "feed_task_alive": feed_task_alive,
-        "feed_dead_normal_exit": feed_dead_normal_exit,
-        "feed_healthy": feed_healthy,
-    }
-
+    return {"ok": True, "feed_connected": bool(getattr(feed, "_connected", False)), "feed_task_alive": feed_task_alive, "feed_dead_normal_exit": feed_dead_normal_exit, "feed_healthy": feed_healthy}
 
 @app.get("/api/token-status")
 async def token_status():
-    """Returns whether the app has live Quotex credentials.
-
-    Frontend uses this to show a clear "No Token" warning banner when
-    QX_TOKEN is missing, instead of silently failing on stream subscribe.
-
-    SIM-MODE-DISABLED (2026-07-25): sim mode is permanently disabled, so
-    the only way to get live data is to set QX_TOKEN. This endpoint exposes
-    the token presence state (without leaking the token itself).
-
-    FIX (LIVE-DATA-WS-FIX-2, 2026-07-26): also report whether the app's
-    live Quotex connection is currently AUTHORIZED. Without this, the
-    frontend can't distinguish "no token set" from "token set but Quotex
-    rejected it" — both look like "no live data". Now the response includes
-    `connection_status` so the user can act on the actual problem.
-    """
+    """Returns whether the app has live Quotex credentials."""
     qx_token = os.environ.get("QX_TOKEN", "").strip()
     qx_email = os.environ.get("QX_EMAIL", "").strip()
     has_token = bool(qx_token)
     has_email = bool(qx_email)
 
-    # Inspect the feed's live Quotex client state.
-    #
-    # FIX (LIVE-TICK-RELIABILITY-2026-07-31): consecutive_rejects/token_dead
-    # used to be read off `feed._client`, but that attribute only exists on
-    # quotex_ws.QuotexWSClient (QX_USE_RAW_WS=1). The default production
-    # backend (pyquotex.stable_api.Quotex, QX_USE_RAW_WS=0) never set it, so
-    # this always silently fell back to 0/False via getattr — token_dead
-    # was unreachable in the actual deployed configuration. Also, a fresh
-    # client object is created on every failed connect() attempt, so even a
-    # client-level counter would never survive across reconnects. Both are
-    # now tracked on the persistent `feed` manager instance itself — see
-    # QuotexFeed.__init__ / QuotexFeed._connect() in feed.py.
     connection_status = "disconnected"
     consecutive_rejects = int(getattr(feed, "_consecutive_rejects", 0))
     token_dead = bool(getattr(feed, "_token_dead_at", 0))
     try:
         client = getattr(feed, "_client", None)
-        # FIX (DATA-AUDIT-2026-08-05): `_authorized`/`_connected` only exist
-        # on quotex_ws.QuotexWSClient (QX_USE_RAW_WS=1) — the same
-        # backend-specific-attribute bug the LIVE-TICK-RELIABILITY-2026-07-31
-        # fix above already found and fixed for consecutive_rejects/token_dead,
-        # but missed here. The default production backend
-        # (pyquotex.stable_api.Quotex, QX_USE_RAW_WS=0) never sets either
-        # attribute, so `getattr(client, "_authorized", False)` and
-        # `getattr(client, "_connected", False)` silently returned False
-        # FOREVER — this endpoint reported "disconnected" even while the
-        # feed was live and streaming (confirmed: /healthz + /api/status
-        # showed connected:true and candles were closing every 60s in the
-        # logs, while this endpoint said "disconnected" the whole time).
-        # `feed._connected` is the backend-agnostic, authoritative flag set
-        # by QuotexFeed._connect() for BOTH backends — and for pyquotex,
-        # _connect() only returns True after the client's own auth check
-        # succeeds (see feed.py's `ok, reason = await self._client.connect()`
-        # call), so `feed._connected` already implies authorized on that
-        # backend. Use the client-level flags when present (raw-WS backend,
-        # which can be connected-but-not-yet-authorized), and fall back to
-        # `feed._connected` otherwise.
         if hasattr(client, "_authorized") or hasattr(client, "_connected"):
             authorized = bool(getattr(client, "_authorized", False))
             connected = bool(getattr(client, "_connected", False))
@@ -563,16 +310,11 @@ async def token_status():
         elif connected and not authorized:
             connection_status = "connected_unauth"
         elif token_dead:
-            # FIX (LIVE-TICK-RELIABILITY-2026-07-31): token_dead now lives
-            # on `feed`, not `feed._client` — so this fires even when
-            # `client` is None (e.g. between the failed connect and the
-            # next retry cycle, when _connect() has already torn the
-            # client down).
             connection_status = "token_dead_backoff"
         else:
             connection_status = "disconnected"
     except Exception as _e:
-        print(f"[silent-except] server.py:527 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+        print(f"[silent-except] server.py:527 {type(_e).__name__}: {_e}")
         pass
 
     if has_token:
@@ -582,181 +324,68 @@ async def token_status():
             message = f"QX_TOKEN is set ({preview}) — connected + authorized. Live data flowing."
         elif connection_status == "token_dead_backoff":
             status = "token_dead"
-            message = (f"⛔ Quotex REJECTED the token {consecutive_rejects}x consecutively. "
-                       f"Token is likely EXPIRED or REVOKED by Quotex. Refresh the SSID and "
-                       f"set it via /api/set-token to restore live data.")
+            message = (f"⛔ Quotex REJECTED the token {consecutive_rejects}x consecutively. " f"Token is likely EXPIRED or REVOKED by Quotex. Refresh the SSID and " f"set it via /api/set-token to restore live data.")
         elif connection_status in ("connected_unauth", "disconnected"):
             status = "token_set_but_connecting"
-            message = (f"QX_TOKEN is set ({preview}) but Quotex connection is "
-                       f"'{connection_status}'. Will retry shortly.")
+            message = (f"QX_TOKEN is set ({preview}) but Quotex connection is " f"'{connection_status}'. Will retry shortly.")
         else:
             status = "live_token"
             message = f"QX_TOKEN is set ({preview}) — connection state: {connection_status}"
     elif has_email:
         status = "email_only_no_token"
-        # FIX (2026-07-26 / MANUAL-TOKEN-MODE): email/password login is
-        # DISABLED on Railway (Cloudflare blocks it). Don't say "will try
-        # email/password login" because we no longer do.
-        message = ("QX_EMAIL is set but no QX_TOKEN — email/password login "
-                   "is DISABLED on Railway (Cloudflare blocks datacenter IPs "
-                   "and Quotex may ban the account for repeated failures). "
-                   "Push a Quotex token via /api/set-token to get live data.")
+        message = ("QX_EMAIL is set but no QX_TOKEN — email/password login " "is DISABLED on Railway (Cloudflare blocks datacenter IPs "
+                   "and Quotex may ban the account for repeated failures). " "Push a Quotex token via /api/set-token to get live data.")
     else:
         status = "no_credentials"
-        message = ("❌ No Quotex credentials — sim mode is permanently disabled. "
-                   "Set QX_TOKEN via Railway Variables or visit "
-                   "/api/set-token?token=YOUR_TOKEN to provision at runtime.")
-    return {
-        "status": status,
-        "has_token": has_token,
-        "has_email": has_email,
-        "connection_status": connection_status,
-        "consecutive_rejects": consecutive_rejects,
-        "token_dead": token_dead,
-        "sim_mode_disabled": True,
-        "message": message,
-        "action": "refresh_token" if token_dead else ("set_token" if status == "no_credentials" else None),
-    }
-
+        message = ("❌ No Quotex credentials — sim mode is permanently disabled. " "Set QX_TOKEN via Railway Variables or visit " "/api/set-token?token=YOUR_TOKEN to provision at runtime.")
+    return {"status": status, "has_token": has_token, "has_email": has_email, "connection_status": connection_status, "consecutive_rejects": consecutive_rejects, "token_dead": token_dead, "sim_mode_disabled": True, "message": message, "action": "refresh_token" if token_dead else ("set_token" if status == "no_credentials" else None)}
 
 @app.get("/")
 async def index():
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-55): use the same `no-store`
-    #   cache policy that the static-file mount uses, so the browser never
-    #   serves a stale index.html whose <script src=> tags point at
-    #   freshly-updated JS modules.
     return FileResponse(static_dir / "index.html",
                         headers={"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate"})
 
-
-# ── Token update endpoint (2026-07-23) ──────────────────────────────────────
-# FIX (TOKEN-AUTO-UPDATE): user reported app falling back to sim mode when
-# Quotex token expires. The auto-relogin via email/password is blocked by
-# Cloudflare on Railway datacenter IPs. This endpoint lets the user update
-# the token at RUNTIME — no Railway dashboard access needed, no restart.
-# The user just opens a URL in their browser with the new token.
-#
-# Usage:
-#   GET  /api/set-token?token=XXXX  (simple, from browser address bar)
-#   POST /api/set-token             (with JSON body {"token": "XXXX"})
-#
-# Security: this endpoint is UNPROTECTED — anyone with the URL can set
-# the token. For a personal app this is acceptable. For production with
-# multiple users, add an auth header check.
 @app.get("/api/set-token")
 async def set_token_get(token: str, x_admin_key: Optional[str] = None):
-    """Set Quotex token at runtime — no restart needed.
-
-    Usage: open in browser:
-    https://binary-signals-app-production.up.railway.app/api/set-token?token=YOUR_TOKEN
-
-    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-08): optional shared-secret
-    admin-key check. If ADMIN_KEY env var is set, callers MUST pass the
-    matching X-Admin-Key header (or query param) or get 403. If ADMIN_KEY
-    is unset, the endpoint stays open (backwards-compatible for personal
-    deployments).
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-26, F-13-42): replaced the
-      `provided != expected` comparison with the constant-time
-      `hmac.compare_digest` helper (`_check_admin_key`) and corrected
-      the type annotation from `str = None` to `Optional[str] = None`
-      so the generated OpenAPI schema is accurate.
-    """
+    """Set Quotex token at runtime — no restart needed."""
     _check_admin_key(x_admin_key)
     return await _apply_token(token)
 
-
 @app.post("/api/set-token")
 async def set_token_post(request: Request):
-    """Set Quotex token via POST (for programmatic updates).
-
-    Body: {"token": "YOUR_TOKEN"}
-
-    FIX (DEEP-AUDIT-2026-07-26 / A-07-CRIT-1):
-    The GET version of this endpoint checked the X-Admin-Key header
-    (AUDIT-1-08 fix), but the POST version did NOT — anyone could
-    overwrite the Quotex token via POST without authentication. This
-    is a security hole for any deployment with ADMIN_KEY set. Now the
-    POST version applies the same gate, accepting the key via either
-    the X-Admin-Key header or the JSON body's `x_admin_key` field.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-26): the comparison now goes
-      through the constant-time `_check_admin_key` helper instead of
-      `provided != expected`.
-    """
+    """Set Quotex token via POST (for programmatic updates)."""
     try:
         body = await request.json()
         token = body.get("token", "").strip()
         body_admin_key = body.get("x_admin_key", "").strip() if isinstance(body, dict) else ""
     except Exception:
         return {"ok": False, "error": "invalid JSON body"}
-    # FIX (A-07-CRIT-1 / F-13-26): apply ADMIN_KEY gate (constant-time).
     header_admin_key = (request.headers.get("X-Admin-Key") or "").strip()
     _check_admin_key(body_admin_key or header_admin_key)
     return await _apply_token(token)
 
-
 async def _apply_token(token: str):
-    """Apply a new Quotex token at runtime.
-
-    Sets the token in os.environ and forces an immediate reconnect on
-    the next feed loop tick.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-47, F-13-48, F-13-49):
-      Removed the entire `sim_delegate` cleanup block — sim mode is
-      permanently disabled (server.py:33-45), so the defensive cleanup
-      was dead code that added ~50ms latency to every token update.
-      Also removed the redundant `os.environ["USE_SIM"] = "0"` line
-      (USE_SIM is ignored) and the local `import os as _os` /
-      `import time as _time` aliases — both modules are now imported
-      once at the top of the file.
-    """
-    # FIX (2026-07-26 / MANUAL-TOKEN-MODE): lowered minimum from 50 to 20.
-    # Quotex has TWO token formats:
-    #   - Long JWT-style "quotex-token.eyJ..." (200+ chars) — older API
-    #   - Short alphanumeric "Nydjp4hzBRXUxig5g9yxxLBLqB7LHj2do3wJ0RbJ" (~40 chars)
-    #     — current Quotex market-qx.trade API (verified live 2026-07-26).
-    # The previous 50-char minimum rejected the short format, blocking the
-    # user's manual token push via /api/set-token. Now accepts both formats.
+    """Apply a new Quotex token at runtime."""
     if not token or len(token) < 20:
-        return {"ok": False, "error": f"token too short ({len(token) if token else 0} chars) "
-                "(real Quotex tokens are 40+ chars)"}
+        return {"ok": False, "error": f"token too short ({len(token) if token else 0} chars) " "(real Quotex tokens are 40+ chars)"}
 
     # Set the token in the environment so _connect() picks it up
     os.environ["QX_TOKEN"] = token
 
-    # Reset the real feed's connection state so it retries immediately.
-    # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-03): set _token_update_pending
-    # so feed._connect() (if currently suspended in await client.connect())
-    # discards the in-flight attempt with the OLD token and retries with the
-    # new one. Without this, an in-flight connect succeeds with the old
-    # token and overwrites _connected=True, silently losing the update.
     feed._connected = False
     feed._abandoned = False
     feed._reconnect_attempts = 0
     feed._last_error = None
     feed._last_error_time = 0
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-29): setting an attribute on a
-    #   plain Python object essentially never raises; the previous
-    #   `try/except Exception: pass` was dead defensive code that would
-    #   have masked any real error in a future feed subclass overriding
-    #   __setattr__. If feed ever does override __setattr__ we want to
-    #   know loudly, so the try/except is removed.
     feed._token_update_pending = True
 
-    # Clear any stale idle_since timestamps on existing streams.
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-28): use getattr-default + setattr
-    #   so a future stream subclass without `idle_since` no longer raises
-    #   AttributeError and aborts the token update halfway through.
     for s in getattr(feed, '_streams', {}).values():
         try:
             s.idle_since = None
         except (AttributeError, TypeError) as _e:
-            print(f"[silent-except] server.py:699 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+            print(f"[silent-except] server.py:699 {type(_e).__name__}: {_e}")
             pass
 
-    # Save token to session.json so it persists across restarts
-    # AUDIT-1-02 FIX: was calling save_session_json(token) with wrong arg count
     try:
         from quotex_ws import QuotexWSClient
         QuotexWSClient.save_token_only(token)
@@ -768,27 +397,11 @@ async def _apply_token(token: str):
     print(f"[server] ✅ token updated at runtime: {token_preview}")
     print(f"[server]    real feed will reconnect within 5s...")
 
-    return {
-        "ok": True,
-        "message": f"Token set ({token_preview}). Real feed reconnecting...",
-        "timestamp": time.time(),
-        "sim_mode_disabled_permanently": True,
-        "next_step": "Wait 5-10 seconds, then check /api/debug to confirm connected:true",
-    }
-
+    return {"ok": True, "message": f"Token set ({token_preview}). Real feed reconnecting...", "timestamp": time.time(), "sim_mode_disabled_permanently": True, "next_step": "Wait 5-10 seconds, then check /api/debug to confirm connected:true"}
 
 @app.post("/api/reconnect")
 async def force_reconnect():
-    """Force an immediate Quotex reconnect without changing the token.
-
-    FIX (DISCONNECT-2026-07-30): user complaint "session token এর মেয়াদ থাকা
-    সত্ত্বেও ডিসকানেক্ট করে" — when the feed gets stuck in a long backoff
-    (up to 120s), there was no way to force an immediate reconnect without
-    pushing a new token. This endpoint resets the feed state and restarts
-    the manager task if it's dead.
-
-    No admin key required — this is a safe operation (doesn't change tokens).
-    """
+    """Force an immediate Quotex reconnect without changing the token."""
     try:
         # Reset feed state
         feed._connected = False
@@ -816,86 +429,36 @@ async def force_reconnect():
         else:
             msg = "Manager task alive — reconnect triggered (will pick up within 60s)"
 
-        return {
-            "ok": True,
-            "message": msg,
-            "timestamp": time.time(),
-            "next_step": "Wait 10-30 seconds, then check /api/debug",
-        }
+        return {"ok": True, "message": msg, "timestamp": time.time(), "next_step": "Wait 10-30 seconds, then check /api/debug"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
-
 
 @app.get("/api/reconnect")
 async def force_reconnect_get():
     """GET version of /api/reconnect for browser-friendly access."""
     return await force_reconnect()
 
-
 @app.get("/api/pairs")
 async def get_pairs():
-    """Return both Real Market and OTC Market pair lists.
-
-    Returns:
-        {
-          "real_pairs": [...],          # real-market pairs (no _otc suffix), payout >= 70%
-          "otc_pairs":  [...],          # OTC pairs (_otc suffix), payout >= 85%
-          "payout_floor_real": 70,
-          "payout_floor_otc":  85,
-          "pairs":        [...],        # BACKWARD COMPAT: combined list
-          "payout_floor": 85,
-        }
-    """
+    """Return both Real Market and OTC Market pair lists."""
     return feed.available_pairs()
-
 
 @app.get("/api/pairs/{category}")
 async def get_pairs_by_category(category: str):
-    """Return only the pair list for the requested category.
-
-    Args:
-        category: "real" or "otc" (case-insensitive)
-
-    Returns:
-        {"category": "real", "pairs": [...], "payout_floor": 70}
-        or 404 if category is unknown.
-
-    NOTE (USER REQUIREMENT 2026-08-03): the "alltime_otc" category has been
-    removed. Every OTC pair is now treated uniformly — they're all always-on
-    and bypass the payout floor. Use "otc" to get the full OTC pair list.
-    """
+    """Return only the pair list for the requested category."""
     cat = category.lower().strip()
     all_pairs = feed.available_pairs()
     if cat == "real":
-        return {
-            "category": "real",
-            "pairs": all_pairs["real_pairs"],
-            "payout_floor": all_pairs["payout_floor_real"],
-        }
+        return {"category": "real", "pairs": all_pairs["real_pairs"], "payout_floor": all_pairs["payout_floor_real"]}
     if cat == "otc":
-        return {
-            "category": "otc",
-            "pairs": all_pairs["otc_pairs"],
-            "payout_floor": all_pairs["payout_floor_otc"],
-        }
+        return {"category": "otc", "pairs": all_pairs["otc_pairs"], "payout_floor": all_pairs["payout_floor_otc"]}
     raise HTTPException(
         status_code=404,
         detail=f"unknown category {category!r}; expected 'real' or 'otc'")
 
-
-# ─── USER FEATURE (2026-08-03): DB download + export endpoints ───────────
-# Allows the user to download the full signals.db file or export all
-# tables as JSON for offline analysis. Both endpoints are open (no
-# ADMIN_KEY) so the user can fetch them from a browser.
 @app.get("/api/db-download")
 async def download_db():
-    """Download the raw signals.db SQLite file.
-
-    Returns the binary .db file with a Content-Disposition header so
-    browsers save it as 'signals_<timestamp>.db'. The file is read
-    directly from DB_PATH (defaults to /app/data/signals.db on Railway,
-    or ./signals.db locally).
-    """
+    """Download the raw signals.db SQLite file."""
     import os
     import shutil
     import sqlite3
@@ -948,14 +511,8 @@ async def download_db():
     return Response(
         content=data,
         media_type="application/octet-stream",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Length": str(len(data)),
-            "X-DB-Path": found_path,
-            "X-DB-Size": str(len(data)),
-        },
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Content-Length": str(len(data)), "X-DB-Path": found_path, "X-DB-Size": str(len(data))},
     )
-
 
 @app.get("/api/db-export")
 async def export_db_json():
@@ -1017,9 +574,7 @@ async def export_db_json():
         return Response(
             content=_json.dumps(export, indent=2, default=str),
             media_type="application/json",
-            headers={
-                "Content-Disposition": f'attachment; filename="signals_export_{ts}.json"',
-            },
+            headers={"Content-Disposition": f'attachment; filename="signals_export_{ts}.json"'},
         )
     except HTTPException:
         raise
@@ -1034,14 +589,9 @@ async def export_db_json():
             status_code=500,
         )
 
-
 @app.get("/api/db-info")
 async def db_info():
-    """Return DB file size, table list, and row counts (no row data).
-
-    Useful as a quick 'what's in the DB?' check before downloading
-    the full file via /api/db-download or /api/db-export.
-    """
+    """Return DB file size, table list, and row counts (no row data)."""
     import sqlite3
     import time as _time_mod
     import traceback
@@ -1109,10 +659,7 @@ async def db_info():
             "last_modified": _time_mod.strftime("%Y-%m-%dT%H:%M:%SZ", _time_mod.gmtime(mtime)),
             "tables": table_info,
             "total_rows": sum(t["rows"] for t in table_info if t["rows"] > 0),
-            "download_endpoints": {
-                "binary_db": "/api/db-download",
-                "json_export": "/api/db-export",
-            },
+            "download_endpoints": {"binary_db": "/api/db-download", "json_export": "/api/db-export"},
         })
     except Exception as exc:
         result["error"] = str(exc)
@@ -1120,14 +667,9 @@ async def db_info():
 
     return result
 
-
 @app.get("/api/status")
 async def status():
-    return {
-        "connected": feed._connected,
-        "streams": feed.stream_status(),
-    }
-
+    return {"connected": feed._connected, "streams": feed.stream_status()}
 
 @app.get("/api/history/{asset}/{period}")
 async def get_history(asset: str, period: int):
@@ -1136,20 +678,9 @@ async def get_history(asset: str, period: int):
         return snap
     return {"candles": [], "prediction": None}
 
-
 @app.get("/api/debug")
 async def debug_info(request: Request):
-    """Diagnostic endpoint — shows connection state, stream status, errors.
-    Visit /api/debug in browser to see why candles aren't coming.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-60): this endpoint exposes env-var
-      presence, signal delays and payout floors — information leak. Now
-      gated behind ADMIN_KEY (same shared-secret as /api/set-token) when
-      that env var is set. Backwards-compatible: with no ADMIN_KEY set,
-      the endpoint stays open for personal deployments.
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-49): removed the local
-      `import time as _time` — `time` is now imported at module top.
-    """
+    """Diagnostic endpoint — shows connection state, stream status, errors."""
     _check_admin_key(request.headers.get("X-Admin-Key"))
     debug = {
         "timestamp": time.time(),
@@ -1171,26 +702,11 @@ async def debug_info(request: Request):
             "SIGNAL_DELAY_SEC": os.environ.get("SIGNAL_DELAY_SEC", "3.0"),
         },
     }
-    # Stream details
-    # FIX (CANDLE-STUCK-FIX, 2026-07-23): merge streams from BOTH the real
-    # feed AND the sim delegate (if active). Previously when the real feed
-    # fell back to sim mode, /api/debug showed streams: {} because it only
-    # read feed._streams (real feed's empty dict). This made it impossible
-    # to diagnose why candles weren't updating — the user saw 0 streams
-    # even though the sim delegate had active streams producing ticks.
     def _collect_streams(feed_obj):
         out = {}
         if hasattr(feed_obj, '_streams'):
             for key, s in feed_obj._streams.items():
-                out[f"{key[0]}@{key[1]}s"] = {
-                    "candles_count": len(s.candles) if hasattr(s, 'candles') else 0,
-                    "ticks_count": len(s.ticks) if hasattr(s, 'ticks') else 0,
-                    "last_real_tick_wall": getattr(s, 'last_real_tick_wall', 0),
-                    "always_on": getattr(s, 'always_on', False),
-                    "interested_cids": list(getattr(s, 'interested_cids', set())),
-                    "sub_started": getattr(s, 'sub_started', False),
-                    "source": "real_feed",
-                }
+                out[f"{key[0]}@{key[1]}s"] = {"candles_count": len(s.candles) if hasattr(s, 'candles') else 0, "ticks_count": len(s.ticks) if hasattr(s, 'ticks') else 0, "last_real_tick_wall": getattr(s, 'last_real_tick_wall', 0), "always_on": getattr(s, 'always_on', False), "interested_cids": list(getattr(s, 'interested_cids', set())), "sub_started": getattr(s, 'sub_started', False), "source": "real_feed"}
         return out
 
     debug["streams"] = _collect_streams(feed)
@@ -1212,32 +728,9 @@ async def debug_info(request: Request):
         debug["last_error"] = feed._last_error
     return debug
 
-
 @app.get("/api/stats")
 async def module_stats():
-    """Per-module performance report from signal_log.
-    Visit /api/stats in browser to see which modules are performing well.
-
-    FIX (BUG-3, 2026-07-18): previously had a local MODULE_NAMES dict that
-    was missing `trend_follow` (the Real engine's 6th module), silently
-    undercounting Real-engine signals in the per-module report. Now uses
-    the shared `core.stats.compute_module_stats()` which sources module
-    names from `core.constants.MODULE_NAMES` — the single source of truth.
-
-    FIX (BUG-I, 2026-07-20): also reports DB-adaptation status — which
-    pairs have enough graded samples for adaptation, and what the current
-    learned weights are.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-22, F-13-61, F-13-62, F-13-63):
-      The adaptation loop previously called N synchronous DB queries per
-      pair inside an async handler, blocking the event loop. The entire
-      stats computation now runs in `asyncio.to_thread`. Also: dedup the
-      asset list (an asset could appear in both OTC and Real configs);
-      on exception, log the full traceback server-side and return a
-      generic `adaptation_error: "internal error"` instead of leaking
-      the raw Python exception string (which includes module paths and
-      line numbers — information leak).
-    """
+    """Per-module performance report from signal_log."""
     def _compute_stats_with_adaptation():
         from core.stats import compute_module_stats
         stats = compute_module_stats(_db.DB_PATH)
@@ -1245,7 +738,6 @@ async def module_stats():
             from engines.otc.config import weight_adapter as _otc_adapter
             from engines.real.config import weight_adapter as _real_adapter
             adaptation_status = {}
-            # FIX (F-13-62): dedup assets that may appear in both adapters.
             seen = set()
             assets = []
             for a in (list(_otc_adapter.pair_configs.keys())
@@ -1271,14 +763,11 @@ async def module_stats():
                 }
             stats["adaptation_status"] = adaptation_status
         except Exception as e:
-            # FIX (F-13-61): log full exception server-side; return generic
-            # message to client so module paths / line numbers aren't leaked.
             _logger.exception("adaptation status computation failed")
             stats["adaptation_error"] = "internal error"
         return stats
 
     return await asyncio.to_thread(_compute_stats_with_adaptation)
-
 
 @app.get("/api/brain")
 async def brain_summary():
@@ -1286,57 +775,31 @@ async def brain_summary():
     from core.brain import get_brain_summary
     return get_brain_summary()
 
-
 @app.get("/api/brain/insights")
 async def brain_insights(limit: int = 50):
     """Get auto-generated insights and recommendations."""
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-21): clamp `limit` to [1, 500] so
-    #   `?limit=10000000` can't allocate unbounded memory.
     safe_limit = max(1, min(int(limit), 500))
     from core.brain import get_insights
     return {"insights": get_insights(active_only=True, limit=safe_limit)}
 
-
 @app.get("/api/brain/learning")
 async def brain_learning(asset: Optional[str] = None, limit: int = 100):
     """Get learned weights per pair per module."""
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-21, F-13-41): clamp `limit` to
-    #   [1, 500] and correct `asset` type annotation from `str = None` to
-    #   `Optional[str] = None` so the generated OpenAPI schema is accurate.
     safe_limit = max(1, min(int(limit), 500))
     from core.brain import get_learning
     return {"learning": get_learning(asset=asset, limit=safe_limit)}
 
-
 @app.get("/api/brain/analyze")
 async def brain_analyze(request: Request):
-    """Trigger brain analysis manually.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-2): added ADMIN_KEY gate (same as
-      /api/set-token) and an `asyncio.Lock` so two concurrent calls can't
-      double-recompute. Endpoint signature & HTTP method unchanged for
-      clients without ADMIN_KEY — backwards-compatible. (A-07 noted these
-      endpoints should ideally be POST mutations, but the original route
-      was GET and changing it would break existing clients — left as-is.)
-    """
+    """Trigger brain analysis manually."""
     _check_admin_key(request.headers.get("X-Admin-Key"))
     from core.brain import analyze_and_learn
     async with _BRAIN_ANALYZE_LOCK:
         await asyncio.to_thread(analyze_and_learn)
     return {"status": "analysis complete"}
 
-
-# ── Pattern endpoints (BACKTEST-2026-07-21) ────────────────────────────────
-
 def _ensure_patterns_init():
-    """Lazily init patterns once at module level.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-64): `/api/patterns` and `/api/patterns/{asset}`
-      both used to call `init_patterns()` defensively on every request. Now
-      a module-level flag (`_PATTERNS_INITIALIZED`, set in lifespan) tracks
-      whether startup init succeeded; if not yet set, we re-attempt here so
-      the endpoints still work after a failed startup (backwards compat).
-    """
+    """Lazily init patterns once at module level."""
     global _PATTERNS_INITIALIZED
     if _PATTERNS_INITIALIZED:
         return
@@ -1347,14 +810,12 @@ def _ensure_patterns_init():
     except Exception as _e:
         print(f"[server] lazy pattern init failed (non-fatal): {_e}")
 
-
 @app.get("/api/patterns")
 async def patterns_summary():
     """Summary of all stored time/session/regime patterns per pair."""
     _ensure_patterns_init()
     from core.time_patterns import get_pattern_summary
     return {"patterns": get_pattern_summary()}
-
 
 @app.get("/api/patterns/{asset}")
 async def patterns_for_asset(asset: str):
@@ -1363,33 +824,9 @@ async def patterns_for_asset(asset: str):
     from core.time_patterns import get_asset_patterns_detail
     return {"asset": asset, "patterns": get_asset_patterns_detail(asset)}
 
-
 @app.get("/api/module-analysis")
 async def module_analysis(min_samples: int = 30):
-    """Deep per-module per-pair per-direction analysis from module_votes table.
-
-    FIX (DEEP_v2 2026-07-30): new endpoint that queries the module_votes
-    table (added in this version) to provide queryable per-module accuracy
-    without requiring regex parsing of reasons JSON.
-
-    FIX (MODULE-TRACKING-2026-08-05): rows now carry a 95% Wilson interval and
-    a `reliable` flag, `min_samples` defaults to 30 (the per-pair query used a
-    bare `HAVING total >= 3`), and results sort by the interval's LOWER bound
-    instead of the raw `win_pct`. This is the same correction already applied
-    to /api/theory-analysis — it had been missed here, so the dashboard's
-    Modules-tab per-pair drill-down still ranked by point estimate and floated
-    tiny samples to the top: USDCHF_otc showed "62%" off 32/52, whose Wilson
-    lower bound is ~48% — below the ~51.8% OTC break-even, i.e. no evidence of
-    an edge at all. Splitting one ~50% engine across 19 pairs guarantees a few
-    such buckets by chance alone.
-
-    Returns:
-    - Per-module global accuracy (all pairs combined)
-    - Per-pair per-module accuracy
-    - Per-pair per-module per-direction (CALL/PUT) accuracy
-    - Best/worst modules per pair
-    - Recommended calibration actions
-    """
+    """Deep per-module per-pair per-direction analysis from module_votes table."""
     def _decorate(rows):
         """Attach Wilson bounds + reliability, then sort by the lower bound."""
         out = []
@@ -1399,15 +836,6 @@ async def module_analysis(min_samples: int = 30):
             lo, hi = _wilson_bounds(d.get("correct") or 0, total)
             d["wilson_lo"] = lo
             d["wilson_hi"] = hi
-            # Distinguishable from a coin flip at 95% confidence AND backed by
-            # enough samples to be worth acting on. The sample-count condition
-            # matters: `global_modules` is deliberately unfiltered (so every
-            # module stays visible even before it has data), which meant a
-            # module sitting at 13/17 produced an interval excluding 50% and
-            # got flagged reliable off 17 votes — the same false positive that
-            # previously had candle_reaction boosted on n=7. An interval can
-            # exclude 50% on a tiny sample purely by chance; requiring
-            # min_samples as well stops that from ever reading as evidence.
             d["reliable"] = total >= min_samples and (lo > 50.0 or hi < 50.0)
             out.append(d)
         out.sort(key=lambda x: x["wilson_lo"], reverse=True)
@@ -1472,34 +900,13 @@ async def module_analysis(min_samples: int = 30):
             """)
             pair_summary = [dict(r) for r in cur.fetchall()]
 
-        return {
-            "global_modules": global_modules,
-            "pair_modules": pair_modules,
-            "pair_module_directions": pair_module_dirs,
-            "pair_summary": pair_summary,
-            "total_vote_records": sum(m['total'] for m in global_modules),
-            "min_samples": min_samples,
-            # Break-even at a 93% OTC payout. A win_pct above this means
-            # nothing unless wilson_lo also clears it.
-            "breakeven_pct": 51.8,
-        }
+        return {"global_modules": global_modules, "pair_modules": pair_modules, "pair_module_directions": pair_module_dirs, "pair_summary": pair_summary, "total_vote_records": sum(m['total'] for m in global_modules), "min_samples": min_samples, "breakeven_pct": 51.8}
     except Exception as e:
         _logger.exception("module analysis failed")
         return {"error": str(e), "hint": "module_votes table may not exist yet — new table added in DEEP_v2"}
 
-
-# ─── NEW (ALWAYS-SIGNAL-2026-08-03): per-THEORY analysis endpoint ──────────
-# User requirement: "কোনটার ভিতরে কি কি কতগুলো করে theory আছে?
-# সেই theory গুলো কেমন পারফেমস করছে? কোন পেয়ার এ কেমন?"
 def _wilson_bounds(correct: int, total: int, z: float = 1.96):
-    """95% Wilson score interval for a win rate, returned as (lo, hi) percent.
-
-    FIX (THEORY-TRACKING-2026-08-05): every theory-pruning round in this repo
-    was justified by a bare `win_pct` on a handful of samples, and each round
-    picked a different "best" set because a bare win_pct on n=13 carries a
-    confidence interval roughly +/-27 points. Shipping the interval alongside
-    the point estimate makes that impossible to overlook.
-    """
+    """95% Wilson score interval for a win rate, returned as (lo, hi) percent."""
     if total <= 0:
         return (0.0, 0.0)
     p = correct / total
@@ -1509,30 +916,9 @@ def _wilson_bounds(correct: int, total: int, z: float = 1.96):
     return (round(100 * (centre - margin) / denom, 1),
             round(100 * (centre + margin) / denom, 1))
 
-
 @app.get("/api/theory-analysis")
 async def theory_analysis(period: int = 60, min_samples: int = 30):
-    """Per-theory win-rate analysis from the theory_votes table.
-
-    Returns:
-      global_theories: [{module_name, theory_name, theory_group, correct,
-                         total, win_pct, wilson_lo, wilson_hi, reliable}]
-      pair_theories:   same shape, plus `asset`
-      total_theory_records: int
-
-    FIX (THEORY-TRACKING-2026-08-05): `min_samples` default raised from 3 to
-    30, and rows now carry a 95% Wilson interval plus a `reliable` flag
-    (True only when the interval excludes 50%, i.e. the theory is
-    distinguishable from a coin flip at all). Sorted by `wilson_lo`, not
-    `win_pct` — sorting by the point estimate put whatever theory had gone
-    3-for-3 at the top of the list, which is how the module docstrings ended
-    up claiming 58-71% win rates for signals that measure 48-52% over tens of
-    thousands of samples.
-
-    A 95% interval that spans 50% means "no evidence either way" — not
-    "promising". Break-even for a 93%-payout OTC pair is 51.8%, so a theory
-    is only actionable when `wilson_lo` clears that.
-    """
+    """Per-theory win-rate analysis from the theory_votes table."""
     try:
         conn = _db._conn()
         try:
@@ -1563,9 +949,6 @@ async def theory_analysis(period: int = 60, min_samples: int = 30):
                     # Distinguishable from a coin flip at 95% confidence.
                     "reliable": lo > 50.0 or hi < 50.0,
                 })
-            # Rank by the lower bound: a theory that is 3-for-3 sorts below one
-            # that is 1100-for-2000, which is the correct ordering for deciding
-            # what to keep.
             global_theories.sort(key=lambda t: t["wilson_lo"], reverse=True)
 
             # Per-pair per-theory accuracy
@@ -1598,46 +981,18 @@ async def theory_analysis(period: int = 60, min_samples: int = 30):
 
             total = conn.execute("SELECT COUNT(*) as n FROM theory_votes WHERE period=?", (period,)).fetchone()
 
-            return {
-                "global_theories": global_theories,
-                "pair_theories": pair_theories,
-                "total_theory_records": total["n"] if total else 0,
-            }
+            return {"global_theories": global_theories, "pair_theories": pair_theories, "total_theory_records": total["n"] if total else 0}
         finally:
             conn.close()
     except Exception as e:
         _logger.exception("theory analysis failed")
         return {"error": str(e), "hint": "theory_votes table may not exist yet — run db.init()"}
 
-
-# ─── NEW (SIGNAL-QUALITY-2026-08-04): quality-tier win-rate endpoint ──────
-# Every signal always fires (always-signal mode), but each one now also
-# carries an honest signal_quality label (HIGH/MEDIUM/LOW/NONE — see
-# engines/base/blender.py::_compute_signal_quality) that does NOT depend
-# on the CONSENSUS_STRICT/MIN_GROUPS env vars. This endpoint answers the
-# question those env-var flips couldn't settle: does the label actually
-# predict win rate? MIN_SAMPLES_FOR_QUALITY_DECISION guards against
-# repeating the same day's small-sample thrashing (see git history
-# 2026-08-04, e.g. a theory going from 75% win at n=8 to 38% at n=32) —
-# treat any tier's win_pct as provisional until it clears the minimum.
 MIN_SAMPLES_FOR_QUALITY_DECISION = 150
-
 
 @app.get("/api/quality-analysis")
 async def quality_analysis(period: int = 60, hours: int = 0):
-    """Win-rate broken down by signal_quality tier (HIGH/MEDIUM/LOW/NONE).
-
-    Args:
-      period: candle period in seconds (default 60).
-      hours: if > 0, restrict to signals logged in the last N hours
-        (ctime >= now - hours*3600). 0 = all history.
-
-    Returns:
-      tiers: [{signal_quality, correct, wrong, total, win_pct, reliable}]
-        `reliable` is False until total >= MIN_SAMPLES_FOR_QUALITY_DECISION —
-        surfaced explicitly so the number isn't mistaken for a settled fact.
-      min_samples_required: the threshold used for `reliable`.
-    """
+    """Win-rate broken down by signal_quality tier (HIGH/MEDIUM/LOW/NONE)."""
     try:
         conn = _db._conn()
         try:
@@ -1673,31 +1028,16 @@ async def quality_analysis(period: int = 60, hours: int = 0):
                     "reliable": total >= MIN_SAMPLES_FOR_QUALITY_DECISION,
                 })
 
-            return {
-                "tiers": tiers,
-                "min_samples_required": MIN_SAMPLES_FOR_QUALITY_DECISION,
-            }
+            return {"tiers": tiers, "min_samples_required": MIN_SAMPLES_FOR_QUALITY_DECISION}
         finally:
             conn.close()
     except Exception as e:
         _logger.exception("quality analysis failed")
         return {"error": str(e), "hint": "signal_quality column may not exist yet — run db.init()"}
 
-
 @app.get("/api/pair-deep-stats/{asset}")
 async def pair_deep_stats(asset: str, period: int = 60):
-    """Deep statistics for a specific pair — all the data needed for calibration.
-
-    Returns:
-    - Overall win rate
-    - Per-module accuracy
-    - Per-module per-direction accuracy
-    - Regime distribution
-    - Tag distribution
-    - Confidence distribution
-    - Move magnitude distribution
-    - Time-of-day patterns
-    """
+    """Deep statistics for a specific pair — all the data needed for calibration."""
     try:
         with _db._read_cursor() as cur:
             # Overall
@@ -1741,15 +1081,6 @@ async def pair_deep_stats(asset: str, period: int = 60):
             """, (asset, period))
             tag_data = [dict(r) for r in cur.fetchall()]
 
-            # Confidence distribution.
-            # FIX (WALK-FORWARD-2026-08-05): re-bucketed. `confidence` is now a
-            # calibrated expected-win-percentage (see blender._calibrated_
-            # confidence), so it lives in a narrow 44-56 band instead of the old
-            # 10-60 spread. The previous buckets ('<20', '20-39', '40-59',
-            # '60-74', '75+') dumped essentially every signal into '40-59',
-            # making this endpoint useless for calibration checking. These
-            # buckets straddle the break-even range that actually matters:
-            # 51.8% at 93% payout, 56.8% at 76%, 71.4% at 40%.
             cur.execute("""
                 SELECT
                     CASE
@@ -1786,39 +1117,14 @@ async def pair_deep_stats(asset: str, period: int = 60):
         total = correct + wrong
         win_pct = round(100.0 * correct / total, 1) if total > 0 else 0
 
-        return {
-            "asset": asset,
-            "period": period,
-            "total_signals": total,
-            "correct": correct,
-            "wrong": wrong,
-            "win_pct": win_pct,
-            "module_votes": module_votes,
-            "regime_distribution": regime_data,
-            "tag_distribution": tag_data,
-            "confidence_distribution": conf_data,
-            "strength_distribution": strength_data,
-            "hourly_patterns": hourly_patterns,
-        }
+        return {"asset": asset, "period": period, "total_signals": total, "correct": correct, "wrong": wrong, "win_pct": win_pct, "module_votes": module_votes, "regime_distribution": regime_data, "tag_distribution": tag_data, "confidence_distribution": conf_data, "strength_distribution": strength_data, "hourly_patterns": hourly_patterns}
     except Exception as e:
         _logger.exception("pair deep stats failed")
         return {"error": str(e)}
 
-
 @app.get("/api/time-patterns")
 async def time_patterns_all():
-    """Time-of-day patterns for ALL pairs — best/worst hours per pair.
-
-    User insight: "কিছু পেয়ার 70% উইন রেট পায়, কিন্তু দিনের ভিন্ন সময়ে 30%
-    এর নিচে পায়। আবার খারাপ পেয়ার ভালো সময়ে 60% পায়।"
-
-    Returns per-pair:
-    - Best hour (highest win rate, min 5 samples)
-    - Worst hour (lowest win rate, min 5 samples)
-    - Time volatility (best - worst spread)
-    - All 24 hours data
-    - Recommended trading hours
-    """
+    """Time-of-day patterns for ALL pairs — best/worst hours per pair."""
     try:
         with _db._read_cursor() as cur:
             cur.execute("""
@@ -1872,18 +1178,8 @@ async def time_patterns_all():
                 'pair': pair,
                 'overall_win_pct': overall_wr,
                 'total_signals': total_total,
-                'best_hour': {
-                    'hour': best['hour_utc'],
-                    'win_pct': best['win_pct'],
-                    'samples': best['total_signals'],
-                    'session': best['session'],
-                },
-                'worst_hour': {
-                    'hour': worst['hour_utc'],
-                    'win_pct': worst['win_pct'],
-                    'samples': worst['total_signals'],
-                    'session': worst['session'],
-                },
+                'best_hour': {"hour": best['hour_utc'], "win_pct": best['win_pct'], "samples": best['total_signals'], "session": best['session']},
+                'worst_hour': {"hour": worst['hour_utc'], "win_pct": worst['win_pct'], "samples": worst['total_signals'], "session": worst['session']},
                 'spread': round(spread, 1),
                 'volatility': volatility,
                 'recommended_hours': [
@@ -1897,14 +1193,10 @@ async def time_patterns_all():
                 'all_hours': hours,
             })
 
-        return {
-            "total_pairs": len(summary),
-            "pairs": summary,
-        }
+        return {"total_pairs": len(summary), "pairs": summary}
     except Exception as e:
         _logger.exception("time patterns failed")
         return {"error": str(e)}
-
 
 @app.get("/api/time-patterns/{asset}")
 async def time_patterns_for_pair(asset: str):
@@ -1917,29 +1209,14 @@ async def time_patterns_for_pair(asset: str):
         from datetime import datetime, timezone
         current_hour = datetime.now(tz=timezone.utc).hour
         adjustment = _db.get_time_confidence_adjustment(asset, current_hour)
-        return {
-            "asset": asset,
-            "current_hour_utc": current_hour,
-            "current_adjustment": adjustment,
-            "hourly_patterns": patterns,
-        }
+        return {"asset": asset, "current_hour_utc": current_hour, "current_adjustment": adjustment, "hourly_patterns": patterns}
     except Exception as e:
         _logger.exception("time patterns for pair failed")
         return {"error": str(e)}
 
-
 @app.get("/api/quotex-algo-detect")
 async def quotex_algo_detect():
-    """Detect Quotex algorithm patterns from time-based data.
-
-    User insight: "কোয়েটেক্স এর এলগরিদম ডিটেক্ট করা সহজ হবে"
-
-    Detects:
-    - Trap hours (pairs that consistently fail at specific hours)
-    - Boost hours (pairs that consistently win at specific hours)
-    - Direction bias (Quotex favoring CALL or PUT at specific hours)
-    - Reversal patterns (pairs that reverse direction at specific times)
-    """
+    """Detect Quotex algorithm patterns from time-based data."""
     try:
         with _db._read_cursor() as cur:
             # Get all hourly patterns with enough data
@@ -1999,38 +1276,14 @@ async def quotex_algo_detect():
                         'description': f"{p['asset']} at {p['hour_utc']:02d}:00 UTC favors {favored} (CALL {call_wr:.0f}% vs PUT {put_wr:.0f}%)",
                     })
 
-        return {
-            "total_patterns_analyzed": len(all_patterns),
-            "trap_hours": sorted(trap_hours, key=lambda x: x['win_pct']),
-            "boost_hours": sorted(boost_hours, key=lambda x: -x['win_pct']),
-            "direction_bias": sorted(direction_bias, key=lambda x: -x['difference']),
-            "summary": {
-                "trap_hours_count": len(trap_hours),
-                "boost_hours_count": len(boost_hours),
-                "direction_bias_count": len(direction_bias),
-                "insight": "Quotex algorithm appears to manipulate specific pairs at specific hours. Avoid trap hours, trade during boost hours.",
-            }
-        }
+        return {"total_patterns_analyzed": len(all_patterns), "trap_hours": sorted(trap_hours, key=lambda x: x['win_pct']), "boost_hours": sorted(boost_hours, key=lambda x: -x['win_pct']), "direction_bias": sorted(direction_bias, key=lambda x: -x['difference']), "summary": {"trap_hours_count": len(trap_hours), "boost_hours_count": len(boost_hours), "direction_bias_count": len(direction_bias), "insight": "Quotex algorithm appears to manipulate specific pairs at specific hours. Avoid trap hours, trade during boost hours."}}
     except Exception as e:
         _logger.exception("quotex algo detect failed")
         return {"error": str(e)}
 
-
 @app.get("/api/streaming-status")
 async def streaming_status():
-    """Streaming architecture status — shows tier1/tier2/tier3 breakdown.
-
-    Explains why not all pairs can stream simultaneously and what the
-    smart streaming system does about it.
-
-    Quotex limits (discovered from production):
-    - ~15 concurrent subscriptions before silent tick drops
-    - ~5-10 ticks/sec per pair before rate-limiting
-    - 25s Engine.IO ping interval (must send keepalive every 15s)
-    - Anti-abuse: 76 reconnect attempts/20min → account ban
-
-    Solution: 3-tier smart streaming (see core/smart_streaming.py)
-    """
+    """Streaming architecture status — shows tier1/tier2/tier3 breakdown."""
     import time as _time
     now = _time.time()
     streams = getattr(feed, '_streams', {})
@@ -2055,42 +1308,23 @@ async def streaming_status():
         "stale_streams": stale_streams,
         "max_always_on": int(os.environ.get("MAX_ALWAYS_ON_STREAMS", "15")),
         "total_configured_pairs": len(getattr(feed, '_pairs_list', [])),
-        "quotex_limits": {
-            "concurrent_subscriptions": "~15 (silent drops above this)",
-            "tick_rate_per_pair": "~5-10/sec",
-            "ping_interval": "25s",
-            "anti_abuse_threshold": "76 attempts/20min → ban",
-        },
+        "quotex_limits": {"concurrent_subscriptions": "~15 (silent drops above this)", "tick_rate_per_pair": "~5-10/sec", "ping_interval": "25s", "anti_abuse_threshold": "76 attempts/20min → ban"},
         "recommendation": (
-            "All pairs CANNOT stream simultaneously — Quotex rate-limits. "
-            "Use smart streaming (3-tier rotation) for smooth appearance. "
-            "See /api/streaming-status for details."
+            "All pairs CANNOT stream simultaneously — Quotex rate-limits. " "Use smart streaming (3-tier rotation) for smooth appearance. " "See /api/streaming-status for details."
         ),
         "smart_streaming_available": True,
         "note": "core/smart_streaming.py implemented but not yet wired into feed.py",
     }
 
-
 @app.post("/api/patterns/refresh")
 async def patterns_refresh(request: Request):
-    """Recompute ALL patterns from signal_log. Call after backtest or manually.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-2, F-13-65): ADMIN_KEY gate +
-      `asyncio.Lock` so concurrent refresh calls can't double-recompute.
-      `recompute_from_signal_log` now called with `min_samples=3` for
-      consistency with the startup call at lifespan.
-    """
+    """Recompute ALL patterns from signal_log. Call after backtest or manually."""
     _check_admin_key(request.headers.get("X-Admin-Key"))
     _ensure_patterns_init()
     from core.time_patterns import recompute_from_signal_log
     async with _PATTERNS_REFRESH_LOCK:
-        # FIX (F-13-65): match startup's `min_samples=3` so the refresh
-        # doesn't produce a different pattern set than the boot-time recompute.
         summary = await asyncio.to_thread(recompute_from_signal_log, 3)
     return {"status": "refreshed", "summary": summary}
-
-
-# ── Algorithm-change endpoints (DATA-FLOW-2026-07-22) ──────────────────────
 
 @app.get("/api/strategies")
 async def get_strategies():
@@ -2098,18 +1332,11 @@ async def get_strategies():
     from core.algorithm_strategy import get_all_strategies
     return {"strategies": get_all_strategies()}
 
-
 @app.get("/api/current-strategy")
 async def get_current_strategy(asset: Optional[str] = None):
-    """Get the current trading strategy for one or all assets.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-41): correct `asset` type annotation
-      from `str = None` to `Optional[str] = None` so the generated OpenAPI
-      schema marks the param as optional instead of required.
-    """
+    """Get the current trading strategy for one or all assets."""
     from core.algorithm_strategy import get_asset_strategy_summary
     return get_asset_strategy_summary(asset)
-
 
 @app.get("/api/auto-tune")
 async def auto_tune_report():
@@ -2117,29 +1344,18 @@ async def auto_tune_report():
     from core.auto_tune import get_tuning_report
     return get_tuning_report()
 
-
 @app.post("/api/auto-tune/apply")
 async def auto_tune_apply(request: Request):
-    """Manually trigger auto-tune weight recalculation.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-2): ADMIN_KEY gate + `asyncio.Lock`
-      so two concurrent apply calls can't double-write weights.
-    """
+    """Manually trigger auto-tune weight recalculation."""
     _check_admin_key(request.headers.get("X-Admin-Key"))
     from core.auto_tune import apply_tuned_weights_to_engines
     async with _AUTO_TUNE_APPLY_LOCK:
         result = await asyncio.to_thread(apply_tuned_weights_to_engines)
     return {"status": "applied", "weights": result}
 
-
 @app.get("/api/algorithm-changes")
 async def algorithm_changes(hours: int = 24, limit: int = 100):
-    """Recent algorithm changes across all pairs (default: last 24h).
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-21, F-13-66): clamp `hours` to
-      [1, 24*30] and `limit` to [1, 500] so negative hours / huge limits
-      can't allocate unbounded memory.
-    """
+    """Recent algorithm changes across all pairs (default: last 24h)."""
     safe_hours = max(1, min(int(hours), 24 * 30))
     safe_limit = max(1, min(int(limit), 500))
     from core.algorithm_monitor import get_recent_changes, get_change_summary
@@ -2147,14 +1363,9 @@ async def algorithm_changes(hours: int = 24, limit: int = 100):
     summary = get_change_summary(asset=None, hours=safe_hours)
     return {"changes": changes, "summary": summary}
 
-
 @app.get("/api/algorithm-changes/{asset}")
 async def algorithm_changes_for_asset(asset: str, hours: int = 24, limit: int = 50):
-    """Recent algorithm changes for one pair.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-21, F-13-66): same input clamping as
-      the all-assets endpoint above.
-    """
+    """Recent algorithm changes for one pair."""
     safe_hours = max(1, min(int(hours), 24 * 30))
     safe_limit = max(1, min(int(limit), 500))
     from core.algorithm_monitor import get_recent_changes, get_current_state
@@ -2162,40 +1373,20 @@ async def algorithm_changes_for_asset(asset: str, hours: int = 24, limit: int = 
     state = get_current_state(asset)
     return {"asset": asset, "changes": changes, "current_state": state}
 
-
 @app.get("/api/signals/{asset}/{period}")
 async def get_signals(asset: str, period: int, limit: int = 100, before_ctime: Optional[int] = None):
-    # FIX (AUDIT-CRITICAL #002, 2026-07-21): default limit raised from 50
-    # to 100 to match the frontend's HISTORY_MAX=100. Also accepts
-    # `before_ctime` for pagination (the frontend's "Load more" button
-    # uses this to fetch older signals on demand).
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-23, F-13-40): wrap the synchronous
-    #   SQLite call in `asyncio.to_thread` so a 500-row cold-cache read
-    #   doesn't block every other HTTP request. Also correct
-    #   `before_ctime` type annotation from `int = None` to
-    #   `Optional[int] = None` so the OpenAPI schema is accurate.
     safe_limit = max(1, min(int(limit), 500))
     signals = await asyncio.to_thread(
         _db.get_recent_signals, asset, period, safe_limit, before_ctime)
     return {"signals": signals}
 
-
 @app.get("/api/signals/{asset}/{period}/{ctime}")
 async def get_signal_detail(asset: str, period: int, ctime: int):
-    """Return full detail for a single signal (win/loss reason, regime, etc.).
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-24): wrap the synchronous SQLite call
-      in `asyncio.to_thread` to match the WS-side fix from AUDIT-CORE #7.
-    """
+    """Return full detail for a single signal (win/loss reason, regime, etc.)."""
     detail = await asyncio.to_thread(_db.get_signal_detail, asset, period, ctime)
     if detail:
         return detail
     raise HTTPException(status_code=404, detail="not found")
-
-
-# ─── NEW (ALWAYS-SIGNAL-2026-08-03): signal history delete/clear endpoints ──
-# User requirement: "আমাকে অ্যাপ এর মধ্যে থেকে ডেটা সিগন্যাল হিস্টোরি ডিলিট
-# করার সিস্টেম যোগ করতে হবে"
 
 @app.delete("/api/signals/{asset}/{period}/{ctime}")
 async def delete_signal_endpoint(asset: str, period: int, ctime: int):
@@ -2205,21 +1396,16 @@ async def delete_signal_endpoint(asset: str, period: int, ctime: int):
         raise HTTPException(status_code=404, detail="signal not found")
     return {"deleted": True, "asset": asset, "period": period, "ctime": ctime}
 
-
 @app.post("/api/signals/clear")
 async def clear_signals_endpoint(
     asset: Optional[str] = None,
     period: Optional[int] = None,
     before_ctime: Optional[int] = None,
 ):
-    """Clear signals, optionally filtered by asset/period/before_ctime.
-
-    If no filters provided, clears ALL signals.
-    """
+    """Clear signals, optionally filtered by asset/period/before_ctime."""
     count = await asyncio.to_thread(
         _db.clear_signals, asset, period, before_ctime)
     return {"deleted_count": count, "filter": {"asset": asset, "period": period, "before_ctime": before_ctime}}
-
 
 @app.get("/api/signals/count")
 async def get_signals_count(
@@ -2227,10 +1413,7 @@ async def get_signals_count(
     period: Optional[int] = None,
     hours: Optional[int] = None,
 ):
-    """Return total signal count, optionally filtered by asset/period/hours.
-
-    Used by the frontend history tab to show total + filtered counts.
-    """
+    """Return total signal count, optionally filtered by asset/period/hours."""
     import time as _t
     q = "SELECT COUNT(*) as n FROM signal_log WHERE signal IN ('CALL','PUT')"
     params = []
@@ -2254,46 +1437,12 @@ async def get_signals_count(
         conn.close()
     return {"count": total}
 
-
 # ── WebSocket endpoint ───────────────────────────────────────────────────────
 
-# Allowed candle periods (seconds). Anything outside this whitelist is
-# rejected up-front — feed.ensure_stream would silently misbehave on
-# invalid periods (negative, fractional, or unreasonably large).
-# FIX (Bug #16, 2026-07-17): previously any integer was accepted, which
-# could create bogus streams (e.g., period=-1 or period=999999) that
-# wasted resources and corrupted the stream registry.
-# FIX (AUDIT-CORE #1, 2026-07-19): import from core.constants instead
-# of duplicating the literal set. The previous local definition would
-# silently drift if core.constants.ALLOWED_PERIODS changed — e.g. if a
-# new period (e.g. 15s) was added to the canonical constant, the WS
-# endpoint would still reject it. Now both server and constants share
-# one source of truth.
-# FIX (DEEP-AUDIT-2026-07-26 / F-13-67): moved this import to the top
-#   of the module with the other top-level imports — having it here
-#   after route definitions was unusual and meant an import failure
-#   would surface only after partial app setup.
 from core.constants import ALLOWED_PERIODS as _ALLOWED_PERIODS  # noqa: E402
 
-
 def _ws_origin_allowed(ws: WebSocket) -> bool:
-    """Check the WS Origin header against the module-level whitelist.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-13-6): previously any website could
-      open a WS to `/ws` (CSRF attack surface). Now the Origin header is
-      validated against `_ALLOWED_WS_ORIGINS` (configured via the
-      `ALLOWED_WS_ORIGINS` env var, default localhost+127.0.0.1). If
-      the list is empty the check is skipped (NOT recommended).
-
-    FIX (LIVE-DATA-WS-FIX, 2026-07-26): if ALLOWED_WS_ORIGINS is at its
-      DEFAULT value (user didn't set it), assume this is a personal
-      deployment and allow ANY Origin that ends with `.up.railway.app`
-      or matches the `RAILWAY_PUBLIC_DOMAIN` host. This is more permissive
-      than full whitelist but unbreaks Railway deployments that didn't
-      set the env var. Operators who want strict mode should set
-      ALLOWED_WS_ORIGINS explicitly — once set, the loose auto-match is
-      disabled.
-    """
+    """Check the WS Origin header against the module-level whitelist."""
     if not _ALLOWED_WS_ORIGINS:
         return True
     try:
@@ -2316,11 +1465,6 @@ def _ws_origin_allowed(ws: WebSocket) -> bool:
                 rest = origin[len(f"{scheme}://{host}"):]
                 if rest == "" or rest.startswith(":"):
                     return True
-    # FIX (LIVE-DATA-WS-FIX): loose auto-match for Railway deployments.
-    # If user didn't set ALLOWED_WS_ORIGINS explicitly (we're using the
-    # default localhost-only list), be permissive for *.up.railway.app
-    # and any auto-detected Railway public domain. Once the operator
-    # sets ALLOWED_WS_ORIGINS, this loose mode is skipped.
     _user_set_origins = bool(os.environ.get("ALLOWED_WS_ORIGINS", "").strip())
     if not _user_set_origins:
         # Extract host from origin for matching.
@@ -2344,30 +1488,23 @@ def _ws_origin_allowed(ws: WebSocket) -> bool:
                                        auto_host.endswith("." + host)):
                         return True
                 except Exception as _e:
-                    print(f"[silent-except] server.py:1231 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+                    print(f"[silent-except] server.py:1231 {type(_e).__name__}: {_e}")
                     pass
     return False
-
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     global cid_counter
 
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-6): reject cross-origin WS
-    #   connections BEFORE accepting them, with WS code 1008 (policy
-    #   violation).
     if not _ws_origin_allowed(ws):
         await ws.close(code=1008, reason="origin not allowed")
         return
 
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-36): cap total concurrent WS
-    #   clients so a botnet can't exhaust file descriptors. Reject with
-    #   code 1013 (try again later) when the cap is hit.
     if len(clients) >= _MAX_WS_CLIENTS:
         try:
             await ws.close(code=1013, reason="server at max capacity")
         except Exception as _e:
-            print(f"[silent-except] server.py:1253 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+            print(f"[silent-except] server.py:1253 {type(_e).__name__}: {_e}")
             pass
         return
 
@@ -2377,17 +1514,6 @@ async def ws_endpoint(ws: WebSocket):
     clients[cid] = ws
     print(f"[server] {cid} connected ({len(clients)} total)")
 
-    # FIX (AUDIT-CORE #8, 2026-07-19): WS idle timeout. Previously a
-    # client that connected and never sent would hold the WS open
-    # forever, registered in `clients`, counted in len(clients). A
-    # malicious/buggy client could exhaust server FDs by opening
-    # thousands of idle connections. Now we apply a per-receive timeout
-    # of WS_IDLE_TIMEOUT (default 300s) — if no message arrives within
-    # that window, we close the connection with code 1008 (policy
-    # violation) and free the slot.
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-68): `_WS_IDLE_TIMEOUT` is now
-    #   read once at module load instead of being re-parsed on every
-    #   new connection.
     ws_idle_timeout = _WS_IDLE_TIMEOUT
 
     try:
@@ -2399,121 +1525,59 @@ async def ws_endpoint(ws: WebSocket):
                 try:
                     await ws.close(code=1008, reason="idle timeout")
                 except Exception as _e:
-                    print(f"[silent-except] server.py:1284 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+                    print(f"[silent-except] server.py:1284 {type(_e).__name__}: {_e}")
                     pass
                 break
-            # FIX (DEEP-AUDIT-2026-07-26 / F-13-7): enforce a max message
-            #   size so a malicious client can't OOM the server with a
-            #   1GB text frame. Reject with WS code 1009 (message too big)
-            #   and skip processing.
             if len(raw) > _MAX_WS_MSG_BYTES:
                 try:
                     await ws.close(code=1009, reason="message too big")
                 except Exception as _e:
-                    print(f"[silent-except] server.py:1294 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
+                    print(f"[silent-except] server.py:1294 {type(_e).__name__}: {_e}")
                     pass
-                print(f"[server] {cid} sent oversized message "
-                      f"({len(raw)} > {_MAX_WS_MSG_BYTES} bytes) — closing")
+                print(f"[server] {cid} sent oversized message " f"({len(raw)} > {_MAX_WS_MSG_BYTES} bytes) — closing")
                 break
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            # FIX (DEEP-AUDIT-2026-07-26 / F-13-9): a JSON array or
-            #   scalar would later crash `msg.get("type")` with
-            #   AttributeError. Reject non-dict payloads explicitly.
             if not isinstance(msg, dict):
-                await ws.send_text(json.dumps({
-                    "type": "error",
-                    "error": "expected a JSON object",
-                }))
+                await ws.send_text(json.dumps({"type": "error", "error": "expected a JSON object"}))
                 continue
 
             t = msg.get("type")
 
             if t == "subscribe":
                 asset = msg.get("asset", "")
-                # FIX (DEEP-AUDIT-2026-07-26 / F-13-10): cap asset length
-                #   to prevent 1MB asset names bloating the stream
-                #   registry / SQLite params.
                 if not isinstance(asset, str) or not asset or len(asset) > 32:
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": "invalid or missing asset (max 32 chars)",
-                    }))
+                    await ws.send_text(json.dumps({"type": "error", "error": "invalid or missing asset (max 32 chars)"}))
                     continue
-                # Validate period up-front. Reject anything not in the
-                # whitelist with a clear error instead of letting the feed
-                # create a bogus stream.
-                # FIX (DEEP-AUDIT-2026-07-26 / F-13-11): reject non-integer
-                #   `period` (e.g. 60.9 or "60s") explicitly instead of
-                #   silently truncating / falling back to a default.
                 period_val = msg.get("period", 60)
                 if not isinstance(period_val, int) or isinstance(period_val, bool):
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": f"invalid period {period_val!r}; "
-                                 f"must be an integer in {sorted(_ALLOWED_PERIODS)}",
-                    }))
+                    await ws.send_text(json.dumps({"type": "error", "error": f"invalid period {period_val!r}; " f"must be an integer in {sorted(_ALLOWED_PERIODS)}"}))
                     continue
                 period = period_val
                 if period not in _ALLOWED_PERIODS:
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": f"invalid period {period!r}; allowed: "
-                                 f"{sorted(_ALLOWED_PERIODS)}",
-                    }))
+                    await ws.send_text(json.dumps({"type": "error", "error": f"invalid period {period!r}; allowed: " f"{sorted(_ALLOWED_PERIODS)}"}))
                     continue
-                # Optional `category` field: "real" or "otc". The server
-                # now ENFORCES consistency between category and asset — if
-                # a client sends category="real" but asset="EURUSD_otc"
-                # (or vice versa), the subscribe is REJECTED with an error.
-                # FIX (2026-07-17): previously the server silently honored
-                # the asset name even on mismatch, which let an OTC pair
-                # be analyzed by the Real engine (defeating the whole point
-                # of having two engines).
                 category = (msg.get("category") or "").lower().strip()
-                # NOTE (USER REQUIREMENT 2026-08-03): 'alltime_otc' category
-                # removed. Only 'real' and 'otc' are accepted. (Older clients
-                # that still send 'alltime_otc' will get a clear error — the
-                # frontend has been updated to never send it.)
                 if category and category not in ("real", "otc"):
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": f"invalid category {category!r}; "
-                                 f"expected 'real' or 'otc'",
-                    }))
+                    await ws.send_text(json.dumps({"type": "error", "error": f"invalid category {category!r}; " f"expected 'real' or 'otc'"}))
                     continue
                 # If category is specified, validate it matches the asset.
                 # 'otc' requires the asset to end with _otc.
                 if category:
                     is_otc_asset = asset.endswith("_otc")
                     if category == "otc" and not is_otc_asset:
-                        await ws.send_text(json.dumps({
-                            "type": "error",
-                            "error": f"category/asset mismatch: category={category!r} "
-                                     f"but asset {asset!r} is not an OTC pair "
-                                     f"(must end with '_otc').",
-                        }))
+                        await ws.send_text(json.dumps({"type": "error", "error": f"category/asset mismatch: category={category!r} " f"but asset {asset!r} is not an OTC pair " f"(must end with '_otc')."}))
                         continue
                     if category == "real" and is_otc_asset:
-                        await ws.send_text(json.dumps({
-                            "type": "error",
-                            "error": f"category/asset mismatch: category='real' "
-                                     f"but asset {asset!r} is an OTC pair.",
-                        }))
+                        await ws.send_text(json.dumps({"type": "error", "error": f"category/asset mismatch: category='real' " f"but asset {asset!r} is an OTC pair."}))
                         continue
-                # FIX (DEEP-AUDIT-2026-07-26 / F-13-12): wrap ensure_stream
-                #   in try/except so a failure sends a structured error
-                #   back to the client instead of killing the connection.
                 try:
                     result = await feed.ensure_stream(asset, period, cid=cid)
                 except Exception as exc:
                     _logger.exception("ensure_stream failed for %s@%ss", asset, period)
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": f"stream setup failed: {type(exc).__name__}",
-                    }))
+                    await ws.send_text(json.dumps({"type": "error", "error": f"stream setup failed: {type(exc).__name__}"}))
                     continue
                 await ws.send_text(json.dumps(result))
 
@@ -2522,108 +1586,54 @@ async def ws_endpoint(ws: WebSocket):
                     {"type": "pairs", **feed.available_pairs()}))
 
             elif t == "status":
-                await ws.send_text(json.dumps({
-                    "type": "status",
-                    "connected": feed._connected,
-                    "streams": feed.stream_status(),
-                }))
+                await ws.send_text(json.dumps({"type": "status", "connected": feed._connected, "streams": feed.stream_status()}))
 
             elif t == "signals":
                 asset = msg.get("asset", "")
-                # FIX (DEEP-AUDIT-2026-07-26 / F-13-10): same asset length
-                #   cap as the subscribe branch.
                 if not isinstance(asset, str) or not asset or len(asset) > 32:
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": "invalid or missing asset (max 32 chars)",
-                    }))
+                    await ws.send_text(json.dumps({"type": "error", "error": "invalid or missing asset (max 32 chars)"}))
                     continue
-                # FIX (DEEP-AUDIT-2026-07-26 / F-13-11, F-13-102): reject
-                #   non-integer `period` instead of silently falling back
-                #   to 60 (the old behavior hid client bugs and could
-                #   route to the wrong stream).
                 period_val = msg.get("period", 60)
                 if not isinstance(period_val, int) or isinstance(period_val, bool):
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": f"invalid period {period_val!r}; "
-                                 f"must be an integer in {sorted(_ALLOWED_PERIODS)}",
-                    }))
+                    await ws.send_text(json.dumps({"type": "error", "error": f"invalid period {period_val!r}; " f"must be an integer in {sorted(_ALLOWED_PERIODS)}"}))
                     continue
                 period = period_val
                 if period not in _ALLOWED_PERIODS:
-                    await ws.send_text(json.dumps({
-                        "type": "error",
-                        "error": f"invalid period {period!r}",
-                    }))
+                    await ws.send_text(json.dumps({"type": "error", "error": f"invalid period {period!r}"}))
                     continue
-                # FIX (AUDIT-CORE #7, 2026-07-19): wrap the synchronous
-                # SQLite call in asyncio.to_thread so the event loop is
-                # not blocked. Previously this endpoint would block all
-                # other WS clients for the duration of the query — under
-                # load this caused visible tick stutter for everyone else.
-                # FIX (AUDIT-CRITICAL #002, 2026-07-21): limit raised from
-                # 50 to 100 to match the frontend's HISTORY_MAX. Also
-                # supports `before_ctime` for pagination and a `limit`
-                # field from the message (capped at 200).
                 try:
                     req_limit = int(msg.get("limit", 100))
                 except (TypeError, ValueError):
                     req_limit = 100
                 req_limit = max(1, min(req_limit, 200))
                 before_ctime = msg.get("before_ctime")
-                # FIX (DEEP-AUDIT-2026-07-26 / F-13-13): if `before_ctime`
-                #   is present but unparseable, send an error instead of
-                #   silently coercing to None (which broke pagination
-                #   cursors in the frontend).
                 if before_ctime is not None:
                     try:
                         before_ctime = int(before_ctime)
                     except (TypeError, ValueError):
-                        await ws.send_text(json.dumps({
-                            "type": "error",
-                            "error": f"invalid before_ctime {before_ctime!r}; "
-                                     f"must be an integer or null",
-                        }))
+                        await ws.send_text(json.dumps({"type": "error", "error": f"invalid before_ctime {before_ctime!r}; " f"must be an integer or null"}))
                         continue
                 sigs = await asyncio.to_thread(
                     _db.get_recent_signals, asset, period, req_limit, before_ctime)
-                await ws.send_text(json.dumps({
-                    "type": "signals",
-                    "signals": sigs,
-                    "asset": asset,
-                    "period": period,
-                    "before_ctime": before_ctime,
-                }))
+                await ws.send_text(json.dumps({"type": "signals", "signals": sigs, "asset": asset, "period": period, "before_ctime": before_ctime}))
 
     except WebSocketDisconnect:
         print(f"[server] {cid} disconnected")
     except Exception as e:
-        # FIX (DEEP-AUDIT-2026-07-26 / F-13-37): log full traceback via
-        #   the module logger instead of just `str(e)` — debugging
-        #   production WS issues was near-impossible without the stack.
         _logger.exception("%s ws error", cid)
         print(f"[server] {cid} error: {e}")
     finally:
         clients.pop(cid, None)
-        # FIX (DEEP-AUDIT-2026-07-26 / F-13-14): wrap drop_interest in
-        #   defensive try/except so a raised cleanup error doesn't
-        #   swallow the original exception or leak the cid registration.
         try:
             await feed.drop_interest(cid)
         except Exception:
             _logger.exception("drop_interest failed for %s", cid)
 
-
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-69): use `os.environ.get("PORT") or "8000"`
-    #   so an empty-string PORT env var doesn't crash with `int("")`.
     port = int(os.environ.get("PORT") or "8000")
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-70): also recognise the official
-    #   Railway detection env var `RAILWAY_ENVIRONMENT`.
     is_railway = (
         os.environ.get("RAILWAY_PROJECT_ID")
         or os.environ.get("RAILWAY_SERVICE_ID")
@@ -2636,12 +1646,6 @@ if __name__ == "__main__":
         print("[server] Railway environment detected — headless mode, no browser auto-open")
         host = "0.0.0.0"
     else:
-        # FIX (DEEP-AUDIT-2026-07-26 / F-13-71): on a local dev machine,
-        #   bind to 127.0.0.1 by default so the app isn't exposed to the
-        #   LAN. Override with `HOST=0.0.0.0` if you really want LAN access.
         host = os.environ.get("HOST", "127.0.0.1")
-    # FIX (DEEP-AUDIT-2026-07-26 / F-13-72): allow `WEB_CONCURRENCY` to
-    #   spin up multiple uvicorn workers (note: requires feed to be
-    #   per-worker or shared via Redis pubsub — left as an ops decision).
     workers = int(os.environ.get("WEB_CONCURRENCY") or "1")
     uvicorn.run(app, host=host, port=port, log_level="info", workers=workers)

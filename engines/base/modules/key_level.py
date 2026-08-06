@@ -1,64 +1,17 @@
-"""
-Module: Key Level Engine (PRUNED 2026-08-04)
-
-After THEORY-PRUNE-2026-08-04 (3 rounds), this module keeps only the
-key-level signals that performed well in production backtesting.
-
-Active signals:
-  1. Support wick rejection (LEVEL group) — 49.6% measured, n=9581
-  3. Close NEAR prev low → CALL bounce (MICRO_SR group) — 49.4%, n=2709
-  6. S/R flip (SR_FLIP group) — remeasured 2026-08-06 by walk-forward over
-     191,482 real candles / 19 pairs:
-       resistance→support (emits CALL): 50.7% UP, n=2786, 95% CI [48.9, 52.6]
-         CALL wins 50.7%, PUT wins 49.3%. Its 2026-08-05 CALL→PUT inversion
-         was falsified and reverted — read the comment at SIGNAL 6 before
-         proposing another direction change.
-       support→resistance (emits PUT):  48.2% UP, n=2760, 95% CI [46.3, 50.0]
-         i.e. PUT wins 51.8% [50.0, 53.7] — the best-looking theory in the
-         whole engine and correctly signed, but its lower bound still sits
-         below the 51.8% OTC break-even, so it is NOT actionable. Worth
-         monitoring, not worth a code change.
-  7. Trendline breakout (TRENDLINE group) — kept, fires too rarely to measure
-
-Measured win rates above are from a walk-forward run over 5 days of real
-Quotex history, all 19 live pairs (WALK-FORWARD-2026-08-05). They replace
-the previous in-sample figures, which were counted off a few dozen live
-signals and overstated every theory by 5-10pp. None of these signals has a
-demonstrated edge — they are kept because none has a demonstrated ANTI-edge
-either, and they feed the group-consensus count.
-
-Removed signals (see git history):
-  - Close BELOW prev low / breakdown (47.3% win, n=2536 walk-forward — the
-    only theory with a confirmed anti-edge; removed WALK-FORWARD-2026-08-05)
-  - Resistance wick rejection (33% win, n=27)
-  - Key support bounce (36% win, n=11)
-  - Key resistance bounce (38% win, n=32)
-  - Fibonacci retracement (43% win, n=77 — toxic combo king)
-  - Close near prev high (17% win, n=6)
-  - Round number proximity (44% win — disabled 2026-07-26)
-  - Breakout action (47% win — disabled 2026-07-26)
-  - Double top/bottom (44% win — disabled 2026-07-26)
-
-Reliability: LEVEL ×1.0
-"""
+"""Module: Key Level Engine (PRUNED 2026-08-04)."""
 from engines.base.types import ModuleResult, MarketContext
 
-
-# Module-level constants (only those used by active signals)
-JPY_PRICE_THRESHOLD = 50        # abs(close) > 50 ⇒ JPY-pair granularity
-EPS_PRICE_SCALE = 1e-7          # relative eps floor for breakout checks
-EPS_GRANULARITY_SCALE = 0.1      # fraction of pair granularity for eps floor
-MICRO_SR_PROXIMITY_ATR = 0.10    # tol for "close near prev high/low"
-MAX_SR_FLIP_LEVELS = 4           # recent levels to check for S/R flip
-SR_FLIP_PROXIMITY_ATR = 0.20     # |close - lvl_price| < 0.20×ATR
-TRENDLINE_WINDOW = 6             # candles for descending-highs / ascending-lows
+JPY_PRICE_THRESHOLD = 50
+EPS_PRICE_SCALE = 1e-7
+EPS_GRANULARITY_SCALE = 0.1
+MICRO_SR_PROXIMITY_ATR = 0.10
+MAX_SR_FLIP_LEVELS = 4
+SR_FLIP_PROXIMITY_ATR = 0.20
+TRENDLINE_WINDOW = 6
 
 
 def analyze(candles, ctx: MarketContext) -> list:
-    """Analyze price action at key S/R levels.
-
-    Returns list of ModuleResult objects.
-    """
+    """Analyze price action at key S/R levels."""
     results = []
     if len(candles) < 5:
         return results
@@ -68,15 +21,12 @@ def analyze(candles, ctx: MarketContext) -> list:
     atr = ctx.atr
     level_conf = ctx.level_confluence
 
-    # FIX (THEORY-LOGIC-FIX-2026-08-03): read regime for context-aware signals.
     regime = ctx.regime
     is_trending = regime.get("is_trending", False)
     trend_regime = regime.get("regime", "RANGE")
     trend_strength = regime.get("trend_strength", 0.0)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SIGNAL 1: Support wick rejection (KEPT — 58% win, n=154)
-    # ═══════════════════════════════════════════════════════════════════════
+    # SIGNAL 1: Support wick rejection
     if level_conf.get("near_level", False):
         lvl_type = level_conf.get("level_type")
         action = level_conf.get("action")
@@ -89,20 +39,9 @@ def analyze(candles, ctx: MarketContext) -> list:
                     results.append(ModuleResult(
                         module_name="key_level", direction="CALL", score=4, confidence=70,
                         signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                        # FIX (2026-08-06): the reason text claimed "70% win
-                        # rate" — that number was just `confidence=70` restated
-                        # as if it were a measured result, and it rendered in
-                        # the UI as one. This module's own docstring measures
-                        # this signal at 49.6% (n=9581 walk-forward); live
-                        # theory_votes put it at 50.8% (n=1280). Claim removed
-                        # rather than corrected: no win rate belongs in a reason
-                        # string, because nothing keeps it in sync with the data.
-                        reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) → CALL (failed breakdown)"]))
-                # Resistance wick rejection removed (Round 2 — 33% win, n=27)
+                        reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) -> CALL (failed breakdown)"]))
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SIGNAL 3: Previous candle high/low as micro-S/R (KEPT — prev_low only)
-    # ═══════════════════════════════════════════════════════════════════════
+    # SIGNAL 3: Previous candle high/low as micro-S/R (prev_low only)
     if len(candles) >= 2 and atr > 0:
         prev = candles[-2]
         prev_low = prev["low"]
@@ -110,31 +49,15 @@ def analyze(candles, ctx: MarketContext) -> list:
         _granularity = 0.01 if abs(close) > JPY_PRICE_THRESHOLD else 0.0001
         eps = max(abs(close) * EPS_PRICE_SCALE, _granularity * EPS_GRANULARITY_SCALE)
 
-        # "Close near prev high" branch removed (Round 2 — 17% win, n=6)
         if abs(close - prev_low) < tol:
             if close > prev_low + eps:
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=1, confidence=52,
                     signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
-                    reasons=[f"Close near prev low ({prev_low:.5f}) → CALL bounce"]))
-            # REMOVED (WALK-FORWARD-2026-08-05): "Close below prev low → PUT
-            # breakdown" measured 47.3% over n=2536 on 5 days of real Quotex
-            # history across all 19 pairs (95% CI [45.4, 49.2] — the whole
-            # interval sits below 50%, so this is a confirmed anti-edge, not
-            # noise). It was the ONLY theory of the 15 active ones whose CI
-            # excluded 50%. The docstring above claimed "55-57% win"; that
-            # figure came from an in-sample count on a few dozen live signals.
-            #
-            # The bounce side of this branch (close > prev_low) measured 49.4%
-            # (n=2709) — indistinguishable from a coin flip, so it stays: it
-            # contributes to group consensus without a measured negative edge.
-            #
-            # Reproduce with: scripts/live_backtest/backtest_theories.py
+                    reasons=[f"Close near prev low ({prev_low:.5f}) -> CALL bounce"]))
             pass
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SIGNAL 6: Support/Resistance Flip (KEPT — 50% win, small sample)
-    # ═══════════════════════════════════════════════════════════════════════
+    # SIGNAL 6: Support/Resistance Flip
     if len(candles) >= 10 and atr > 0:
         levels = ctx.key_levels
         recent_levels = sorted(levels, key=lambda lv: lv.get("idx", 0),
@@ -145,75 +68,20 @@ def analyze(candles, ctx: MarketContext) -> list:
             lvl_type = level["type"]
             if lvl_type == "resistance" and prev["close"] > lvl_price and close > lvl_price:
                 if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:
-                    # REVERTED (2026-08-06): PROD-BACKTEST-2026-08-05 / FIX-1
-                    # flipped this branch CALL → PUT, predicting 56.19% from an
-                    # in-sample count of n=105 ("the highest-confidence single
-                    # fix in the commit"). It then ran in production for ~7
-                    # hours and was falsified out-of-sample:
-                    #
-                    #   era        voted   n     won
-                    #   pre-flip   CALL    114   43.9%
-                    #   post-flip  PUT     101   39.6%   <- predicted 56.2%
-                    #
-                    # PUT's 95% CI is [30.6, 49.4] — it excludes the 56.2% the
-                    # flip was justified by, missing it by 16.6pp. Flipping the
-                    # direction on a stationary pattern MUST turn 43.9% into
-                    # 56.1%; it produced 39.6% instead, which means the trigger
-                    # population is not stationary at all. What actually
-                    # happened is that the market's tendency on this setup
-                    # changed sign across the deploy boundary: 56.1% DOWN
-                    # before, 60.4% UP after. The flip was fitted to one side
-                    # of that swing and landed on the wrong side of the next.
-                    #
-                    # Pooled over both eras the trigger is a coin flip:
-                    # 111/215 = 51.6% UP, 95% CI [45.0, 58.2]. Neither CALL nor
-                    # PUT has any measured edge, so this reverts to the textbook
-                    # label rather than keeping a direction chosen by noise.
-                    # The "56.2% measured n=105" text was also being rendered in
-                    # the UI as if it were a validated win rate — it never was.
-                    #
-                    # CORRECTION (same day, walk-forward over 191,482 real
-                    # candles / 19 pairs, n=2,786 triggers — 13x the live
-                    # sample): the revert is CONFIRMED, but the "not
-                    # stationary / tendency changed sign" reasoning above is
-                    # NOT. The underlying rate is 50.7% UP, 95% CI [48.9,
-                    # 52.6], and a chi-square homogeneity test across 6
-                    # chronological slices gives 6.0 on df=5 — i.e. entirely
-                    # consistent with a CONSTANT rate, no time-drift at all.
-                    # The live 43.9% -> 39.6% swing was ordinary sampling
-                    # noise at n~100 per era, not a regime change; do not
-                    # repeat that explanation.
-                    # What the large sample does settle: CALL wins 50.7% and
-                    # PUT wins 49.3%, so the 2026-08-05 flip moved this branch
-                    # to the *worse* side, and reverting to CALL is right.
-                    # It still clears nothing — 48.9 lower bound vs the 51.8%
-                    # OTC break-even — so this stays a no-edge signal kept
-                    # only for group consensus.
-                    #
-                    # Kept (not deleted) on the same grounds as the other
-                    # signals in this module: no demonstrated anti-edge either,
-                    # and it feeds the SR_FLIP group-consensus count. It fires
-                    # on only 1.47% of signals.
-                    #
-                    # Template for this revert: the `agree=0` fallback inversion
-                    # in blender.py — hypothesis from train, verdict from
-                    # holdout, revert when it does not replicate.
                     results.append(ModuleResult(
                         module_name="key_level", direction="CALL", score=2, confidence=57,
                         signal_type="CONTINUATION", reliability="LEVEL", group="SR_FLIP",
-                        reasons=[f"Broken resistance now support ({lvl_price:.5f}) → CALL (continuation of original breakout)"]))
+                        reasons=[f"Broken resistance now support ({lvl_price:.5f}) -> CALL (continuation of original breakout)"]))
                     break
             elif lvl_type == "support" and prev["close"] < lvl_price and close < lvl_price:
                 if abs(close - lvl_price) < atr * SR_FLIP_PROXIMITY_ATR:
                     results.append(ModuleResult(
                         module_name="key_level", direction="PUT", score=2, confidence=57,
                         signal_type="CONTINUATION", reliability="LEVEL", group="SR_FLIP",
-                        reasons=[f"Broken support now resistance ({lvl_price:.5f}) → PUT (continuation of original breakdown)"]))
+                        reasons=[f"Broken support now resistance ({lvl_price:.5f}) -> PUT (continuation of original breakdown)"]))
                     break
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SIGNAL 7: Trendline Breakout (KEPT — not yet backtested, kept for completeness)
-    # ═══════════════════════════════════════════════════════════════════════
+    # SIGNAL 7: Trendline Breakout
     if len(candles) >= 12 and atr > 0:
         window = candles[-12:]
         highs = [c["high"] for c in window[-TRENDLINE_WINDOW:]]
@@ -227,14 +95,14 @@ def analyze(candles, ctx: MarketContext) -> list:
                 _score, _conf = 2, 56
                 if is_trending and trend_strength > 0.5:
                     if trend_regime == "TREND_DOWN":
-                        _score, _conf = 1, 50  # likely false breakout — dampen
+                        _score, _conf = 1, 50  # likely false breakout
                     elif trend_regime == "TREND_UP":
-                        _sig_type = "CONTINUATION"  # trend-aligned breakout
-                        _score, _conf = 3, 60  # boost
+                        _sig_type = "CONTINUATION"
+                        _score, _conf = 3, 60
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=_score, confidence=_conf,
                     signal_type=_sig_type, reliability="LEVEL", group="TRENDLINE",
-                    reasons=[f"Trendline breakout above descending highs → CALL ({_sig_type})"]))
+                    reasons=[f"Trendline breakout above descending highs -> CALL ({_sig_type})"]))
         elif lows[0] < lows[-1] and all(lows[i] <= lows[i+1] + _tol
                                         for i in range(len(lows)-1)):
             if close < min(lows[-2], lows[-1]):
@@ -242,13 +110,13 @@ def analyze(candles, ctx: MarketContext) -> list:
                 _score, _conf = 2, 56
                 if is_trending and trend_strength > 0.5:
                     if trend_regime == "TREND_UP":
-                        _score, _conf = 1, 50  # likely false breakdown — dampen
+                        _score, _conf = 1, 50  # likely false breakdown
                     elif trend_regime == "TREND_DOWN":
-                        _sig_type = "CONTINUATION"  # trend-aligned breakdown
-                        _score, _conf = 3, 60  # boost
+                        _sig_type = "CONTINUATION"
+                        _score, _conf = 3, 60
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=_score, confidence=_conf,
                     signal_type=_sig_type, reliability="LEVEL", group="TRENDLINE",
-                    reasons=[f"Trendline breakdown below ascending lows → PUT ({_sig_type})"]))
+                    reasons=[f"Trendline breakdown below ascending lows -> PUT ({_sig_type})"]))
 
     return results

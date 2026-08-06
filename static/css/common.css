@@ -1,13 +1,4 @@
-/* ============================================================================
-   common.css — Shared styles for both Real and OTC market pages.
-   Dark theme (GitHub-style #0d1117 bg).
-   Layout: topbar (header) + main (chart + side panel) + bottom (history).
-   Responsive breakpoints: 1200px, 992px, 768px, 576px, 400px.
-   Touch-friendly tap targets (min 44x44px) on mobile.
-   ============================================================================ */
-
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-
 :root{
   /* Base palette — same for both pages, only --accent differs */
   --bg:#0d1117;
@@ -18,7 +9,6 @@
   --text:#e6edf3;
   --text-dim:#8b949e;
   --text-faint:#484f58;
-
   /* Signal colors */
   --green:#00c853;
   --green-bg:rgba(0,200,83,.12);
@@ -28,34 +18,19 @@
   --yellow-bg:rgba(255,193,7,.12);
   --blue:#58a6ff;
   --info:#2196F3;
-
   /* Accent — overridden in real.css / otc.css */
   --accent:#ffc107;
   --accent-bg:rgba(255,193,7,.12);
   --accent-border:rgba(255,193,7,.4);
-
   --mono:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;
   --sans:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   --radius:6px;
   --radius-lg:10px;
-
   /* Touch target sizing — used by all interactive controls */
   --tap:44px;
 }
-
-html,body{
-  height:100%;
-  background:var(--bg);
-  color:var(--text);
-  font-family:var(--sans);
-  font-size:14px;
-  line-height:1.4;
-  -webkit-font-smoothing:antialiased;
-  -webkit-tap-highlight-color:transparent;
-}
-
+html,body { height:100%; background:var(--bg); color:var(--text); font-family:var(--sans); font-size:14px; line-height:1.4; -webkit-font-smoothing:antialiased; -webkit-tap-highlight-color:transparent; }
 body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scroll */
-
 #app{
   display:grid;
   /* Row 1: topbar (auto), Row 2: tab bar (auto), Row 3: main content (1fr) */
@@ -64,53 +39,11 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   height:100dvh;            /* mobile-safe viewport (excludes URL bar) */
   gap:0;
 }
-
-/* ============================================================================
-   HEADER / TOPBAR
-   Two rows:
-     Row 1: brand + pair selector + live price + payout + connection + switch
-     Row 2: market status banner (LIVE / CLOSED / 24/7) + mini stats
-   ============================================================================ */
-#topbar{
-  display:flex;
-  flex-direction:column;
-  background:var(--card);
-  border-bottom:1px solid var(--border);
-  flex-shrink:0;
-}
-
-#topbar-row1{
-  display:flex;
-  align-items:center;
-  gap:10px;
-  padding:8px 14px;
-  min-height:52px;
-  flex-wrap:nowrap;
-}
-
+#topbar { display:flex; flex-direction:column; background:var(--card); border-bottom:1px solid var(--border); flex-shrink:0; }
+#topbar-row1 { display:flex; align-items:center; gap:10px; padding:8px 14px; min-height:52px; flex-wrap:nowrap; }
 /* Brand block — market title + colored dot */
-.brand{
-  display:flex;
-  align-items:center;
-  gap:8px;
-  flex-shrink:0;
-  padding-right:10px;
-  border-right:1px solid var(--border);
-  margin-right:4px;
-}
-.brand-dot{
-  width:10px;height:10px;border-radius:50%;
-  background:var(--accent);
-  box-shadow:0 0 8px var(--accent);
-  animation:pulse-dot 2s infinite;
-  flex-shrink:0;
-}
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-05): A-09 PROBLEM 76 — .brand-title and
-   children REMOVED (8 lines dead CSS). The HTML uses <div class="brand">
-   <span class="brand-name">…</span></div> — no .brand-title wrapper.
-   Direct .brand-name rules below and in CLEAN LAYOUT OVERRIDES (line ~1500)
-   cover all real elements. */
-
+.brand { display:flex; align-items:center; gap:8px; flex-shrink:0; padding-right:10px; border-right:1px solid var(--border); margin-right:4px; }
+.brand-dot { width:10px;height:10px;border-radius:50%; background:var(--accent); box-shadow:0 0 8px var(--accent); animation:pulse-dot 2s infinite; flex-shrink:0; }
 /* Pair selector */
 .pair-wrap{position:relative;flex-shrink:0}
 #pair-select{
@@ -128,47 +61,21 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 }
 #pair-select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
 #pair-select:hover{border-color:var(--text-dim)}
-.pair-arrow{
-  position:absolute;right:12px;top:50%;transform:translateY(-50%);
-  pointer-events:none;color:var(--text-dim);font-size:10px;
-}
+.pair-arrow { position:absolute;right:12px;top:50%;transform:translateY(-50%); pointer-events:none;color:var(--text-dim);font-size:10px; }
 #pair-select option,
-#pair-select option.locked{
-  background:#0d1117;color:var(--text);padding:6px 10px;
-}
+#pair-select option.locked { background:#0d1117;color:var(--text);padding:6px 10px; }
 #pair-select option:disabled{color:var(--text-dim);background:#161b22}
-
 /* Live price ticker */
-.live-price-wrap{
-  display:flex;align-items:center;gap:8px;
-  padding:6px 12px;
-  background:var(--bg);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  min-width:150px;
-  min-height:var(--tap);
-}
-.live-price-label{
-  font-size:10px;color:var(--text-dim);
-  text-transform:uppercase;letter-spacing:.5px;
-}
-.live-price-val{
-  font-family:var(--mono);font-size:15px;font-weight:700;
-  font-variant-numeric:tabular-nums;transition:color .15s;
-}
+.live-price-wrap { display:flex;align-items:center;gap:8px; padding:6px 12px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); min-width:150px; min-height:var(--tap); }
+.live-price-label { font-size:10px;color:var(--text-dim); text-transform:uppercase;letter-spacing:.5px; }
+.live-price-val { font-family:var(--mono);font-size:15px;font-weight:700; font-variant-numeric:tabular-nums;transition:color .15s; }
 .live-price-val.up{color:var(--green)}
 .live-price-val.down{color:var(--red)}
 .live-price-val.flat{color:var(--text-dim)}
 .live-price-arrow{font-size:14px;font-weight:700;transition:transform .2s}
 .live-price-arrow.up{color:var(--green)}
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-08): A-09 PROBLEM 29 — REMOVED the
-   `transform:rotate(180deg)` from .live-price-arrow.down. The arrow glyph
-   `▼` (U+25BC) is already down-pointing, so the rotation was incorrectly
-   flipping it back to up-pointing — showing a red UP triangle on price
-   drops. Now the arrow correctly points down (red ▼) when price drops. */
 .live-price-arrow.down{color:var(--red)}
 .live-price-arrow.flat{color:var(--text-dim)}
-
 /* Payout pill */
 .payout{
   font-family:var(--mono);color:var(--accent);font-weight:700;font-size:13px;
@@ -176,22 +83,13 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   border:1px solid var(--accent-border);white-space:nowrap;
   min-height:var(--tap);display:inline-flex;align-items:center;
 }
-
 /* Connection status */
-.conn-group{
-  display:flex;align-items:center;gap:6px;
-  padding:6px 10px;
-  background:var(--bg);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  min-height:var(--tap);
-}
+.conn-group { display:flex;align-items:center;gap:6px; padding:6px 10px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); min-height:var(--tap); }
 #conn-dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex-shrink:0}
 #conn-dot.connected{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse-dot 2s infinite}
 #conn-dot.disconnected{background:var(--red);box-shadow:0 0 8px var(--red)}
 #conn-dot.connecting{background:var(--yellow);animation:pulse-dot 1s infinite}
 #conn-label{font-size:11px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.3px;white-space:nowrap}
-
 /* Pairs count badge */
 .pairs-count-badge{
   display:inline-flex;align-items:center;gap:4px;
@@ -201,7 +99,6 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   border:1px solid rgba(88,166,255,.25);white-space:nowrap;
   min-height:var(--tap);
 }
-
 /* Tick rate badge (hidden on small screens) */
 .tick-rate-badge{
   display:inline-flex;align-items:center;gap:4px;
@@ -212,11 +109,7 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   font-family:var(--mono);
   min-height:var(--tap);
 }
-.tick-rate-badge .tick-dot{
-  width:5px;height:5px;border-radius:50%;background:var(--green);
-  animation:pulse-dot 1s infinite;
-}
-
+.tick-rate-badge .tick-dot { width:5px;height:5px;border-radius:50%;background:var(--green); animation:pulse-dot 1s infinite; }
 /* Sound button */
 #sound-btn{
   background:none;border:1px solid var(--border);color:var(--text-dim);
@@ -227,13 +120,7 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 }
 #sound-btn:hover{color:var(--text);border-color:var(--text-dim)}
 #sound-btn.on{color:var(--accent);border-color:var(--accent);background:var(--accent-bg)}
-
 .spacer{flex:1;min-width:0}
-
-/* ============================================================================
-   MARKET SWITCH BUTTON — prominent, in the top-right of row 1.
-   Clicking it navigates to the other HTML page (setCategory()).
-   ============================================================================ */
 #market-switch-btn{
   display:inline-flex;align-items:center;gap:8px;
   padding:8px 14px;
@@ -248,71 +135,22 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   font-family:var(--sans);
   white-space:nowrap;
 }
-#market-switch-btn:hover{
-  background:var(--accent);color:#000;
-  box-shadow:0 4px 12px var(--accent-bg);
-  transform:translateY(-1px);
-}
+#market-switch-btn:hover { background:var(--accent);color:#000; box-shadow:0 4px 12px var(--accent-bg); transform:translateY(-1px); }
 #market-switch-btn:active{transform:translateY(0)}
-#market-switch-btn .switch-icon{
-  display:inline-block;font-size:14px;font-weight:700;
-  transition:transform .25s;
-}
+#market-switch-btn .switch-icon { display:inline-block;font-size:14px;font-weight:700; transition:transform .25s; }
 #market-switch-btn:hover .switch-icon{transform:rotate(180deg)}
-
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-06): A-09 PROBLEM 75 — #topbar-row2
-   REMOVED (10 lines dead CSS). The simplified topbar (CLEAN LAYOUT OVERRIDES)
-   uses only #topbar-row1 — #topbar-row2 element does not exist in any HTML
-   file (verified by grep across real.html / otc.html / alltime_otc.html). */
-
 /* Market status indicator (LIVE / CLOSED / 24/7) */
-.market-status{
-  display:inline-flex;align-items:center;gap:6px;
-  padding:4px 10px;border-radius:var(--radius);
-  font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;
-  white-space:nowrap;
-}
-.market-status .status-dot{
-  width:7px;height:7px;border-radius:50%;background:currentColor;
-  animation:pulse-dot 2s infinite;
-}
+.market-status { display:inline-flex;align-items:center;gap:6px; padding:4px 10px;border-radius:var(--radius); font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase; white-space:nowrap; }
+.market-status .status-dot { width:7px;height:7px;border-radius:50%;background:currentColor; animation:pulse-dot 2s infinite; }
 .market-status.live{color:var(--green);background:var(--green-bg);border:1px solid rgba(0,200,83,.3)}
 .market-status.closed{color:var(--red);background:var(--red-bg);border:1px solid rgba(255,23,68,.3)}
 .market-status.always{color:var(--accent);background:var(--accent-bg);border:1px solid var(--accent-border)}
-
 /* Mini stat panel (right side of row 2) */
-.topbar-stats{
-  display:flex;align-items:center;gap:14px;margin-left:auto;
-}
-.stat-mini{
-  display:flex;flex-direction:column;align-items:flex-end;gap:0;
-  padding:2px 0;line-height:1.1;
-}
-.stat-mini-label{
-  font-size:9px;color:var(--text-dim);
-  text-transform:uppercase;letter-spacing:.3px;
-}
-.stat-mini-val{
-  font-size:12px;color:var(--text);
-  font-family:var(--mono);font-weight:700;
-  font-variant-numeric:tabular-nums;
-}
-
-/* ============================================================================
-   TAB BAR — switch between Live Chart / Signal History / Accuracy Stats
-   Sits between the topbar and the main area. Always visible.
-   ============================================================================ */
-#tab-bar{
-  display:flex;
-  gap:0;
-  background:var(--card);
-  border-bottom:1px solid var(--border);
-  flex-shrink:0;
-  padding:0 8px;
-  overflow-x:auto;
-  overflow-y:hidden;
-  scrollbar-width:thin;
-}
+.topbar-stats { display:flex;align-items:center;gap:14px;margin-left:auto; }
+.stat-mini { display:flex;flex-direction:column;align-items:flex-end;gap:0; padding:2px 0;line-height:1.1; }
+.stat-mini-label { font-size:9px;color:var(--text-dim); text-transform:uppercase;letter-spacing:.3px; }
+.stat-mini-val { font-size:12px;color:var(--text); font-family:var(--mono);font-weight:700; font-variant-numeric:tabular-nums; }
+#tab-bar { display:flex; gap:0; background:var(--card); border-bottom:1px solid var(--border); flex-shrink:0; padding:0 8px; overflow-x:auto; overflow-y:hidden; scrollbar-width:thin; }
 #tab-bar::-webkit-scrollbar{height:3px}
 #tab-bar::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 .tab-btn{
@@ -335,92 +173,28 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   gap:6px;
   flex-shrink:0;
 }
-.tab-btn:hover{
-  color:var(--text);
-  background:rgba(255,255,255,.03);
-}
-.tab-btn:focus-visible{
-  outline:2px solid var(--accent);
-  outline-offset:-2px;
-}
-.tab-btn.active{
-  color:var(--accent);
-  border-bottom-color:var(--accent);
-  background:var(--accent-bg);
-}
-
-/* ============================================================================
-   MAIN AREA — tab content (left) + side panel (right)
-   The side panel is ALWAYS visible; only the left pane swaps via tabs.
-   ============================================================================ */
-#main{
-  display:grid;
-  grid-template-columns:1fr 340px;
-  gap:0;
-  overflow:hidden;
-  min-height:0;
-}
+.tab-btn:hover { color:var(--text); background:rgba(255,255,255,.03); }
+.tab-btn:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); background:var(--accent-bg); }
+#main { display:grid; grid-template-columns:1fr 340px; gap:0; overflow:hidden; min-height:0; }
 #main>*{min-width:0;min-height:0}
-
 /* Tab content wrapper — holds the 3 tab panes (only one visible at a time) */
-#tab-content-wrap{
-  position:relative;
-  display:grid;
-  grid-template-areas:"pane";
-  min-width:0;
-  min-height:0;
-  overflow:hidden;
-}
-.tab-pane{
-  grid-area:pane;
-  display:none;
-  min-width:0;
-  min-height:0;
-  overflow:hidden;
-  flex-direction:column;
-}
+#tab-content-wrap { position:relative; display:grid; grid-template-areas:"pane"; min-width:0; min-height:0; overflow:hidden; }
+.tab-pane { grid-area:pane; display:none; min-width:0; min-height:0; overflow:hidden; flex-direction:column; }
 .tab-pane.active{display:flex}
-
 /* ── TAB: Live Chart ────────────────────────────────────────────────────── */
 #tab-chart{padding:0;background:var(--bg-elev)}
-#chart-wrap{
-  position:relative;
-  background:var(--bg-elev);
-  overflow:hidden;
-  min-height:0;
-  width:100%;
-  height:100%;
-  flex:1 1 auto;
-}
+#chart-wrap { position:relative; background:var(--bg-elev); overflow:hidden; min-height:0; width:100%; height:100%; flex:1 1 auto; }
 #chart-container{
   width:100%;
   height:100%;
   /* Pinch-to-zoom disabled on chart (LightweightCharts handles touch internally) */
   touch-action:none;
 }
-
 /* ── TAB: Signal History ────────────────────────────────────────────────── */
-#tab-history{
-  background:var(--bg);
-  overflow:hidden;
-}
-.tab-history-header{
-  display:flex;
-  align-items:center;
-  gap:10px;
-  padding:10px 14px;
-  border-bottom:1px solid var(--border-soft);
-  background:var(--card);
-  flex-shrink:0;
-  flex-wrap:wrap;
-}
-.tab-history-label{
-  font-size:10px;
-  text-transform:uppercase;
-  letter-spacing:.5px;
-  color:var(--text-dim);
-  font-weight:700;
-}
+#tab-history { background:var(--bg); overflow:hidden; }
+.tab-history-header { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid var(--border-soft); background:var(--card); flex-shrink:0; flex-wrap:wrap; }
+.tab-history-label { font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim); font-weight:700; }
 #history-pair-select{
   appearance:none;
   background:var(--bg);
@@ -438,317 +212,88 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 }
 #history-pair-select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
 #history-pair-select:hover{border-color:var(--text-dim)}
-.tab-history-header .hint{
-  font-size:10px;
-  color:var(--text-dim);
-  margin-left:auto;
-  text-transform:none;
-  letter-spacing:0;
-  font-weight:400;
-}
+.tab-history-header .hint { font-size:10px; color:var(--text-dim); margin-left:auto; text-transform:none; letter-spacing:0; font-weight:400; }
 /* History list inside the tab — LARGE, fills the available pane height */
-#tab-history #history-list{
-  flex:1 1 auto;
-  display:flex;
-  flex-direction:column;
-  gap:3px;
-  overflow-y:auto;
-  overflow-x:hidden;
-  padding:8px 10px;
-  background:var(--bg);
-  min-height:0;
-  scroll-behavior:smooth;
-}
-
+#tab-history #history-list { flex:1 1 auto; display:flex; flex-direction:column; gap:3px; overflow-y:auto; overflow-x:hidden; padding:8px 10px; background:var(--bg); min-height:0; scroll-behavior:smooth; }
 /* ── TAB: Accuracy Stats ────────────────────────────────────────────────── */
-#tab-accuracy{
-  background:var(--bg-elev);
-  overflow-y:auto;
-  overflow-x:hidden;
-  padding:14px;
-}
+#tab-accuracy { background:var(--bg-elev); overflow-y:auto; overflow-x:hidden; padding:14px; }
 #tab-accuracy::-webkit-scrollbar{width:6px}
 #tab-accuracy::-webkit-scrollbar-track{background:transparent}
 #tab-accuracy::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 #tab-accuracy::-webkit-scrollbar-thumb:hover{background:var(--text-dim)}
-
-.accuracy-hero{
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  justify-content:center;
-  padding:18px 14px;
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:var(--radius-lg);
-  margin-bottom:12px;
-  text-align:center;
-}
-.accuracy-hero-label{
-  font-size:10px;
-  color:var(--text-dim);
-  text-transform:uppercase;
-  letter-spacing:.8px;
-  font-weight:700;
-}
-.accuracy-hero-pct{
-  font-size:54px;
-  font-weight:800;
-  font-family:var(--mono);
-  line-height:1.05;
-  margin:6px 0 2px;
-  letter-spacing:-1px;
-  font-variant-numeric:tabular-nums;
-  transition:color .3s;
-}
-.accuracy-hero-detail{
-  font-size:11px;
-  color:var(--text-dim);
-  font-family:var(--mono);
-}
-
-.accuracy-stats-grid{
-  display:grid;
-  grid-template-columns:repeat(4, 1fr);
-  gap:8px;
-  margin-bottom:12px;
-}
-.accuracy-stat{
-  padding:10px 8px;
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  text-align:center;
-  display:flex;
-  flex-direction:column;
-  gap:4px;
-}
-.accuracy-stat .stat-label{
-  font-size:9px;
-  color:var(--text-dim);
-  text-transform:uppercase;
-  letter-spacing:.5px;
-  font-weight:700;
-}
-.accuracy-stat .stat-value{
-  font-size:22px;
-  font-weight:800;
-  font-family:var(--mono);
-  line-height:1;
-  font-variant-numeric:tabular-nums;
-}
+.accuracy-hero { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:18px 14px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius-lg); margin-bottom:12px; text-align:center; }
+.accuracy-hero-label { font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.8px; font-weight:700; }
+.accuracy-hero-pct { font-size:54px; font-weight:800; font-family:var(--mono); line-height:1.05; margin:6px 0 2px; letter-spacing:-1px; font-variant-numeric:tabular-nums; transition:color .3s; }
+.accuracy-hero-detail { font-size:11px; color:var(--text-dim); font-family:var(--mono); }
+.accuracy-stats-grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin-bottom:12px; }
+.accuracy-stat { padding:10px 8px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); text-align:center; display:flex; flex-direction:column; gap:4px; }
+.accuracy-stat .stat-label { font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; font-weight:700; }
+.accuracy-stat .stat-value { font-size:22px; font-weight:800; font-family:var(--mono); line-height:1; font-variant-numeric:tabular-nums; }
 .accuracy-stat.correct .stat-value{color:var(--green)}
 .accuracy-stat.wrong .stat-value{color:var(--red)}
 .accuracy-stat.draw .stat-value{color:var(--yellow)}
-
-.accuracy-section{
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:12px;
-  margin-bottom:10px;
-}
-.accuracy-section-title{
-  font-size:10px;
-  text-transform:uppercase;
-  letter-spacing:.8px;
-  color:var(--text-dim);
-  font-weight:700;
-  margin-bottom:10px;
-  padding-bottom:6px;
-  border-bottom:1px solid var(--border-soft);
-}
-.accuracy-empty{
-  font-size:11px;
-  color:var(--text-faint);
-  text-align:center;
-  padding:12px 0;
-  font-style:italic;
-}
-.accuracy-breakdown-row{
-  display:grid;
-  grid-template-columns:100px 1fr 100px;
-  align-items:center;
-  gap:12px;
-  padding:5px 0;
-  font-size:12px;
-}
-.accuracy-breakdown-row .breakdown-label{
-  font-weight:700;
-  color:var(--text);
-  font-family:var(--mono);
-  font-size:11px;
-}
-.accuracy-breakdown-row .breakdown-bar{
-  height:8px;
-  background:var(--bg);
-  border-radius:4px;
-  overflow:hidden;
-  position:relative;
-}
-.accuracy-breakdown-row .breakdown-bar-fill{
-  height:100%;
-  width:0%;
-  background:var(--text-dim);
-  transition:width .4s ease, background .3s;
-  border-radius:4px;
-}
+.accuracy-section { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:12px; margin-bottom:10px; }
+.accuracy-section-title { font-size:10px; text-transform:uppercase; letter-spacing:.8px; color:var(--text-dim); font-weight:700; margin-bottom:10px; padding-bottom:6px; border-bottom:1px solid var(--border-soft); }
+.accuracy-empty { font-size:11px; color:var(--text-faint); text-align:center; padding:12px 0; font-style:italic; }
+.accuracy-breakdown-row { display:grid; grid-template-columns:100px 1fr 100px; align-items:center; gap:12px; padding:5px 0; font-size:12px; }
+.accuracy-breakdown-row .breakdown-label { font-weight:700; color:var(--text); font-family:var(--mono); font-size:11px; }
+.accuracy-breakdown-row .breakdown-bar { height:8px; background:var(--bg); border-radius:4px; overflow:hidden; position:relative; }
+.accuracy-breakdown-row .breakdown-bar-fill { height:100%; width:0%; background:var(--text-dim); transition:width .4s ease, background .3s; border-radius:4px; }
 .accuracy-breakdown-row .breakdown-bar-fill.correct{background:var(--green)}
 .accuracy-breakdown-row .breakdown-bar-fill.wrong{background:var(--red)}
-.accuracy-breakdown-row .breakdown-pct{
-  font-family:var(--mono);
-  font-weight:700;
-  text-align:right;
-  font-variant-numeric:tabular-nums;
-  display:flex;
-  align-items:baseline;
-  justify-content:flex-end;
-  gap:4px;
-}
+.accuracy-breakdown-row .breakdown-pct { font-family:var(--mono); font-weight:700; text-align:right; font-variant-numeric:tabular-nums; display:flex; align-items:baseline; justify-content:flex-end; gap:4px; }
 .accuracy-breakdown-row .breakdown-pct .pct-num{font-size:13px}
-.accuracy-breakdown-row .breakdown-pct .breakdown-meta{
-  font-size:9px;
-  color:var(--text-dim);
-  font-weight:400;
-}
+.accuracy-breakdown-row .breakdown-pct .breakdown-meta { font-size:9px; color:var(--text-dim); font-weight:400; }
 .accuracy-breakdown-row .breakdown-pct.good{color:var(--green)}
 .accuracy-breakdown-row .breakdown-pct.mid{color:var(--yellow)}
 .accuracy-breakdown-row .breakdown-pct.bad{color:var(--red)}
 .accuracy-breakdown-row .breakdown-pct.none{color:var(--text-faint)}
-
 /* Side panel */
-#panel{
-  display:flex;
-  flex-direction:column;
-  gap:0;
-  overflow:hidden;
-  background:var(--bg);
-  border-left:1px solid var(--border);
-}
-.panel-section{
-  padding:10px 12px;
-  border-bottom:1px solid var(--border-soft);
-  flex-shrink:0;
-}
+#panel { display:flex; flex-direction:column; gap:0; overflow:hidden; background:var(--bg); border-left:1px solid var(--border); }
+.panel-section { padding:10px 12px; border-bottom:1px solid var(--border-soft); flex-shrink:0; }
 .panel-section:last-child{border-bottom:none;flex:1;overflow-y:auto}
 .panel-section::-webkit-scrollbar{width:4px}
 .panel-section::-webkit-scrollbar-track{background:transparent}
 .panel-section::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-
-.section-title{
-  font-size:10px;text-transform:uppercase;letter-spacing:.8px;
-  color:var(--text-dim);margin-bottom:8px;font-weight:700;
-}
-
+.section-title { font-size:10px;text-transform:uppercase;letter-spacing:.8px; color:var(--text-dim);margin-bottom:8px;font-weight:700; }
 /* ── Signal box ──────────────────────────────────────────────────────────── */
-#signal-box{
-  padding:14px;border-radius:var(--radius);text-align:center;
-  transition:background .3s, box-shadow .3s;
-}
+#signal-box { padding:14px;border-radius:var(--radius);text-align:center; transition:background .3s, box-shadow .3s; }
 #signal-box.call{background:var(--green-bg);box-shadow:inset 0 0 20px rgba(0,200,83,.08)}
 #signal-box.put{background:var(--red-bg);box-shadow:inset 0 0 20px rgba(255,23,68,.08)}
 #signal-box.neutral{background:rgba(139,148,158,.08)}
-#signal-box.pending{
-  background:rgba(33,150,243,.08);
-  box-shadow:inset 0 0 20px rgba(33,150,243,.08);
-  animation:pulse-pending 1s infinite;
-}
+#signal-box.pending { background:rgba(33,150,243,.08); box-shadow:inset 0 0 20px rgba(33,150,243,.08); animation:pulse-pending 1s infinite; }
 @keyframes pulse-pending{0%,100%{opacity:1}50%{opacity:.6}}
 #signal-label{font-size:24px;font-weight:800;letter-spacing:1px;line-height:1.2}
 #signal-box.call #signal-label{color:var(--green)}
 #signal-box.put #signal-label{color:var(--red)}
 #signal-box.neutral #signal-label{color:var(--text-dim)}
 #signal-box.pending #signal-label{color:var(--info)}
-
-/* FIX (UI-SIGNAL-ENHANCE, 2026-07-23): prominent strength badge shown
-   directly on the signal box so the user sees STRONG/MEDIUM/NEUTRAL at
-   a glance without scanning the meta rows. Color-coded by tier. */
-#signal-strength-badge{
-  display:inline-block;
-  margin-top:6px;
-  padding:3px 12px;
-  border-radius:4px;
-  font-size:11px;font-weight:700;letter-spacing:.6px;
-  background:rgba(139,148,158,.18);
-  color:var(--text-dim);
-  text-transform:uppercase;
-}
-#signal-strength-badge.strong{
-  background:rgba(0,200,83,.22);
-  color:var(--green);
-  box-shadow:0 0 8px rgba(0,200,83,.25);
-}
-#signal-strength-badge.medium{
-  background:rgba(33,150,243,.22);
-  color:var(--info);
-}
-#signal-strength-badge.neutral{
-  background:rgba(139,148,158,.18);
-  color:var(--text-dim);
-}
-
-/* Next-signal timer — counts down to the next candle close (when a
-   new signal will be produced). Uses the same time math as the
-   header countdown but framed as "when will the next signal arrive". */
-#next-signal-timer{
-  display:block;
-  margin-top:6px;
-  font-size:11px;
-  color:var(--text-dim);
-  font-variant-numeric:tabular-nums;
-  letter-spacing:.3px;
-}
-#next-signal-timer.critical{
-  color:var(--red);
-  font-weight:700;
-  animation:pulse-pending 1s infinite;
-}
-
-.signal-row{
-  display:flex;justify-content:space-between;align-items:center;
-  padding:3px 0;font-size:12px;
-}
+#signal-strength-badge { display:inline-block; margin-top:6px; padding:3px 12px; border-radius:4px; font-size:11px;font-weight:700;letter-spacing:.6px; background:rgba(139,148,158,.18); color:var(--text-dim); text-transform:uppercase; }
+#signal-strength-badge.strong { background:rgba(0,200,83,.22); color:var(--green); box-shadow:0 0 8px rgba(0,200,83,.25); }
+#signal-strength-badge.medium { background:rgba(33,150,243,.22); color:var(--info); }
+#signal-strength-badge.neutral { background:rgba(139,148,158,.18); color:var(--text-dim); }
+#next-signal-timer { display:block; margin-top:6px; font-size:11px; color:var(--text-dim); font-variant-numeric:tabular-nums; letter-spacing:.3px; }
+#next-signal-timer.critical { color:var(--red); font-weight:700; animation:pulse-pending 1s infinite; }
+.signal-row { display:flex;justify-content:space-between;align-items:center; padding:3px 0;font-size:12px; }
 .signal-row .label{color:var(--text-dim)}
 .signal-row .value{font-family:var(--mono);font-weight:600}
-
-.conf-bar-wrap{
-  height:6px;background:var(--bg);border-radius:3px;overflow:hidden;margin-top:3px;
-}
+.conf-bar-wrap { height:6px;background:var(--bg);border-radius:3px;overflow:hidden;margin-top:3px; }
 .conf-bar{height:100%;border-radius:3px;transition:width .4s ease, background .3s}
-
 .strength-weak{color:var(--text-dim)}
 .strength-medium{color:var(--yellow)}
 .strength-strong{color:var(--green)}
 .strength-strong-put{color:var(--red)}
-
 /* ── Market State grid ──────────────────────────────────────────────────── */
 .micro-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .micro-item{display:flex;flex-direction:column;gap:2px}
-.micro-label{
-  font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);
-}
-.micro-value{
-  font-family:var(--mono);font-size:12px;font-weight:600;
-}
-
+.micro-label { font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim); }
+.micro-value { font-family:var(--mono);font-size:12px;font-weight:600; }
 /* Buyer/Seller bar */
 .bs-bar-wrap{grid-column:1/-1;margin-bottom:4px}
 .bs-bars{display:flex;height:20px;border-radius:3px;overflow:hidden;background:var(--bg)}
-.bs-buy{
-  background:var(--green);transition:width .3s;
-  display:flex;align-items:center;justify-content:center;
-  font-size:10px;font-family:var(--mono);color:#fff;font-weight:700;min-width:20px;
-}
-.bs-sell{
-  background:var(--red);transition:width .3s;
-  display:flex;align-items:center;justify-content:center;
-  font-size:10px;font-family:var(--mono);color:#fff;font-weight:700;min-width:20px;
-}
-
-.pressure-badge{
-  display:inline-block;padding:2px 10px;border-radius:3px;
-  font-size:13px;font-weight:800;letter-spacing:.5px;
-}
+.bs-buy { background:var(--green);transition:width .3s; display:flex;align-items:center;justify-content:center; font-size:10px;font-family:var(--mono);color:#fff;font-weight:700;min-width:20px; }
+.bs-sell { background:var(--red);transition:width .3s; display:flex;align-items:center;justify-content:center; font-size:10px;font-family:var(--mono);color:#fff;font-weight:700;min-width:20px; }
+.pressure-badge { display:inline-block;padding:2px 10px;border-radius:3px; font-size:13px;font-weight:800;letter-spacing:.5px; }
 .pressure-badge.buyer{background:var(--green);color:#000;animation:pressure-glow-green 1.5s infinite}
 .pressure-badge.seller{background:var(--red);color:#fff;animation:pressure-glow-red 1.5s infinite}
 .pressure-badge.fight{background:var(--yellow);color:#000;animation:pressure-pulse 1s infinite}
@@ -756,86 +301,44 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 @keyframes pressure-glow-red{0%,100%{box-shadow:0 0 4px var(--red)}50%{box-shadow:0 0 12px var(--red)}}
 @keyframes pressure-pulse{0%,100%{opacity:1}50%{opacity:.6}}
 @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.3}}
-
 .phase-box{display:flex;gap:4px;grid-column:1/-1}
-.phase-card{
-  flex:1;padding:5px 6px;border-radius:var(--radius);
-  background:var(--card);text-align:center;border:1px solid var(--border);
-}
+.phase-card { flex:1;padding:5px 6px;border-radius:var(--radius); background:var(--card);text-align:center;border:1px solid var(--border); }
 .phase-card .phase-name{font-size:9px;color:var(--text-dim);text-transform:uppercase}
 .phase-card .phase-dir{font-size:14px;font-weight:700;margin-top:1px}
 .phase-dir.up{color:var(--green)}
 .phase-dir.down{color:var(--red)}
 .phase-dir.flat{color:var(--text-dim)}
-
-.react-badge{
-  display:inline-block;padding:2px 8px;border-radius:3px;
-  font-size:11px;font-weight:700;
-}
+.react-badge { display:inline-block;padding:2px 8px;border-radius:3px; font-size:11px;font-weight:700; }
 .react-badge.exhaust{background:var(--red);color:#fff;animation:flash-red .6s 3}
 .react-badge.recovery{background:var(--green);color:#000;animation:flash-green .6s 3}
 .react-badge.none{background:transparent;color:var(--text-dim)}
 @keyframes flash-red{0%,100%{opacity:1}50%{opacity:.3}}
 @keyframes flash-green{0%,100%{opacity:1}50%{opacity:.3}}
-
 .running-conf{font-size:12px;font-weight:700}
 .running-conf.confirming{color:var(--green)}
 .running-conf.opposing{color:var(--red)}
 .running-conf.none{color:var(--text-dim)}
-
 /* ── 6-Module Engine ────────────────────────────────────────────────────── */
-#theories-toggle{
-  cursor:pointer;user-select:none;
-  display:flex;align-items:center;justify-content:space-between;
-  padding:6px 0;background:none;border:none;color:inherit;font:inherit;
-  width:100%;text-align:left;min-height:var(--tap);
-}
+#theories-toggle { cursor:pointer;user-select:none; display:flex;align-items:center;justify-content:space-between; padding:6px 0;background:none;border:none;color:inherit;font:inherit; width:100%;text-align:left;min-height:var(--tap); }
 #theories-toggle .arrow{transition:transform .2s;font-size:10px}
 #theories-toggle.open .arrow{transform:rotate(90deg)}
 #theories-list{display:none;margin-top:6px}
 #theories-list.open{display:block}
-
-.theory-item{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:4px 6px;border-radius:3px;margin-bottom:3px;font-size:11px;
-}
+.theory-item { display:flex;align-items:center;justify-content:space-between; padding:4px 6px;border-radius:3px;margin-bottom:3px;font-size:11px; }
 .theory-item.call-vote{background:var(--green-bg)}
 .theory-item.put-vote{background:var(--red-bg)}
 .theory-name{color:var(--text-dim)}
 .theory-vote{font-weight:700;font-size:10px;padding:1px 6px;border-radius:2px}
 .theory-vote.call{background:var(--green);color:#000}
 .theory-vote.put{background:var(--red);color:#fff}
-.theory-item.reason-detail{
-  border-left:2px solid var(--text-dim);margin-left:4px;opacity:.7;
-}
-
+.theory-item.reason-detail { border-left:2px solid var(--text-dim);margin-left:4px;opacity:.7; }
 /* Active engine badge */
-.engine-label{
-  font-weight:700;padding:2px 8px;border-radius:3px;
-  font-family:var(--mono);font-size:10px;
-}
-
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-07): A-09 PROBLEMS 77 / 83 / 84 —
-   REMOVED ~50 lines of dead CSS: #bottom, #tick-tape, #tick-tape-inner,
-   .tape-price, .tape-arrow, #accuracy-bar, #history-panel, and
-   #history-panel .section-title children. NONE of these elements exist in
-   any HTML file (verified by grep). The #history-list block immediately
-   below IS still used (#tab-history contains #history-list) and is retained.
-   The tick-tape / accuracy-bar / collapsible history-panel features were
-   removed during the 'CLEAN LAYOUT OVERRIDES' refactor (2026-07-22) but the
-   CSS was not pruned at that time. */
-#history-list{
-  display:flex;flex-direction:column;gap:3px;
-  overflow-y:auto;overflow-x:hidden;
-  padding:2px 2px 4px;
-  scroll-behavior:smooth;
-  flex:1 1 auto;min-height:0;
-}
+.engine-label { font-weight:700;padding:2px 8px;border-radius:3px; font-family:var(--mono);font-size:10px; }
+#history-list { display:flex;flex-direction:column;gap:3px; overflow-y:auto;overflow-x:hidden; padding:2px 2px 4px; scroll-behavior:smooth; flex:1 1 auto;min-height:0; }
 #history-list::-webkit-scrollbar{width:6px}
 #history-list::-webkit-scrollbar-track{background:transparent}
 #history-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 #history-list::-webkit-scrollbar-thumb:hover{background:var(--text-dim)}
-
 .history-row{
   display:grid;
   grid-template-columns:46px 1fr auto auto 56px;
@@ -851,33 +354,13 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 }
 .history-row:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12)}
 .history-row:active{transform:scale(.995)}
-.history-row.correct{
-  background:rgba(0,200,83,.14);
-  border-color:rgba(0,200,83,.35);
-  border-left:3px solid var(--green);
-  box-shadow:inset 0 0 12px rgba(0,200,83,.06);
-}
-.history-row.wrong{
-  background:rgba(255,23,68,.14);
-  border-color:rgba(255,23,68,.35);
-  border-left:3px solid var(--red);
-  box-shadow:inset 0 0 12px rgba(255,23,68,.06);
-}
-.history-row.draw{
-  background:rgba(255,193,7,.10);
-  border-color:rgba(255,193,7,.30);
-  border-left:3px solid var(--yellow);
-}
-.history-row.pending{
-  background:rgba(33,150,243,.08);
-  border-color:rgba(33,150,243,.20);
-  border-left:3px solid #2196f3;
-}
+.history-row.correct { background:rgba(0,200,83,.14); border-color:rgba(0,200,83,.35); border-left:3px solid var(--green); box-shadow:inset 0 0 12px rgba(0,200,83,.06); }
+.history-row.wrong { background:rgba(255,23,68,.14); border-color:rgba(255,23,68,.35); border-left:3px solid var(--red); box-shadow:inset 0 0 12px rgba(255,23,68,.06); }
+.history-row.draw { background:rgba(255,193,7,.10); border-color:rgba(255,193,7,.30); border-left:3px solid var(--yellow); }
+.history-row.pending { background:rgba(33,150,243,.08); border-color:rgba(33,150,243,.20); border-left:3px solid #2196f3; }
 .history-row.correct:hover{background:rgba(0,200,83,.20)}
 .history-row.wrong:hover{background:rgba(255,23,68,.20)}
 .history-row.draw:hover{background:rgba(255,193,7,.16)}
-
-/* FIX (AUDIT-CORE #106, 2026-07-21): "Load older signals" button styles. */
 .history-load-more{
   display:flex;
   align-items:center;
@@ -894,127 +377,57 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   transition:background .15s ease, color .15s ease, border-color .15s ease;
   user-select:none;
 }
-.history-load-more:hover{
-  background:rgba(255,255,255,.07);
-  color:var(--text);
-  border-color:rgba(255,255,255,.18);
-}
+.history-load-more:hover { background:rgba(255,255,255,.07); color:var(--text); border-color:rgba(255,255,255,.18); }
 .history-load-more:active{ transform:scale(.99); }
-.history-load-more:focus-visible{
-  outline:2px solid var(--accent,#4a9eff);
-  outline-offset:2px;
-}
-
-.history-row-recent{
-  box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 0 10px rgba(255,255,255,.06);
-}
-.history-row-recent.history-call-tint{
-  box-shadow:0 0 0 1px rgba(0,200,83,.45), 0 0 12px rgba(0,200,83,.28);
-}
-.history-row-recent.history-put-tint{
-  box-shadow:0 0 0 1px rgba(255,23,68,.45), 0 0 12px rgba(255,23,68,.28);
-}
-
+.history-load-more:focus-visible { outline:2px solid var(--accent,#4a9eff); outline-offset:2px; }
+.history-row-recent { box-shadow:0 0 0 1px rgba(255,255,255,.10), 0 0 10px rgba(255,255,255,.06); }
+.history-row-recent.history-call-tint { box-shadow:0 0 0 1px rgba(0,200,83,.45), 0 0 12px rgba(0,200,83,.28); }
+.history-row-recent.history-put-tint { box-shadow:0 0 0 1px rgba(255,23,68,.45), 0 0 12px rgba(255,23,68,.28); }
 .history-time{font-family:var(--mono);font-size:11px;color:var(--text-dim);letter-spacing:.3px}
 .history-signal{font-family:var(--mono);font-weight:700;font-size:12px;letter-spacing:.5px}
 .history-signal.call{color:var(--green)}
 .history-signal.put{color:var(--red)}
 .history-signal.neutral{color:var(--text-dim)}
-.history-strength{
-  font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700;
-  font-family:var(--mono);min-width:22px;text-align:center;
-}
+.history-strength { font-size:10px;padding:1px 6px;border-radius:3px;font-weight:700; font-family:var(--mono);min-width:22px;text-align:center; }
 .history-strength.STRONG{background:var(--green);color:#000}
 .history-strength.MEDIUM{background:var(--yellow);color:#000}
 .history-strength.WEAK{background:var(--text-dim);color:#fff}
 .history-score{font-family:var(--mono);font-weight:600;font-size:12px;min-width:34px;text-align:right}
 .history-score.pos{color:var(--green)}
 .history-score.neg{color:var(--red)}
-.history-icon{
-  display:flex;align-items:center;justify-content:center;gap:4px;
-  font-size:16px;width:56px;text-align:center;line-height:1;
-  font-weight:700;letter-spacing:.5px;
-}
+.history-icon { display:flex;align-items:center;justify-content:center;gap:4px; font-size:16px;width:56px;text-align:center;line-height:1; font-weight:700;letter-spacing:.5px; }
 .history-icon .icon-emoji{font-size:16px;line-height:1}
-.history-icon .icon-label{
-  font-size:9px;font-family:var(--sans);font-weight:800;
-  letter-spacing:.6px;text-transform:uppercase;
-}
+.history-icon .icon-label { font-size:9px;font-family:var(--sans);font-weight:800; letter-spacing:.6px;text-transform:uppercase; }
 .history-row.correct .icon-label{color:var(--green)}
 .history-row.wrong .icon-label{color:var(--red)}
 .history-row.draw .icon-label{color:var(--yellow)}
 .history-row.pending .icon-label{color:#2196f3}
-
 /* ============================================================================
    SIGNAL DETAIL MODAL
    ============================================================================ */
-#signal-detail-overlay{
-  display:none;position:fixed;top:0;left:0;right:0;bottom:0;
-  background:rgba(0,0,0,.7);z-index:100;
-  align-items:center;justify-content:center;
-  padding:16px;
-}
+#signal-detail-overlay { display:none;position:fixed;top:0;left:0;right:0;bottom:0; background:rgba(0,0,0,.7);z-index:100; align-items:center;justify-content:center; padding:16px; }
 #signal-detail-overlay.show{display:flex}
-#signal-detail-modal{
-  background:var(--card);border:1px solid var(--border);
-  border-radius:8px;padding:16px;
-  max-width:560px;max-height:80vh;overflow-y:auto;
-  width:100%;box-shadow:0 8px 32px rgba(0,0,0,.5);
-}
-#signal-detail-modal h3{
-  margin:0 0 12px;font-size:15px;
-  display:flex;justify-content:space-between;align-items:center;gap:8px;
-}
-#signal-detail-modal .detail-close{
-  cursor:pointer;color:var(--text-dim);font-size:22px;line-height:1;
-  padding:4px 8px;border-radius:4px;
-}
+#signal-detail-modal { background:var(--card);border:1px solid var(--border); border-radius:8px;padding:16px; max-width:560px;max-height:80vh;overflow-y:auto; width:100%;box-shadow:0 8px 32px rgba(0,0,0,.5); }
+#signal-detail-modal h3 { margin:0 0 12px;font-size:15px; display:flex;justify-content:space-between;align-items:center;gap:8px; }
+#signal-detail-modal .detail-close { cursor:pointer;color:var(--text-dim);font-size:22px;line-height:1; padding:4px 8px;border-radius:4px; }
 #signal-detail-modal .detail-close:hover{color:var(--text);background:rgba(255,255,255,.06)}
-#signal-detail-modal .detail-row{
-  display:flex;justify-content:space-between;gap:12px;
-  padding:6px 0;font-size:12px;border-bottom:1px solid rgba(255,255,255,.05);
-}
+#signal-detail-modal .detail-row { display:flex;justify-content:space-between;gap:12px; padding:6px 0;font-size:12px;border-bottom:1px solid rgba(255,255,255,.05); }
 #signal-detail-modal .detail-row .label{color:var(--text-dim)}
-#signal-detail-modal .detail-row .value{
-  font-family:var(--mono);font-weight:600;text-align:right;
-  max-width:60%;word-break:break-word;
-}
+#signal-detail-modal .detail-row .value { font-family:var(--mono);font-weight:600;text-align:right; max-width:60%;word-break:break-word; }
 #signal-detail-modal .detail-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
-#signal-detail-modal .detail-tag{
-  font-size:10px;padding:2px 6px;border-radius:3px;
-  background:rgba(33,150,243,.15);color:#64b5f6;font-family:var(--mono);
-}
-#signal-detail-modal .detail-postmortem{
-  background:rgba(0,0,0,.3);padding:8px;border-radius:4px;
-  font-family:var(--mono);font-size:11px;margin-top:8px;line-height:1.5;
-  color:var(--text-dim);white-space:pre-wrap;word-break:break-word;
-}
-#signal-detail-modal .detail-theories{
-  display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:8px;
-}
-#signal-detail-modal .theory-pill{
-  font-size:10px;padding:3px 6px;border-radius:3px;
-  display:flex;justify-content:space-between;
-}
+#signal-detail-modal .detail-tag { font-size:10px;padding:2px 6px;border-radius:3px; background:rgba(33,150,243,.15);color:#64b5f6;font-family:var(--mono); }
+#signal-detail-modal .detail-postmortem { background:rgba(0,0,0,.3);padding:8px;border-radius:4px; font-family:var(--mono);font-size:11px;margin-top:8px;line-height:1.5; color:var(--text-dim);white-space:pre-wrap;word-break:break-word; }
+#signal-detail-modal .detail-theories { display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:8px; }
+#signal-detail-modal .theory-pill { font-size:10px;padding:3px 6px;border-radius:3px; display:flex;justify-content:space-between; }
 #signal-detail-modal .theory-pill.right{background:rgba(0,200,83,.12);color:var(--green)}
 #signal-detail-modal .theory-pill.wrong{background:rgba(255,23,68,.12);color:var(--red)}
-
 /* ============================================================================
    CHART OVERLAYS — countdown timer, loading spinner, stale warning
    ============================================================================ */
 #candle-countdown{
-  /* FIX (UI-TIMER-MOVE, 2026-07-23): countdown is now in the header
-     (not absolute-positioned over the chart). It uses flexbox layout
-     to fit between the payout label and the connection status group. */
   position:static;
   font-family:var(--sans);font-size:13px;font-weight:700;letter-spacing:.5px;
   color:#fff;
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-22): A-09 PROBLEM 74 — consolidated the
-     triplicated background declarations (originally at lines ~1011, ~1349,
-     ~1457) into one. Solid blue + border for legibility. The previous
-     semi-transparent rgba(33,150,243,.85) was harder to read against chart
-     gridlines, hence the UI-P1-14 override; merging it here removes the
-     maintenance hazard of three competing rules. */
   background:rgba(33,150,243,1);
   border:1px solid rgba(255,255,255,.15);
   padding:4px 10px;border-radius:6px;
@@ -1025,66 +438,30 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   white-space:nowrap;
 }
 #candle-countdown.warn{background:rgba(255,152,0,.9);color:#000}
-#candle-countdown.critical{
-  background:rgba(255,23,68,.95);color:#fff;animation:flash-red .6s infinite;
-}
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-22): .idle background consolidated here
-   — was previously redefined at the (now-removed) duplicate rule block. */
+#candle-countdown.critical { background:rgba(255,23,68,.95);color:#fff;animation:flash-red .6s infinite; }
 #candle-countdown.idle{background:rgba(48,54,61,.95);color:var(--text-dim)}
-
-#stale-overlay{
-  display:none;position:absolute;top:0;left:0;right:0;bottom:0;
-  background:rgba(255,23,68,.08);z-index:10;pointer-events:none;
-  align-items:center;justify-content:center;
-}
+#stale-overlay { display:none;position:absolute;top:0;left:0;right:0;bottom:0; background:rgba(255,23,68,.08);z-index:10;pointer-events:none; align-items:center;justify-content:center; }
 #stale-overlay.show{display:flex}
-#stale-msg{
-  background:var(--red);color:#fff;padding:6px 16px;border-radius:var(--radius);
-  font-weight:700;font-size:13px;animation:flash-red 1s infinite;
-}
-
-#chart-loading-overlay{
-  display:none;position:absolute;top:0;left:0;right:0;bottom:0;
-  background:rgba(19,23,34,.85);z-index:11;
-  align-items:center;justify-content:center;flex-direction:column;gap:10px;
-}
+#stale-msg { background:var(--red);color:#fff;padding:6px 16px;border-radius:var(--radius); font-weight:700;font-size:13px;animation:flash-red 1s infinite; }
+#chart-loading-overlay { display:none;position:absolute;top:0;left:0;right:0;bottom:0; background:rgba(19,23,34,.85);z-index:11; align-items:center;justify-content:center;flex-direction:column;gap:10px; }
 #chart-loading-overlay.show{display:flex}
-#chart-loading-spinner{
-  width:36px;height:36px;
-  border:3px solid rgba(88,166,255,.2);border-top-color:var(--blue);
-  border-radius:50%;animation:chart-spin .7s linear infinite;
-}
-@keyframes chart-spin{to{transform:rotate(360deg)}}
+#chart-loading-spinner { width:36px;height:36px; border:3px solid rgba(88,166,255,.2);border-top-color:var(--blue); border-radius:50%;animation:chart-spin .7s linear infinite; }
 #chart-loading-text{color:var(--text-dim);font-size:12px;font-weight:600}
-
 /* Signal pop animation */
 @keyframes signal-pop{0%{transform:scale(1)}50%{transform:scale(1.08)}100%{transform:scale(1)}}
 .signal-pop{animation:signal-pop .35s ease}
-
 /* ============================================================================
    RESPONSIVE BREAKPOINTS
    ============================================================================ */
-
 /* ── Large desktop → desktop (1200px) ───────────────────────────────────── */
 @media (max-width:1200px){
   #main{grid-template-columns:1fr 300px}
   .topbar-stats{gap:10px}
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-09): A-09 PROBLEM 81 — REMOVED
-     `.brand-title .brand-name{font-size:13px}` (dead — .brand-title
-     wrapper does not exist in HTML; .brand-name is restyled in
-     CLEAN LAYOUT OVERRIDES section below). */
 }
-
 /* ── Desktop → tablet landscape (992px) ──────────────────────────────────── */
 @media (max-width:992px){
   #main{grid-template-columns:1fr 280px}
   /* Compact the topbar — hide some labels */
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-10): A-09 PROBLEM 79 — REMOVED
-     `.brand-title .brand-sub{display:none}` (dead — .brand-title does
-     not exist in HTML). The .live-price-label / .pairs-count-badge rules
-     below are also dead (these elements are removed in the CLEAN LAYOUT
-     OVERRIDES section) but are retained here as harmless no-ops; see
-     F-18-19 below for the global !important suppression. */
   .live-price-label{display:none}
   .live-price-wrap{min-width:auto;padding:6px 10px}
   .pairs-count-badge{display:none}
@@ -1092,15 +469,11 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   #market-switch-btn .switch-text{display:none}
   #market-switch-btn{padding:8px 10px}
 }
-
 /* ── Tablet landscape → tablet portrait (768px) ──────────────────────────── */
 @media (max-width:768px){
   body{overflow-y:auto;overflow-x:hidden}
   #app{height:auto;min-height:100vh;min-height:100dvh}
-
-  #topbar-row1{
-    flex-wrap:wrap;gap:6px;padding:6px 10px;min-height:auto;
-  }
+#topbar-row1 { flex-wrap:wrap;gap:6px;padding:6px 10px;min-height:auto; }
   /* Row 1 stacks: brand+switch on top, then pair-select full width,
      then price+payout+conn. */
   .brand{flex:0 0 auto;border-right:none;padding-right:6px;margin-right:0}
@@ -1111,422 +484,175 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   .conn-group{order:8;flex:0 0 auto}
   #sound-btn{order:9;flex:0 0 auto}
   #market-switch-btn{order:2;margin-left:auto}
-
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-11): A-09 PROBLEM 75 — REMOVED
-     `#topbar-row2{flex-wrap:wrap;padding:4px 10px;gap:6px}` (dead — element
-     does not exist in HTML). The .topbar-stats rule below is retained
-     harmlessly because the .topbar-stats element may still be present in
-     some layout variants (verified: grep finds no #topbar-row2 in HTML). */
   .topbar-stats{gap:10px;margin-left:0;flex:1 1 100%;justify-content:space-between}
-
   /* Switch to single-column main area: tab content on top, panel below */
-  #main{
-    grid-template-columns:1fr;
-    grid-template-rows:minmax(280px, 50vh) auto;
-    overflow:visible;
-  }
+#main { grid-template-columns:1fr; grid-template-rows:minmax(280px, 50vh) auto; overflow:visible; }
   #tab-content-wrap{min-height:280px;overflow:visible}
   #chart-wrap{min-height:280px}
   #tab-history,#tab-accuracy{min-height:280px}
-  #panel{
-    border-left:none;border-top:1px solid var(--border);
-    overflow:visible;
-  }
-  .panel-section:last-child{
-    max-height:none;overflow:visible;
-  }
-
+#panel { border-left:none;border-top:1px solid var(--border); overflow:visible; }
+.panel-section:last-child { max-height:none;overflow:visible; }
   /* Tab bar: smaller padding on mobile so all 3 tabs fit */
   .tab-btn{padding:10px 12px;font-size:11px}
   .tab-btn-text{display:inline}
-
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-12): A-09 PROBLEM 78 — REMOVED
-     `#history-panel{max-height:30vh}` (dead — element does not exist in
-     HTML; history now lives inside #tab-history as a tab pane). */
 }
-
 /* ── Tablet portrait → phone (576px) ─────────────────────────────────────── */
 @media (max-width:576px){
   html,body{font-size:13px}
-
   #topbar-row1{padding:6px 8px;gap:6px}
   .brand{padding-right:4px}
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-13): A-09 PROBLEM 82 — REMOVED
-     `.brand-title .brand-name{font-size:12px}` (dead — .brand-title wrapper
-     does not exist; .brand-name is restyled in CLEAN LAYOUT OVERRIDES). */
   .brand-dot{width:8px;height:8px}
-
   /* Hide tick rate badge on phones — not enough room */
   .tick-rate-badge{display:none}
-
   /* Compact price wrap */
   .live-price-wrap{padding:4px 8px;gap:4px;min-width:auto}
   .live-price-val{font-size:14px}
-
   /* Payout: smaller padding */
   .payout{padding:4px 8px;font-size:12px}
-
   /* Conn group: hide label, show only dot */
   #conn-label{display:none}
   .conn-group{padding:6px;min-width:var(--tap)}
-
   /* Switch button: icon-only on phones */
-  #market-switch-btn{
-    padding:6px 10px;font-size:11px;letter-spacing:.3px;
-  }
+#market-switch-btn { padding:6px 10px;font-size:11px;letter-spacing:.3px; }
   #market-switch-btn .switch-text{display:none}
-
   /* Mini stat panel: hide some on phones */
   .stat-mini:nth-child(3){display:none}   /* hide "Signals" count, keep Active + WinRate + Next */
-
   /* Chart: shorter on phones so panel + tabs are reachable */
   #main{grid-template-rows:minmax(260px, 45vh) auto}
   #tab-content-wrap{min-height:260px}
   #chart-wrap{min-height:260px}
   #tab-history,#tab-accuracy{min-height:260px}
-
   /* Countdown badge: smaller on phones */
-  #candle-countdown{
-    top:6px;right:60px;font-size:11px;padding:3px 8px;
-  }
-
+#candle-countdown { top:6px;right:60px;font-size:11px;padding:3px 8px; }
   /* Panel: tighter padding */
   .panel-section{padding:8px 10px}
-
   /* Signal label: smaller */
   #signal-label{font-size:20px}
-
   /* History: tighter rows — keep icon visible for quick win/loss scan */
   .history-row{padding:6px 8px;font-size:11px;gap:6px;grid-template-columns:36px 1fr auto auto 44px}
   .history-strength{font-size:9px;padding:1px 4px}
   .history-icon{width:44px;font-size:14px;gap:2px}
   .history-icon .icon-emoji{font-size:14px}
   .history-icon .icon-label{font-size:8px}
-
   /* Modal: full-width on phones */
   #signal-detail-modal{padding:12px;border-radius:6px}
   #signal-detail-modal .detail-theories{grid-template-columns:1fr}
 }
-
 /* ── Phone → small phone (400px) ─────────────────────────────────────────── */
 @media (max-width:400px){
   html,body{font-size:12px}
-
   /* Even more compact topbar */
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-14): A-09 PROBLEM 82 — REMOVED
-     `.brand-title .brand-name{font-size:11px;letter-spacing:.3px}` (dead —
-     .brand-title wrapper does not exist; .brand-name is restyled in
-     CLEAN LAYOUT OVERRIDES). */
   .live-price-val{font-size:13px}
   .live-price-arrow{font-size:12px}
-
   /* Stat panel: hide WinRate too, keep only Active + Next */
   .stat-mini:nth-child(2){display:none}
-
   /* Chart shorter */
   #main{grid-template-rows:minmax(220px, 40vh) auto}
   #tab-content-wrap{min-height:220px}
   #chart-wrap{min-height:220px}
   #tab-history,#tab-accuracy{min-height:220px}
-
   /* Accuracy stats: 2x2 grid on tiny phones */
   .accuracy-stats-grid{grid-template-columns:repeat(2, 1fr)}
   .accuracy-breakdown-row{grid-template-columns:70px 1fr 70px;gap:6px;font-size:11px}
   .accuracy-hero-pct{font-size:42px}
   .accuracy-stat .stat-value{font-size:18px}
-
   #signal-label{font-size:18px}
-
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-15): A-09 PROBLEM 84 — REMOVED
-     `#accuracy-bar{padding:3px 8px;font-size:10px}` (dead — #accuracy-bar
-     element does not exist in HTML). */
-
   /* History rows: keep icon (just emoji) but drop the label to save space */
   .history-row{grid-template-columns:30px 1fr auto auto 20px;gap:4px;padding:5px 6px}
   .history-icon{width:20px;font-size:14px;gap:0}
   .history-icon .icon-label{display:none}
   .history-icon .icon-emoji{font-size:14px}
-
   /* Countdown: top-right corner */
   #candle-countdown{top:4px;right:50px;font-size:10px;padding:2px 6px}
 }
-
 /* ── Landscape phones (height < 500px) — maximize chart ─────────────────── */
 @media (max-width:992px) and (max-height:500px){
   #main{grid-template-rows:minmax(200px, 60vh) auto}
   #tab-content-wrap{min-height:200px}
   #chart-wrap{min-height:200px}
   #tab-history,#tab-accuracy{min-height:200px}
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-16): A-09 PROBLEMS 78 / 80 — REMOVED
-     `#history-panel{max-height:25vh}` and `.brand-title .brand-sub{display:none}`
-     (both dead — neither #history-panel nor .brand-title exist in HTML). */
 }
-
 /* ============================================================================
    PRINT STYLES — hide all interactive chrome, show only chart + signal
    ============================================================================ */
 @media print{
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-17): A-09 PROBLEM 85 — REMOVED #bottom
-     from the print-hidden selector list (element does not exist in HTML).
-     FIX (DEEP-AUDIT-2026-07-26 / F-18-18): A-09 PROBLEM 89 — REMOVED
-     #candle-countdown from the print-hidden selector list so the countdown
-     timer remains visible in printed screenshots (provides candle context).
-     The `display:none !important` here is acceptable in @media print context
-     because print CSS has fewer specificity concerns and we explicitly want
-     these interactive elements suppressed regardless of state classes. */
   #topbar, #tab-bar, #stale-overlay, #chart-loading-overlay,
-  #signal-detail-overlay, #sound-btn, #market-switch-btn{
-    display:none !important;
-  }
+#signal-detail-overlay, #sound-btn, #market-switch-btn { display:none !important; }
   body{overflow:visible;background:#fff}
   #app{height:auto;display:block}
   #main{display:block;overflow:visible}
   #panel{border:none}
   #chart-wrap{height:60vh;min-height:400px}
 }
-
-/* ============================================================================
-   FIX (UI-P1-17, 2026-07-21): prefers-reduced-motion — WCAG 2.3.3
-   Respect users with vestibular disorders / motion sensitivity.
-   ============================================================================ */
 @media (prefers-reduced-motion: reduce){
-  /* FIX (DEEP-AUDIT-2026-07-26 / F-18-19): A-09 PROBLEM 72 — previously the
-     universal selector `*` was used with `!important` to nuke ALL
-     animation AND transition durations, which also suppressed legitimate
-     state-change transitions (e.g. confidence-bar fill, conn-dot colour
-     shift on connect/disconnect). Be more selective: kill ANIMATION only
-     (movement), keep transition for state changes by leaving
-     transition-duration alone (transition cannot trigger vestibular
-     distress — only animation/movement does). */
-  *,*::before,*::after{
-    animation-duration:0.01ms !important;
-    animation-iteration-count:1 !important;
-    scroll-behavior:auto !important;
-  }
+*,*::before,*::after { animation-duration:0.01ms !important; animation-iteration-count:1 !important; scroll-behavior:auto !important; }
   .brand-dot, #conn-dot.connected, #signal-box.pending, #stale-msg,
-  #candle-countdown.critical, #chart-loading-spinner{
-    animation:none !important;
-  }
+#candle-countdown.critical, #chart-loading-spinner { animation:none !important; }
 }
-
-/* ============================================================================
-   FIX (UI-P1-18, 2026-07-21): safe-area insets for notched phones.
-   viewport-fit=cover in the HTML meta tag lets content extend under the
-   notch; this padding ensures it doesn't actually overlap the notch.
-   ============================================================================ */
-#topbar{
-  padding-top:env(safe-area-inset-top, 0);
-  padding-left:env(safe-area-inset-left, 0);
-  padding-right:env(safe-area-inset-right, 0);
-}
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-20): A-09 PROBLEM 85 — REMOVED the
-   `#bottom{ padding-bottom:env(safe-area-inset-bottom,0); ... }` rule
-   (dead — #bottom element does not exist in HTML). The safe-area-inset-bottom
-   padding for the page is handled by #app (set on body via overflow). */
-#topbar-row1{
-  padding-left:max(14px, env(safe-area-inset-left));
-  padding-right:max(14px, env(safe-area-inset-right));
-}
-#signal-detail-modal{
-  margin-top:env(safe-area-inset-top, 0);
-  margin-bottom:env(safe-area-inset-bottom, 0);
-}
-
-/* ============================================================================
-   FIX (UI-P1-8, 2026-07-21): mobile bottom bar as collapsible drawer.
-   On phones, the history panel collapses to a slim header; tap to expand
-   into a 50vh bottom sheet. Frees up the main viewport for the chart +
-   side panel (which contains the actual signal).
-   ============================================================================ */
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-21): A-09 PROBLEM 78 — REMOVED the entire
-   `#history-drawer-toggle{...}` rule, the `#history-drawer-toggle:hover{...}`
-   rule, and the `@media (max-width:768px){ #history-drawer-toggle{...},
-   #history-panel.collapsed{...}, #history-panel.collapsed #history-list{...},
-   #history-panel:not(.collapsed){...}, #tick-tape{display:none},
-   #accuracy-bar{...} }` block (40 lines dead CSS) — none of these elements
-   (#history-drawer-toggle, #history-panel, #tick-tape, #accuracy-bar) exist
-   in any HTML file. The collapsible-drawer feature was removed during the
-   'CLEAN LAYOUT OVERRIDES' refactor (2026-07-22) when history became a tab
-   pane. */
-
-/* ============================================================================
-   FIX (UI-P0-5, 2026-07-21): extract inline styles to classes so media
-   queries can override them. Previously `style="flex:1;overflow-y:auto"`
-   on the Microstructure panel-section beat all media-query rules,
-   creating a nested-scroll trap on mobile.
-   ============================================================================ */
-.panel-section--scroll{
-  flex:1;
-  overflow-y:auto;
-}
+#topbar { padding-top:env(safe-area-inset-top, 0); padding-left:env(safe-area-inset-left, 0); padding-right:env(safe-area-inset-right, 0); }
+#topbar-row1 { padding-left:max(14px, env(safe-area-inset-left)); padding-right:max(14px, env(safe-area-inset-right)); }
+#signal-detail-modal { margin-top:env(safe-area-inset-top, 0); margin-bottom:env(safe-area-inset-bottom, 0); }
+.panel-section--scroll { flex:1; overflow-y:auto; }
 @media (max-width:768px){
   /* On mobile, the body is the scroll container — let the panel section
      flow naturally instead of nesting its own scroll area. */
-  .panel-section--scroll{
-    flex:0 0 auto;
-    overflow:visible;
-  }
+.panel-section--scroll { flex:0 0 auto; overflow:visible; }
 }
-
 /* Signal-meta and other inline-style extractions (P2-1) */
 .signal-meta{ margin-top:8px; }
 .micro-item--full{ grid-column:1/-1; }
-.bs-bar-labels{
-  display:flex;justify-content:space-between;
-  font-size:9px;color:var(--text-dim);margin-bottom:2px;
-}
+.bs-bar-labels { display:flex;justify-content:space-between; font-size:9px;color:var(--text-dim);margin-bottom:2px; }
 .engine-block{ margin-top:10px; }
-.engine-active-row{
-  display:flex;justify-content:space-between;align-items:center;
-  margin-top:6px;font-size:10px;color:var(--text-dim);
-}
+.engine-active-row { display:flex;justify-content:space-between;align-items:center; margin-top:6px;font-size:10px;color:var(--text-dim); }
 .section-title--inline{ margin:0; }
-.section-title--primary{
-  font-size:11px;
-  color:var(--text);
-  font-weight:700;
-}
-
-/* ============================================================================
-   FIX (UI-P1-3, 2026-07-21): visual hierarchy for reordered panel.
-   Signal section gets a slightly larger title; collapsible Microstructure
-   section gets a collapse indicator.
-   ============================================================================ */
-.panel-section--micro{
-  border-top:1px solid var(--border-soft);
-}
-.panel-section--micro .section-collapse{
-  display:block;width:100%;text-align:left;
-  background:transparent;border:none;
-  color:var(--text-dim);font-size:10px;font-weight:600;
-  text-transform:uppercase;letter-spacing:.8px;
-  padding:8px 0;cursor:pointer;
-  font-family:var(--sans);
-}
+.section-title--primary { font-size:11px; color:var(--text); font-weight:700; }
+.panel-section--micro { border-top:1px solid var(--border-soft); }
+.panel-section--micro .section-collapse { display:block;width:100%;text-align:left; background:transparent;border:none; color:var(--text-dim);font-size:10px;font-weight:600; text-transform:uppercase;letter-spacing:.8px; padding:8px 0;cursor:pointer; font-family:var(--sans); }
 .panel-section--micro .section-collapse:hover{ color:var(--text); }
-.panel-section--micro .section-collapse::after{
-  content:' ▾';float:right;color:var(--text-dim);
-}
+.panel-section--micro .section-collapse::after { content:' ▾';float:right;color:var(--text-dim); }
 .panel-section--micro.collapsed .micro-grid{ display:none; }
-.panel-section--micro.collapsed .section-collapse::after{
-  content:' ▸';
-}
-
+.panel-section--micro.collapsed .section-collapse::after { content:' ▸'; }
 /* Default: collapse Microstructure on mobile, expand on desktop */
 @media (max-width:768px){
   .panel-section--micro.collapsed .micro-grid{ display:none; }
 }
-
-/* ============================================================================
-   FIX (UI-P1-14, 2026-07-21): countdown badge moved away from chart's
-   price-axis labels. Solid background for legibility.
-   ============================================================================ */
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-22): A-09 PROBLEM 74 — REMOVED the
-   duplicate `#candle-countdown{ background:rgba(33,150,243,1); border:... }`
-   and `#candle-countdown.idle{ background:rgba(48,54,61,.95) }` rules that
-   were here. They have been merged into the primary #candle-countdown rule
-   at the top of the "CHART OVERLAYS" section above to eliminate the
-   triplicated background hazard. */
-
-/* ============================================================================
-   FIX (UI-P1-19, 2026-07-21): when stale-overlay is visible, block chart
-   interaction so users don't trade on stale data.
-   ============================================================================ */
-#chart-wrap.stale #chart-container{
-  pointer-events:none;
-}
-
-/* ============================================================================
-   FIX (UI-P1-20, 2026-07-21): 4th connection state "stale" (yellow-orange).
-   Shows when the WS is technically open but no data has flowed for >15s.
-   ============================================================================ */
-#conn-dot.stale{
-  background:#ff9800;
-  box-shadow:0 0 8px #ff9800;
-  animation:pulse-dot 1.5s infinite;
-}
-
+#chart-wrap.stale #chart-container { pointer-events:none; }
+#conn-dot.stale { background:#ff9800; box-shadow:0 0 8px #ff9800; animation:pulse-dot 1.5s infinite; }
 /* Skip-link for keyboard a11y (P3-2) */
-.skip-link{
-  position:absolute;left:-9999px;top:0;
-  background:var(--accent);color:#000;
-  padding:8px 14px;border-radius:0 0 6px 0;
-  text-decoration:none;font-weight:700;font-size:12px;
-  z-index:200;
-}
-.skip-link:focus{
-  left:0;
-}
-
-/* ============================================================================
-   CLEAN LAYOUT OVERRIDES (2026-07-22)
-   Simplified topbar (no row2), compact brand, clean sequence.
-   ============================================================================ */
-
+.skip-link { position:absolute;left:-9999px;top:0; background:var(--accent);color:#000; padding:8px 14px;border-radius:0 0 6px 0; text-decoration:none;font-weight:700;font-size:12px; z-index:200; }
+.skip-link:focus { left:0; }
 /* Brand: simplified — just dot + name, no subtitle */
 .brand{display:flex;align-items:center;gap:6px;flex-shrink:0;padding-right:8px;border-right:1px solid var(--border);margin-right:4px}
 .brand-name{font-size:13px;font-weight:800;letter-spacing:.5px;text-transform:uppercase}
 .brand-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-
 /* Topbar: single compact row */
 #topbar{padding:env(safe-area-inset-top,0) 0 0 0}
 #topbar-row1{padding:6px 12px;gap:8px;min-height:44px}
-/* FIX (DEEP-AUDIT-2026-07-26 / F-18-23): A-09 PROBLEM 73 — REMOVED the
-   `.live-price-label,.pairs-count-badge,.tick-rate-badge{display:none!important}`
-   rule. None of these elements exist in any HTML file (verified by grep
-   across real.html / otc.html / alltime_otc.html — the simplified CLEAN
-   LAYOUT OVERRIDES removed them). The earlier per-breakpoint `display:none`
-   rules at 992px/576px media queries were already dead and are documented
-   inline (see F-18-10). The `!important` was specifically problematic because
-   it would have overridden any future use of these classes — even though
-   they're unused now, removing it eliminates the abuse per audit A-09. */
-
 /* Tab bar: clean */
-#tab-bar{
-  display:flex;gap:0;background:var(--card);
-  border-bottom:1px solid var(--border);flex-shrink:0;
-  padding:0 env(safe-area-inset-left,0) 0 env(safe-area-inset-right,0);
-}
-.tab-btn{
-  flex:1;padding:8px 12px;background:transparent;border:none;
-  color:var(--text-dim);font-size:12px;font-weight:600;font-family:var(--sans);
-  cursor:pointer;border-bottom:2px solid transparent;transition:all .15s;
-  white-space:nowrap;
-}
+#tab-bar { display:flex;gap:0;background:var(--card); border-bottom:1px solid var(--border);flex-shrink:0; padding:0 env(safe-area-inset-left,0) 0 env(safe-area-inset-right,0); }
+.tab-btn { flex:1;padding:8px 12px;background:transparent;border:none; color:var(--text-dim);font-size:12px;font-weight:600;font-family:var(--sans); cursor:pointer;border-bottom:2px solid transparent;transition:all .15s; white-space:nowrap; }
 .tab-btn:hover{color:var(--text)}
 .tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
-
 /* Side panel: clean section spacing */
 #panel{display:flex;flex-direction:column;gap:0;overflow-y:auto}
 .panel-section{padding:10px 12px;border-bottom:1px solid var(--border-soft)}
 .panel-signal{padding:8px 12px}
-
 /* Signal box: prominent */
-#signal-box{
-  font-size:22px;font-weight:800;text-align:center;padding:10px;
-  border-radius:var(--radius);margin-bottom:6px;letter-spacing:1px;
-}
+#signal-box { font-size:22px;font-weight:800;text-align:center;padding:10px; border-radius:var(--radius);margin-bottom:6px;letter-spacing:1px; }
 .signal-meta{font-size:11px}
 .signal-row{display:flex;justify-content:space-between;padding:2px 0}
 .signal-row span:first-child{color:var(--text-dim)}
 .signal-row span:last-child{font-family:var(--mono);font-weight:600}
-
 /* 6-Module engine: compact inside signal section */
 .engine-block{margin-top:6px;border-top:1px solid var(--border-soft);padding-top:6px}
-#theories-toggle{
-  display:flex;align-items:center;justify-content:space-between;width:100%;
-  background:transparent;border:none;cursor:pointer;padding:4px 0;
-  color:var(--text-dim);font-size:10px;font-weight:600;text-transform:uppercase;
-}
+#theories-toggle { display:flex;align-items:center;justify-content:space-between;width:100%; background:transparent;border:none;cursor:pointer;padding:4px 0; color:var(--text-dim);font-size:10px;font-weight:600;text-transform:uppercase; }
 .engine-active-row{display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim);margin:4px 0}
-
 /* Market state: compact grid */
 .micro-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
 .micro-item{display:flex;flex-direction:column;gap:1px}
 .micro-label{font-size:9px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px}
 .micro-value{font-size:12px;font-weight:600;font-family:var(--mono)}
 .micro-item--full{grid-column:1/-1}
-
 /* Microstructure: collapsible, compact */
 .panel-section--micro{cursor:pointer}
 .panel-section--micro .micro-grid{margin-top:4px}
@@ -1542,21 +668,18 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 .phase-dir.up{color:var(--green)}
 .phase-dir.down{color:var(--red)}
 .phase-dir.flat{color:var(--text-dim)}
-
 /* Tab content: fill space */
 #tab-content-wrap{position:relative;overflow:hidden}
 .tab-pane{display:none;width:100%;height:100%}
 .tab-pane.active{display:block}
 #tab-chart.active{display:flex}
 #chart-wrap{width:100%;height:100%;position:relative}
-
 /* History tab: full-height scroll */
 #tab-history{display:none;flex-direction:column;height:100%}
 #tab-history.active{display:flex}
 .tab-history-header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border-soft);flex-shrink:0}
 #history-pair-select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px}
 #tab-history #history-list{flex:1;overflow-y:auto}
-
 /* Accuracy tab: scrollable stats */
 #tab-accuracy{display:none;flex-direction:column;height:100%;overflow-y:auto;padding:16px}
 #tab-accuracy.active{display:flex}
@@ -1572,12 +695,10 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 .accuracy-stat.draw .stat-value{color:var(--yellow)}
 .accuracy-section{margin:12px 0}
 .accuracy-section-title{font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-
 /* Connection: compact */
 .conn-group{display:flex;align-items:center;gap:4px}
 #conn-dot{width:8px;height:8px;border-radius:50%}
 #conn-label{font-size:10px;color:var(--text-dim)}
-
 /* Responsive */
 @media(max-width:768px){
   body{overflow-y:auto;overflow-x:hidden}
@@ -1594,101 +715,36 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   #signal-box{font-size:16px;padding:8px}
   .tab-btn{padding:6px 4px}
 }
-
 /* ═══ NEW (ALWAYS-SIGNAL-2026-08-03): history filter + delete button styles ═══ */
-
 /* Danger buttons (delete/clear) */
-.btn-danger{
-  background:#3a1518;
-  color:#ff6b6b;
-  border:1px solid #5a2228;
-  border-radius:4px;
-  padding:4px 8px;
-  font-size:10px;
-  cursor:pointer;
-  transition:all .15s;
-}
-.btn-danger:hover{
-  background:#5a2228;
-  color:#ff8a8a;
-  border-color:#7a2a30;
-}
-.btn-danger:active{
-  transform:scale(.97);
-}
-
+.btn-danger { background:#3a1518; color:#ff6b6b; border:1px solid #5a2228; border-radius:4px; padding:4px 8px; font-size:10px; cursor:pointer; transition:all .15s; }
+.btn-danger:hover { background:#5a2228; color:#ff8a8a; border-color:#7a2a30; }
+.btn-danger:active { transform:scale(.97); }
 /* Per-row delete button (trash icon) */
-.history-delete-btn{
-  margin-left:auto;
-  cursor:pointer;
-  opacity:.4;
-  font-size:11px;
-  padding:2px 4px;
-  border-radius:3px;
-  transition:all .15s;
-}
-.history-delete-btn:hover{
-  opacity:1;
-  background:rgba(255,107,107,.2);
-}
-
+.history-delete-btn { margin-left:auto; cursor:pointer; opacity:.4; font-size:11px; padding:2px 4px; border-radius:3px; transition:all .15s; }
+.history-delete-btn:hover { opacity:1; background:rgba(255,107,107,.2); }
 /* History header layout — wrap on small screens */
-.tab-history-header{
-  flex-wrap:wrap;
-  gap:4px;
-}
+.tab-history-header { flex-wrap:wrap; gap:4px; }
 .tab-history-header select,
-.tab-history-header button{
-  font-size:10px;
-  padding:3px 6px;
-  height:24px;
-}
-
+.tab-history-header button { font-size:10px; padding:3px 6px; height:24px; }
 /* Count hint */
-#history-count-hint{
-  margin-left:auto;
-  font-size:10px;
-  color:var(--text-dim);
-}
-
+#history-count-hint { margin-left:auto; font-size:10px; color:var(--text-dim); }
 /* Asset label in history row */
-.history-asset{
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
-}
-
+.history-asset { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 /* ═══ NEW (ALWAYS-SIGNAL-2026-08-03): refresh button + module stats ═══ */
-
-#refresh-btn{
-  background:none;border:1px solid var(--border);color:var(--text);
-  font-size:14px;padding:4px 8px;border-radius:4px;cursor:pointer;
-  transition:all .15s;
-}
-#refresh-btn:hover{
-  background:var(--card);border-color:var(--text-dim);
-}
-#refresh-btn.spin{
-  animation:chart-spin .7s linear infinite;
-}
+#refresh-btn { background:none;border:1px solid var(--border);color:var(--text); font-size:14px;padding:4px 8px;border-radius:4px;cursor:pointer; transition:all .15s; }
+#refresh-btn:hover { background:var(--card);border-color:var(--text-dim); }
+#refresh-btn.spin { animation:chart-spin .7s linear infinite; }
 @keyframes chart-spin{
   from{transform:rotate(0deg)}
   to{transform:rotate(360deg)}
 }
-
 /* Per-module stats (Stats tab → By Module section) */
-.module-stats-hero{
-  display:flex;justify-content:space-between;align-items:baseline;
-  padding:6px 0;margin-bottom:6px;border-bottom:1px solid var(--border);
-}
+.module-stats-hero { display:flex;justify-content:space-between;align-items:baseline; padding:6px 0;margin-bottom:6px;border-bottom:1px solid var(--border); }
 .module-stats-overall{font-size:14px;font-weight:700;color:var(--text)}
 .module-stats-meta{font-size:10px;color:var(--text-dim)}
 .module-stats-rows{display:flex;flex-direction:column;gap:6px}
-.module-stats-row{
-  display:grid;grid-template-columns:90px 1fr 70px 100px;
-  align-items:center;gap:8px;padding:6px 8px;border-radius:4px;
-  background:var(--card);cursor:pointer;transition:background .15s;
-}
+.module-stats-row { display:grid;grid-template-columns:90px 1fr 70px 100px; align-items:center;gap:8px;padding:6px 8px;border-radius:4px; background:var(--card);cursor:pointer;transition:background .15s; }
 .module-stats-row:hover{background:rgba(255,255,255,.08)}
 .module-stats-row:focus{outline:2px solid var(--text-dim);outline-offset:2px}
 .module-stats-name{font-size:10px;color:var(--text-dim);text-transform:uppercase;font-weight:600}
@@ -1701,272 +757,78 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 .module-stats-callput{display:flex;gap:6px;font-size:9px;justify-content:flex-end}
 .cp-call{color:#4caf50}
 .cp-put{color:#f44336}
-.mini-btn{
-  background:none;border:1px solid var(--border);color:var(--text-dim);
-  font-size:11px;padding:1px 6px;border-radius:3px;cursor:pointer;
-  margin-left:6px;transition:all .15s;
-}
+.mini-btn { background:none;border:1px solid var(--border);color:var(--text-dim); font-size:11px;padding:1px 6px;border-radius:3px;cursor:pointer; margin-left:6px;transition:all .15s; }
 .mini-btn:hover{color:var(--text);border-color:var(--text-dim);background:var(--card)}
-
 /* Breakdown bar (reused for module + regime + strength) */
-.breakdown-bar{
-  height:6px;background:rgba(255,255,255,.08);border-radius:3px;
-  overflow:hidden;position:relative;
-}
-.breakdown-bar-fill{
-  height:100%;border-radius:3px;transition:width .3s ease;
-}
+.breakdown-bar { height:6px;background:rgba(255,255,255,.08);border-radius:3px; overflow:hidden;position:relative; }
+.breakdown-bar-fill { height:100%;border-radius:3px;transition:width .3s ease; }
 .breakdown-bar-fill.correct{background:linear-gradient(90deg,#4caf50,#66bb6a)}
-
 /* ═══ NEW (ALWAYS-SIGNAL-2026-08-03): UI polish — shadows, fade-in, filter bar ═══ */
-
 /* Subtle background gradient for depth */
-body{
-  background:radial-gradient(ellipse at top, #131722 0%, #0d1117 60%);
-}
-
+body { background:radial-gradient(ellipse at top, #131722 0%, #0d1117 60%); }
 /* Card shadow system (replaces flat borders on key sections) */
-.accuracy-section{
-  box-shadow:0 1px 3px rgba(0,0,0,.3), 0 1px 2px rgba(0,0,0,.2);
-  border:1px solid var(--border);
-  transition:box-shadow .2s ease;
-}
-.accuracy-section:hover{
-  box-shadow:0 4px 12px rgba(0,0,0,.4);
-}
-.accuracy-stat{
-  box-shadow:0 1px 2px rgba(0,0,0,.2);
-}
-.module-stats-row{
-  box-shadow:0 1px 2px rgba(0,0,0,.15);
-  transition:all .2s ease;
-}
-.module-stats-row:hover{
-  box-shadow:0 4px 8px rgba(0,0,0,.3);
-  transform:translateY(-1px);
-}
-
+.accuracy-section { box-shadow:0 1px 3px rgba(0,0,0,.3), 0 1px 2px rgba(0,0,0,.2); border:1px solid var(--border); transition:box-shadow .2s ease; }
+.accuracy-section:hover { box-shadow:0 4px 12px rgba(0,0,0,.4); }
+.accuracy-stat { box-shadow:0 1px 2px rgba(0,0,0,.2); }
+.module-stats-row { box-shadow:0 1px 2px rgba(0,0,0,.15); transition:all .2s ease; }
+.module-stats-row:hover { box-shadow:0 4px 8px rgba(0,0,0,.3); transform:translateY(-1px); }
 /* History row fade-in animation (smooth refresh) */
-.history-row{
-  animation:row-fade-in .25s ease;
-}
+.history-row { animation:row-fade-in .25s ease; }
 @keyframes row-fade-in{
   from{opacity:0;transform:translateY(-4px)}
   to{opacity:1;transform:none}
 }
-
-/* Fixed-width history columns for alignment (was 1fr for asset) */
-.history-row{
-  grid-template-columns:46px 84px 50px 24px 40px 50px 24px !important;
-}
+.history-row { grid-template-columns:46px 84px 50px 24px 40px 50px 24px !important; }
 @media(max-width:400px){
-  .history-row{
-    grid-template-columns:38px 70px 44px 20px 34px 44px 20px !important;
-  }
+.history-row { grid-template-columns:38px 70px 44px 20px 34px 44px 20px !important; }
 }
-.history-asset{
-  text-overflow:ellipsis;
-  overflow:hidden;
-  white-space:nowrap;
-}
-.history-delete-btn{
-  flex-shrink:0;
-}
-
+.history-asset { text-overflow:ellipsis; overflow:hidden; white-space:nowrap; }
+.history-delete-btn { flex-shrink:0; }
 /* Stats filter bar (pair selector + refresh on Stats tab) */
-.stats-filter-bar{
-  display:flex;
-  align-items:center;
-  gap:8px;
-  padding:8px 12px;
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  margin-bottom:12px;
-  box-shadow:0 1px 3px rgba(0,0,0,.2);
-}
-.stats-filter-label{
-  font-size:11px;
-  color:var(--text-dim);
-  font-weight:600;
-  text-transform:uppercase;
-  letter-spacing:.5px;
-}
-#stats-pair-select{
-  flex:1;
-  min-width:120px;
-  background:var(--bg-elev);
-  color:var(--text);
-  border:1px solid var(--border);
-  border-radius:4px;
-  padding:4px 8px;
-  font-size:12px;
-  cursor:pointer;
-}
-#stats-pair-select:focus{
-  outline:2px solid var(--accent);
-  outline-offset:-1px;
-}
-
+.stats-filter-bar { display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,.2); }
+.stats-filter-label { font-size:11px; color:var(--text-dim); font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+#stats-pair-select { flex:1; min-width:120px; background:var(--bg-elev); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:4px 8px; font-size:12px; cursor:pointer; }
+#stats-pair-select:focus { outline:2px solid var(--accent); outline-offset:-1px; }
 /* Per-pair drill-down panel */
-.module-pair-detail{
-  margin-top:12px;
-  padding:10px;
-  background:var(--bg-elev);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  box-shadow:0 2px 8px rgba(0,0,0,.3);
-  animation:panel-slide-in .2s ease;
-}
+.module-pair-detail { margin-top:12px; padding:10px; background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius); box-shadow:0 2px 8px rgba(0,0,0,.3); animation:panel-slide-in .2s ease; }
 @keyframes panel-slide-in{
   from{opacity:0;transform:translateY(-8px)}
   to{opacity:1;transform:none}
 }
-.module-pair-detail-header{
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  margin-bottom:8px;
-  padding-bottom:6px;
-  border-bottom:1px solid var(--border);
-}
-.module-pair-detail-title{
-  font-size:11px;
-  font-weight:700;
-  color:var(--text);
-  text-transform:uppercase;
-  letter-spacing:.5px;
-}
-.module-pair-detail-rows{
-  display:flex;
-  flex-direction:column;
-  gap:4px;
-}
-.module-pair-detail-row{
-  display:grid;
-  grid-template-columns:100px 1fr 50px 60px;
-  align-items:center;
-  gap:8px;
-  padding:4px 6px;
-  border-radius:3px;
-  background:var(--card);
-}
-.mppd-asset{
-  font-size:10px;
-  color:var(--text);
-  font-weight:600;
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
-}
-.mppd-pct{
-  font-size:12px;
-  font-weight:700;
-  text-align:right;
-}
+.module-pair-detail-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+.module-pair-detail-title { font-size:11px; font-weight:700; color:var(--text); text-transform:uppercase; letter-spacing:.5px; }
+.module-pair-detail-rows { display:flex; flex-direction:column; gap:4px; }
+.module-pair-detail-row { display:grid; grid-template-columns:100px 1fr 50px 60px; align-items:center; gap:8px; padding:4px 6px; border-radius:3px; background:var(--card); }
+.mppd-asset { font-size:10px; color:var(--text); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mppd-pct { font-size:12px; font-weight:700; text-align:right; }
 .mppd-pct.none{color:var(--text-dim)}
 .mppd-pct.good{color:#4caf50}
 .mppd-pct.mid{color:#ffc107}
 .mppd-pct.bad{color:#f44336}
-.mppd-meta{
-  font-size:9px;
-  color:var(--text-dim);
-  text-align:right;
-}
-
+.mppd-meta { font-size:9px; color:var(--text-dim); text-align:right; }
 /* Refresh button — no layout shift on spin */
-#refresh-btn{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  width:32px;
-  height:32px;
-  padding:0;
-  line-height:1;
-}
-
+#refresh-btn { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; line-height:1; }
 /* Last-refresh label — subtle */
-#last-refresh-label{
-  font-variant-numeric:tabular-nums;
-  opacity:.7;
-  transition:opacity .2s;
-}
+#last-refresh-label { font-variant-numeric:tabular-nums; opacity:.7; transition:opacity .2s; }
 #last-refresh-label:hover{opacity:1}
-
 /* ═══ NEW (ALWAYS-SIGNAL-2026-08-03): per-theory breakdown styles ═══ */
-
-.theory-stats-rows{
-  display:flex;
-  flex-direction:column;
-  gap:6px;
-}
-.theory-stats-row{
-  display:grid;
-  grid-template-columns:1fr;
-  gap:4px;
-  padding:8px 10px;
-  border-radius:var(--radius);
-  background:var(--card);
-  border:1px solid var(--border);
-  box-shadow:0 1px 2px rgba(0,0,0,.15);
-  transition:all .2s ease;
-}
-.theory-stats-row:hover{
-  box-shadow:0 4px 8px rgba(0,0,0,.3);
-  transform:translateY(-1px);
-  border-color:var(--text-dim);
-}
-.theory-row-header{
-  display:flex;
-  justify-content:space-between;
-  align-items:baseline;
-  gap:8px;
-}
-.theory-name{
-  font-size:12px;
-  font-weight:600;
-  color:var(--text);
-}
-.theory-module{
-  font-size:9px;
-  color:var(--text-dim);
-  text-transform:uppercase;
-  letter-spacing:.5px;
-  padding:1px 6px;
-  border-radius:3px;
-  background:var(--bg-elev);
-  white-space:nowrap;
-}
-.theory-row-stats{
-  display:flex;
-  justify-content:space-between;
-  align-items:baseline;
-  gap:8px;
-}
-.theory-pct{
-  font-size:14px;
-  font-weight:700;
-  font-variant-numeric:tabular-nums;
-}
+.theory-stats-rows { display:flex; flex-direction:column; gap:6px; }
+.theory-stats-row { display:grid; grid-template-columns:1fr; gap:4px; padding:8px 10px; border-radius:var(--radius); background:var(--card); border:1px solid var(--border); box-shadow:0 1px 2px rgba(0,0,0,.15); transition:all .2s ease; }
+.theory-stats-row:hover { box-shadow:0 4px 8px rgba(0,0,0,.3); transform:translateY(-1px); border-color:var(--text-dim); }
+.theory-row-header { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+.theory-name { font-size:12px; font-weight:600; color:var(--text); }
+.theory-module { font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; padding:1px 6px; border-radius:3px; background:var(--bg-elev); white-space:nowrap; }
+.theory-row-stats { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+.theory-pct { font-size:14px; font-weight:700; font-variant-numeric:tabular-nums; }
 .theory-pct.none{color:var(--text-dim)}
 .theory-pct.good{color:#4caf50}
 .theory-pct.mid{color:#ffc107}
 .theory-pct.bad{color:#f44336}
-.theory-meta{
-  font-size:10px;
-  color:var(--text-dim);
-  font-variant-numeric:tabular-nums;
-}
-
-
+.theory-meta { font-size:10px; color:var(--text-dim); font-variant-numeric:tabular-nums; }
 /* ═══════════════════════════════════════════════════════════════════════════
    UI-V2 (2026-08-05): Header Win-Rate Button + Dropdown
    ═══════════════════════════════════════════════════════════════════════════ */
-
-.winrate-wrap{
-  position:relative;
-  flex-shrink:0;
-}
+.winrate-wrap { position:relative; flex-shrink:0; }
 #winrate-btn{
   display:inline-flex;
   align-items:center;
@@ -1984,25 +846,14 @@ body{
   min-height:28px;
   letter-spacing:.3px;
 }
-#winrate-btn:hover{
-  border-color:var(--accent);
-  background:rgba(255,193,7,.08);
-}
-#winrate-btn[aria-expanded="true"]{
-  border-color:var(--accent);
-  background:rgba(255,193,7,.12);
-  box-shadow:0 0 0 2px rgba(255,193,7,.15);
-}
+#winrate-btn:hover { border-color:var(--accent); background:rgba(255,193,7,.08); }
+#winrate-btn[aria-expanded="true"] { border-color:var(--accent); background:rgba(255,193,7,.12); box-shadow:0 0 0 2px rgba(255,193,7,.15); }
 #winrate-btn .winrate-icon{font-size:13px;line-height:1}
-#winrate-btn .winrate-pct{
-  font-variant-numeric:tabular-nums;
-  transition:color .2s;
-}
+#winrate-btn .winrate-pct { font-variant-numeric:tabular-nums; transition:color .2s; }
 #winrate-btn .winrate-pct.good{color:#4caf50}
 #winrate-btn .winrate-pct.mid{color:#ffc107}
 #winrate-btn .winrate-pct.bad{color:#f44336}
 #winrate-btn .winrate-trend{font-size:9px;opacity:.7}
-
 /* Dropdown panel — desktop: floating, anchored top-right of button */
 .winrate-dropdown{
   position:absolute;
@@ -2025,164 +876,44 @@ body{
   to{opacity:1;transform:none}
 }
 .winrate-dropdown[hidden]{display:none}
-
-.winrate-dropdown-header{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  padding:8px 10px;
-  border-bottom:1px solid var(--border-soft);
-  background:var(--bg-elev, var(--bg));
-}
-.winrate-dropdown-title{
-  font-size:11px;
-  font-weight:700;
-  color:var(--text);
-  text-transform:uppercase;
-  letter-spacing:.5px;
-}
+.winrate-dropdown-header { display:flex; align-items:center; justify-content:space-between; padding:8px 10px; border-bottom:1px solid var(--border-soft); background:var(--bg-elev, var(--bg)); }
+.winrate-dropdown-title { font-size:11px; font-weight:700; color:var(--text); text-transform:uppercase; letter-spacing:.5px; }
 .winrate-dropdown-actions{display:flex;gap:4px}
-
-.winrate-dropdown-summary{
-  display:grid;
-  grid-template-columns:repeat(4,1fr);
-  gap:6px;
-  padding:8px 10px;
-  border-bottom:1px solid var(--border-soft);
-  background:rgba(255,255,255,.02);
-}
-.winrate-summary-pill{
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  gap:1px;
-  text-align:center;
-}
-.winrate-summary-pill .pill-label{
-  font-size:8px;
-  color:var(--text-dim);
-  text-transform:uppercase;
-  letter-spacing:.4px;
-}
-.winrate-summary-pill .pill-value{
-  font-size:12px;
-  font-weight:700;
-  font-family:var(--mono);
-  font-variant-numeric:tabular-nums;
-}
+.winrate-dropdown-summary { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; padding:8px 10px; border-bottom:1px solid var(--border-soft); background:rgba(255,255,255,.02); }
+.winrate-summary-pill { display:flex; flex-direction:column; align-items:center; gap:1px; text-align:center; }
+.winrate-summary-pill .pill-label { font-size:8px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.4px; }
+.winrate-summary-pill .pill-value { font-size:12px; font-weight:700; font-family:var(--mono); font-variant-numeric:tabular-nums; }
 .winrate-summary-pill .pill-value.good{color:#4caf50}
 .winrate-summary-pill .pill-value.mid{color:#ffc107}
 .winrate-summary-pill .pill-value.bad{color:#f44336}
-
-.winrate-dropdown-search{
-  padding:6px 10px;
-  border-bottom:1px solid var(--border-soft);
-}
-#winrate-search{
-  width:100%;
-  background:var(--bg);
-  color:var(--text);
-  border:1px solid var(--border);
-  border-radius:4px;
-  padding:5px 8px;
-  font-size:11px;
-  font-family:var(--sans);
-}
-#winrate-search:focus{
-  outline:none;
-  border-color:var(--accent);
-  box-shadow:0 0 0 2px rgba(255,193,7,.15);
-}
-
-.winrate-dropdown-list{
-  flex:1;
-  overflow-y:auto;
-  padding:4px 0;
-}
+.winrate-dropdown-search { padding:6px 10px; border-bottom:1px solid var(--border-soft); }
+#winrate-search { width:100%; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:5px 8px; font-size:11px; font-family:var(--sans); }
+#winrate-search:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 2px rgba(255,193,7,.15); }
+.winrate-dropdown-list { flex:1; overflow-y:auto; padding:4px 0; }
 .winrate-dropdown-list::-webkit-scrollbar{width:6px}
 .winrate-dropdown-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}
-
-.winrate-row{
-  display:grid;
-  grid-template-columns:1fr 50px 60px;
-  align-items:center;
-  gap:8px;
-  padding:6px 10px;
-  cursor:pointer;
-  transition:background .12s;
-  border-left:2px solid transparent;
-}
-.winrate-row:hover{
-  background:rgba(255,255,255,.06);
-  border-left-color:var(--accent);
-}
-.winrate-row.current{
-  background:rgba(255,193,7,.08);
-  border-left-color:var(--accent);
-}
-.wr-pair-name{
-  font-size:11px;
-  font-weight:600;
-  color:var(--text);
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
-}
-.wr-pair-meta{
-  font-size:9px;
-  color:var(--text-dim);
-  margin-top:1px;
-}
-.wr-pair-bar{
-  width:50px;
-  height:5px;
-  background:rgba(255,255,255,.08);
-  border-radius:3px;
-  overflow:hidden;
-  margin-top:2px;
-}
-.wr-pair-bar-fill{
-  height:100%;
-  border-radius:3px;
-  transition:width .3s ease;
-}
+.winrate-row { display:grid; grid-template-columns:1fr 50px 60px; align-items:center; gap:8px; padding:6px 10px; cursor:pointer; transition:background .12s; border-left:2px solid transparent; }
+.winrate-row:hover { background:rgba(255,255,255,.06); border-left-color:var(--accent); }
+.winrate-row.current { background:rgba(255,193,7,.08); border-left-color:var(--accent); }
+.wr-pair-name { font-size:11px; font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.wr-pair-meta { font-size:9px; color:var(--text-dim); margin-top:1px; }
+.wr-pair-bar { width:50px; height:5px; background:rgba(255,255,255,.08); border-radius:3px; overflow:hidden; margin-top:2px; }
+.wr-pair-bar-fill { height:100%; border-radius:3px; transition:width .3s ease; }
 .wr-pair-bar-fill.good{background:linear-gradient(90deg,#4caf50,#66bb6a)}
 .wr-pair-bar-fill.mid{background:linear-gradient(90deg,#ffc107,#ffca28)}
 .wr-pair-bar-fill.bad{background:linear-gradient(90deg,#f44336,#ef5350)}
 .wr-pair-bar-fill.none{background:rgba(255,255,255,.15)}
-.wr-pair-pct{
-  font-size:12px;
-  font-weight:700;
-  text-align:right;
-  font-family:var(--mono);
-  font-variant-numeric:tabular-nums;
-}
+.wr-pair-pct { font-size:12px; font-weight:700; text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums; }
 .wr-pair-pct.good{color:#4caf50}
 .wr-pair-pct.mid{color:#ffc107}
 .wr-pair-pct.bad{color:#f44336}
 .wr-pair-pct.none{color:var(--text-dim)}
-
-.winrate-empty{
-  padding:16px;
-  text-align:center;
-  font-size:11px;
-  color:var(--text-dim);
-}
-
-.winrate-dropdown-footer{
-  display:flex;
-  justify-content:space-between;
-  padding:6px 10px;
-  border-top:1px solid var(--border-soft);
-  background:var(--bg-elev, var(--bg));
-}
+.winrate-empty { padding:16px; text-align:center; font-size:11px; color:var(--text-dim); }
+.winrate-dropdown-footer { display:flex; justify-content:space-between; padding:6px 10px; border-top:1px solid var(--border-soft); background:var(--bg-elev, var(--bg)); }
 .winrate-dropdown-footer .hint{font-size:9px;color:var(--text-dim)}
-
-
 /* ═══════════════════════════════════════════════════════════════════════════
    UI-V2: Tooltip System (data-tooltip attribute)
    ═══════════════════════════════════════════════════════════════════════════ */
-
 #ui-tooltip{
   position:fixed;
   z-index:9999;
@@ -2203,73 +934,25 @@ body{
 }
 #ui-tooltip.show{opacity:1}
 [data-tooltip]{position:relative;cursor:help}
-
-
 /* ═══════════════════════════════════════════════════════════════════════════
    UI-V2: Redesigned History Tab
    ═══════════════════════════════════════════════════════════════════════════ */
-
 /* Override old flat tab-history-header to use new layout */
-#tab-history{
-  display:none;
-  flex-direction:column;
-  height:100%;
-  background:var(--bg);
-}
+#tab-history { display:none; flex-direction:column; height:100%; background:var(--bg); }
 #tab-history.active{display:flex}
-
-.history-summary-grid{
-  display:grid;
-  grid-template-columns:repeat(6,1fr);
-  gap:6px;
-  padding:8px 12px;
-  background:var(--card);
-  border-bottom:1px solid var(--border-soft);
-  flex-shrink:0;
-}
-.summary-card{
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  padding:6px 4px;
-  border-radius:5px;
-  background:var(--bg-elev, var(--bg));
-  border:1px solid var(--border-soft);
-  transition:all .15s;
-  text-align:center;
-  min-height:42px;
-}
-.summary-card:hover{
-  border-color:var(--text-dim);
-  transform:translateY(-1px);
-}
-.summary-label{
-  font-size:9px;
-  color:var(--text-dim);
-  text-transform:uppercase;
-  letter-spacing:.4px;
-}
-.summary-value{
-  font-size:14px;
-  font-weight:700;
-  font-family:var(--mono);
-  font-variant-numeric:tabular-nums;
-  margin-top:2px;
-  line-height:1.1;
-}
+.history-summary-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; padding:8px 12px; background:var(--card); border-bottom:1px solid var(--border-soft); flex-shrink:0; }
+.summary-card { display:flex; flex-direction:column; align-items:center; padding:6px 4px; border-radius:5px; background:var(--bg-elev, var(--bg)); border:1px solid var(--border-soft); transition:all .15s; text-align:center; min-height:42px; }
+.summary-card:hover { border-color:var(--text-dim); transform:translateY(-1px); }
+.summary-label { font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.4px; }
+.summary-value { font-size:14px; font-weight:700; font-family:var(--mono); font-variant-numeric:tabular-nums; margin-top:2px; line-height:1.1; }
 .summary-card.summary-wins .summary-value{color:#4caf50}
 .summary-card.summary-losses .summary-value{color:#f44336}
 .summary-card.summary-rate .summary-value.good{color:#4caf50}
 .summary-card.summary-rate .summary-value.mid{color:#ffc107}
 .summary-card.summary-rate .summary-value.bad{color:#f44336}
 .summary-card.summary-pending .summary-value{color:#ffc107}
-
 /* Collapsible filter bar */
-.history-controls-wrap{
-  border-bottom:1px solid var(--border-soft);
-  background:var(--card);
-  flex-shrink:0;
-}
+.history-controls-wrap { border-bottom:1px solid var(--border-soft); background:var(--card); flex-shrink:0; }
 .history-filter-toggle{
   display:flex;
   align-items:center;
@@ -2288,106 +971,31 @@ body{
   transition:background .12s;
 }
 .history-filter-toggle:hover{background:rgba(255,255,255,.04)}
-.history-filter-toggle .toggle-arrow{
-  display:inline-block;
-  transition:transform .2s;
-  font-size:9px;
-  color:var(--text-dim);
-}
+.history-filter-toggle .toggle-arrow { display:inline-block; transition:transform .2s; font-size:9px; color:var(--text-dim); }
 .history-filter-toggle[aria-expanded="false"] .toggle-arrow{transform:rotate(-90deg)}
 .history-filter-toggle .toggle-label{flex:1}
 .history-filter-toggle .hint{font-size:9px;color:var(--text-dim);font-weight:400;text-transform:none;letter-spacing:0}
-
-.history-controls{
-  display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-  gap:6px;
-  padding:8px 12px;
-  border-top:1px solid var(--border-soft);
-  background:rgba(255,255,255,.02);
-}
+.history-controls { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:6px; padding:8px 12px; border-top:1px solid var(--border-soft); background:rgba(255,255,255,.02); }
 .history-controls[hidden]{display:none}
-.control-row{
-  display:flex;
-  flex-direction:column;
-  gap:2px;
-}
+.control-row { display:flex; flex-direction:column; gap:2px; }
 .control-row--grow{grid-column:span 2}
-.control-row--actions{
-  grid-column:span 2;
-  flex-direction:row;
-  align-items:flex-end;
-  gap:4px;
-}
-.control-label{
-  font-size:9px;
-  color:var(--text-dim);
-  text-transform:uppercase;
-  letter-spacing:.4px;
-  font-weight:600;
-}
+.control-row--actions { grid-column:span 2; flex-direction:row; align-items:flex-end; gap:4px; }
+.control-label { font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.4px; font-weight:600; }
 .history-controls select,
-.history-controls input{
-  background:var(--bg);
-  color:var(--text);
-  border:1px solid var(--border);
-  border-radius:4px;
-  padding:4px 8px;
-  font-size:11px;
-  font-family:var(--sans);
-  height:26px;
-  width:100%;
-  box-sizing:border-box;
-}
+.history-controls input { background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:4px 8px; font-size:11px; font-family:var(--sans); height:26px; width:100%; box-sizing:border-box; }
 .history-controls select:focus,
-.history-controls input:focus{
-  outline:none;
-  border-color:var(--accent);
-  box-shadow:0 0 0 2px rgba(255,193,7,.15);
-}
-.history-controls .btn-danger{
-  height:26px;
-  font-size:10px;
-  padding:0 8px;
-  flex:1;
-  white-space:nowrap;
-}
-
-#tab-history #history-list{
-  flex:1;
-  overflow-y:auto;
-  padding:0;
-}
-
+.history-controls input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 2px rgba(255,193,7,.15); }
+.history-controls .btn-danger { height:26px; font-size:10px; padding:0 8px; flex:1; white-space:nowrap; }
+#tab-history #history-list { flex:1; overflow-y:auto; padding:0; }
 /* History row — V2 (cleaner, more info) */
-.history-row{
-  display:grid;
-  grid-template-columns:46px 84px 50px 24px 40px 50px 24px !important;
-  align-items:center;
-  gap:6px;
-  padding:6px 10px;
-  border-bottom:1px solid var(--border-soft);
-  cursor:pointer;
-  transition:background .12s, transform .12s;
-  font-size:11px;
-}
-.history-row:hover{
-  background:rgba(255,255,255,.05);
-  transform:translateX(2px);
-}
-.history-row.history-row-recent{
-  background:rgba(255,193,7,.04);
-}
+.history-row { display:grid; grid-template-columns:46px 84px 50px 24px 40px 50px 24px !important; align-items:center; gap:6px; padding:6px 10px; border-bottom:1px solid var(--border-soft); cursor:pointer; transition:background .12s, transform .12s; font-size:11px; }
+.history-row:hover { background:rgba(255,255,255,.05); transform:translateX(2px); }
+.history-row.history-row-recent { background:rgba(255,193,7,.04); }
 .history-row.correct{border-left:3px solid #4caf50}
 .history-row.wrong{border-left:3px solid #f44336}
 .history-row.draw{border-left:3px solid #ffc107}
 .history-row.pending{border-left:3px solid var(--text-dim)}
-.history-row .history-time{
-  font-family:var(--mono);
-  font-size:10px;
-  color:var(--text-dim);
-  font-variant-numeric:tabular-nums;
-}
+.history-row .history-time { font-family:var(--mono); font-size:10px; color:var(--text-dim); font-variant-numeric:tabular-nums; }
 .history-row .history-signal.call{color:#4caf50;font-weight:700}
 .history-row .history-signal.put{color:#f44336;font-weight:700}
 .history-row .history-strength.STRONG{color:#4caf50;font-weight:700}
@@ -2395,13 +1003,7 @@ body{
 .history-row .history-strength.WEAK{color:var(--text-dim)}
 .history-row .history-score.pos{color:#4caf50}
 .history-row .history-score.neg{color:#f44336}
-.history-row .history-icon{
-  display:flex;
-  align-items:center;
-  gap:2px;
-  font-size:11px;
-}
-
+.history-row .history-icon { display:flex; align-items:center; gap:2px; font-size:11px; }
 /* Group header in history list */
 .history-group-header{
   padding:6px 10px;
@@ -2420,52 +1022,15 @@ body{
   top:0;
   z-index:2;
 }
-.history-group-header .grp-count{
-  font-weight:400;
-  color:var(--text-dim);
-  text-transform:none;
-  letter-spacing:0;
-}
-
-.history-load-more{
-  padding:10px;
-  text-align:center;
-  background:var(--card);
-  border-top:1px solid var(--border-soft);
-  cursor:pointer;
-  font-size:11px;
-  color:var(--text-dim);
-  transition:all .15s;
-}
-.history-load-more:hover{
-  background:rgba(255,255,255,.06);
-  color:var(--text);
-}
-
-
+.history-group-header .grp-count { font-weight:400; color:var(--text-dim); text-transform:none; letter-spacing:0; }
+.history-load-more { padding:10px; text-align:center; background:var(--card); border-top:1px solid var(--border-soft); cursor:pointer; font-size:11px; color:var(--text-dim); transition:all .15s; }
+.history-load-more:hover { background:rgba(255,255,255,.06); color:var(--text); }
 /* ═══════════════════════════════════════════════════════════════════════════
    UI-V2: Redesigned Stats Tab — Sub-tab Navigation
    ═══════════════════════════════════════════════════════════════════════════ */
-
-#tab-accuracy{
-  display:none;
-  flex-direction:column;
-  height:100%;
-  overflow:hidden;
-  padding:0;
-  background:var(--bg);
-}
+#tab-accuracy { display:none; flex-direction:column; height:100%; overflow:hidden; padding:0; background:var(--bg); }
 #tab-accuracy.active{display:flex}
-
-.stats-subtabs{
-  display:flex;
-  gap:0;
-  border-bottom:1px solid var(--border-soft);
-  background:var(--card);
-  overflow-x:auto;
-  flex-shrink:0;
-  -webkit-overflow-scrolling:touch;
-}
+.stats-subtabs { display:flex; gap:0; border-bottom:1px solid var(--border-soft); background:var(--card); overflow-x:auto; flex-shrink:0; -webkit-overflow-scrolling:touch; }
 .stats-subtabs::-webkit-scrollbar{height:3px}
 .stats-subtabs::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15)}
 .stats-subtab{
@@ -2484,48 +1049,16 @@ body{
   white-space:nowrap;
 }
 .stats-subtab:hover{color:var(--text);background:rgba(255,255,255,.03)}
-.stats-subtab.active{
-  color:var(--accent);
-  border-bottom-color:var(--accent);
-  background:rgba(255,193,7,.05);
-}
-
-.stats-subpane{
-  display:none;
-  flex:1;
-  overflow-y:auto;
-  padding:14px;
-  -webkit-overflow-scrolling:touch;
-}
+.stats-subtab.active { color:var(--accent); border-bottom-color:var(--accent); background:rgba(255,193,7,.05); }
+.stats-subpane { display:none; flex:1; overflow-y:auto; padding:14px; -webkit-overflow-scrolling:touch; }
 .stats-subpane.active{display:block}
 .stats-subpane::-webkit-scrollbar{width:6px}
 .stats-subpane::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}
-
 /* Time pattern bars */
-.time-pattern-row{
-  display:grid;
-  grid-template-columns:40px 1fr 50px 40px;
-  align-items:center;
-  gap:8px;
-  padding:5px 6px;
-  border-radius:3px;
-  background:var(--card);
-  margin-bottom:3px;
-  font-size:11px;
-}
+.time-pattern-row { display:grid; grid-template-columns:40px 1fr 50px 40px; align-items:center; gap:8px; padding:5px 6px; border-radius:3px; background:var(--card); margin-bottom:3px; font-size:11px; }
 .tp-hour{font-family:var(--mono);color:var(--text-dim);font-size:10px}
-.tp-bar{
-  height:8px;
-  background:rgba(255,255,255,.06);
-  border-radius:3px;
-  overflow:hidden;
-  position:relative;
-}
-.tp-bar-fill{
-  height:100%;
-  border-radius:3px;
-  transition:width .3s;
-}
+.tp-bar { height:8px; background:rgba(255,255,255,.06); border-radius:3px; overflow:hidden; position:relative; }
+.tp-bar-fill { height:100%; border-radius:3px; transition:width .3s; }
 .tp-bar-fill.good{background:linear-gradient(90deg,#4caf50,#66bb6a)}
 .tp-bar-fill.mid{background:linear-gradient(90deg,#ffc107,#ffca28)}
 .tp-bar-fill.bad{background:linear-gradient(90deg,#f44336,#ef5350)}
@@ -2535,149 +1068,70 @@ body{
 .tp-pct.good{color:#4caf50}
 .tp-pct.mid{color:#ffc107}
 .tp-pct.bad{color:#f44336}
-
 /* Deep stats blocks */
-.deep-stat-block{
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:6px;
-  padding:10px;
-  margin-bottom:10px;
-}
-.deep-stat-block-title{
-  font-size:10px;
-  font-weight:700;
-  color:var(--text-dim);
-  text-transform:uppercase;
-  letter-spacing:.5px;
-  margin-bottom:6px;
-  padding-bottom:4px;
-  border-bottom:1px solid var(--border-soft);
-}
-.deep-stat-row{
-  display:grid;
-  grid-template-columns:1fr 60px 50px;
-  align-items:center;
-  gap:8px;
-  padding:3px 0;
-  font-size:11px;
-}
+.deep-stat-block { background:var(--card); border:1px solid var(--border); border-radius:6px; padding:10px; margin-bottom:10px; }
+.deep-stat-block-title { font-size:10px; font-weight:700; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; padding-bottom:4px; border-bottom:1px solid var(--border-soft); }
+.deep-stat-row { display:grid; grid-template-columns:1fr 60px 50px; align-items:center; gap:8px; padding:3px 0; font-size:11px; }
 .deep-stat-row .ds-label{color:var(--text)}
 .deep-stat-row .ds-bar{height:5px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden}
 .deep-stat-row .ds-bar-fill{height:100%;border-radius:3px;transition:width .3s}
 .deep-stat-row .ds-value{font-family:var(--mono);font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
-
-
 /* ═══════════════════════════════════════════════════════════════════════════
    UI-V2: Responsive — Mobile / Tablet / Desktop
    ═══════════════════════════════════════════════════════════════════════════ */
-
 /* Tablet & small desktop (≤992px) */
 @media (max-width:992px){
   .history-summary-grid{grid-template-columns:repeat(3,1fr)}
   .stats-subtab{padding:6px 10px;font-size:10px}
   .winrate-dropdown{width:min(340px,92vw)}
 }
-
 /* Mobile portrait (≤768px) */
 @media (max-width:768px){
   /* Win-rate button: hide text on very small screens, keep icon */
   #winrate-btn .winrate-pct{font-size:10px}
   #winrate-btn .winrate-trend{display:none}
-
   /* Win-rate dropdown: full-width bottom sheet on mobile */
-  .winrate-dropdown{
-    position:fixed;
-    top:auto;
-    right:0;
-    bottom:0;
-    left:0;
-    width:100%;
-    max-height:75vh;
-    border-radius:12px 12px 0 0;
-    border-left:none;
-    border-right:none;
-    border-bottom:none;
-    animation:wr-sheet-up .22s ease;
-  }
+.winrate-dropdown { position:fixed; top:auto; right:0; bottom:0; left:0; width:100%; max-height:75vh; border-radius:12px 12px 0 0; border-left:none; border-right:none; border-bottom:none; animation:wr-sheet-up .22s ease; }
   @keyframes wr-sheet-up{
     from{transform:translateY(100%);opacity:.5}
     to{transform:translateY(0);opacity:1}
   }
   /* Visible handle at top of bottom-sheet */
-  .winrate-dropdown::before{
-    content:'';
-    display:block;
-    width:38px;
-    height:4px;
-    background:rgba(255,255,255,.25);
-    border-radius:2px;
-    margin:6px auto 0;
-  }
-
+.winrate-dropdown::before { content:''; display:block; width:38px; height:4px; background:rgba(255,255,255,.25); border-radius:2px; margin:6px auto 0; }
   /* History summary: 2 cols on mobile */
   .history-summary-grid{grid-template-columns:repeat(2,1fr);gap:4px;padding:6px 8px}
   .summary-card{padding:5px 2px;min-height:38px}
   .summary-value{font-size:13px}
-
   /* History controls: stack vertically */
-  .history-controls{
-    grid-template-columns:1fr 1fr;
-    gap:4px;
-    padding:6px 8px;
-  }
+.history-controls { grid-template-columns:1fr 1fr; gap:4px; padding:6px 8px; }
   .control-row--grow{grid-column:1/-1}
   .control-row--actions{grid-column:1/-1}
-
   /* History row: smaller columns on mobile */
-  .history-row{
-    grid-template-columns:38px 70px 44px 20px 34px 44px 20px !important;
-    padding:5px 6px;
-    font-size:10px;
-  }
-
+.history-row { grid-template-columns:38px 70px 44px 20px 34px 44px 20px !important; padding:5px 6px; font-size:10px; }
   /* Stats subtabs: smaller, scrollable */
   .stats-subtabs{padding:0}
-  .stats-subtab{
-    flex:0 0 auto;
-    min-width:max-content;
-    padding:6px 10px;
-    font-size:10px;
-  }
-
+.stats-subtab { flex:0 0 auto; min-width:max-content; padding:6px 10px; font-size:10px; }
   /* Accuracy hero smaller on mobile */
   .accuracy-hero{padding:14px 0}
   .accuracy-hero-pct{font-size:36px}
   .accuracy-stats-grid{grid-template-columns:repeat(2,1fr);gap:6px;margin:10px 0}
-
   /* Module stats row: stack */
-  .module-stats-row{
-    grid-template-columns:80px 1fr 50px !important;
-    grid-template-rows:auto auto;
-  }
+.module-stats-row { grid-template-columns:80px 1fr 50px !important; grid-template-rows:auto auto; }
   .module-stats-callput{grid-column:2/-1;justify-content:flex-start !important}
-
   /* Deep stat rows */
   .deep-stat-row{grid-template-columns:1fr 50px 40px}
 }
-
 /* Very small phones (≤400px) */
 @media (max-width:400px){
   .history-summary-grid{grid-template-columns:repeat(2,1fr)}
   .summary-value{font-size:12px}
   .summary-label{font-size:8px}
   .accuracy-hero-pct{font-size:30px}
-  .history-row{
-    grid-template-columns:34px 60px 38px 18px 30px 38px 18px !important;
-    padding:4px 4px;
-    font-size:9px;
-    gap:3px;
-  }
+.history-row { grid-template-columns:34px 60px 38px 18px 30px 38px 18px !important; padding:4px 4px; font-size:9px; gap:3px; }
   #winrate-btn{padding:3px 6px;font-size:10px}
   #winrate-btn .winrate-icon{font-size:11px}
   .stats-subtab{padding:5px 8px;font-size:9px}
 }
-
 /* Touch device tweaks — larger tap targets */
 @media (hover:none) and (pointer:coarse){
   .winrate-row{padding:9px 10px;min-height:38px}
@@ -2689,7 +1143,6 @@ body{
   .history-controls select,
   .history-controls input{min-height:32px;height:32px}
 }
-
 /* Landscape phone — short height */
 @media (max-width:992px) and (max-height:500px){
   .winrate-dropdown{max-height:90vh}
@@ -2697,7 +1150,6 @@ body{
   .summary-card{min-height:32px;padding:3px 2px}
   .summary-value{font-size:11px}
 }
-
 /* Reduced motion */
 @media (prefers-reduced-motion:reduce){
   .winrate-dropdown{animation:none}
@@ -2705,7 +1157,6 @@ body{
   .summary-card{transition:none}
   .stats-subtab{transition:none}
 }
-
 /* Print */
 @media print{
   .winrate-wrap,

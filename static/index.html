@@ -1,58 +1,21 @@
 <!DOCTYPE html>
-<!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-51, MEDIUM): `.no-js` class on <html> is
-     removed by the inline script below once JS runs. CSS uses it to hide the
-     spinner when JS is disabled (otherwise it spins forever implying
-     "loading" when nothing is loading). -->
 <html lang="en" class="no-js">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0d1117">
   <title>Binary Signal Terminal</title>
-  <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-50, MEDIUM): no-JS fallback redirect.
-       If JS is disabled (or fails to load), the inline <script> at the
-       bottom never runs — the user sees the spinner forever. This meta
-       refresh redirects to the OTC default page (24/7) after 0 seconds,
-       but only if JS hasn't already redirected via location.replace().
-       The inline script's setTimeout(200) fires before the meta refresh
-       in practice, so JS-enabled users see the intended localStorage-based
-       redirect; JS-disabled users get the meta refresh fallback. -->
   <meta http-equiv="refresh" content="0; url=/static/otc.html">
   <style>
-    /* Minimal router page styling — dark theme to match the destination
-       pages so there's no flash of white when the redirect lands. */
-    /* FIX (DEEP-AUDIT-2026-07-26 / F-17-51, MEDIUM): hide the spinner when JS
-       is disabled. The `.no-js` class is on <html> by default; the inline
-       script at the bottom removes it. When JS is off, the spinner stays
-       spinning forever (CSS animation) which implies "loading" but nothing
-       is loading — confusing. Now: `.no-js .router-spinner{display:none}`. */
     html.no-js .router-spinner{display:none}
-    html,body{
-      margin:0;padding:0;height:100%;width:100%;
-      background:#0d1117;color:#e6edf3;
-      font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-    }
-    #router{
-      display:flex;flex-direction:column;align-items:center;justify-content:center;
-      height:100vh;height:100dvh;gap:18px;padding:24px;text-align:center;
-    }
+    html,body{margin:0;padding:0;height:100%;width:100%;background:#0d1117;color:#e6edf3;font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+    #router{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;height:100dvh;gap:18px;padding:24px;text-align:center}
     .router-title{font-size:16px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
     .router-sub{font-size:13px;color:#8b949e;max-width:480px;line-height:1.5}
-    .router-spinner{
-      width:34px;height:34px;
-      border:3px solid rgba(255,193,7,.2);border-top-color:#ffc107;
-      border-radius:50%;animation:chart-spin .7s linear infinite;
-    }
+    .router-spinner{width:34px;height:34px;border:3px solid rgba(255,193,7,.2);border-top-color:#ffc107;border-radius:50%;animation:chart-spin .7s linear infinite}
     @keyframes chart-spin{to{transform:rotate(360deg)}}
-    /* Manual fallback links — shown if JS is disabled or the redirect
-       fails (rare). User can pick the market manually. */
     .router-links{display:flex;gap:10px;margin-top:6px;flex-wrap:wrap;justify-content:center}
-    .router-links a{
-      display:inline-flex;align-items:center;gap:6px;
-      padding:10px 18px;border-radius:6px;font-size:13px;font-weight:700;
-      text-decoration:none;letter-spacing:.5px;text-transform:uppercase;
-      transition:transform .12s;
-    }
+    .router-links a{display:inline-flex;align-items:center;gap:6px;padding:10px 18px;border-radius:6px;font-size:13px;font-weight:700;text-decoration:none;letter-spacing:.5px;text-transform:uppercase;transition:transform .12s}
     .router-links a:hover{transform:translateY(-1px)}
     .router-links a.real{background:rgba(0,200,83,.15);color:#00c853;border:1px solid rgba(0,200,83,.4)}
     .router-links a.otc{background:rgba(255,193,7,.15);color:#ffc107;border:1px solid rgba(255,193,7,.4)}
@@ -65,50 +28,22 @@
   <div class="router-title">Binary Signal Terminal</div>
   <div class="router-sub">Redirecting to your last-used market…</div>
   <div class="router-links">
-    <a class="real"    href="/static/real.html">Real Market</a>
-    <a class="otc"     href="/static/otc.html">OTC Market</a>
+    <a class="real" href="/static/real.html">Real Market</a>
+    <a class="otc"  href="/static/otc.html">OTC Market</a>
   </div>
-  <noscript>
-    <div class="noscript">JavaScript is required. Pick a market above to continue.</div>
-  </noscript>
+  <noscript><div class="noscript">JavaScript is required. Pick a market above to continue.</div></noscript>
 </div>
 <script>
-/* Tiny router — reads localStorage and redirects to the appropriate market
-   page. Falls back to OTC if no stored preference (OTC runs 24/7, so it's
-   the safer default). Uses location.replace() so this router page doesn't
-   pollute the browser history (back button goes to the previous site, not
-   back here). */
-/* FIX (DEEP-AUDIT-2026-07-26 / F-17-51, MEDIUM): remove the .no-js class so
-   the spinner becomes visible (the CSS rule `.no-js .router-spinner{display:none}`
-   only hides it when JS is OFF). */
 document.documentElement.classList.remove('no-js');
-(function(){
-  'use strict';
-  var category = 'otc';   // default — OTC is always open (24/7)
+(function(){'use strict';
+  var category = 'otc'; // default — OTC is always open (24/7)
   try{
     var stored = localStorage.getItem('marketCategory');
-    // NOTE (USER REQUIREMENT 2026-08-03): 'alltime_otc' category removed.
-    // Old users who had it stored as their default get redirected to OTC
-    // (the closest equivalent — every OTC pair is now always-on).
-    if(stored === 'real' || stored === 'otc'){
-      category = stored;
-    }else if(stored === 'alltime_otc'){
-      category = 'otc';
-      try{ localStorage.setItem('marketCategory', 'otc'); }catch(_){}
-    }
-  }catch(_){ /* localStorage may be unavailable (private mode, etc.) */ }
-
-  // Small delay so the spinner is visible — gives the user feedback that
-  // something is happening, even on slow connections. Without this the
-  // redirect is so fast it looks like the page flickered.
-  var targets = {
-    'real':         '/static/real.html',
-    'otc':          '/static/otc.html',
-  };
-  var target = targets[category] || '/static/otc.html';
-  setTimeout(function(){
-    window.location.replace(target);
-  }, 200);
+    if(stored === 'real' || stored === 'otc') category = stored;
+    else if(stored === 'alltime_otc'){ category = 'otc'; try{ localStorage.setItem('marketCategory','otc'); }catch(_){} }
+  }catch(_){ /* localStorage may be unavailable */ }
+  var targets = {'real':'/static/real.html','otc':'/static/otc.html'};
+  setTimeout(function(){ window.location.replace(targets[category] || '/static/otc.html'); }, 200);
 })();
 </script>
 </body>

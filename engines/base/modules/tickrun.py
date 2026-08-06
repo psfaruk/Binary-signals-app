@@ -1,54 +1,20 @@
-"""
-Module: TICKRUN — Real-time tick-level theories (TICKSWEEP, ABSORBWALL, LATEFLIP)
-
-Three high-conviction theories operating on raw tick data:
-
-  TICKSWEEP   — Stop-hunt detection: spike beyond a recent local extreme
-                in the middle 60% of the candle, then retrace ≥50% of the
-                spike. Classic stop-run before reversal. (x3 vote)
-
-  ABSORBWALL  — Price-band absorption: heavy opposing pressure absorbed at
-                a single price band (top or bottom 10% of range). At least
-                8 band-ticks with ≥35% in opposing direction. Smart-money
-                footprint. (x3 vote)
-
-  LATEFLIP    — 70/30 control transfer: first 70% of ticks dominated by
-                one side, final 30% dominated by the opposite side, both
-                segments with ≥65% one-sided dominance. Stricter variant
-                of LIVE INVASION. (x3 vote)
-
-This module was ADDED in PROD-BACKTEST-2026-08-05 by user request —
-ported from the uploaded analyze_eoc.py file's TICKSWEEP, ABSORBWALL,
-and LATEFLIP blocks.
-
-NOTE: This module operates on the JUST-CLOSED candle's ticks (not the
-running/open candle's ticks). In production, the engine receives ticks
-from feed.py via the closing-candle callback. In the backtest replay,
-ticks are loaded from candle_micro.ticks_json.
-"""
+"""Module: TICKRUN — Real-time tick-level theories (TICKSWEEP, ABSORBWALL, LATEFLIP)."""
 from engines.base.types import ModuleResult, MarketContext
 
 __all__ = ["analyze"]
 
-# Tunable env flags (default ON)
 import os
 ENABLE_TICKSWEEP = os.environ.get("ENABLE_TICKSWEEP", "1") == "1"
 ENABLE_ABSORBWALL = os.environ.get("ENABLE_ABSORBWALL", "1") == "1"
 ENABLE_LATEFLIP = os.environ.get("ENABLE_LATEFLIP", "1") == "1"
 
-# Min ticks required for each theory
 MIN_TICKS_TICKSWEEP = 20
 MIN_TICKS_ABSORBWALL = 25
 MIN_TICKS_LATEFLIP = 20
 
 
 def _ticksweep(ticks):
-    """Detect stop-hunt pattern in tick sequence.
-
-    Returns (direction, magnitude, reason) or None.
-      direction: +1 for CALL (lower sweep + retrace up)
-                 -1 for PUT (upper sweep + retrace down)
-    """
+    """Detect stop-hunt pattern in tick sequence; returns (dir, mag, reason) or None."""
     if not ticks or len(ticks) < MIN_TICKS_TICKSWEEP:
         return None
 
@@ -57,7 +23,7 @@ def _ticksweep(ticks):
     lo_idx = ticks.index(min(ticks))
     in_middle = lambda idx: n * 0.20 <= idx <= n * 0.80
 
-    # Upper sweep: high in middle, then retraced ≥50%
+    # Upper sweep: high in middle, then retraced >=50%
     if in_middle(hi_idx):
         peak = ticks[hi_idx]
         after = ticks[hi_idx:hi_idx + 8]
@@ -68,9 +34,9 @@ def _ticksweep(ticks):
                 and excursion >= (peak - ticks[lo_idx]) * 0.30):
             return (-1, 3,
                     f"TICKSWEEP Upper stop-hunt at tick {hi_idx}"
-                    f" (retraced {retrace/excursion:.0%}) → PUT (x3)")
+                    f" (retraced {retrace/excursion:.0%}) -> PUT (x3)")
 
-    # Lower sweep: low in middle, then retraced ≥50%
+    # Lower sweep: low in middle, then retraced >=50%
     if in_middle(lo_idx):
         trough = ticks[lo_idx]
         after = ticks[lo_idx:lo_idx + 8]
@@ -81,16 +47,13 @@ def _ticksweep(ticks):
                 and excursion >= (ticks[hi_idx] - trough) * 0.30):
             return (+1, 3,
                     f"TICKSWEEP Lower stop-hunt at tick {lo_idx}"
-                    f" (retraced {retrace/excursion:.0%}) → CALL (x3)")
+                    f" (retraced {retrace/excursion:.0%}) -> CALL (x3)")
 
     return None
 
 
 def _absorbwall(ticks):
-    """Detect price-band absorption.
-
-    Returns (direction, magnitude, reason) or None.
-    """
+    """Detect price-band absorption; returns (dir, mag, reason) or None."""
     if not ticks or len(ticks) < MIN_TICKS_ABSORBWALL:
         return None
 
@@ -100,46 +63,41 @@ def _absorbwall(ticks):
     if rng == 0:
         return None
 
-    band_size = rng * 0.10  # 10% of range = band width
-    hi_band = hi - band_size  # upper band lower edge
-    lo_band = lo + band_size  # lower band upper edge
+    band_size = rng * 0.10
+    hi_band = hi - band_size
+    lo_band = lo + band_size
 
-    # Count opposing ticks at upper band (sellers hitting resistance)
     upper_sells = sum(1 for i in range(1, len(ticks))
                       if ticks[i] > hi_band and ticks[i] < ticks[i - 1])
     upper_total = sum(1 for t in ticks if t > hi_band)
 
-    # Count opposing ticks at lower band (buyers hitting support)
     lower_buys = sum(1 for i in range(1, len(ticks))
                      if ticks[i] < lo_band and ticks[i] > ticks[i - 1])
     lower_total = sum(1 for t in ticks if t < lo_band)
 
-    threshold = 0.35  # 35% of band-ticks must be opposing
+    threshold = 0.35
 
-    # Upper absorption wall: sellers rejected at top → PUT (reversal)
+    # Upper absorption wall: sellers rejected at top -> PUT
     if (upper_total >= 8
             and upper_sells / upper_total >= threshold
-            and ticks[-1] < hi_band):  # closed back below
+            and ticks[-1] < hi_band):
         return (-1, 3,
                 f"ABSORBWALL {upper_sells} sell-ticks absorbed at upper band"
-                f" ({upper_sells/upper_total:.0%} of {upper_total}) → PUT (x3)")
+                f" ({upper_sells/upper_total:.0%} of {upper_total}) -> PUT (x3)")
 
-    # Lower absorption wall: buyers rejected at bottom → CALL
+    # Lower absorption wall: buyers rejected at bottom -> CALL
     if (lower_total >= 8
             and lower_buys / lower_total >= threshold
-            and ticks[-1] > lo_band):  # closed back above
+            and ticks[-1] > lo_band):
         return (+1, 3,
                 f"ABSORBWALL {lower_buys} buy-ticks absorbed at lower band"
-                f" ({lower_buys/lower_total:.0%} of {lower_total}) → CALL (x3)")
+                f" ({lower_buys/lower_total:.0%} of {lower_total}) -> CALL (x3)")
 
     return None
 
 
 def _lateflip(ticks):
-    """Detect 70/30 control transfer.
-
-    Returns (direction, magnitude, reason) or None.
-    """
+    """Detect 70/30 control transfer; returns (dir, mag, reason) or None."""
     if not ticks or len(ticks) < MIN_TICKS_LATEFLIP:
         return None
 
@@ -163,36 +121,19 @@ def _lateflip(ticks):
     opposite = ((a - 0.5) * (b - 0.5)) < 0
 
     if a_dom and b_dom and opposite:
-        # FIX (PROD-BACKTEST-2026-08-05 / FIX-LATEFLIP): FLIPPED direction.
-        # Production data (7,221 signals backtested):
-        #   LATEFLIP CALL n=45 win=17.78% → flipped win=82.22% (+64.44pp)
-        #   LATEFLIP PUT  n=45 win=11.11% → flipped win=88.89% (+77.78pp)
-        # Textbook says "vote with segment B (continuation of the new
-        # control side)" — but at 1-minute binary options, a strong late-
-        # candle flip is a mean-reversion signal: the next candle tends to
-        # go OPPOSITE to segment B. This is consistent with the bearish
-        # pattern finding (Bearish Harami/Pin Bar/Two-Bar all flipped
-        # PUT→CALL for the same reason — late-candle strength reverses).
-        # n=90 is below the 150 threshold in core/constants.py:121, but
-        # the lift is so dramatic (64-77pp) that the Wilson 95% lower
-        # bound on the flipped win rate is >75% — statistically a real
-        # edge, not noise.
+        # Direction flipped: late-candle flip is mean-reverting in 1-min binary.
         direction = -1 if b > 0.5 else +1
         a_lbl = f"{a:.0%} buy" if a > 0.5 else f"{1 - a:.0%} sell"
         b_lbl = f"{b:.0%} buy" if b > 0.5 else f"{1 - b:.0%} sell"
         return (direction, 3,
                 f"LATEFLIP Control transfer: first 70% {a_lbl}, last 30% {b_lbl}"
-                f" → mean-reversion {'PUT' if direction < 0 else 'CALL'} (x3)")
+                f" -> mean-reversion {'PUT' if direction < 0 else 'CALL'} (x3)")
 
     return None
 
 
 def analyze(candles, ticks, ctx: MarketContext) -> list:
-    """Run TICKSWEEP, ABSORBWALL, LATEFLIP on raw ticks.
-
-    Signature matches running_tick.analyze (candles, ticks, ctx) — the
-    blender calls it the same way.
-    """
+    """Run TICKSWEEP, ABSORBWALL, LATEFLIP on raw ticks."""
     if not ticks or len(ticks) < 15:
         return []
 

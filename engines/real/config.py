@@ -1,100 +1,33 @@
-"""engines/real/config.py — AUTO-CALIBRATED CONFIG v4 (2026-08-03)
-
-Generated from live Railway brain data (~1280 graded signals).
-Per-pair per-module weights calibrated against actual win rates.
-
-FIX (MODULE-PRUNE-2026-08-03): removed `indicator` and `trend_follow`
-modules entirely. Both engines now run the same shared modules.
-
-FIX (RUNNING-TICK-REMOVE-2026-08-05): removed `running_tick` entirely
-(module deleted, weight entries removed below). See the matching comment
-in engines/otc/config.py for the full rationale (12 sub-signals +
-composite confirmed no edge on live theory_votes data, n=460-7742).
-
-Calibration methodology (DEEP_v3, 2026-08-03):
-- Pairs with < 40% win rate (and >= 8 samples) -> DISABLED entirely
-- Per-module accuracy thresholds:
-  - < 35%  -> weight = 0.1  (DISABLED)
-  - 35-45% -> weight = 0.5  (DAMPENED)
-  - 45-55% -> weight = 1.0  (BASELINE)
-  - 55-65% -> weight = 1.5  (BOOSTED)
-  - >= 65% -> weight = 1.8  (STRONG BOOST)
-- Direction-specific patterns documented in comments
-
-Source: /api/brain/learning on Railway production
-Date: 2026-08-03
-"""
+"""engines/real/config.py — AUTO-CALIBRATED CONFIG v4 (2026-08-03)."""
 from engines.base.blender import BlenderConfig
 from engines.base.per_pair import PairWeightAdapter
 from core.constants import REAL_MODULES as _MODULES
 
-
-# ── Reliability tier multipliers (data-driven) ──────────────────────────
-# FIX (MODULE-PRUNE-2026-08-03): removed "INDICATOR" and "TREND" tiers —
-# the corresponding modules have been deleted.
-# FIX (POST-PRUNE-TUNE-2026-08-03): boosted PATTERN 1.0 → 1.2 to compensate
-# for the lost INDICATOR + TREND tiers. Pattern module is now the primary
-# trend-continuation detector in Real markets.
-# NOTE: "MICRO" tier is still used by tickrun and market_state — do not
-# remove it just because running_tick (its original user) was deleted.
+# Reliability tier multipliers
 RELIABILITY = {
-    "PATTERN":   1.2,
-    "LEVEL":     1.0,
-    "CANDLE":    1.0,
-    "MICRO":     0.7,
+    "PATTERN": 1.2, "LEVEL": 1.0, "CANDLE": 1.0, "MICRO": 0.7,
 }
 
-
-# ── DEFAULT_WEIGHTS — for pairs with insufficient data (< 8 samples) ──
-# FIX (MODULE-PRUNE-2026-08-03): removed indicator + trend_follow entries.
-# FIX (RUNNING-TICK-REMOVE-2026-08-05): removed running_tick entry.
+# DEFAULT_WEIGHTS — for pairs with insufficient data
 DEFAULT_WEIGHTS = {
-    "candle_reaction":   1.0,
-    "pattern":           1.0,
-    "key_level":         0.8,
-    "market_state":      0.8,
-    "wickwall":          0.5,
-    "divergence":        0.5,
-    "tickrun":           0.5,
+    "candle_reaction": 1.0, "pattern": 1.0, "key_level": 0.8,
+    "market_state": 0.8, "wickwall": 0.5, "divergence": 0.5, "tickrun": 0.5,
 }
 
-
-# ── PER-PAIR CALIBRATED WEIGHTS (auto-generated from live data) ────────
-# FIX (MODULE-PRUNE-2026-08-03): removed indicator + trend_follow from
-# every pair's weights dict. Comments for those entries are also removed.
-# FIX (RUNNING-TICK-REMOVE-2026-08-05): removed running_tick from every
-# pair's weights dict.
+# Per-pair calibrated weights (auto-generated from live data)
 PAIR_CONFIGS = {
     "AUDUSD": {
         "profile": "calibrated",
-        "weights": {
-            "candle_reaction":   1.0,   # baseline (acc=46%) (n=28)
-            "pattern":           1.0,   # baseline (acc=55%) (n=22)
-            "key_level":         1.0,   # baseline (no data)
-            "market_state":      0.8,
-            "wickwall":          0.5,
-            "divergence":        0.5,
-            "tickrun":           0.5,
-        },
         "description": "Calibrated: 56.0% win (n=84)",
-    },
+        "weights": {"candle_reaction": 1.0, "pattern": 1.0, "key_level": 1.0,
+                    "market_state": 0.8, "wickwall": 0.5, "divergence": 0.5, "tickrun": 0.5}},
     "EURUSD": {
         "profile": "calibrated",
-        "weights": {
-            "candle_reaction":   1.0,   # baseline (acc=51%) (n=49)
-            "pattern":           1.0,   # baseline (acc=48%) (n=46)
-            "key_level":         1.0,   # baseline (acc=50%) (n=34)
-            "market_state":      0.8,
-            "wickwall":          0.5,
-            "divergence":        0.5,
-            "tickrun":           0.5,
-        },
         "description": "Calibrated: 50.8% win (n=189)",
-    },
+        "weights": {"candle_reaction": 1.0, "pattern": 1.0, "key_level": 1.0,
+                    "market_state": 0.8, "wickwall": 0.5, "divergence": 0.5, "tickrun": 0.5}},
 }
 
-
-# ── BlenderConfig assembly ─────────────────────────────────────────────
 weight_adapter = PairWeightAdapter(
     pair_configs=PAIR_CONFIGS,
     default_weights=DEFAULT_WEIGHTS,

@@ -11,22 +11,11 @@ from datetime import timedelta
 import threading
 from contextlib import contextmanager
 
-# FIX (DEEP-AUDIT-2026-07-26 / F-14-01): guard against `__file__` being
-# empty (REPL, exec()) — previously joined to "signals.db" in cwd which
-# could overwrite an unrelated file.
 DB_PATH = os.environ.get(
     "DB_PATH",
     os.path.abspath(os.path.join(os.path.dirname(__file__) or ".", "signals.db")),
 )
 
-# FIX (LIVE-TICK-RELIABILITY-2026-07-31): DB_PATH can now point at
-# /app/data/signals.db (Railway volume mount, see railway.json). If the
-# operator hasn't added the Volume yet, /app/data doesn't exist and
-# sqlite3.connect() would crash the whole app on startup. Create the
-# directory defensively — this does NOT make data persistent by itself
-# (a plain directory on the ephemeral filesystem also "exists"), it only
-# prevents a hard crash. See _log_persistence_status() below for the
-# actual persistence check.
 try:
     _db_dir = os.path.dirname(DB_PATH)
     if _db_dir:
@@ -36,18 +25,7 @@ except Exception as _mkdir_exc:
 
 
 def _log_persistence_status() -> None:
-    """Log a boot counter next to signals.db so Railway logs make it
-    obvious whether the data directory is really persisting across
-    redeploys, instead of silently trusting the dashboard Volume
-    checkbox. Call once at startup, after init() has created signals.db.
-
-    Interpretation (see this printed line in Railway's deploy logs):
-      boot_count == 1 on the FIRST ever deploy: normal.
-      boot_count == 1 on EVERY redeploy after that: the volume is NOT
-        actually mounted at DB_PATH's directory — data is being wiped
-        every time, even if a Volume exists elsewhere in the dashboard.
-      boot_count > 1 and increasing: persistence is working correctly.
-    """
+    """Log a boot counter next to signals.db to verify persistence across redeploys."""
     marker_path = os.path.join(os.path.dirname(DB_PATH) or ".", ".persistence_marker.json")
     boot_count = 1
     first_seen = None
@@ -74,42 +52,16 @@ def _log_persistence_status() -> None:
               f"(first_seen={first_seen}) at {DB_PATH!r} — data directory "
               f"is surviving restarts.")
 
-# FIX (DEEP-AUDIT-2026-07-26 / F-14-02): previously a global `_lock`
-# serialized ALL writes across 38+ streams through one threading.Lock
-# (db.py L241, L296). Throughput ceiling was ~1 write per commit+fsync
-# (~5-20ms) = ~50-200 writes/sec. WAL mode + busy_timeout=10s already
-# serializes writes safely at the SQLite layer. The global lock has
-# been removed from save()/log_signal(); a dedicated lock is kept only
-# for the rare multi-statement migration transaction in init()
-# (single-threaded, low contention).
 _migration_lock = threading.Lock()
 
-# FIX (DEEP-AUDIT-2026-07-26 / F-14-17): allow-lists for input
-# validation in log_signal(). Previously any text could be inserted
-# into `signal` / `accuracy`, silently corrupting analytics. SQLite
-# can't ALTER ADD CHECK on an existing table without a full rebuild,
-# so we validate in Python instead.
 _VALID_SIGNALS = ("CALL", "PUT", "DRAW", "PENDING")
 _VALID_ACCURACY = ("correct", "wrong", "draw", "pending", None)
-_SECONDS_PER_DAY = 86400  # FIX (F-14-30): named constant for magic 86400
+_SECONDS_PER_DAY = 86400
 
 
 def _conn():
     conn = sqlite3.connect(DB_PATH, timeout=10)
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-03): row_factory set on every
-    # connection (previously set in _cursor() only — non-cursor callers
-    # of _conn() in core/stats.py, core/auto_tune.py, core/time_patterns.py
-    # had to set it themselves). Now every connection gets Row factory.
     conn.row_factory = sqlite3.Row
-    # WAL mode: allows concurrent reads during writes — critical for
-    # avoiding lock contention when 38 streams close simultaneously.
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-04): previously bare
-    # `except Exception: pass` swallowed PRAGMA errors silently,
-    # causing fallback to slow DELETE journal mode with no log. Now
-    # logged so operators can spot read-only FS / permission issues.
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-04b): added busy_timeout=10000
-    # so concurrent writes wait up to 10s instead of raising
-    # `database is locked` immediately.
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -121,14 +73,7 @@ def _conn():
 
 @contextmanager
 def _read_cursor():
-    """Read-only cursor — no commit, no fsync overhead.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-05): split out from _cursor()
-    so SELECT-only callers (get_micro_history, get_recent_signals,
-    get_signal_detail, recent_accuracy, per_module_accuracy) skip the
-    spurious commit() at context exit. Previously every SELECT triggered
-    an fsync via commit() — wasteful on a hot DB.
-    """
+    """Read-only cursor — no commit, no fsync overhead."""
     conn = _conn()
     cur = conn.cursor()
     try:
@@ -139,13 +84,7 @@ def _read_cursor():
 
 @contextmanager
 def _write_cursor():
-    """Write cursor — commits on success, rolls back on exception.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-06): previously _cursor() committed
-    unconditionally at context exit and relied on conn.close() to
-    auto-rollback on exception. Now we rollback explicitly and re-raise
-    so the caller sees the error.
-    """
+    """Write cursor — commits on success, rolls back on exception."""
     conn = _conn()
     cur = conn.cursor()
     try:
@@ -155,28 +94,18 @@ def _write_cursor():
         try:
             conn.rollback()
         except Exception as _e:
-            print(f"[silent-except] db.py:102 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
-            pass
+            print(f"[silent-except] db.py:102 {type(_e).__name__}: {_e}")
         raise
     finally:
         conn.close()
 
 
-# Backward-compatible alias: _cursor() → _write_cursor(). External
-# callers (none in this repo, but kept for safety) get commit-on-exit.
 _cursor = _write_cursor
 
 
 def init():
     _log_persistence_status()
     with _cursor() as c:
-        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-28): metadata table for
-        # one-time migration tracking. Previously the signal_log dedup
-        # query (a correlated O(n²) subquery) ran on EVERY startup. For a
-        # DB with 100k+ rows this took minutes, blocking lifespan startup
-        # and causing Railway health checks to time out and restart the
-        # container. Now we record 'signal_log_dedup_done' in _meta so the
-        # expensive dedup runs only once per DB.
         c.execute("""CREATE TABLE IF NOT EXISTS _meta (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -203,17 +132,8 @@ def init():
             a_open REAL, a_close REAL,
             regime TEXT, zone TEXT,
             tags TEXT, postmortem TEXT,
-            category TEXT,        -- FIX (2026-07-17): track which engine produced this signal
+            category TEXT,        -- track which engine produced this signal
             ts REAL)""")
-        # FIX (DEEP-AUDIT-2026-07-26 / F-14-09): removed the schema-level
-        # `DEFAULT (strftime('%s','now'))` for `ts` — strftime('%s','now')
-        # is locale-fragile and returns NULL/empty on some older SQLite
-        # Windows builds. log_signal() now sets ts explicitly via Python
-        # time.time() so a NULL default never leaks into graded rows.
-        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-18): add `total`
-        # column so the agreement ratio (agree/total) can be computed from
-        # the DB. Previously only `agree` was stored, making it impossible
-        # to distinguish 4/6 agreement from 4/10.
         try:
             cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
             if "total" not in cols:
@@ -221,12 +141,6 @@ def init():
                 print("[db] migrated signal_log: added `total` column")
         except Exception as _e:
             print(f"[db] signal_log `total` column migration skipped: {_e}")
-        # FIX (SIGNAL-QUALITY-2026-08-04): persist blender.py's independent
-        # signal_quality label (HIGH/MEDIUM/LOW/NONE — see
-        # engines/base/blender.py::_compute_signal_quality) so win-rate
-        # per tier can be measured over time instead of guessed at from
-        # tiny same-day samples. Column is nullable/additive — safe to
-        # deploy without touching existing rows (they read back as NULL).
         try:
             cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
             if "signal_quality" not in cols:
@@ -234,29 +148,9 @@ def init():
                 print("[db] migrated signal_log: added `signal_quality` column")
         except Exception as _e:
             print(f"[db] signal_log `signal_quality` column migration skipped: {_e}")
-        # Indexes — composite ctime index covers (asset, period) prefix
-        # lookups too, so no separate ix_sl_asset_period is needed.
-        # FIX (DEEP-AUDIT-2026-07-26 / F-14-07): dropped redundant
-        # `ix_sl_asset_period` — it's a strict prefix of the composite
-        # `ix_sl_ctime` so the query planner never picks it; pure write
-        # overhead (every INSERT updated 2 indexes instead of 1).
         c.execute("DROP INDEX IF EXISTS ix_sl_asset_period")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ctime ON signal_log(asset, period, ctime DESC)")
-        # FIX (DEEP-AUDIT-2026-07-26 / F-14-08): dropped dead `ix_sl_ts`
-        # index. Per cleanup() at the bottom of this file, deletes use
-        # `ctime` (not `ts`), and no query in db.py filters/orders by ts.
-        # The index wasted write throughput and disk space.
         c.execute("DROP INDEX IF EXISTS ix_sl_ts")
-        # FIX (CRASH-FIX-2026-07-26 / DB-001): the `category` column
-        # migration (lines 301-318 below) must run BEFORE this index is
-        # created, otherwise any legacy DB created before 2026-07-17 is
-        # missing the `category` column and `CREATE INDEX ix_sl_category
-        # ON signal_log(category, ...)` raises `no such column: category`.
-        # The except clause in init() rolled back the ENTIRE migration
-        # transaction, causing feed.py lifespan startup to crash, which
-        # manifested as the Railway container restart loop. Now we move
-        # the category-column migration to BEFORE the index creation.
-        # The migration is idempotent (PRAGMA table_info + ADD COLUMN).
         try:
             _cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
             if "category" not in _cols:
@@ -269,38 +163,12 @@ def init():
                 c.execute("UPDATE signal_log SET category = 'real' WHERE category IS NULL")
         except Exception as _e:
             print(f"[db] signal_log `category` column migration skipped: {_e}")
-        # FIX (2026-07-17): index for per-category accuracy queries.
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_category ON signal_log(category, asset, period)")
-        # FIX (SIGNAL-QUALITY-2026-08-04): index for per-quality-tier
-        # win-rate queries (/api/quality-analysis).
         try:
             c.execute("CREATE INDEX IF NOT EXISTS ix_sl_quality ON signal_log(signal_quality, accuracy)")
         except Exception as _e:
             print(f"[db] ix_sl_quality index creation skipped: {_e}")
 
-        # FIX (AUDIT-CRITICAL #003, 2026-07-21): add UNIQUE constraint on
-        # (asset, period, ctime) so the same candle can NEVER produce two
-        # signal_log rows. Previously a watchdog restart or a race between
-        # the timer-close path and the tick-close path could call
-        # _grade_and_log twice for the same candle, inserting duplicate rows.
-        # These duplicates inflated the user-visible signal count (one of the
-        # causes of the '48-signal limit' symptom: the DB had MORE rows than
-        # the user saw, because the frontend's HISTORY_MAX clipped them).
-        # We use a UNIQUE INDEX (not a table-level UNIQUE constraint) so we
-        # can drop + recreate it during migration without rebuilding the table.
-        #
-        # Migration steps:
-        #   1. Detect existing duplicate rows for the same (asset, period, ctime).
-        #   2. If duplicates exist, keep only the LATEST one (MAX(id)) and
-        #      delete the rest — the latest has the most-complete postmortem.
-        #   3. Drop any legacy UNIQUE indexes (from prior schemas) so the
-        #      new one can be created cleanly.
-        #   4. Create the UNIQUE index.
-        # FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-1-28): gate the O(n²)
-        # dedup query on a _meta flag so it only runs ONCE per DB, not on
-        # every startup. On a 100k-row DB this query took 2-5 minutes,
-        # causing Railway health checks to time out and restart the
-        # container in a loop.
         try:
             done_row = c.execute(
                 "SELECT value FROM _meta WHERE key='signal_log_dedup_done'"
@@ -341,24 +209,8 @@ def init():
                     """)
             except Exception as _e:
                 print(f"[db] signal_log dedup skipped: {_e}")
-            # FIX (CRASH-FIX-2026-07-26 / DB-003): the _meta dedup_done flag
-            # was INSERTed here, INSIDE the transaction that also holds the
-            # dedup DELETE — and that transaction commits BEFORE the unique
-            # index CREATE at Step 4 runs. If the index CREATE then failed
-            # (duplicates somehow survived, or another error), the dedup
-            # flag was already persisted — subsequent boots would skip dedup
-            # and the unique-index CREATE would fail FOREVER, forcing the
-            # broken non-unique fallback. Now we move the _meta INSERT to
-            # AFTER the unique-index CREATE succeeds. If init() is rerun,
-            # the dedup runs again — idempotent (DELETE of zero rows).
-        else:
-            # Dedup already ran on a prior startup — skip.
-            pass
 
         # Step 3: drop legacy UNIQUE indexes (best-effort).
-        # FIX (AUDIT-CRITICAL #008, 2026-07-21): older deployments may have
-        # created UNIQUE indexes under different names. Drop them so the
-        # new INSERT OR REPLACE works correctly.
         try:
             legacy_indexes = [
                 "ux_sl_asset_period_ctime",
@@ -369,27 +221,14 @@ def init():
             for idx_name in legacy_indexes:
                 c.execute(f"DROP INDEX IF EXISTS {idx_name}")
         except Exception as _e:
-            print(f"[silent-except] db.py:295 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
-            pass
+            print(f"[silent-except] db.py:295 {type(_e).__name__}: {_e}")
 
         # Step 4: create the canonical UNIQUE index.
-        # FIX (DEEP-AUDIT-2026-07-26 / F-14-12): previously the failure
-        # was silently logged and init() proceeded with NO unique
-        # constraint — re-introducing the duplicate-row bug the index
-        # was supposed to prevent. Now we log loudly AND fall back to a
-        # non-unique index so writes don't fail, but operators see the
-        # warning in logs (the dedup at Step 1+2 must be re-run manually
-        # to fix the underlying duplicates).
         try:
             c.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_sl_asset_period_ctime
                 ON signal_log(asset, period, ctime)
             """)
-            # FIX (CRASH-FIX-2026-07-26 / DB-003): only persist the dedup_done
-            # _meta flag AFTER the unique index CREATE succeeded. If the
-            # CREATE fails, we'll fall through to the except below and the
-            # dedup will rerun on the next boot (idempotent — DELETE of zero
-            # rows is a no-op).
             try:
                 c.execute(
                     "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
@@ -406,22 +245,8 @@ def init():
                     ON signal_log(asset, period, ctime)
                 """)
             except sqlite3.Error as _e:
-                print(f"[silent-except] db.py:331 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
-                pass
+                print(f"[silent-except] db.py:331 {type(_e).__name__}: {_e}")
 
-        # FIX (2026-07-17): the `category` column migration was moved ABOVE
-        # to run BEFORE `ix_sl_category` index creation (see DB-001 fix).
-        # The block that used to live here is now redundant.
-
-        # Refactor (2026-07-14): the `theory_votes` table is no longer
-        # populated. The old theory engine was replaced by the
-        # candle_reaction / advanced_analysis prediction path which doesn't
-        # emit per-theory votes. Drop the table + its indexes if they still
-        # exist from an older schema, and clean up orphaned rows.
-        # FIX (DEEP-AUDIT-2026-07-26 / F-14-10): previously this DROP
-        # block ran on EVERY startup — three no-op SQL statements per
-        # boot after the first successful drop. Now gated on a _meta flag
-        # so it runs exactly once per DB.
         try:
             tv_done = c.execute(
                 "SELECT value FROM _meta WHERE key='theory_votes_dropped'"
@@ -437,13 +262,6 @@ def init():
         except Exception as _e:
             print(f"[db] theory_votes cleanup skipped: {_e}")
 
-        # ── NEW TABLE: module_votes (DEEP_v2 2026-07-30) ──────────────────
-        # Tracks each individual module's vote per signal, enabling:
-        # - Per-module per-pair per-direction accuracy analysis
-        # - Auto-calibration (weight tuning based on live performance)
-        # - Module-level debugging (why did this signal fail?)
-        # Previously module votes were embedded in signal_log.reasons as JSON
-        # text — required regex parsing to analyze. Now queryable directly.
         try:
             c.execute("""CREATE TABLE IF NOT EXISTS module_votes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -466,11 +284,6 @@ def init():
         except sqlite3.Error as _e:
             print(f"[db] module_votes table creation skipped: {_e}")
 
-        # ── NEW TABLE: theory_votes (ALWAYS-SIGNAL-2026-08-03) ──────────────
-        # Per-THEORY breakdown — one row per individual theory emitted by a
-        # module (not collapsed to one row per module-direction like module_votes).
-        # User requirement: "কোনটার ভিতরে কি কি কতগুলো করে theory আছে?
-        # সেই theory গুলো কেমন পারফেমস করছে? কোন পেয়ার এ কেমন?"
         try:
             c.execute("""CREATE TABLE IF NOT EXISTS theory_votes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -494,12 +307,6 @@ def init():
         except sqlite3.Error as _e:
             print(f"[db] theory_votes table creation skipped: {_e}")
 
-        # ── NEW TABLE: signal_quality_metrics (DEEP_v2 2026-07-30) ────────
-        # Detailed quality metrics per signal for advanced analysis:
-        # - Move magnitude (ATR %)
-        # - Tick statistics
-        # - Time-of-day / session info
-        # - Module agreement patterns
         try:
             c.execute("""CREATE TABLE IF NOT EXISTS signal_quality_metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -525,8 +332,6 @@ def init():
         except sqlite3.Error as _e:
             print(f"[db] signal_quality_metrics table creation skipped: {_e}")
 
-        # ── NEW TABLE: pair_performance_daily (DEEP_v2 2026-07-30) ────────
-        # Daily rollup of pair performance for trend analysis
         try:
             c.execute("""CREATE TABLE IF NOT EXISTS pair_performance_daily (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -547,16 +352,6 @@ def init():
         except sqlite3.Error as _e:
             print(f"[db] pair_performance_daily table creation skipped: {_e}")
 
-        # ── NEW TABLE: pair_hourly_patterns (TIME-OF-DAY 2026-07-30) ────────
-        # Tracks per-pair per-hour win rate to detect time-based patterns.
-        # User insight: "কিছু পেয়ার 70% উইন রেট পায়, কিন্তু দিনের ভিন্ন
-        # সময়ে 30% এর নিচে পায়। আবার খারাপ পেয়ার ভালো সময়ে 60% পায়।"
-        # This table enables:
-        # - Time-aware confidence adjustment (brain uses this to boost/dampen)
-        # - Quotex algorithm detection (repeating time-based manipulation)
-        # - "Best time to trade X pair" recommendations
-        # Hour is UTC 0-23. Session names: asian(00-07), london(07-12),
-        # ny(12-17), overlap(12-16), off(17-24).
         try:
             c.execute("""CREATE TABLE IF NOT EXISTS pair_hourly_patterns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -581,12 +376,6 @@ def init():
         except sqlite3.Error as _e:
             print(f"[db] pair_hourly_patterns table creation skipped: {_e}")
 
-        # ── NEW TABLE: quotex_algo_patterns (ALGO DETECTION 2026-07-30) ────
-        # Detects Quotex's time-based manipulation patterns:
-        # - Pairs that consistently reverse at specific hours
-        # - "Trap" hours where signals systematically fail
-        # - Direction bias per hour (does Quotex favor CALL or PUT at hour X?)
-        # This is the user's insight: "কোয়েটেক্স এর এলগরিদম ডিটেক্ট করা সহজ হবে"
         try:
             c.execute("""CREATE TABLE IF NOT EXISTS quotex_algo_patterns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -614,16 +403,6 @@ def _as_text(v):
 
 
 def save(asset, period, closed, micro):
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-13): removed the global `_lock`
-    # around execute+commit. WAL + busy_timeout=10s (set in _conn())
-    # already serializes writes safely at the SQLite layer. The global
-    # lock was a contention bottleneck for 38+ concurrent streams.
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-14): broadened the exception
-    # catch from `sqlite3.Error` only to also include KeyError, TypeError,
-    # ValueError — previously a missing `closed["open"]` key or a
-    # non-JSON-serializable value in micro would propagate up and crash
-    # the stream. Now logged and the row is skipped (acceptable for a
-    # single candle_micro row).
     conn = _conn()
     try:
         try:
@@ -643,95 +422,39 @@ def save(asset, period, closed, micro):
                  ",".join(micro.get("phases", [])), micro.get("reaction"),
                  micro.get("net"), micro.get("tick_count"),
                  micro.get("last_react"),
-                 # FIX (CRASH-FIX-2026-07-26 / DB-004 + DB-005): the
-                 # `.get('round', {})` default only fires when the 'round'
-                 # key is MISSING. If callers pass `round=None` explicitly
-                 # (which JSON `null` round-trips to), `.get('round')`
-                 # returns None and `.get('near_level')` raises
-                 # AttributeError, which was NOT in the except tuple
-                 # (KeyError, TypeError, ValueError, sqlite3.Error) —
-                 # propagating up and crashing the asset stream. Now we
-                 # coerce None → {} via `or {}`.
                  (micro.get("round") or {}).get("near_level"),
                  (micro.get("round") or {}).get("near_strength"),
                  micro.get("gap_pct"), micro.get("gap_type"),
                  _as_text(micro.get("key_levels")), _as_text(micro.get("ticks_json"))))
             conn.commit()
         except (sqlite3.Error, KeyError, TypeError, ValueError, AttributeError) as e:
-            # FIX (DB-004): added AttributeError to the except tuple so
-            # NoneType.get() no longer crashes the stream. Operational
-            # errors (locked, disk full, corruption) and data-shape errors
-            # (missing key, non-serializable value) are logged but NOT
-            # re-raised — losing a single candle_micro row is preferable to
-            # crashing the stream. Logged with the specific error class so
-            # operators can spot patterns.
             print(f"[db] save {type(e).__name__}: {e}")
             try:
                 conn.rollback()
             except Exception as _e:
-                print(f"[silent-except] db.py:425 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
-                pass
+                print(f"[silent-except] db.py:425 {type(_e).__name__}: {_e}")
     finally:
         conn.close()
 
 
 def _category_for_asset(asset):
-    """Detect engine category from asset name. Single source of truth.
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-15): previously the rule
-    `category = "otc" if asset.endswith("_otc") else "real"` was duplicated
-    between the migration backfill (db.py L203-204) and log_signal()
-    (db.py L302-304). Now both call this helper so the rule can change
-    in one place.
-    """
+    """Detect engine category from asset name. Single source of truth."""
     return "otc" if asset.endswith("_otc") else "real"
 
 
-# ─── NEW (ALWAYS-SIGNAL-2026-08-03): per-theory extraction helper ──────────
-# Parses reason strings to extract individual theory names for the theory_votes
-# table. Each reason string follows the pattern:
-#   "[module_name] theory_description → DIRECTION (signal_type_note) (eff=N)"
-#
-# Theory name mapping per module (extracted from reason text patterns):
-#   candle_reaction: "Streak reversal", "Big body reversal", "Upper wick rejection",
-#       "Lower wick rejection", "Close at range top", "Close at range bottom",
-#       "Rising closes momentum", "Falling closes momentum"
-#   pattern: pattern name (e.g., "Bullish Engulfing", "Morning Star", "Hammer")
-#   key_level: "Support wick rejection", "Resistance wick rejection", "Key support bounce",
-#       "Key resistance bounce", "Close near prev high/low", "Fibonacci retracement",
-#       "S/R flip", "Trendline breakout"
 import re as _re_module
 
-# ── Single source of truth for module names ────────────────────────────────
-# FIX (MODULE-TRACKING-2026-08-05): this import used to live ~800 lines further
-# down (next to per_module_accuracy) while the module_votes writer in
-# log_signal carried its OWN hardcoded regex alternation
-# `(candle_reaction|running_tick|pattern|key_level)`. Any module added after
-# that regex was written therefore wrote ZERO rows to module_votes, and
-# _extract_theory_votes dropped it as well via its
-# `module not in _THEORY_PATTERNS` guard. That silently blinded
-# /api/module-analysis (and the dashboard's Modules-tab per-pair drill-down)
-# to market_state, wickwall, divergence and tickrun — over half the live
-# engine. Hoisting the import here lets BOTH writers derive from MODULE_NAMES,
-# so a newly added module is tracked automatically from its first signal.
 try:
     from core.constants import MODULE_NAMES as _MODULE_NAMES
 except ImportError:
-    # Fallback for contexts where core.constants isn't importable (e.g.
-    # standalone test scripts). Keeps a local tuple as a safety net.
     _MODULE_NAMES = (
         "candle_reaction", "pattern", "key_level",
         "market_state", "wickwall", "divergence", "tickrun",
     )
 
-# Matches a "[module_name]" tag for any module the engine actually runs.
 _MODULE_TAG_RE = _re_module.compile(
     r'\[(' + '|'.join(_re_module.escape(m) for m in _MODULE_NAMES) + r')\]')
 
-# Per-module regexes that turn reason text into a canonical theory name.
-# A module absent from this dict is NOT skipped — _extract_theory_votes falls
-# back to naming the theory after its reason text, so newly added modules are
-# tracked from day one and can be given explicit names here later.
 _THEORY_PATTERNS = {
     'candle_reaction': [
         (r'(\d+)\+\s*(UP|DOWN)\s+streak', 'Streak reversal'),
@@ -760,7 +483,6 @@ _THEORY_PATTERNS = {
         (r'Bear Harami|BEAR_HARAMI', 'Bear Harami'),
         (r'Hammer', 'Hammer'),
         (r'Shooting Star', 'Shooting Star'),
-        # NEW (THEORY-RESEARCH-2026-08-03): new pattern theories
         (r'Bullish Pin Bar|BULL_PIN_BAR', 'Bullish Pin Bar'),
         (r'Bearish Pin Bar|BEAR_PIN_BAR', 'Bearish Pin Bar'),
         (r'Bullish Two-Bar Reversal|BULL_TWO_BAR_REV', 'Bullish Two-Bar Reversal'),
@@ -783,14 +505,6 @@ _THEORY_PATTERNS = {
         (r'Trendline breakout above', 'Trendline breakout (bullish)'),
         (r'Trendline breakdown below', 'Trendline breakdown (bearish)'),
     ],
-    # FIX (MODULE-TRACKING-2026-08-05): explicit tables for the four modules
-    # added 2026-08-05. Without them the fallback would name each theory after
-    # its raw reason text — which embeds the live price and percentages
-    # ("WICKWALL Lower-wick cluster x3.0 at 1.0842") — so every single signal
-    # would register as its OWN theory with n=1 and nothing would ever
-    # aggregate. Patterns below match only the invariant part of each string.
-    # Source formats: engines/base/modules/{market_state,wickwall,divergence,
-    # tickrun}.py
     'market_state': [
         (r'MARKET_STATE\s+CONTINUATION', 'Market state: continuation'),
         (r'MARKET_STATE\s+EXHAUSTION', 'Market state: exhaustion'),
@@ -815,7 +529,6 @@ _THEORY_PATTERNS = {
     ],
 }
 
-# Map theory_name → theory_group (for display grouping)
 _THEORY_GROUPS = {
     'Streak reversal': 'BODY',
     'Big body reversal': 'BODY',
@@ -842,7 +555,6 @@ _THEORY_GROUPS = {
     'Bear Harami': 'PATTERN',
     'Hammer': 'PATTERN',
     'Shooting Star': 'PATTERN',
-    # NEW (THEORY-RESEARCH-2026-08-03): new pattern groups
     'Bullish Pin Bar': 'PATTERN',
     'Bearish Pin Bar': 'PATTERN',
     'Bullish Two-Bar Reversal': 'PATTERN',
@@ -862,9 +574,6 @@ _THEORY_GROUPS = {
     'S/R flip (support→resistance)': 'SR_FLIP',
     'Trendline breakout (bullish)': 'TRENDLINE',
     'Trendline breakdown (bearish)': 'TRENDLINE',
-    # FIX (MODULE-TRACKING-2026-08-05): groups for the four modules added
-    # 2026-08-05. Without an entry here every one of their theories reported
-    # as theory_group 'UNKNOWN' in /api/theory-analysis.
     'Market state: continuation': 'MARKET_STATE',
     'Market state: exhaustion': 'MARKET_STATE',
     'Market state: reversal': 'MARKET_STATE',
@@ -890,19 +599,8 @@ def _vote_correct(direction, actual):
                  (direction == 'PUT' and actual == 'DOWN')) else 0
 
 
-# FIX (RUNNING-TICK-REMOVE-2026-08-05): `_extract_running_tick_votes` and its
-# `_RUNNING_TICK_SUB_THEORIES` name table were deleted along with the
-# running_tick module itself (no measured edge — see core/constants.py
-# MODULE_NAMES). The ~51k historical running_tick rows already in theory_votes
-# are untouched and stay queryable; nothing emits new ones because the engine
-# no longer runs the module.
-
-
 def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, regime, strength, ts_val):
-    """Parse reason strings and extract per-theory vote rows for theory_votes.
-
-    Returns list of tuples matching the theory_votes INSERT columns.
-    """
+    """Parse reason strings and extract per-theory vote rows for theory_votes."""
     rows = []
     if not reasons_list:
         return rows
@@ -917,13 +615,6 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
         if end_bracket == -1:
             continue
         module = reason_str[1:end_bracket].strip()
-        # FIX (MODULE-TRACKING-2026-08-05): the guard was
-        # `if module not in _THEORY_PATTERNS: continue`, which silently dropped
-        # every module that had no hand-written regex table — i.e. all four
-        # modules added 2026-08-05. Gate on _MODULE_NAMES instead (so stray
-        # bracketed text still can't create junk rows) and let modules without
-        # an explicit pattern table fall through to the reason-text fallback
-        # naming below. New modules are now tracked from their first signal.
         if module not in _MODULE_NAMES:
             continue
 
@@ -946,8 +637,7 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
         eff_match = _re_module.search(r'\(eff=(\d+)\)', reason_str)
         effective_score = int(eff_match.group(1)) if eff_match else None
 
-        # Extract theory name using module-specific patterns. Modules with no
-        # entry here (the newer ones) fall straight through to the fallback.
+        # Extract theory name using module-specific patterns.
         theory_name = None
         for pattern, name in _THEORY_PATTERNS.get(module, ()):
             if _re_module.search(pattern, reason_str, _re_module.IGNORECASE):
@@ -955,10 +645,6 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
                 break
 
         if not theory_name:
-            # Fallback: name the theory after its reason text. Trimmed at the
-            # arrow first so the label is the claim itself, not the direction
-            # and score suffix — otherwise the same theory would split into
-            # separate "…→ CALL" / "…→ PUT" rows and halve every sample count.
             content = reason_str[end_bracket + 1:].split('→')[0].strip()[:40]
             theory_name = content or 'Unknown'
 
@@ -967,12 +653,7 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
         rows.append((
             None, asset, period, ctime, module,
             theory_name, theory_group, direction, signal_type,
-            None, None, effective_score,  # score, confidence, effective_score
-            # FIX (MODULE-TRACKING-2026-08-05): use the shared `_vote_correct`
-            # helper instead of re-inlining the CALL/UP, PUT/DOWN comparison —
-            # this logic existed in three separate copies (here, in the
-            # module_votes writer in log_signal, and in the deleted
-            # running_tick extractor), which is how they drifted apart.
+            None, None, effective_score,
             _vote_correct(direction, actual),
             category, regime, strength, ts_val
         ))
@@ -982,28 +663,6 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
 
 def log_signal(asset, period, ctime, signal, score, confidence,
                theories, actual, accuracy, **kw):
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-16): use UPSERT (INSERT ... ON
-    # CONFLICT DO UPDATE) instead of INSERT OR REPLACE. The old REPLACE
-    # semantics (DELETE+INSERT) destroyed id stability — re-graded signals
-    # got NEW autoincrement ids, silently breaking external references
-    # (logs, frontend URLs, /api/signals/{asset}/{period}/{ctime} ordering).
-    # UPSERT preserves the existing id when updating a row for the same
-    # (asset, period, ctime).
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-13): removed the global `_lock`
-    # around execute+commit (WAL + busy_timeout handles concurrency).
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-14): broadened exception catch to
-    # include TypeError, ValueError (e.g. _as_text() on a non-JSON-
-    # serializable object).
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-09): set ts explicitly via
-    # Python time.time() — the schema default strftime('%s','now') is
-    # locale-fragile on some SQLite builds (and the default has been
-    # removed from the schema).
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-17): validate `signal` and
-    # `accuracy` against an allow-list. Previously any text could be
-    # inserted, silently corrupting analytics.
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-18): fallback `total_val` to
-    # `agree` count when caller omits it — prevents NULL divisions in
-    # downstream agree/total queries.
     if signal not in _VALID_SIGNALS:
         print(f"[db] log_signal: invalid signal={signal!r} "
               f"(allowed: {_VALID_SIGNALS})")
@@ -1016,8 +675,6 @@ def log_signal(asset, period, ctime, signal, score, confidence,
     category = kw.get("category") or _category_for_asset(asset)
     total_val = kw.get("total")
     if total_val is None:
-        # FIX (F-14-18): fallback to `agree` count so agree/total doesn't
-        # produce NULL when callers omit `total`.
         total_val = kw.get("agree") or 0
     ts_val = time.time()
 
@@ -1025,14 +682,6 @@ def log_signal(asset, period, ctime, signal, score, confidence,
     try:
         try:
             cur = conn.cursor()
-            # FIX (CRASH-FIX-2026-07-26 / DB-002): when the UNIQUE index
-            # creation failed earlier (init() falls back to non-unique),
-            # `ON CONFLICT(asset, period, ctime)` raises
-            # "ON CONFLICT clause does not match a PRIMARY or UNIQUE
-            # constraint" and signals silently stop being logged. Detect
-            # this and retry with INSERT OR REPLACE which works with any
-            # index (or none). The downside — id stability — only matters
-            # when the unique index exists, which is the happy path.
             try:
                 cur.execute("""
                     INSERT INTO signal_log
@@ -1075,10 +724,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                      category, total_val, ts_val, kw.get("signal_quality")))
             except sqlite3.Error as _conflict_err:
                 if "ON CONFLICT" in str(_conflict_err) and "UNIQUE" in str(_conflict_err).upper():
-                    # Fallback path: no unique constraint exists, use
-                    # INSERT OR REPLACE (works with any index, preserves
-                    # the at-most-one-row-per-(asset,period,ctime) intent
-                    # at the cost of id stability on update).
+                    # Fallback: no unique constraint, use INSERT OR REPLACE.
                     cur.execute("""
                         INSERT OR REPLACE INTO signal_log
                             (asset,period,ctime,signal,score,confidence,theories,
@@ -1100,9 +746,6 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                     raise
             conn.commit()
 
-            # ── NEW (DEEP_v2 2026-07-30): write module_votes rows ──────────
-            # Parse reasons JSON to extract per-module votes and store them
-            # in the module_votes table for queryable analysis.
             try:
                 reasons_text = kw.get("reasons", "")
                 if reasons_text:
@@ -1116,16 +759,6 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         r_list = reasons_text
                     r_text = ' ||| '.join(str(r) for r in r_list) if isinstance(r_list, list) else str(reasons_text)
 
-                    # FIX (MODULE-TRACKING-2026-08-05): this used a hardcoded
-                    # alternation `(candle_reaction|running_tick|pattern|key_level)`
-                    # that nobody updated when market_state, wickwall,
-                    # divergence and tickrun were added — those four wrote ZERO
-                    # rows to module_votes, so /api/module-analysis and the
-                    # dashboard's Modules-tab per-pair drill-down were blind to
-                    # more than half the running engine while still looking
-                    # complete. Now derived from MODULE_NAMES via the shared
-                    # `_MODULE_TAG_RE`, compiled once at import instead of on
-                    # every logged signal.
                     parts = _MODULE_TAG_RE.split(r_text)
                     seen = set()
                     vote_rows = []
@@ -1140,9 +773,6 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                             continue
                         seen.add((mod, direction))
 
-                        # Effective (post-weight) score of this vote, so the
-                        # table records how much the vote actually counted for
-                        # and not just its direction. Previously always NULL.
                         eff_m = _re.search(r'\(eff=(\d+)\)', content)
                         eff_score = int(eff_m.group(1)) if eff_m else None
 
@@ -1152,7 +782,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                             eff_score, None, None,
                             category, kw.get('regime'), kw.get('strength'), ts_val
                         ))
-                    
+
                     if vote_rows:
                         cur.executemany("""INSERT INTO module_votes
                             (signal_id, asset, period, ctime, module_name, direction,
@@ -1162,12 +792,6 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                             vote_rows)
                         conn.commit()
 
-                    # ── NEW (ALWAYS-SIGNAL-2026-08-03): per-theory breakdown ──
-                    # Parse each reason string to extract individual theory names
-                    # and insert into theory_votes. Unlike module_votes (which
-                    # dedups by module+direction), this keeps EVERY theory.
-                    # User requirement: "কোনটার ভিতরে কি কি কতগুলো করে theory আছে?
-                    # সেই theory গুলো কেমন পারফেমস করছে?"
                     theory_rows = _extract_theory_votes(
                         r_list if isinstance(r_list, list) else [reasons_text],
                         asset, period, ctime, actual, category,
@@ -1189,15 +813,10 @@ def log_signal(asset, period, ctime, signal, score, confidence,
             try:
                 conn.rollback()
             except Exception as _e:
-                print(f"[silent-except] db.py:565 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
-                pass
+                print(f"[silent-except] db.py:565 {type(_e).__name__}: {_e}")
     finally:
         conn.close()
 
-    # ── NEW (TIME-OF-DAY 2026-07-30): update pair_hourly_patterns ────────
-    # After logging the signal, update the hourly pattern stats so the brain
-    # can use time-aware confidence adjustment. Runs in a separate connection
-    # to avoid holding the main write transaction open.
     try:
         _update_hourly_pattern(asset, ctime, signal, accuracy, confidence)
     except Exception as _hp_err:
@@ -1211,18 +830,14 @@ def _get_session_name(hour_utc: int) -> str:
     elif 7 <= hour_utc < 12:
         return "london"
     elif 12 <= hour_utc < 17:
-        return "ny"  # NY + London overlap
+        return "ny"
     else:
         return "off"
 
 
 def _update_hourly_pattern(asset: str, ctime: int, signal: str,
                            accuracy: str, confidence):
-    """Update pair_hourly_patterns table after each graded signal.
-
-    Tracks per-pair per-hour win rate for time-aware predictions.
-    User insight: pairs perform differently at different hours.
-    """
+    """Update pair_hourly_patterns table after each graded signal."""
     if not ctime or accuracy not in ('correct', 'wrong'):
         return
     try:
@@ -1240,7 +855,6 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
     conn = _conn()
     try:
         cur = conn.cursor()
-        # Upsert: if row exists, increment counters; else insert new
         cur.execute("""
             SELECT total_signals, correct, wrong, call_win_pct, put_win_pct
             FROM pair_hourly_patterns
@@ -1257,12 +871,8 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
             new_wrong = old_wrong + (1 - is_correct)
             new_win_pct = round(100.0 * new_correct / new_total, 1) if new_total > 0 else 0
 
-            # Update direction-specific win rates
-            # We don't track call/put counts separately in this table,
-            # so we approximate: store the signal direction's running win rate
             if is_call:
                 call_wins = existing['call_win_pct'] or 0
-                # Simple exponential moving average for direction win rate
                 new_call_wr = call_wins * 0.8 + is_correct * 100 * 0.2
                 new_put_wr = existing['put_win_pct']
             else:
@@ -1305,11 +915,7 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
 
 
 def get_hourly_pattern(asset: str, hour_utc: int = None) -> dict:
-    """Get hourly pattern data for a pair.
-
-    If hour_utc is None, returns all 24 hours for the pair.
-    Used by the brain for time-aware confidence adjustment.
-    """
+    """Get hourly pattern data for a pair."""
     try:
         with _read_cursor() as cur:
             if hour_utc is not None:
@@ -1332,24 +938,7 @@ def get_hourly_pattern(asset: str, hour_utc: int = None) -> dict:
 
 
 def get_time_confidence_adjustment(asset: str, hour_utc: int) -> dict:
-    """Get confidence adjustment for a pair at a specific hour.
-
-    Returns:
-        {
-            'win_pct': float,        # historical win rate at this hour
-            'total': int,            # sample count
-            'adjustment': float,     # multiplier (0.5 to 1.3)
-            'reason': str,           # human-readable reason
-            'best_direction': str,   # CALL or PUT (which wins more)
-        }
-
-    Adjustment logic:
-    - win_pct >= 65% and total >= 5 → 1.2 (boost)
-    - win_pct 55-65% and total >= 5 → 1.1 (slight boost)
-    - win_pct 45-55% or total < 5  → 1.0 (neutral)
-    - win_pct 35-45% and total >= 5 → 0.8 (dampen)
-    - win_pct < 35% and total >= 5 → 0.6 (strong dampen)
-    """
+    """Get confidence adjustment for a pair at a specific hour."""
     pattern = get_hourly_pattern(asset, hour_utc)
     if not pattern or pattern.get('total_signals', 0) < 5:
         return {
@@ -1390,17 +979,6 @@ def get_time_confidence_adjustment(asset: str, hour_utc: int) -> dict:
 
 
 def get_micro_history(asset, period, n=5, before_ctime=None):
-    # candle_micro PK is (asset, period, ctime) — ctime is unique per
-    # (asset, period) so no secondary tiebreaker is needed (unlike
-    # signal_log which uses AUTOINCREMENT id).
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-19): replaced the SQL string-replace
-    # mutation `q.replace("ORDER BY ctime DESC", "AND ctime < ? ORDER BY ...")`
-    # with an explicit where_parts list. The string-replace silently
-    # produced malformed SQL if the base query text changed (e.g. a comment
-    # containing the literal "ORDER BY ctime DESC"). Now uses parameterized
-    # clause composition.
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-05): switched to _read_cursor() —
-    # SELECT-only, no spurious commit/fsync on context exit.
     where_parts = ["asset=?", "period=?"]
     params = [asset, period]
     if before_ctime is not None:
@@ -1415,24 +993,8 @@ def get_micro_history(asset, period, n=5, before_ctime=None):
 
 
 def get_recent_signals(asset, period, limit=50, before_ctime=None):
-    """Return recent signals with full details for frontend history display.
-    Includes postmortem (win/loss reason), tags.
-
-    FIX (AUDIT-CORE #005, 2026-07-21): default limit raised from 20 to 50
-    to match the WS handler and the HTTP endpoint. Previously a caller
-    forgetting to pass `limit` would silently get only 20 rows.
-    FIX (AUDIT-CRITICAL #003, 2026-07-21): supports `before_ctime` for
-    pagination — the frontend's "Load more" button uses this to fetch
-    older signals on demand, bypassing the HISTORY_MAX cap.
-    """
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-05): switched to _read_cursor() —
-    # SELECT-only, no spurious commit/fsync on context exit.
+    """Return recent signals with full details for frontend history display."""
     with _read_cursor() as c:
-        # FIX (ALWAYS-SIGNAL-2026-08-03): added `asset, period` to SELECT
-        # so the frontend can display which pair each signal belongs to
-        # and filter history by pair. Previously these columns were omitted
-        # because the WHERE clause already filtered by asset/period, but
-        # the frontend's history filter needs them in the response.
         base = """SELECT asset, period, ctime, signal, accuracy, score, confidence,
                    strength, agree, theories, actual, regime, zone,
                    tags, postmortem, right_codes, wrong_codes,
@@ -1450,14 +1012,7 @@ def get_recent_signals(asset, period, limit=50, before_ctime=None):
 
 
 def get_signal_detail(asset, period, ctime):
-    """Return a single signal's full detail (for the reason modal).
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-20): explicit column list instead
-    of SELECT * — previously leaked internal `id` and `ts` columns to
-    the frontend's reason modal. Now returns only the columns the
-    frontend expects.
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-05): switched to _read_cursor().
-    """
+    """Return a single signal's full detail (for the reason modal)."""
     cols = ("ctime, signal, accuracy, score, confidence, strength, agree, "
             "total, theories, actual, regime, zone, tags, postmortem, "
             "right_codes, wrong_codes, a_open, a_close, reasons, category")
@@ -1471,25 +1026,7 @@ def get_signal_detail(asset, period, ctime):
 
 
 def recent_accuracy(asset, period, n=20):
-    """Return (accuracy_float, sample_count) over the last N graded signals.
-
-    accuracy_float = correct / (correct + wrong)   — draws excluded.
-    Returns (None, 0) when no graded rows exist.
-    A single graded row returns (1.0 or 0.0, 1) — caller is responsible for
-    gating on sample size (prediction engine requires recent_n >= 8 before flipping).
-
-    NOTE (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-09): the N-sample window
-    can stretch across multiple algorithm regimes if the pair was in a
-    cooldown (no graded rows for 30 min). feed.py's recent_accuracy cache
-    now uses a smaller N (RECENT_ACCURACY_N env, default 50) to limit the
-    stretch, but the legacy LIMIT-N semantics are preserved here for
-    backwards compatibility with all callers.
-    """
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-21): added a 7-day time floor so
-    # a pair that was idle for 30 days doesn't mix regimes in the
-    # "last N graded" window. Comment at the original code acknowledged
-    # the bug but didn't fix it. Now `ctime > (now - 7d)` is ANDed in.
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-05): switched to _read_cursor().
+    """Return (accuracy_float, sample_count) over the last N graded signals."""
     seven_days_ago = time.time() - 7 * _SECONDS_PER_DAY
     with _read_cursor() as c:
         rows = c.execute("""SELECT accuracy
@@ -1506,50 +1043,11 @@ def recent_accuracy(asset, period, n=20):
     return correct / total, total
 
 
-# ── Per-module per-pair accuracy (added Bug #5 fix, 2026-07-17) ─────────────
-# The `reasons` column in signal_log stores reason strings prefixed with
-# [module_name]. We parse those to extract per-module win rates per asset,
-# which lets per_pair.get_weights() adapt from historical accuracy instead
-# of relying on the hardcoded PAIR_CONFIGS alone.
-
-# FIX M6 (2026-07-19): import from core.constants instead of defining a
-# local tuple. Prevents drift if a new module is added — previously
-# /api/stats (which uses core.constants.MODULE_NAMES) would show the new
-# module while per_module_accuracy (which used the local tuple) would
-# silently skip it. Now both use the single source of truth.
-#
-# FIX (MODULE-TRACKING-2026-08-05): the try/except import that used to sit
-# here was a duplicate — `_MODULE_NAMES` is now defined once near the top of
-# this file (next to `_MODULE_TAG_RE`, which is built from it). Worse, this
-# copy's ImportError fallback was stale (`running_tick` still listed, the four
-# 2026-08-05 modules missing), so on any core.constants import failure it
-# would silently overwrite the correct definition with the outdated one.
-
-
 def per_module_accuracy(asset, period=60, n=200):
-    """Return per-module accuracy for a given (asset, period).
-
-    Parses the `reasons` JSON array from signal_log and, for each module,
-    counts how often its votes aligned with the final graded outcome.
-
-    Returns:
-        dict[module_name] = {
-            "correct": int, "wrong": int, "total": int,
-            "win_rate": float (0..1) or None if no graded rows
-        }
-
-    A module is credited `correct` when its own vote direction matched the
-    final signal direction AND that final signal was graded `correct`. If
-    the module's vote opposed the final signal and the final was `wrong`,
-    the module is also credited `correct` (it was right, against the
-    majority). Symmetric logic for `wrong`.
-
-    This matches the attribution already used by /api/stats in server.py.
-    """
+    """Return per-module accuracy for a given (asset, period)."""
     out = {m: {"correct": 0, "wrong": 0, "total": 0, "win_rate": None}
            for m in _MODULE_NAMES}
 
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-05): switched to _read_cursor().
     with _read_cursor() as c:
         rows = c.execute("""SELECT signal, accuracy, reasons
                    FROM signal_log
@@ -1561,19 +1059,11 @@ def per_module_accuracy(asset, period=60, n=200):
     if not rows:
         return out
 
-    # FIX (DEEP-AUDIT-2026-07-26 / F-14-22): pre-compile the module-name
-    # extraction regex. Previously `reason_str.find("]")` found the FIRST
-    # `]`, mis-extracting module name on reasons like
-    # `"[indicator] RSI[0] > 70"` (extracted `indicator] RSI[0`).
-    # Regex `^\\[([^\\]]+)\\]` correctly extracts the first bracketed
-    # group at the start of the string.
     _MODULE_RE = re.compile(r"^\[([^\]]+)\]")
 
     for row in rows:
         final_signal = row["signal"]
         accuracy = row["accuracy"]
-        # FIX (DEEP-AUDIT-2026-07-26 / F-14-23): distinguish NULL from
-        # empty string. Previously `row["reasons"] or "[]"` masked both.
         reasons_raw = row["reasons"] if row["reasons"] is not None else "[]"
         try:
             reasons = json.loads(reasons_raw) if isinstance(reasons_raw, str) else reasons_raw
@@ -1583,9 +1073,6 @@ def per_module_accuracy(asset, period=60, n=200):
             reasons = []
 
         for reason in reasons:
-            # FIX (DEEP-AUDIT-2026-07-26 / F-14-24): skip non-string
-            # entries silently. Previously `str(reason)` converted dicts
-            # to their repr, which never matched the [module] pattern.
             if not isinstance(reason, str):
                 continue
             m_match = _MODULE_RE.match(reason)
@@ -1595,12 +1082,6 @@ def per_module_accuracy(asset, period=60, n=200):
             if module not in _MODULE_NAMES:
                 continue
             upper = reason.upper()
-            # FIX (DEEP-AUDIT-2026-07-26 / F-14-25): direction parser is
-            # no longer order-dependent. Previously `if "PUT" in upper or
-            # "BEAR" in upper or "SELLER" in upper` ran BEFORE the CALL
-            # check, so `"[indicator] CALL signal but bearish divergence"`
-            # was classified as PUT. Now counts CALL-likes vs PUT-likes
-            # and picks the majority; ties default to None (skip).
             call_hits = sum(1 for k in ("CALL", "BULL", "BUYER") if k in upper)
             put_hits = sum(1 for k in ("PUT", "BEAR", "SELLER") if k in upper)
             if call_hits > put_hits:
@@ -1610,16 +1091,9 @@ def per_module_accuracy(asset, period=60, n=200):
             else:
                 continue
 
-            # FIX (DEEP-AUDIT-2026-07-26 / F-14-26): check accuracy BEFORE
-            # incrementing total. Previously total was incremented then
-            # decremented for DRAW/PENDING — a future maintainer adding an
-            # early `continue` between those two lines would silently
-            # overcount totals.
             if accuracy not in ("correct", "wrong"):
                 continue
             out[module]["total"] += 1
-            # Aligned with final AND final was correct → module was right.
-            # Opposed final AND final was wrong → module was also right.
             if module_dir == final_signal and accuracy == "correct":
                 out[module]["correct"] += 1
             elif module_dir != final_signal and accuracy == "wrong":
@@ -1630,23 +1104,13 @@ def per_module_accuracy(asset, period=60, n=200):
     for m in _MODULE_NAMES:
         s = out[m]
         if s["total"] > 0:
-            # FIX (DEEP-AUDIT-2026-07-26 / F-14-27): clamp win_rate to
-            # [0, 1] — defensive against future bugs in the increment
-            # logic that could push correct > total.
             s["win_rate"] = min(1.0, max(0.0, s["correct"] / s["total"]))
 
     return out
 
 
-# ─── NEW (ALWAYS-SIGNAL-2026-08-03): signal history delete/clear functions ──
-# User requirement: "আমাকে অ্যাপ এর মধ্যে থেকে ডেটা সিগন্যাল হিস্টোরি ডিলিট করার
-# সিস্টেম যোগ করতে হবে"
-
 def delete_signal(asset: str, period: int, ctime: int) -> bool:
-    """Delete a single signal by (asset, period, ctime).
-
-    Returns True if a row was deleted, False if not found.
-    """
+    """Delete a single signal by (asset, period, ctime)."""
     with _write_cursor() as c:
         c.execute(
             "DELETE FROM signal_log WHERE asset=? AND period=? AND ctime=?",
@@ -1656,15 +1120,7 @@ def delete_signal(asset: str, period: int, ctime: int) -> bool:
 
 
 def clear_signals(asset=None, period=None, before_ctime=None):
-    """Clear signals, optionally filtered by asset/period/before_ctime.
-
-    Args:
-        asset: if set, only delete signals for this asset
-        period: if set, only delete signals for this period
-        before_ctime: if set, only delete signals with ctime < this value
-
-    Returns: number of rows deleted.
-    """
+    """Clear signals, optionally filtered by asset/period/before_ctime."""
     q = "DELETE FROM signal_log WHERE 1=1"
     params = []
     if asset:
@@ -1689,31 +1145,7 @@ def clear_all_signals():
 
 
 def cleanup(days=7):
-    """Delete rows older than `days`. Returns (deleted_candle_micro, deleted_signal_log).
-
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-28): validate `days >= 1` —
-    previously `cleanup(days=-1)` would compute cutoff = now + 86400
-    (tomorrow) and DELETE ALL rows. `cleanup(days=0)` deleted everything
-    older than now.
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-29): batched delete in chunks of
-    1000 rows with commit() between batches — previously a single giant
-    DELETE locked the table for seconds on a 100k+ row DB, stalling
-    concurrent reads. Uses `WHERE rowid IN (SELECT ... LIMIT ?)` because
-    `DELETE ... LIMIT` requires SQLITE_ENABLE_UPDATE_DELETE_LIMIT which
-    is not always enabled.
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-30): magic number 86400 replaced
-    with named constant `_SECONDS_PER_DAY` (via timedelta).
-    FIX (DEEP-AUDIT-2026-07-26 / F-14-31): returns the deletion counts so
-    callers can log cleanup progress. Previously no return value.
-    NOTE (2026-07-13): synchronous blocking sqlite3 call. feed.py's run()
-    calls it once at startup; periodic 6-hour cleanups go through
-    asyncio.to_thread(_db.cleanup) to avoid blocking the loop.
-    FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-LIVE-3-20): clean signal_log
-    by `ctime` (candle open time, immutable) instead of `ts`.
-    NOTE on VACUUM: skipped — requires exclusive lock and can take
-    minutes on a large DB. Operators should run `VACUUM` manually after
-    large prunes (Problem 92 mitigation).
-    """
+    """Delete rows older than `days`. Returns (deleted_candle_micro, deleted_signal_log)."""
     if not isinstance(days, int) or days < 1:
         raise ValueError(f"cleanup: days must be a positive int, got {days!r}")
 
@@ -1726,8 +1158,6 @@ def cleanup(days=7):
     conn = _conn()
     try:
         cur = conn.cursor()
-        # Batched delete for candle_micro (PK is (asset, period, ctime),
-        # so we use the implicit rowid for batching).
         while True:
             cur.execute(
                 "DELETE FROM candle_micro WHERE rowid IN ("
@@ -1740,7 +1170,6 @@ def cleanup(days=7):
             deleted_cm += n
             if n < BATCH:
                 break
-        # Batched delete for signal_log (has AUTOINCREMENT id).
         while True:
             cur.execute(
                 "DELETE FROM signal_log WHERE id IN ("

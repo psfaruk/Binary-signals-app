@@ -1,54 +1,19 @@
-"""engines/base/direction_bias.py — Per-pair per-module direction lock.
-
-USER FIX #7 (2026-08-03): exploit Quotex's fixed direction biases.
-
-Live brain data (/api/brain/learning) shows 18 pair+module combinations
-where CALL and PUT win rates differ by >=15 percentage points. Quotex's
-broker algorithm has a structural bias at specific (asset, module)
-combos — it consistently favors one direction.
-
-This module enforces that bias: when a (asset, module_name) is in the
-DIRECTION_LOCK map, the module's vote is filtered to ONLY count in the
-locked direction. A vote in the opposite direction is suppressed
-(score -> 0) before the blender combines it with other modules.
-
-Map generated from /api/brain/learning via /home/z/my-project/scripts/generate_calibration.py.
-Entries are only included when both CALL and PUT have >=8 samples AND
-the win-rate gap is >=15 percentage points.
-
-Regeneration: re-run the calibration script after ~1000 more signals
-accumulate; it will refresh this map from the latest live brain data.
-"""
+"""engines/base/direction_bias.py — Per-pair per-module direction lock."""
 
 # (asset, module_name) -> "CALL" or "PUT"
 # A module vote in the LOCKED direction passes through unchanged.
 # A module vote in the OPPOSITE direction is suppressed (score=0).
-#
-# Source: live /api/brain/learning on Railway production, 2026-08-03.
-# Only includes pair+module combos with >=8 samples in BOTH CALL and PUT
-# AND a win-rate gap >=15 percentage points.
 DIRECTION_LOCK = {
-    # FIX (ALWAYS-SIGNAL-2026-08-03): cleared all DIRECTION_LOCK entries.
-    # User requirement: "4 মডিউল কে তার স্বাধীন মতো চলতে দেন"
-    # Modules now vote freely without any directional dampening.
 }
 
 
 def locked_direction(asset: str, module_name: str):
-    """Return the locked direction for (asset, module) or None if no lock.
-
-    Returns:
-        "CALL", "PUT", or None (no lock — module can vote either way).
-    """
+    """Return the locked direction for (asset, module) or None if no lock."""
     return DIRECTION_LOCK.get((asset, module_name))
 
 
 def is_vote_allowed(asset: str, module_name: str, direction: str) -> bool:
-    """Return True if the module's vote in `direction` is allowed.
-
-    If (asset, module) is not in the lock map, all directions are allowed.
-    If it IS in the lock map, only the locked direction is allowed.
-    """
+    """Return True if the module's vote in `direction` is allowed."""
     lock = DIRECTION_LOCK.get((asset, module_name))
     if lock is None:
         return True
@@ -61,5 +26,4 @@ def suppression_reason(asset: str, module_name: str, direction: str) -> str:
     if lock is None or direction == lock:
         return ""
     return (f"_DIR_LOCK: {module_name} on {asset} is locked to {lock} "
-            f"(vote {direction} suppressed — live data shows {direction} "
-            f"loses consistently on this combo)")
+            f"(vote {direction} suppressed)")

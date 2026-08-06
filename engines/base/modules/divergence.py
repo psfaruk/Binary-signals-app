@@ -1,18 +1,4 @@
-"""
-Module: DIVERGENCE — Price vs momentum divergence detection
-
-Detects classic divergences between swing highs/lows and candle body
-momentum (body / range ratio). When price makes a higher high but the
-body momentum is weaker, the up-move is losing steam → PUT.
-Mirror for bullish divergence.
-
-Mag is x2 base, x3 if tick pressure also diverges (tick pressure not
-available without micro_history — set to None here; can be extended
-later if micro_history is passed in).
-
-This theory was ADDED in PROD-BACKTEST-2026-08-05 by user request —
-ported from the uploaded analyze_eoc.py file's DIVERGENCE block.
-"""
+"""Module: DIVERGENCE — Price vs momentum divergence detection."""
 from engines.base.types import ModuleResult, MarketContext
 
 __all__ = ["analyze"]
@@ -66,8 +52,8 @@ def analyze(candles, ctx: MarketContext) -> list:
                 signal_type="REVERSAL",
                 reliability="CANDLE",
                 group="DIVERGENCE",
-                reasons=[f"DIVERGENCE Bearish: higher high ({_h_prev[1]:.5g}→{_h_last[1]:.5g}), "
-                         f"momentum {_h_prev[2]:.0%}→{_h_last[2]:.0%} → PUT (x{_div_mag})"],
+                reasons=[f"DIVERGENCE Bearish: higher high ({_h_prev[1]:.5g}->{_h_last[1]:.5g}), "
+                         f"momentum {_h_prev[2]:.0%}->{_h_last[2]:.0%} -> PUT (x{_div_mag})"],
             ))
 
     # Bullish divergence: lower low but momentum stronger
@@ -89,8 +75,8 @@ def analyze(candles, ctx: MarketContext) -> list:
                 signal_type="REVERSAL",
                 reliability="CANDLE",
                 group="DIVERGENCE",
-                reasons=[f"DIVERGENCE Bullish: lower low ({_l_prev[1]:.5g}→{_l_last[1]:.5g}), "
-                         f"momentum {_l_prev[2]:.0%}→{_l_last[2]:.0%} → CALL (x{_div_mag})"],
+                reasons=[f"DIVERGENCE Bullish: lower low ({_l_prev[1]:.5g}->{_l_last[1]:.5g}), "
+                         f"momentum {_l_prev[2]:.0%}->{_l_last[2]:.0%} -> CALL (x{_div_mag})"],
             ))
 
     return results
