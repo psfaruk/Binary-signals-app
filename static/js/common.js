@@ -2128,38 +2128,37 @@ async function fetchWinRateStats(){
   }
 }
 function computePairWinRates(statsData){
-  if(!statsData || !statsData.pairs) return [];
+  // FIX (STATS-MATH-2026-08-06): this used to sum statsData.pairs, which is a
+  // per-MODULE-VOTE breakdown — every signal contributes one row per voting
+  // module, so a pair with 100 signals reported ~150 "signals" and a win rate
+  // that could never be reconciled with the Stats tab's overall_win_pct.
+  // `pair_signals` is the signal-level count from signal_log.
+  if(!statsData) return [];
+  const src = statsData.pair_signals || null;
   const result = [];
-  const pairsObj = statsData.pairs;
-  for(const asset in pairsObj){
-    if(!Object.prototype.hasOwnProperty.call(pairsObj, asset)) continue;
-    // OTC assets belong to the OTC page only; real-market assets to the Live
-    // page only. `_otc` suffix is the single source of truth for category —
-    // it's what feed.available_pairs() splits real_pairs/otc_pairs on.
-    const isOtcAsset = /_otc$/i.test(asset);
-    if(isOtcAsset !== (currentCategory === 'otc')) continue;
-    const modulesObj = pairsObj[asset];
-    let total = 0, correct = 0, wrong = 0;
-    for(const modKey in modulesObj){
-      if(!Object.prototype.hasOwnProperty.call(modulesObj, modKey)) continue;
-      const m = modulesObj[modKey];
-      if(!m) continue;
-      total += (m.total || 0);
-      correct += (m.correct || 0);
-      wrong += (m.wrong || 0);
+  if(src){
+    for(const asset in src){
+      if(!Object.prototype.hasOwnProperty.call(src, asset)) continue;
+      // OTC assets belong to the OTC page only; real-market assets to the
+      // Live page only. `_otc` suffix is the single source of truth for
+      // category — it's what feed.available_pairs() splits on.
+      if(/_otc$/i.test(asset) !== (currentCategory === 'otc')) continue;
+      const s = src[asset] || {};
+      result.push({
+        asset: asset,
+        display: prettyPairName(asset),
+        total: s.total || 0,
+        correct: s.correct || 0,
+        wrong: s.wrong || 0,
+        draws: s.draws || 0,
+        graded: s.graded || 0,
+        win_pct: (s.win_pct != null) ? Math.round(s.win_pct) : null,
+      });
     }
-    const graded = correct + wrong;
-    const winPct = graded > 0 ? Math.round((correct / graded) * 100) : null;
-    result.push({
-      asset: asset,
-      display: prettyPairName(asset),
-      total: total,
-      correct: correct,
-      wrong: wrong,
-      graded: graded,
-      win_pct: winPct,
-    });
+    return result;
   }
+  // Backend predates pair_signals — show nothing rather than a wrong number.
+  console.warn('[winrate] /api/stats has no pair_signals; per-pair win rates unavailable');
   return result;
 }
 function prettyPairName(asset){
@@ -2170,13 +2169,16 @@ function prettyPairName(asset){
   // twice with no way to tell which row was broker-synthetic OTC and which
   // was real-market. Callers are all label/heading text — nothing compares
   // this string against an asset id — so the suffix is safe to keep.
+  // FIX (2026-08-06): `isOtc` was computed here and then never used, so the
+  // documented behaviour above was never actually implemented — EURUSD and
+  // EURUSD_otc both rendered as "EUR/USD". Now the marker is really appended.
   const isOtc = /_otc$/i.test(asset);
   let s = String(asset).replace(/_(otc|real)$/i, '');
   // EURUSD → EUR/USD
   if(s.length === 6 && /^[A-Z]{6}$/.test(s)){
     s = s.slice(0,3) + '/' + s.slice(3);
   }
-  return s;
+  return isOtc ? s + ' OTC' : s;
 }
 function classifyPct(pct){ if(pct == null) return 'none'; if(pct >= 55) return 'good'; if(pct >= 45) return 'mid'; return 'bad'; }
 function renderWinRateButton(statsData){
@@ -2186,23 +2188,19 @@ function renderWinRateButton(statsData){
   const btnEl = $('winrate-pct');
   if(!btnEl) return;
   let overallPct = null;
-  // Compute category-filtered aggregate from per-pair stats
-  if(statsData && statsData.pairs){
+  // Category-filtered aggregate, computed from SIGNAL-level counts so the
+  // header pill agrees with the Stats tab and with the dropdown rows.
+  // (It previously summed per-module-vote rows — see computePairWinRates.)
+  if(statsData && statsData.pair_signals){
     let catCorrect = 0, catGraded = 0;
-    const pairsObj = statsData.pairs;
-    for(const asset in pairsObj){
-      if(!Object.prototype.hasOwnProperty.call(pairsObj, asset)) continue;
-      const isOtcAsset = /_otc$/i.test(asset);
-      if(isOtcAsset !== (currentCategory === 'otc')) continue;
-      const modulesObj = pairsObj[asset];
-      if(!modulesObj) continue;
-      for(const modKey in modulesObj){
-        if(!Object.prototype.hasOwnProperty.call(modulesObj, modKey)) continue;
-        const m = modulesObj[modKey];
-        if(!m) continue;
-        catCorrect += (m.correct || 0);
-        catGraded += ((m.correct || 0) + (m.wrong || 0));
-      }
+    const src = statsData.pair_signals;
+    for(const asset in src){
+      if(!Object.prototype.hasOwnProperty.call(src, asset)) continue;
+      if(/_otc$/i.test(asset) !== (currentCategory === 'otc')) continue;
+      const s = src[asset];
+      if(!s) continue;
+      catCorrect += (s.correct || 0);
+      catGraded  += (s.graded  || 0);
     }
     if(catGraded > 0){
       overallPct = Math.round((catCorrect / catGraded) * 100);
@@ -3033,8 +3031,7 @@ function fmtVerifierTime(ts){
   return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 function fmtVerifierAsset(a){
-  if(!a) return '—';
-  return a.replace('_otc','').replace(/([A-Z]{3})([A-Z]{3})/,'$1/$2');
+  return prettyPairName(a);   // keeps the OTC marker; was stripping it
 }
 function _verifierLayerBadge(v){
   if(v === 'VETO') return '<span style="color:#ff1744">V</span>';
@@ -3167,8 +3164,7 @@ function fmtAgentTime(ts){
   return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
 }
 function fmtAgentAsset(a){
-  if(!a) return '—';
-  return a.replace('_otc','').replace(/([A-Z]{3})([A-Z]{3})/,'$1/$2');
+  return prettyPairName(a);   // keeps the OTC marker; was stripping it
 }
 
 function updateAgentStatus(s){
@@ -3177,8 +3173,16 @@ function updateAgentStatus(s){
   const badge = $('verifier-status-badge');
   const hint = $('verifier-enable-hint');
   if(badge){
-    if(s.final_mode){
-      badge.textContent = '● FINAL';
+    const _n = (s.authority && s.authority.assets_authorised) || 0;
+    if((s.final_mode || s.active_mode) && _n === 0){
+      // Mode was requested but the edge gate is holding it at OBSERVE.
+      badge.textContent = '● OBSERVE (gated)';
+      badge.className = 'verifier-status-badge enabled';
+      badge.style.background = 'rgba(255,193,7,0.15)';
+      badge.style.color = '#ffc107';
+      badge.style.borderColor = 'rgba(255,193,7,0.4)';
+    } else if(s.final_mode){
+      badge.textContent = '● FINAL ×' + _n;
       badge.className = 'verifier-status-badge enabled';
       badge.style.background = 'rgba(255,23,68,0.15)';
       badge.style.color = '#ff1744';
@@ -3202,9 +3206,22 @@ function updateAgentStatus(s){
   }
   // Show hint based on mode
   if(hint){
-    if(s.final_mode){
+    const _auth = s.authority || {};
+    const _nAuth = _auth.assets_authorised || 0;
+    if(s.final_mode && _nAuth === 0){
+      // Requested FINAL, but no asset has earned authority — say so plainly
+      // rather than implying the agent is in control of the signals.
       hint.style.display = 'block';
-      hint.innerHTML = '🔄 <b>FINAL mode.</b> Agent makes the FINAL decision — can FLIP CALL→PUT or PUT→CALL, or NEUTRALIZE. Engine signal is just a suggestion. Set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_FINAL=0</code> to disable.';
+      hint.innerHTML = '🛡️ <b>FINAL requested — gate holding.</b> No asset has passed the edge gate yet ('
+        + 'needs ≥' + (_auth.gate_min_samples || '?') + ' graded decisions at AUC ≥'
+        + (_auth.gate_min_auc || '?') + '), so the agent is observing and learning only. '
+        + 'Signals are the engine\'s. Set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_GATE=0</code> to override (not recommended — backtested AUC ≈ 0.50).';
+      hint.style.background = 'rgba(255,193,7,0.05)';
+      hint.style.borderColor = 'rgba(255,193,7,0.3)';
+      hint.style.color = '#ffc107';
+    } else if(s.final_mode){
+      hint.style.display = 'block';
+      hint.innerHTML = '🔄 <b>FINAL mode active on ' + _nAuth + ' asset(s).</b> On those pairs the agent makes the FINAL decision — can FLIP CALL→PUT or PUT→CALL, or NEUTRALIZE. All other pairs stay engine-driven until they pass the edge gate. Set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_FINAL=0</code> to disable.';
       hint.style.background = 'rgba(255,23,68,0.05)';
       hint.style.borderColor = 'rgba(255,23,68,0.3)';
       hint.style.color = '#ff1744';
@@ -3225,6 +3242,27 @@ function updateAgentStatus(s){
   $('vstat-weaken').textContent = s.total_weaken || 0;
   $('vstat-confirm').textContent = s.total_confirm || 0;
   $('vstat-pass').textContent = s.total_pass || 0;
+  // FIX (2026-08-06): the four "%" sub-labels under VETO/WEAKEN/CONFIRM/PASS
+  // were markup-only — nothing ever wrote to them, so they read "0%" forever
+  // no matter what the agent did. Rates are a share of decisions, not ticks.
+  const _dec = s.total_signals_evaluated || 0;
+  const _rate = (v) => _dec ? Math.round((v || 0) / _dec * 100) + '%' : '—';
+  if($('vstat-veto-rate'))    $('vstat-veto-rate').textContent    = _rate(s.total_veto);
+  if($('vstat-weaken-rate'))  $('vstat-weaken-rate').textContent  = _rate(s.total_weaken);
+  if($('vstat-confirm-rate')) $('vstat-confirm-rate').textContent = _rate(s.total_confirm);
+  if($('vstat-pass-rate'))    $('vstat-pass-rate').textContent    = _rate(s.total_pass);
+  if($('vstat-total-sub')){
+    $('vstat-total-sub').textContent = _dec + ' decisions';
+  }
+  // Authority gate summary — shows how much of the requested mode is actually
+  // in force. Without it "● FINAL" implied full control it may not have.
+  const auth = s.authority || null;
+  if(auth && $('agent-hero-subtitle')){
+    $('agent-hero-subtitle').textContent =
+      'Neural net 12→8→1 · ' + auth.assets_authorised + '/' + auth.assets_total +
+      ' assets passed the edge gate' +
+      (auth.median_edge_auc != null ? ' · median AUC ' + auth.median_edge_auc : '');
+  }
   // In final mode, show flips/kept/neutralized instead of learned
   if(s.final_mode){
     const killedEl = $('vstat-killed');

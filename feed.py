@@ -75,6 +75,11 @@ def _clean_display(raw_display: str) -> str:
     """Strip Quotex's own "(OTC)" suffix from its raw instrument display"""
     return _OTC_SUFFIX_RE.sub("", raw_display.replace("\n", "")).strip()
 
+def _otc_display(clean: str) -> str:
+    """Re-attach an unambiguous OTC marker to an OTC instrument's label."""
+    c = (clean or "").strip()
+    return c if c.upper().endswith("OTC") else f"{c} OTC"
+
 # Expanded OTC list — covers all common Quotex OTC instruments.
 # Old list had 12 (with duplicates like USDBRL_otc / BRLUSD_otc);
 # this list has 28 unique pairs spanning USD-majors, USD-exotics, EUR/GBP/JPY crosses.
@@ -93,12 +98,29 @@ _FOREX_OTC = [
     # Reverse-quote exotic OTC
     "INRUSD_otc",
 ]
-# Forex majors — REAL market only (no _otc variant offered).
+# Forex pairs to surface on the REAL-market tab when the broker has them open.
+#
+# FIX (PAIR-SPLIT-2026-08-06, user report): this list used to hold only the 5
+# majors, and _load_pairs() then gated the real list to exactly these bases
+# while giving EVERY other base to the OTC list only. The result was that
+# genuinely real-market instruments the broker does offer live — USD/CAD,
+# NZD/USD, EUR/JPY, EUR/GBP, GBP/JPY, EUR/AUD, USD/MXN, USD/ZAR — could never
+# appear on the Real tab and showed up only under OTC, which is exactly what
+# the user reported seeing. Classification is now driven by what Quotex
+# actually returns per instrument, not by this whitelist; the list only
+# decides which bases we care about at all.
 _FOREX_REAL = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD",
+    "USDCAD", "NZDUSD", "EURJPY", "EURGBP", "GBPJPY", "EURAUD",
+    "USDMXN", "USDZAR", "USDSGD", "USDTRY", "USDCNH", "USDNOK", "USDSEK",
+    "AUDCAD", "AUDJPY", "CADJPY", "CHFJPY", "EURCAD", "EURCHF",
+    "GBPAUD", "GBPCAD", "GBPCHF", "NZDJPY",
 ]
 _CANONICAL_DISPLAY = {
-    "BRLUSD_otc": "USD/BRL",
+    # FIX (PAIR-SPLIT-2026-08-06): BRLUSD_otc used to be labelled "USD/BRL",
+    # identical to USDBRL_otc — two different instruments, one label, so the
+    # OTC dropdown showed "USD/BRL" twice with no way to tell them apart.
+    "BRLUSD_otc": "BRL/USD",
     "INRUSD_otc": "INR/USD",
     "USDINR_otc": "USD/INR",
     "USDCNH_otc": "USD/CNH",
@@ -120,8 +142,9 @@ _CANONICAL_DISPLAY = {
 _FOREX_BASES = set(_FOREX_REAL) | {a[:-4] for a in _FOREX_OTC if a.endswith("_otc")}
 _FALLBACK_ASSETS = _FOREX_OTC
 _DEFAULT_PAIRS: list[dict] = [
-    {"asset": a, "display": _api_to_display(a), "status": "otc",
-     "payout": None, "locked": False}
+    {"asset": a,
+     "display": _otc_display(_CANONICAL_DISPLAY.get(a) or _api_to_display(a)),
+     "status": "otc", "payout": None, "locked": False, "category": "otc"}
     for a in _FALLBACK_ASSETS
 ]
 
@@ -438,13 +461,18 @@ class QuotexFeed:
                 }
             real_pairs: list[dict] = []
             otc_pairs:  list[dict] = []
+            # FIX (PAIR-SPLIT-2026-08-06): classify by what the instrument IS,
+            # not by which hardcoded whitelist its base happens to sit in.
+            #   - the broker's non-suffixed instrument  -> Real Market tab
+            #   - the broker's `_otc` instrument        -> OTC tab
+            # A base the broker offers on both markets now correctly appears
+            # on both tabs, as two distinct instruments. Previously a base
+            # could only ever land on ONE tab, which is what pushed live
+            # real-market pairs (USD/CAD, NZD/USD, EUR/JPY, ...) into OTC.
             for base, v in by_base.items():
                 real = v.get("real")
                 otc  = v.get("otc")
-                _REAL_ONLY_BASES = set(_FOREX_REAL)  # EURUSD, GBPUSD, ...
-                _OTC_ONLY_BASES  = {a[:-4] for a in _FOREX_OTC if a.endswith("_otc")
-                                    and a[:-4] not in _REAL_ONLY_BASES}
-                if real and base in _REAL_ONLY_BASES:
+                if real:
                     status = "live" if real["open"] else "closed"
                     floor = PAYOUT_FLOOR_REAL
                     payout = real["payout"]
@@ -459,14 +487,18 @@ class QuotexFeed:
                         "locked":  locked,
                         "category": "real",
                     })
-                if otc and base in _OTC_ONLY_BASES:
+                if otc:
                     status = "otc"
                     floor = PAYOUT_FLOOR_OTC
                     payout = otc["payout"]
                     locked = False  # OTC pairs bypass payout floor lock
                     otc_pairs.append({
                         "asset":   otc["asset"],
-                        "display": otc["display"],
+                        # Keep the OTC marker in the label. Stripping it made
+                        # "USD/CAD" (real) and "USD/CAD" (OTC) render as the
+                        # same string, so the two tabs looked like they were
+                        # listing the same instrument twice.
+                        "display": _otc_display(otc["display"]),
                         "status":  status,
                         "payout":  payout,
                         "locked":  locked,
@@ -482,12 +514,12 @@ class QuotexFeed:
             self._otc_pairs_list  = otc_pairs
             for p in otc_pairs:
                 if p["asset"] in _CANONICAL_DISPLAY:
-                    p["display"] = _CANONICAL_DISPLAY[p["asset"]]
-            for p in real_pairs:
-                real_key = p["asset"]
-                otc_key = real_key + "_otc"
-                if otc_key in _CANONICAL_DISPLAY:
-                    p["display"] = _CANONICAL_DISPLAY[otc_key]
+                    p["display"] = _otc_display(_CANONICAL_DISPLAY[p["asset"]])
+            # FIX (PAIR-SPLIT-2026-08-06): the real list used to be relabelled
+            # from _CANONICAL_DISPLAY[<asset>_otc] — i.e. a REAL instrument was
+            # given an OTC instrument's canonical label. For BRLUSD that
+            # rendered the real BRL/USD pair as "USD/BRL", the inverted quote.
+            # Real instruments now keep the broker's own display name.
             self._pairs_list = real_pairs + otc_pairs
             self._last_pairs_refresh = time.time()
             print(f"[feed] pairs loaded: "
@@ -1019,12 +1051,25 @@ class QuotexFeed:
                 _orig_signal = result.get("signal")
                 _orig_conf = result.get("confidence", 0)
 
-                if True:
+                # FIX (DEAD-BRANCH-2026-08-06): this was `if True:`, so the
+                # `elif _use_realtime` / `else` arms below were unreachable —
+                # QX_REALTIME_ANALYZER and QX_SIGNAL_VERIFIER did nothing, and
+                # /api/verifier/status served a permanently-zero recorder
+                # ("enabled: true, total_verified: 0") to the dashboard.
+                # Agent Brain is the intended default; the alternates now
+                # actually respond to their env vars again.
+                if not (_use_realtime or _use_verifier):
                     # Agent Brain always evaluates (for visibility + learning).
                     # In observe mode (default) it returns PASS without modifying.
                     # In active mode (QX_AGENT_BRAIN=1) it returns VETO/WEAKEN/CONFIRM.
                     from core.agent_brain import agent
-                    _verify = agent.evaluate(result, stream.asset, closed)
+                    # Pass the (period, ctime) this decision is FOR so the
+                    # outcome can be matched back to exactly these features.
+                    _next_ctime = (closed[-1]["time"] + stream.period
+                                   if closed else 0)
+                    _verify = agent.evaluate(
+                        result, stream.asset, closed,
+                        period=stream.period, ctime=_next_ctime)
                     _record_fn = lambda **kw: None  # agent handles its own state
                 elif _use_realtime:
                     from core.realtime_analyzer import (
@@ -1264,7 +1309,8 @@ class QuotexFeed:
             try:
                 from core.agent_brain import agent
                 _was_correct = (accuracy == "correct")
-                agent.learn(asset, sig, _was_correct)
+                agent.learn(asset, sig, _was_correct,
+                            period=period, ctime=closed["time"])
             except Exception as _le:
                 print(f"[agent] learn hook error: {_le}")
         return accuracy
@@ -2075,6 +2121,23 @@ class QuotexFeed:
                         p = float(t["price"])
                         stream.ticks.append(p)
                         self._track_tick(stream, p)
+                        # BUG-FIX (AGENT-TICKS-2026-08-06): this branch handles
+                        # every tick batch that does NOT straddle a candle
+                        # boundary — i.e. the overwhelming majority of ticks —
+                        # and it never forwarded them to the agent. Only the
+                        # boundary branch below did. Production measured 1,348
+                        # ticks in 47 minutes across 22 streams (~0.02/sec/pair)
+                        # against Quotex's real ~5-10/sec/pair, so every
+                        # tick-derived feature (momentum, order flow, micro
+                        # volatility, tick rate) was computed over a sparse
+                        # boundary-only sample spanning minutes instead of
+                        # seconds. The agent was scoring noise.
+                        try:
+                            from core.agent_brain import agent
+                            agent.process_tick(stream.asset, p,
+                                               float(t.get("time", 0)) * 1000.0)
+                        except Exception:
+                            pass
                     running = self._running_candle(stream)
                     if not stream.candles:
                         stream.candles.append(running)

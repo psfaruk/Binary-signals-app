@@ -77,27 +77,18 @@ PAIR_CONFIGS = {
         "weights": {"candle_reaction": 1.5, "pattern": 1.0, "key_level": 1.5,
                     "market_state": 0.8, "wickwall": 0.5, "divergence": 0.5, "tickrun": 0.5}},
     # ─── Newly added OTC pairs (use default weights until calibrated) ───
-    "EURUSD_otc": {
-        "profile": "default",
-        "description": "Default weights (awaiting calibration)",
-        "weights": DEFAULT_WEIGHTS},
+    # FIX (CONFIG-DUP-2026-08-06): EURUSD_otc, USDJPY_otc, USDCHF_otc and
+    # AUDUSD_otc were ALSO listed here as "default". In a Python dict literal
+    # the later key wins, so those four pairs silently threw away the
+    # calibrated weights defined above (e.g. USDJPY_otc's pattern weight 1.5
+    # reverted to 1.0, USDDZD-style tuning lost) — the calibration block read
+    # as if it were live but four of its twelve entries were dead. The
+    # duplicates are removed; the calibrated blocks above are authoritative.
     "GBPUSD_otc": {
         "profile": "default",
         "description": "Default weights (awaiting calibration)",
         "weights": DEFAULT_WEIGHTS},
-    "USDJPY_otc": {
-        "profile": "default",
-        "description": "Default weights (awaiting calibration)",
-        "weights": DEFAULT_WEIGHTS},
-    "USDCHF_otc": {
-        "profile": "default",
-        "description": "Default weights (awaiting calibration)",
-        "weights": DEFAULT_WEIGHTS},
     "USDCAD_otc": {
-        "profile": "default",
-        "description": "Default weights (awaiting calibration)",
-        "weights": DEFAULT_WEIGHTS},
-    "AUDUSD_otc": {
         "profile": "default",
         "description": "Default weights (awaiting calibration)",
         "weights": DEFAULT_WEIGHTS},

@@ -220,6 +220,14 @@ async def lifespan(app: FastAPI):
     print("[server] lifespan: startup complete")
     yield
     print("[server] lifespan: shutdown beginning")
+    # Flush learned agent weights before the container goes away — otherwise
+    # everything learned since the last periodic save is lost on redeploy.
+    try:
+        from core.agent_brain import agent
+        n_saved = await asyncio.to_thread(agent.save_state)
+        print(f"[server] agent: persisted {n_saved} learned model(s)")
+    except Exception as _e:
+        print(f"[server] agent save on shutdown failed (non-fatal): {_e}")
     await feed.shutdown()
     feed_task.cancel()
     try:
@@ -1317,20 +1325,47 @@ async def streaming_status():
     }
 
 
+def _active_analyzer() -> str:
+    """Which signal analyzer feed.py is actually running (mirrors _run_eoc)."""
+    if os.environ.get("QX_REALTIME_ANALYZER", "0") == "1":
+        return "realtime_analyzer"
+    if os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1":
+        return "signal_verifier"
+    return "agent_brain"
+
+
 @app.get("/api/verifier/status")
 async def verifier_status():
-    """Signal Verifier Agent status — shows verdict counts + uptime."""
+    """Legacy statistical-verifier status.
+
+    This reported `enabled: true` with all-zero counters whenever Agent Brain
+    was the active analyzer (the normal case), because feed.py never called
+    the verifier. It now says which analyzer is actually running so the
+    dashboard can't present a dormant module's zeros as live data.
+    """
+    active = _active_analyzer()
+    if active != "signal_verifier":
+        return {"enabled": False, "active_analyzer": active,
+                "note": f"signal_verifier is dormant — {active} is handling "
+                        f"signals. See /api/agent/status.",
+                "total_verified": 0, "recent_count": 0}
     try:
         from core.signal_verifier import get_verifier_status
-        return get_verifier_status()
+        out = get_verifier_status()
+        out["active_analyzer"] = active
+        return out
     except Exception as e:
-        return {"enabled": False, "error": str(e),
+        return {"enabled": False, "active_analyzer": active, "error": str(e),
                 "hint": "Set QX_SIGNAL_VERIFIER=1 to enable the agent"}
 
 
 @app.get("/api/verifier/recent")
 async def verifier_recent(limit: int = 50):
     """Recent Signal Verifier Agent verdicts (last N signals analyzed)."""
+    if _active_analyzer() != "signal_verifier":
+        return {"count": 0, "verdicts": [],
+                "active_analyzer": _active_analyzer(),
+                "note": "dormant module — use /api/agent/live"}
     try:
         from core.signal_verifier import get_verifier_recent
         limit = max(1, min(200, limit))

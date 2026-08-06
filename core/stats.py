@@ -245,6 +245,43 @@ def _compute_module_stats_inner(cur):
     total_wrong = sum(r["n"] for r in acc_rows if r["accuracy"] == "wrong")
     total_graded = total_correct + total_wrong
     overall_win = (total_correct / total_graded * 100) if total_graded else 0
+    # ── Per-pair SIGNAL-level win rate ──────────────────────────────────────
+    # FIX (STATS-MATH-2026-08-06): `pairs` below counts MODULE VOTES, not
+    # signals — one signal contributes a row for every module that voted on
+    # it (3,908 module votes for 2,662 signals in the live DB), and a module
+    # that voted the losing way on a losing signal is scored "correct" by the
+    # counterfactual rule above. The frontend was summing those module rows to
+    # produce the header win-rate pill and the per-pair dropdown, so the number
+    # a user saw next to a pair was a module-vote rate that could not be
+    # reconciled with the Stats tab's own overall_win_pct. This block gives the
+    # UI the honest signal-level count instead.
+    pair_signal_stats = {}
+    try:
+        sig_rows = cur.execute("""
+            SELECT asset,
+                   SUM(accuracy = 'correct') AS correct,
+                   SUM(accuracy = 'wrong')   AS wrong,
+                   SUM(accuracy = 'draw')    AS draws,
+                   COUNT(*)                  AS total
+            FROM signal_log
+            WHERE signal IN ('CALL','PUT')
+              AND accuracy IN ('correct','wrong','draw')
+            GROUP BY asset
+        """).fetchall()
+        for r in sig_rows:
+            c_, w_ = (r["correct"] or 0), (r["wrong"] or 0)
+            graded = c_ + w_
+            pair_signal_stats[r["asset"]] = {
+                "correct": c_,
+                "wrong": w_,
+                "draws": r["draws"] or 0,
+                "graded": graded,
+                "total": r["total"] or 0,
+                "win_pct": round(c_ / graded * 100, 1) if graded else None,
+            }
+    except sqlite3.Error as e:
+        print(f"[stats] per-pair signal stats failed: {e}")
+
     pairs_summary = {}
     for asset, pair_data in pair_module_stats.items():
         pair_modules = {}
@@ -279,5 +316,9 @@ def _compute_module_stats_inner(cur):
         "total_correct": total_correct,
         "total_wrong": total_wrong,
         "modules": modules_summary,
+        # `pairs` = per-pair MODULE-VOTE breakdown (many rows per signal).
         "pairs": pairs_summary,
+        # `pair_signals` = per-pair SIGNAL-level counts. Use this for any
+        # user-facing "win rate for this pair" number — see the note above.
+        "pair_signals": pair_signal_stats,
     }
