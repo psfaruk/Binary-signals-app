@@ -74,11 +74,24 @@ _OTC_SUFFIX_RE = re.compile(r"\s*\(otc\)\s*$", re.IGNORECASE)
 def _clean_display(raw_display: str) -> str:
     """Strip Quotex's own "(OTC)" suffix from its raw instrument display"""
     return _OTC_SUFFIX_RE.sub("", raw_display.replace("\n", "")).strip()
+
+# Expanded OTC list — covers all common Quotex OTC instruments.
+# Old list had 12 (with duplicates like USDBRL_otc / BRLUSD_otc);
+# this list has 28 unique pairs spanning USD-majors, USD-exotics, EUR/GBP/JPY crosses.
 _FOREX_OTC = [
+    # USD-based OTC (most liquid)
+    "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "USDCHF_otc",
+    "USDCAD_otc", "AUDUSD_otc", "NZDUSD_otc",
+    # USD-cross OTC (exotic / high-payout)
     "USDMXN_otc", "USDTRY_otc", "USDPKR_otc", "USDCOP_otc",
     "USDBDT_otc", "USDARS_otc", "USDDZD_otc",
     "USDIDR_otc", "USDBRL_otc", "BRLUSD_otc",
-    "INRUSD_otc", "USDINR_otc",
+    "USDINR_otc", "USDZAR_otc", "USDSGD_otc", "USDCNH_otc",
+    "USDTHB_otc", "USDPHP_otc", "USDRUB_otc",
+    # EUR/GBP/JPY crosses OTC
+    "EURJPY_otc", "EURGBP_otc", "GBPJPY_otc", "EURAUD_otc",
+    # Reverse-quote exotic OTC
+    "INRUSD_otc",
 ]
 # Forex majors — REAL market only (no _otc variant offered).
 _FOREX_REAL = [
@@ -88,6 +101,21 @@ _CANONICAL_DISPLAY = {
     "BRLUSD_otc": "USD/BRL",
     "INRUSD_otc": "INR/USD",
     "USDINR_otc": "USD/INR",
+    "USDCNH_otc": "USD/CNH",
+    "USDMXN_otc": "USD/MXN",
+    "USDTRY_otc": "USD/TRY",
+    "USDPKR_otc": "USD/PKR",
+    "USDCOP_otc": "USD/COP",
+    "USDBDT_otc": "USD/BDT",
+    "USDARS_otc": "USD/ARS",
+    "USDDZD_otc": "USD/DZD",
+    "USDIDR_otc": "USD/IDR",
+    "USDBRL_otc": "USD/BRL",
+    "USDZAR_otc": "USD/ZAR",
+    "USDSGD_otc": "USD/SGD",
+    "USDTHB_otc": "USD/THB",
+    "USDPHP_otc": "USD/PHP",
+    "USDRUB_otc": "USD/RUB",
 }
 _FOREX_BASES = set(_FOREX_REAL) | {a[:-4] for a in _FOREX_OTC if a.endswith("_otc")}
 _FALLBACK_ASSETS = _FOREX_OTC

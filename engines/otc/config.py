@@ -76,6 +76,75 @@ PAIR_CONFIGS = {
         "description": "Calibrated: 54.7% win (n=254)",
         "weights": {"candle_reaction": 1.5, "pattern": 1.0, "key_level": 1.5,
                     "market_state": 0.8, "wickwall": 0.5, "divergence": 0.5, "tickrun": 0.5}},
+    # ─── Newly added OTC pairs (use default weights until calibrated) ───
+    "EURUSD_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "GBPUSD_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDJPY_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDCHF_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDCAD_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "AUDUSD_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "NZDUSD_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDZAR_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDSGD_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDCNH_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDTHB_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDPHP_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "USDRUB_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "EURJPY_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "EURGBP_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "GBPJPY_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
+    "EURAUD_otc": {
+        "profile": "default",
+        "description": "Default weights (awaiting calibration)",
+        "weights": DEFAULT_WEIGHTS},
 }
 
 weight_adapter = PairWeightAdapter(
