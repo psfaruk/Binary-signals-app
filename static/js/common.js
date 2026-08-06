@@ -1335,7 +1335,7 @@ async function renderTheoryStats(){
   }
 }
 function switchTab(tabName){
-  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'accuracy') return;
+  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'accuracy' && tabName !== 'verifier') return;
   currentTab = tabName;
   // Update tab buttons
   const tabBtns = document.querySelectorAll('.tab-btn');
@@ -1345,7 +1345,7 @@ function switchTab(tabName){
     btn.setAttribute('aria-selected', String(isActive));
   });
   // Update tab panes
-  ['chart', 'history', 'accuracy'].forEach(name => {
+  ['chart', 'history', 'accuracy', 'verifier'].forEach(name => {
     const pane = $('tab-' + name);
     if(pane) pane.classList.toggle('active', name === tabName);
   });
@@ -1369,6 +1369,10 @@ function switchTab(tabName){
         if(chart.timeScale) chart.timeScale().fitContent();
       }catch(_){}
     }
+  } else if(tabName === 'verifier'){
+    // Trigger immediate refresh of verifier panel when opened
+    if(typeof fetchVerifierStatus === 'function') fetchVerifierStatus();
+    if(typeof fetchVerifierRecent === 'function') fetchVerifierRecent();
   }
 }
 function renderHistoryPairSelect(){
@@ -2007,7 +2011,7 @@ function initApp(category){
     btn.classList.toggle('active', isActive);
     btn.setAttribute('aria-selected', String(isActive));
   });
-  ['chart', 'history', 'accuracy'].forEach(name => {
+  ['chart', 'history', 'accuracy', 'verifier'].forEach(name => {
     const pane = document.getElementById('tab-' + name);
     if(pane) pane.classList.toggle('active', name === 'chart');
   });
@@ -2058,7 +2062,7 @@ function initApp(category){
   }, 30000);
   // button label (always) + the dropdown list (only if visible).
   if(_winRateRefreshInterval){ clearInterval(_winRateRefreshInterval); }
-  _winRateRefreshInterval = setInterval(() => refreshWinRate(), 30000);
+  _winRateRefreshInterval = setInterval(() => refreshWinRate(), 15000);
   const refreshBtn = $('refresh-btn');
   if(refreshBtn){
     refreshBtn.addEventListener('click', () => {
@@ -2177,22 +2181,37 @@ function prettyPairName(asset){
 function classifyPct(pct){ if(pct == null) return 'none'; if(pct >= 55) return 'good'; if(pct >= 45) return 'mid'; return 'bad'; }
 function renderWinRateButton(statsData){
   /* Update the header button label with overall win rate.
-
-     FIX (USER REPORT 2026-08-06): was reading the app-wide
-     `overall_win_pct` (Real + OTC combined), so the header pill on the Live
-     page reported a number driven mostly by OTC signals. Derived from the
-     category-filtered per-pair aggregate instead, so it matches the pills
-     and the pair rows in the dropdown below it. */
+     Computes the category-filtered aggregate (real-only on Live page,
+     OTC-only on OTC page) so the header pill matches the dropdown rows. */
   const btnEl = $('winrate-pct');
   if(!btnEl) return;
-let overallPct = null, totalGraded = 0;
-  if(statsData){
-    totalGraded = (statsData.total_graded_signals || statsData.total_graded || 0);
-    if(statsData.overall_win_pct != null){
-      overallPct = Math.round(statsData.overall_win_pct);
-    } else if(statsData.total_correct != null && totalGraded > 0) overallPct = Math.round((statsData.total_correct / totalGraded) * 100);
+  let overallPct = null;
+  // Compute category-filtered aggregate from per-pair stats
+  if(statsData && statsData.pairs){
+    let catCorrect = 0, catGraded = 0;
+    const pairsObj = statsData.pairs;
+    for(const asset in pairsObj){
+      if(!Object.prototype.hasOwnProperty.call(pairsObj, asset)) continue;
+      const isOtcAsset = /_otc$/i.test(asset);
+      if(isOtcAsset !== (currentCategory === 'otc')) continue;
+      const modulesObj = pairsObj[asset];
+      if(!modulesObj) continue;
+      for(const modKey in modulesObj){
+        if(!Object.prototype.hasOwnProperty.call(modulesObj, modKey)) continue;
+        const m = modulesObj[modKey];
+        if(!m) continue;
+        catCorrect += (m.correct || 0);
+        catGraded += ((m.correct || 0) + (m.wrong || 0));
+      }
+    }
+    if(catGraded > 0){
+      overallPct = Math.round((catCorrect / catGraded) * 100);
+    }
   }
-  if(catGraded > 0) overallPct = Math.round((catCorrect / catGraded) * 100);
+  // Fallback to app-wide overall if category calc failed
+  if(overallPct == null && statsData && statsData.overall_win_pct != null){
+    overallPct = Math.round(statsData.overall_win_pct);
+  }
   if(overallPct == null){
     btnEl.textContent = '—%';
     btnEl.className = 'winrate-pct';
@@ -2200,27 +2219,32 @@ let overallPct = null, totalGraded = 0;
     btnEl.textContent = overallPct + '%';
     btnEl.className = 'winrate-pct ' + classifyPct(overallPct);
   }
-  /* Update trend indicator (subtle up/down arrow based on best pair) */
+  // Trend indicator
   const trendEl = $('winrate-trend');
-  if(trendEl){ if(overallPct != null && overallPct >= 55) trendEl.textContent = '▲'; else if(overallPct != null && overallPct < 45) trendEl.textContent = '▼'; else trendEl.textContent = ''; }
+  if(trendEl){
+    if(overallPct != null && overallPct >= 55) trendEl.textContent = '▲';
+    else if(overallPct != null && overallPct < 45) trendEl.textContent = '▼';
+    else trendEl.textContent = '';
+  }
 }
 function renderWinRateDropdown(statsData){
   const listEl = $('winrate-list');
   if(!listEl) return;
   const pairs = computePairWinRates(statsData);
-  /* Summary pills */
+  /* Summary pills — use category-filtered aggregate */
   const overallEl = $('winrate-overall');
   const signalsEl = $('winrate-signals');
   const bestEl = $('winrate-best');
   const worstEl = $('winrate-worst');
-  const overallPct = statsData && statsData.overall_win_pct != null
-    ? Math.round(statsData.overall_win_pct) : null;
+  // Category-filtered overall win rate
+  let catCorrect = 0, catGraded = 0;
+  pairs.forEach(p => { catCorrect += (p.correct || 0); catGraded += (p.graded || 0); });
+  const overallPct = catGraded > 0 ? Math.round((catCorrect / catGraded) * 100) : null;
   if(overallEl){
     if(overallPct == null){ overallEl.textContent = '—'; overallEl.className = 'pill-value'; }
     else { overallEl.textContent = overallPct + '%'; overallEl.className = 'pill-value ' + classifyPct(overallPct); }
   }
-  const totalGraded = statsData ? (statsData.total_graded_signals || statsData.total_graded || 0) : 0;
-  if(signalsEl) signalsEl.textContent = totalGraded;
+  if(signalsEl) signalsEl.textContent = catGraded;
   const MIN_GRADED_FOR_RANK = 30;
   const gradedPairs = pairs.filter(p => (p.graded || 0) >= MIN_GRADED_FOR_RANK);
   if(gradedPairs.length > 0){
@@ -3000,138 +3024,124 @@ function wireHistoryExtraControls(){
 // Polls /api/verifier/status + /api/verifier/recent every 5s and renders
 // live verdict counts + recent verdict table.
 // ═══════════════════════════════════════════════════════════════════════════
-(function verifierPanel(window){
-  'use strict';
+let _verifierPollTimer = null;
+let _verifierRecentTimer = null;
+let _verifierLastTotal = -1;
+
+function fmtVerifierTime(ts){
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+function fmtVerifierAsset(a){
+  if(!a) return '—';
+  return a.replace('_otc','').replace(/([A-Z]{3})([A-Z]{3})/,'$1/$2');
+}
+function _verifierLayerBadge(v){
+  if(v === 'VETO') return '<span style="color:#ff1744">V</span>';
+  if(v === 'WEAKEN') return '<span style="color:#ffc107">W</span>';
+  if(v === 'CONFIRM') return '<span style="color:#00c853">C</span>';
+  return '<span style="color:#8b949e">·</span>';
+}
+
+function updateVerifierStatus(s){
   const $ = (id) => document.getElementById(id);
-  let pollTimer = null;
-  let recentTimer = null;
-  let lastTotal = -1;
-
-  function fmtTime(ts){
-    const d = new Date(ts * 1000);
-    return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  if(!$('vstat-total')) return;
+  const badge = $('verifier-status-badge');
+  if(badge){
+    if(s.enabled){
+      badge.textContent = '● LIVE';
+      badge.className = 'verifier-status-badge enabled';
+    } else {
+      badge.textContent = '○ DISABLED';
+      badge.className = 'verifier-status-badge disabled';
+    }
   }
-
-  function fmtAsset(a){
-    if(!a) return '—';
-    return a.replace('_otc','').replace(/([A-Z]{3})([A-Z]{3})/,'$1/$2');
+  $('vstat-total').textContent = s.total_verified || 0;
+  $('vstat-veto').textContent = s.total_veto || 0;
+  $('vstat-veto-rate').textContent = (s.veto_rate || 0) + '%';
+  $('vstat-weaken').textContent = s.total_weaken || 0;
+  $('vstat-weaken-rate').textContent = (s.weaken_rate || 0) + '%';
+  $('vstat-confirm').textContent = s.total_confirm || 0;
+  $('vstat-confirm-rate').textContent = (s.confirm_rate || 0) + '%';
+  $('vstat-pass').textContent = s.total_pass || 0;
+  $('vstat-pass-rate').textContent = (s.pass_rate || 0) + '%';
+  $('vstat-killed').textContent = s.total_killed || 0;
+  $('vstat-uptime').textContent = s.uptime_human || '—';
+  if(s.total_verified !== _verifierLastTotal && _verifierLastTotal !== -1){
+    fetchVerifierRecent();
   }
+  _verifierLastTotal = s.total_verified;
+}
 
-  function updateStatus(s){
-    if(!$('vstat-total')) return; // panel not on this page
+function renderVerifierRecent(data){
+  const $ = (id) => document.getElementById(id);
+  const tbl = $('verifier-recent-table');
+  if(!tbl) return;
+  if(!data.verdicts || data.verdicts.length === 0){
     const badge = $('verifier-status-badge');
-    if(badge){
-      if(s.enabled){
-        badge.textContent = '● LIVE';
-        badge.className = 'verifier-status-badge enabled';
-      } else {
-        badge.textContent = '○ DISABLED';
-        badge.className = 'verifier-status-badge disabled';
-      }
-    }
-    $('vstat-total').textContent = s.total_verified || 0;
-    $('vstat-veto').textContent = s.total_veto || 0;
-    $('vstat-veto-rate').textContent = (s.veto_rate || 0) + '%';
-    $('vstat-weaken').textContent = s.total_weaken || 0;
-    $('vstat-weaken-rate').textContent = (s.weaken_rate || 0) + '%';
-    $('vstat-confirm').textContent = s.total_confirm || 0;
-    $('vstat-confirm-rate').textContent = (s.confirm_rate || 0) + '%';
-    $('vstat-pass').textContent = s.total_pass || 0;
-    $('vstat-pass-rate').textContent = (s.pass_rate || 0) + '%';
-    $('vstat-killed').textContent = s.total_killed || 0;
-    $('vstat-uptime').textContent = s.uptime_human || '—';
-    // Detect new verdicts -> refresh recent table immediately
-    if(s.total_verified !== lastTotal && lastTotal !== -1){
-      fetchRecent();
-    }
-    lastTotal = s.total_verified;
+    const isDisabled = badge && badge.classList.contains('disabled');
+    tbl.innerHTML = '<div class="verifier-empty">No verdicts yet. ' +
+      (isDisabled ? 'Enable with QX_SIGNAL_VERIFIER=1 env var.'
+                  : 'Waiting for first signal…') + '</div>';
+    return;
   }
-
-  function layerBadge(v){
-    if(v === 'VETO') return '<span style="color:#ff1744">V</span>';
-    if(v === 'WEAKEN') return '<span style="color:#ffc107">W</span>';
-    if(v === 'CONFIRM') return '<span style="color:#00c853">C</span>';
-    return '<span style="color:#8b949e">·</span>';
-  }
-
-  function renderRecent(data){
-    const tbl = $('verifier-recent-table');
-    if(!tbl) return;
-    if(!data.verdicts || data.verdicts.length === 0){
-      tbl.innerHTML = '<div class="verifier-empty">No verdicts yet. ' +
-        (updateStatus && $('verifier-status-badge') &&
-         $('verifier-status-badge').classList.contains('disabled')
-          ? 'Enable with QX_SIGNAL_VERIFIER=1 env var.'
-          : 'Waiting for first signal…') + '</div>';
-      return;
-    }
-    let html = '<div class="vrow vrow-head">' +
-      '<div>Time</div><div>Asset</div><div>Sig</div><div>Verdict</div>' +
-      '<div>Conf</div><div>Layers</div><div>Reason</div></div>';
-    data.verdicts.slice(0, 30).forEach(v => {
-      const sigClass = v.signal === 'CALL' ? 'call' : 'put';
-      const layers = v.layers || {};
-      const layerStr = 'L1'+layerBadge(layers.L1_price_action)+' ' +
-                       'L2'+layerBadge(layers.L2_wick_rejection)+' ' +
-                       'L3'+layerBadge(layers.L3_tick_momentum)+' ' +
-                       'L4'+layerBadge(layers.L4_key_level)+' ' +
-                       'L5'+layerBadge(layers.L5_historical);
-      const confStr = v.original_conf + '→' + v.final_conf +
-        (v.final_signal === 'NEUTRAL' ? ' ✗' : '');
-      const reason = (v.reason || '').split('|').slice(-1)[0].trim().slice(0, 80);
-      html += '<div class="vrow' + (v.killed ? ' killed' : '') + '">' +
-        '<div class="v-time">' + fmtTime(v.ts) + '</div>' +
-        '<div class="v-asset">' + fmtAsset(v.asset) + '</div>' +
-        '<div class="v-signal ' + sigClass + '">' + v.signal + '</div>' +
-        '<div class="v-verdict ' + (v.verdict || '').toLowerCase() + '">' + v.verdict + '</div>' +
-        '<div class="v-conf">' + confStr + '</div>' +
-        '<div class="v-layers">' + layerStr + '</div>' +
-        '<div class="v-conf" style="font-size:10px;color:#8b949e">' + reason + '</div>' +
-        '</div>';
-    });
-    tbl.innerHTML = html;
-  }
-
-  async function fetchStatus(){
-    try{
-      const r = await fetch('/api/verifier/status');
-      if(!r.ok) return;
-      const data = await r.json();
-      updateStatus(data);
-    }catch(e){ /* silent — UI keeps last known state */ }
-  }
-
-  async function fetchRecent(){
-    try{
-      const r = await fetch('/api/verifier/recent?limit=30');
-      if(!r.ok) return;
-      const data = await r.json();
-      renderRecent(data);
-    }catch(e){ /* silent */ }
-  }
-
-  function start(){
-    if(pollTimer) return; // already running
-    // Only start if panel exists on this page
-    if(!$('vstat-total')) return;
-    fetchStatus();
-    fetchRecent();
-    pollTimer = setInterval(fetchStatus, 5000);  // every 5s
-    recentTimer = setInterval(fetchRecent, 15000); // every 15s
-  }
-
-  // Start on DOM ready
-  if(document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', start);
-  } else {
-    start();
-  }
-
-  // Re-start when verifier tab is clicked (in case it was hidden)
-  document.addEventListener('click', (e) => {
-    if(e.target && e.target.id === 'tab-verifier-btn'){
-      setTimeout(() => { fetchStatus(); fetchRecent(); }, 100);
-    }
+  let html = '<div class="vrow vrow-head">' +
+    '<div>Time</div><div>Asset</div><div>Sig</div><div>Verdict</div>' +
+    '<div>Conf</div><div>Layers</div><div>Reason</div></div>';
+  data.verdicts.slice(0, 30).forEach(v => {
+    const sigClass = v.signal === 'CALL' ? 'call' : 'put';
+    const layers = v.layers || {};
+    const layerStr = 'L1'+_verifierLayerBadge(layers.L1_price_action)+' ' +
+                     'L2'+_verifierLayerBadge(layers.L2_wick_rejection)+' ' +
+                     'L3'+_verifierLayerBadge(layers.L3_tick_momentum)+' ' +
+                     'L4'+_verifierLayerBadge(layers.L4_key_level)+' ' +
+                     'L5'+_verifierLayerBadge(layers.L5_historical);
+    const confStr = v.original_conf + '→' + v.final_conf +
+      (v.final_signal === 'NEUTRAL' ? ' ✗' : '');
+    const reason = (v.reason || '').split('|').slice(-1)[0].trim().slice(0, 80);
+    html += '<div class="vrow' + (v.killed ? ' killed' : '') + '">' +
+      '<div class="v-time">' + fmtVerifierTime(v.ts) + '</div>' +
+      '<div class="v-asset">' + fmtVerifierAsset(v.asset) + '</div>' +
+      '<div class="v-signal ' + sigClass + '">' + v.signal + '</div>' +
+      '<div class="v-verdict ' + (v.verdict || '').toLowerCase() + '">' + v.verdict + '</div>' +
+      '<div class="v-conf">' + confStr + '</div>' +
+      '<div class="v-layers">' + layerStr + '</div>' +
+      '<div class="v-conf" style="font-size:10px;color:#8b949e">' + reason + '</div>' +
+      '</div>';
   });
+  tbl.innerHTML = html;
+}
 
-})(window);
+async function fetchVerifierStatus(){
+  try{
+    const r = await fetch('/api/verifier/status');
+    if(!r.ok) return;
+    const data = await r.json();
+    updateVerifierStatus(data);
+  }catch(e){ /* silent */ }
+}
+
+async function fetchVerifierRecent(){
+  try{
+    const r = await fetch('/api/verifier/recent?limit=30');
+    if(!r.ok) return;
+    const data = await r.json();
+    renderVerifierRecent(data);
+  }catch(e){ /* silent */ }
+}
+
+function startVerifierPanel(){
+  if(_verifierPollTimer) return;
+  const $ = (id) => document.getElementById(id);
+  if(!$('vstat-total')) return;
+  fetchVerifierStatus();
+  fetchVerifierRecent();
+  _verifierPollTimer = setInterval(fetchVerifierStatus, 5000);
+  _verifierRecentTimer = setInterval(fetchVerifierRecent, 15000);
+}
+
+if(document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', startVerifierPanel);
+} else {
+  startVerifierPanel();
+}

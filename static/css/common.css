@@ -683,6 +683,9 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 /* Accuracy tab: scrollable stats */
 #tab-accuracy{display:none;flex-direction:column;height:100%;overflow-y:auto;padding:16px}
 #tab-accuracy.active{display:flex}
+/* Verifier tab: scrollable agent panel */
+#tab-verifier{display:none;flex-direction:column;height:100%;overflow-y:auto;padding:16px}
+#tab-verifier.active{display:flex}
 .accuracy-hero{text-align:center;padding:20px 0}
 .accuracy-hero-pct{font-size:48px;font-weight:800;line-height:1}
 .accuracy-hero-detail{font-size:12px;color:var(--text-dim);margin-top:4px}
