@@ -4,7 +4,3 @@
   --accent-bg:rgba(0,200,83,.12);
   --accent-border:rgba(0,200,83,.4);
 }
-.brand-name{color:var(--green)}
-.brand-dot{background:var(--green);box-shadow:0 0 8px var(--green)}
-#market-switch-btn{background:var(--accent-bg);color:var(--accent);border-color:var(--accent-border)}
-.engine-label{background:rgba(0,200,83,.15);color:var(--green)}

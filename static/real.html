@@ -11,6 +11,10 @@
 <body>
 <a href="#main" class="skip-link">Skip to content</a>
 <div id="app">
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       HEADER — Top Bar (single compact row, wraps gracefully on mobile)
+       ════════════════════════════════════════════════════════════════════ -->
   <header id="topbar">
     <div id="topbar-row1">
       <div class="brand" aria-label="Real Market">
@@ -67,20 +71,42 @@
       </div>
       <button id="sound-btn" type="button" aria-pressed="false" aria-label="Unmute sounds">🔇</button>
       <button id="refresh-btn" type="button" aria-label="Refresh data" title="Refresh candles + history + stats now">🔄</button>
-      <span id="last-refresh-label" class="hint" style="font-size:9px;color:var(--text-dim);min-width:60px;text-align:right">never</span>
+      <span id="last-refresh-label" class="hint">never</span>
       <button id="market-switch-btn" type="button" aria-label="Switch market">
         <span class="switch-icon">⇄</span><span class="switch-text">OTC</span>
       </button>
     </div>
   </header>
-  <nav id="tab-bar" role="tablist">
-    <button class="tab-btn active" data-tab="chart" role="tab" id="tab-chart-btn" aria-selected="true" aria-controls="tab-chart">📈 Chart</button>
-    <button class="tab-btn" data-tab="history" role="tab" id="tab-history-btn" aria-selected="false" aria-controls="tab-history">📜 History</button>
-    <button class="tab-btn" data-tab="accuracy" role="tab" id="tab-accuracy-btn" aria-selected="false" aria-controls="tab-accuracy">📊 Stats</button>
-    <button class="tab-btn" data-tab="verifier" role="tab" id="tab-verifier-btn" aria-selected="false" aria-controls="tab-verifier">🤖 Agent</button>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       TAB BAR — primary navigation (variable-width buttons)
+       ════════════════════════════════════════════════════════════════════ -->
+  <nav id="tab-bar" role="tablist" aria-label="Main navigation">
+    <button class="tab-btn tab-btn--lg active" data-tab="chart" role="tab" id="tab-chart-btn" aria-selected="true" aria-controls="tab-chart">
+      <span class="tab-icon" aria-hidden="true">📈</span><span class="tab-label">Chart</span>
+    </button>
+    <button class="tab-btn tab-btn--md" data-tab="history" role="tab" id="tab-history-btn" aria-selected="false" aria-controls="tab-history">
+      <span class="tab-icon" aria-hidden="true">📜</span><span class="tab-label">History</span>
+    </button>
+    <button class="tab-btn tab-btn--md" data-tab="accuracy" role="tab" id="tab-accuracy-btn" aria-selected="false" aria-controls="tab-accuracy">
+      <span class="tab-icon" aria-hidden="true">📊</span><span class="tab-label">Stats</span>
+    </button>
+    <button class="tab-btn tab-btn--md" data-tab="verifier" role="tab" id="tab-verifier-btn" aria-selected="false" aria-controls="tab-verifier">
+      <span class="tab-icon" aria-hidden="true">🤖</span><span class="tab-label">Agent</span>
+    </button>
   </nav>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       MAIN AREA — Grid: [Tab Content] | [Right Panel]
+       Panel is a SIBLING of #tab-content-wrap, not nested inside it.
+       On mobile, panel becomes a collapsible bottom sheet.
+       ════════════════════════════════════════════════════════════════════ -->
   <main id="main" tabindex="-1">
+
+    <!-- LEFT: tab content area -->
     <div id="tab-content-wrap">
+
+      <!-- ─── TAB 1: Chart ─── -->
       <div id="tab-chart" class="tab-pane active" role="tabpanel" aria-labelledby="tab-chart-btn">
         <section id="chart-wrap">
           <div id="chart-container"></div>
@@ -88,6 +114,8 @@
           <div id="chart-loading-overlay" class="show"><div id="chart-loading-spinner"></div><span id="chart-loading-text">Loading…</span></div>
         </section>
       </div>
+
+      <!-- ─── TAB 2: History ─── -->
       <div id="tab-history" class="tab-pane" role="tabpanel" aria-labelledby="tab-history-btn">
         <div class="history-summary-grid" id="history-summary-grid">
           <div class="summary-card summary-total" data-tooltip="Total signals in current filter"><div class="summary-label">Total</div><div class="summary-value" id="hist-sum-total">0</div></div>
@@ -119,12 +147,14 @@
         </div>
         <div id="history-list"></div>
       </div>
+
+      <!-- ─── TAB 3: Stats (with sub-tabs) ─── -->
       <div id="tab-accuracy" class="tab-pane" role="tabpanel" aria-labelledby="tab-accuracy-btn">
         <div class="stats-filter-bar">
           <label class="stats-filter-label">Pair:</label>
           <select id="stats-pair-select" aria-label="Select pair for stats"><option value="">All pairs (app-wide)</option></select>
           <button id="acc-module-refresh" type="button" class="mini-btn" title="Refresh module stats from DB">↻ Refresh</button>
-          <span class="hint" id="stats-context-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">App-wide</span>
+          <span class="hint" id="stats-context-hint">App-wide</span>
         </div>
         <nav class="stats-subtabs" role="tablist" aria-label="Statistics views">
           <button class="stats-subtab active" data-subtab="overview" role="tab" aria-selected="true">📊 Overview</button>
@@ -156,8 +186,8 @@
         <div class="stats-subpane" data-subpane="modules">
           <div class="accuracy-section">
             <div class="accuracy-section-title">
-              By Module (4-Module Engine)
-              <span class="hint" id="acc-module-context" style="font-size:9px;color:var(--text-dim);margin-left:auto">App-wide</span>
+              <span>By Module (4-Module Engine)</span>
+              <span class="hint" id="acc-module-context">App-wide</span>
             </div>
             <div id="acc-module-breakdown"><div class="accuracy-empty">Loading module stats…</div></div>
             <div id="acc-module-pair-detail" class="module-pair-detail" style="display:none">
@@ -172,8 +202,8 @@
         <div class="stats-subpane" data-subpane="theories">
           <div class="accuracy-section">
             <div class="accuracy-section-title">
-              By Theory (Individual Signals)
-              <span class="hint" id="theory-count-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">Loading…</span>
+              <span>By Theory (Individual Signals)</span>
+              <span class="hint" id="theory-count-hint">Loading…</span>
             </div>
             <div id="acc-theory-breakdown"><div class="accuracy-empty">Loading theory stats…</div></div>
           </div>
@@ -181,8 +211,8 @@
         <div class="stats-subpane" data-subpane="pairs">
           <div class="accuracy-section">
             <div class="accuracy-section-title">
-              Per-Pair Deep Stats
-              <span class="hint" id="pair-deep-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">Select a pair above</span>
+              <span>Per-Pair Deep Stats</span>
+              <span class="hint" id="pair-deep-hint">Select a pair above</span>
             </div>
             <div id="pair-deep-stats-container">
               <div class="accuracy-empty">Pick a pair from the dropdown above to see deep stats — overall win rate, regime distribution, strength distribution, hourly patterns, and more.</div>
@@ -192,15 +222,93 @@
         <div class="stats-subpane" data-subpane="time">
           <div class="accuracy-section">
             <div class="accuracy-section-title">
-              Time-of-Day Patterns
-              <span class="hint" id="time-patterns-hint" style="font-size:9px;color:var(--text-dim);margin-left:auto">All pairs</span>
+              <span>Time-of-Day Patterns</span>
+              <span class="hint" id="time-patterns-hint">All pairs</span>
             </div>
             <div id="time-patterns-container"><div class="accuracy-empty">Loading time patterns…</div></div>
           </div>
         </div>
       </div>
+
+      <!-- ─── TAB 4: Agent (verifier) — fully self-contained ─── -->
+      <div id="tab-verifier" class="tab-pane" role="tabpanel" aria-labelledby="tab-verifier-btn">
+        <div class="verifier-panel">
+
+          <div class="verifier-header">
+            <div class="verifier-header-title">
+              <h2>🤖 Autonomous AI Agent V2</h2>
+              <p class="verifier-desc">Self-learning neural network agent. Autonomously ingests every market tick (millisecond-level), extracts 12 features in real-time, uses a 12→8→1 neural network with dropout + L2 regularization to estimate P(win), and learns from each outcome via backpropagation with momentum.</p>
+            </div>
+            <div class="verifier-status-badge" id="verifier-status-badge">Loading…</div>
+          </div>
+          <div class="verifier-enable-hint" id="verifier-enable-hint" style="display:none">
+            ⚙️ <b>Agent is DISABLED.</b> To enable: set env var <code>QX_AGENT_BRAIN=1</code> in Railway → Settings → Variables, then redeploy.
+          </div>
+
+          <div class="verifier-stats-grid" id="verifier-stats-grid">
+            <div class="vstat-card vstat-total"><div class="vstat-label">Ticks Processed</div><div class="vstat-value" id="vstat-total">0</div></div>
+            <div class="vstat-card vstat-veto"><div class="vstat-label">🚫 VETO</div><div class="vstat-value" id="vstat-veto">0</div></div>
+            <div class="vstat-card vstat-weaken"><div class="vstat-label">⚠️ WEAKEN</div><div class="vstat-value" id="vstat-weaken">0</div></div>
+            <div class="vstat-card vstat-confirm"><div class="vstat-label">✅ CONFIRM</div><div class="vstat-value" id="vstat-confirm">0</div></div>
+            <div class="vstat-card vstat-pass"><div class="vstat-label">➖ PASS</div><div class="vstat-value" id="vstat-pass">0</div></div>
+            <div class="vstat-card vstat-killed"><div class="vstat-label">Signals Learned</div><div class="vstat-value" id="vstat-killed">0</div></div>
+            <div class="vstat-card vstat-uptime"><div class="vstat-label">Uptime</div><div class="vstat-value" id="vstat-uptime">—</div></div>
+          </div>
+
+          <div class="verifier-grid-2col">
+            <div class="verifier-subsection agent-live-section">
+              <h3>📡 Live Data Stream</h3>
+              <div class="agent-live-stream" id="agent-live-stream">
+                <div class="verifier-empty">Waiting for ticks…</div>
+              </div>
+            </div>
+            <div class="verifier-subsection agent-features-section">
+              <h3>🧠 Live Features (current asset)</h3>
+              <div class="agent-features-grid" id="agent-features-grid">
+                <div class="verifier-empty">Select a pair to see live features…</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="verifier-subsection agent-models-section">
+            <h3>📊 Per-Asset Learned Models</h3>
+            <div class="agent-models-table" id="agent-models-table">
+              <div class="verifier-empty">No models yet. Agent starts learning after first signal.</div>
+            </div>
+          </div>
+
+          <div class="verifier-subsection verifier-recent-section">
+            <h3>📋 Recent Decisions (last 30)</h3>
+            <div class="verifier-recent-table" id="verifier-recent-table">
+              <div class="verifier-empty">No decisions yet. Enable with QX_AGENT_BRAIN=1 env var.</div>
+            </div>
+          </div>
+
+          <div class="verifier-subsection verifier-layers-legend">
+            <h3>🔍 12 Features the Agent Learns (Neural Network V2)</h3>
+            <div class="legend-grid">
+              <div class="legend-item"><span class="legend-icon">f1</span><div><b>Tick Momentum 30</b><div class="legend-desc">velocity of last 30 ticks (ATR/sec)</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f2</span><div><b>Tick Momentum 10</b><div class="legend-desc">velocity of last 10 ticks (faster signal)</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f3</span><div><b>Tick Acceleration</b><div class="legend-desc">2nd derivative (velocity change)</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f4</span><div><b>Order Flow 30</b><div class="legend-desc">uptick ratio last 30 ticks (buyer vs seller)</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f5</span><div><b>Order Flow 10</b><div class="legend-desc">uptick ratio last 10 ticks (recent)</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f6</span><div><b>Micro Volatility 3s</b><div class="legend-desc">3-sec price range / ATR</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f7</span><div><b>Micro Volatility 10s</b><div class="legend-desc">10-sec price range / ATR</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f8</span><div><b>HTF Alignment</b><div class="legend-desc">5-min vs 20-min EMA separation</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f9</span><div><b>Gap vs Prev Close</b><div class="legend-desc">current price vs last close (ATR)</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f10</span><div><b>Tick Rate</b><div class="legend-desc">broker behavior (slow/burst/normal)</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f11</span><div><b>Candle Body %</b><div class="legend-desc">last candle body / range (momentum)</div></div></div>
+              <div class="legend-item"><span class="legend-icon">f12</span><div><b>Hour Normalized</b><div class="legend-desc">time of day (trap vs boost hours)</div></div></div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
     </div>
-    <aside id="panel">
+
+    <!-- RIGHT: signal panel (sidebar on desktop, bottom sheet on mobile) -->
+    <aside id="panel" aria-label="Signal panel">
       <div class="panel-section panel-signal">
         <div id="signal-box" class="neutral">
           <div id="signal-label">—</div>
@@ -214,10 +322,12 @@
           <div class="conf-bar-wrap"><div class="conf-bar" id="sig-conf-bar" style="width:0%"></div></div>
           <div class="signal-row"><span>Agree</span><span id="sig-agree">—</span></div>
           <div class="signal-row"><span>Regime</span><span id="sig-regime">—</span></div>
-          <div class="signal-row" id="sig-strategy-row" style="display:none"><span>Strategy</span><span id="sig-strategy" style="font-weight:700;color:var(--accent)">—</span></div>
+          <div class="signal-row" id="sig-strategy-row" style="display:none"><span>Strategy</span><span id="sig-strategy" class="strategy-val">—</span></div>
         </div>
         <div class="engine-block">
-          <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list"><span class="section-title section-title--inline">4-Module Engine</span><span class="arrow">▶</span></button>
+          <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
+            <span class="section-title section-title--inline">4-Module Engine</span><span class="arrow">▶</span>
+          </button>
           <div class="engine-active-row"><span>Engine:</span><span id="engine-label" class="engine-label">—</span></div>
           <div id="theories-list"></div>
         </div>
@@ -248,82 +358,17 @@
       </div>
     </aside>
 
-    <div id="tab-verifier" class="tab-pane" role="tabpanel" aria-labelledby="tab-verifier-btn">
-      <div class="verifier-panel">
-        <div class="verifier-header">
-          <h2>🤖 Autonomous AI Agent V2</h2>
-          <div class="verifier-status-badge" id="verifier-status-badge">Loading…</div>
-        </div>
-        <p class="verifier-desc">Self-learning neural network agent. Autonomously ingests every market tick (millisecond-level), extracts 12 features in real-time, uses a 12→8→1 neural network with dropout + L2 regularization to estimate P(win), and learns from each outcome via backpropagation with momentum. Per-asset models adapt independently. Includes Monte Carlo ensemble (5-pass) + Platt calibration for better prediction quality.</p>
-        <div class="verifier-enable-hint" id="verifier-enable-hint" style="display:none;padding:10px 14px;margin-bottom:14px;background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.4);border-radius:6px;font-size:12px;color:#ffc107;">
-          ⚙️ <b>Agent is DISABLED.</b> To enable: set env var <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_BRAIN=1</code> in Railway → Settings → Variables, then redeploy.
-        </div>
-
-        <div class="verifier-stats-grid" id="verifier-stats-grid">
-          <div class="vstat-card vstat-total"><div class="vstat-label">Ticks Processed</div><div class="vstat-value" id="vstat-total">0</div></div>
-          <div class="vstat-card vstat-veto"><div class="vstat-label">🚫 VETO</div><div class="vstat-value" id="vstat-veto">0</div></div>
-          <div class="vstat-card vstat-weaken"><div class="vstat-label">⚠️ WEAKEN</div><div class="vstat-value" id="vstat-weaken">0</div></div>
-          <div class="vstat-card vstat-confirm"><div class="vstat-label">✅ CONFIRM</div><div class="vstat-value" id="vstat-confirm">0</div></div>
-          <div class="vstat-card vstat-pass"><div class="vstat-label">➖ PASS</div><div class="vstat-value" id="vstat-pass">0</div></div>
-          <div class="vstat-card vstat-killed"><div class="vstat-label">Signals Learned</div><div class="vstat-value" id="vstat-killed">0</div></div>
-          <div class="vstat-card vstat-uptime"><div class="vstat-label">Uptime</div><div class="vstat-value" id="vstat-uptime">—</div></div>
-        </div>
-
-        <div class="agent-live-section">
-          <h3>📡 Live Data Stream (what the agent sees)</h3>
-          <div class="agent-live-stream" id="agent-live-stream">
-            <div class="verifier-empty">Waiting for ticks…</div>
-          </div>
-        </div>
-
-        <div class="agent-features-section">
-          <h3>🧠 Live Features (what the agent computes for current asset)</h3>
-          <div class="agent-features-grid" id="agent-features-grid">
-            <div class="verifier-empty">Select a pair to see live features…</div>
-          </div>
-        </div>
-
-        <div class="agent-models-section">
-          <h3>📊 Per-Asset Learned Models</h3>
-          <div class="agent-models-table" id="agent-models-table">
-            <div class="verifier-empty">No models yet. Agent starts learning after first signal.</div>
-          </div>
-        </div>
-
-        <div class="verifier-recent-section">
-          <h3>📋 Recent Decisions (last 30)</h3>
-          <div class="verifier-recent-table" id="verifier-recent-table">
-            <div class="verifier-empty">No decisions yet. Enable with QX_AGENT_BRAIN=1 env var.</div>
-          </div>
-        </div>
-
-        <div class="verifier-layers-legend">
-          <h3>🔍 12 Features the Agent Learns (Neural Network V2)</h3>
-          <div class="legend-grid">
-            <div class="legend-item"><span class="legend-icon">f1</span> <b>Tick Momentum 30</b> — velocity of last 30 ticks (ATR/sec)</div>
-            <div class="legend-item"><span class="legend-icon">f2</span> <b>Tick Momentum 10</b> — velocity of last 10 ticks (faster signal)</div>
-            <div class="legend-item"><span class="legend-icon">f3</span> <b>Tick Acceleration</b> — 2nd derivative (velocity change)</div>
-            <div class="legend-item"><span class="legend-icon">f4</span> <b>Order Flow 30</b> — uptick ratio last 30 ticks (buyer vs seller)</div>
-            <div class="legend-item"><span class="legend-icon">f5</span> <b>Order Flow 10</b> — uptick ratio last 10 ticks (recent)</div>
-            <div class="legend-item"><span class="legend-icon">f6</span> <b>Micro Volatility 3s</b> — 3-sec price range / ATR</div>
-            <div class="legend-item"><span class="legend-icon">f7</span> <b>Micro Volatility 10s</b> — 10-sec price range / ATR</div>
-            <div class="legend-item"><span class="legend-icon">f8</span> <b>HTF Alignment</b> — 5-min vs 20-min EMA separation</div>
-            <div class="legend-item"><span class="legend-icon">f9</span> <b>Gap vs Prev Close</b> — current price vs last close (ATR)</div>
-            <div class="legend-item"><span class="legend-icon">f10</span> <b>Tick Rate</b> — broker behavior (slow/burst/normal)</div>
-            <div class="legend-item"><span class="legend-icon">f11</span> <b>Candle Body %</b> — last candle body / range (momentum)</div>
-            <div class="legend-item"><span class="legend-icon">f12</span> <b>Hour Normalized</b> — time of day (trap vs boost hours)</div>
-          </div>
-        </div>
-      </div>
-    </div>
   </main>
 </div>
+
+<!-- Signal detail modal -->
 <div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title" aria-describedby="detail-body" tabindex="-1">
   <div id="signal-detail-modal">
     <h3><span id="detail-title">Signal Detail</span><button type="button" class="detail-close" id="detail-close" aria-label="Close">×</button></h3>
     <div id="detail-body"></div>
   </div>
 </div>
+
 <script defer src="/static/lightweight-charts.js"></script>
 <script defer src="/static/js/common.js"></script>
 <script defer src="/static/js/real.js"></script>
