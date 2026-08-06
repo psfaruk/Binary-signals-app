@@ -85,42 +85,37 @@ def _otc_display(clean: str) -> str:
     c = (clean or "").strip()
     return c if c.upper().endswith("OTC") else f"{c} OTC"
 
-# Expanded OTC list — covers all common Quotex OTC instruments.
-# Old list had 12 (with duplicates like USDBRL_otc / BRLUSD_otc);
-# this list has 28 unique pairs spanning USD-majors, USD-exotics, EUR/GBP/JPY crosses.
-_FOREX_OTC = [
-    # USD-based OTC (most liquid)
-    "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "USDCHF_otc",
-    "USDCAD_otc", "AUDUSD_otc", "NZDUSD_otc",
-    # USD-cross OTC (exotic / high-payout)
-    "USDMXN_otc", "USDTRY_otc", "USDPKR_otc", "USDCOP_otc",
-    "USDBDT_otc", "USDARS_otc", "USDDZD_otc",
-    "USDIDR_otc", "USDBRL_otc", "BRLUSD_otc",
-    "USDINR_otc", "USDZAR_otc", "USDSGD_otc", "USDCNH_otc",
-    "USDTHB_otc", "USDPHP_otc", "USDRUB_otc",
-    # EUR/GBP/JPY crosses OTC
-    "EURJPY_otc", "EURGBP_otc", "GBPJPY_otc", "EURAUD_otc",
-    # Reverse-quote exotic OTC
-    "INRUSD_otc",
-]
-# Forex pairs to surface on the REAL-market tab when the broker has them open.
+# ───────────────────────────────────────────────────────────────────────────
+# TRADED PAIRS — the exact instruments this app subscribes to.
 #
-# FIX (PAIR-SPLIT-2026-08-06, user report): this list used to hold only the 5
-# majors, and _load_pairs() then gated the real list to exactly these bases
-# while giving EVERY other base to the OTC list only. The result was that
-# genuinely real-market instruments the broker does offer live — USD/CAD,
-# NZD/USD, EUR/JPY, EUR/GBP, GBP/JPY, EUR/AUD, USD/MXN, USD/ZAR — could never
-# appear on the Real tab and showed up only under OTC, which is exactly what
-# the user reported seeing. Classification is now driven by what Quotex
-# actually returns per instrument, not by this whitelist; the list only
-# decides which bases we care about at all.
-_FOREX_REAL = [
-    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD",
-    "USDCAD", "NZDUSD", "EURJPY", "EURGBP", "GBPJPY", "EURAUD",
-    "USDMXN", "USDZAR", "USDSGD", "USDTRY", "USDCNH", "USDNOK", "USDSEK",
-    "AUDCAD", "AUDJPY", "CADJPY", "CHFJPY", "EURCAD", "EURCHF",
-    "GBPAUD", "GBPCAD", "GBPCHF", "NZDJPY",
+# These are PER-CATEGORY allow-lists of full instrument names, not bases.
+# That distinction matters: the user's selection is asymmetric — EUR/USD is
+# wanted on the real market but NOT as OTC, while USD/ZAR is wanted as OTC but
+# NOT on the real market. A base-level filter (what this used to be) cannot
+# express that and would surface each base on both tabs.
+#
+# SELECTION (USER 2026-08-07): trimmed to 15 pairs — 4 real + 11 OTC.
+# Quotex silently drops subscriptions past ~15 concurrent and bans at ~76
+# subscribe attempts / 20 min, so 51 eligible pairs meant 8 streams that never
+# received a single tick. 15 is the documented safe ceiling and every pair
+# here is one the DB already has signal history for.
+#
+# To change what the app trades, edit these two lists — nothing else.
+# Anything removed here still keeps its rows in signal_log; it just stops
+# being offered and stops consuming a subscription slot.
+
+# OTC instruments (broker-synthetic, tradeable 24/7).
+_FOREX_OTC = [
+    "USDZAR_otc", "BRLUSD_otc", "USDIDR_otc", "NZDUSD_otc",
+    "USDCOP_otc", "USDBDT_otc", "USDPKR_otc", "USDMXN_otc",
+    "USDDZD_otc", "USDINR_otc", "USDPHP_otc",
 ]
+# Real-market instruments (follow actual market hours; closed at weekends).
+_FOREX_REAL = [
+    "EURUSD", "EURGBP", "AUDUSD", "USDJPY",
+]
+_REAL_ALLOWED = frozenset(_FOREX_REAL)
+_OTC_ALLOWED = frozenset(_FOREX_OTC)
 _CANONICAL_DISPLAY = {
     # FIX (PAIR-SPLIT-2026-08-06): BRLUSD_otc used to be labelled "USD/BRL",
     # identical to USDBRL_otc — two different instruments, one label, so the
@@ -144,7 +139,6 @@ _CANONICAL_DISPLAY = {
     "USDPHP_otc": "USD/PHP",
     "USDRUB_otc": "USD/RUB",
 }
-_FOREX_BASES = set(_FOREX_REAL) | {a[:-4] for a in _FOREX_OTC if a.endswith("_otc")}
 _FALLBACK_ASSETS = _FOREX_OTC
 _DEFAULT_PAIRS: list[dict] = [
     {"asset": a,
@@ -446,9 +440,13 @@ class QuotexFeed:
             for i in instruments:
                 name   = i[1]
                 is_otc = name.endswith("_otc")
-                base   = name[:-4] if is_otc else name
-                if base not in _FOREX_BASES:
+                # Per-category allow-list. Filtering on the shared BASE (what
+                # this did before) cannot express an asymmetric selection —
+                # wanting EURUSD real but not EURUSD_otc, or USDZAR_otc but
+                # not USDZAR real — and would surface each base on both tabs.
+                if name not in (_OTC_ALLOWED if is_otc else _REAL_ALLOWED):
                     continue
+                base   = name[:-4] if is_otc else name
                 is_open = bool(i[_OPEN_IDX])
                 payout  = i[_PAYOUT_IDX]
                 try:              # own get_payout_by_asset()/get_payment() read
