@@ -37,8 +37,13 @@ def _wick_wall(candles, lookback=20):
         return out
 
     # Recency-weighted tips.
-    _low_tips = [(recent[i]["low"], 1.0 - i / n) for i in range(n)]
-    _high_tips = [(recent[i]["high"], 1.0 - i / n) for i in range(n)]
+    # FIX (PREDICTION-BUG-2026-08-07 / A-17 B18): previously used
+    # `1.0 - i/n` which gives weight 1.0 to OLDEST candle (i=0) and ~0 to
+    # NEWEST. That meant wick-wall detection was dominated by stale 20-candle-
+    # old rejections. Now `i/n` gives weight ~0 to oldest, 1.0 to newest —
+    # recent rejections dominate, which is the whole point of "wick wall".
+    _low_tips = [(recent[i]["low"], i / n) for i in range(n)]
+    _high_tips = [(recent[i]["high"], i / n) for i in range(n)]
 
     return (_cluster(_low_tips), _cluster(_high_tips), avg_rng)
 

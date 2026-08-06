@@ -62,6 +62,18 @@
           </div>
           <div class="winrate-dropdown-list" id="winrate-list" role="list">
             <div class="winrate-empty">Loading…</div>
+            <!-- Each pair row should render a diverging bar (CSS .wr-pair-bar expects this markup):
+                 <div class="wr-pair-bar" data-pct="67">
+                   <div class="wr-bar-fill" style="width: 67%"></div>
+                   <div class="wr-bar-center"></div>
+                 </div>
+            -->
+            <template id="wr-pair-bar-tmpl">
+              <div class="wr-pair-bar" data-pct="0">
+                <div class="wr-bar-fill" style="width:0%"></div>
+                <div class="wr-bar-center"></div>
+              </div>
+            </template>
           </div>
           <div class="winrate-dropdown-footer" id="winrate-footer">
             <span class="hint" id="winrate-updated">never updated</span>
@@ -104,7 +116,7 @@
   <main id="main" tabindex="-1">
 
     <!-- LEFT: tab content area -->
-    <div id="tab-content-wrap">
+    <div id="tab-content-wrap" data-active-tab="chart">
 
       <!-- ─── TAB 1: Chart ─── -->
       <div id="tab-chart" class="tab-pane active" role="tabpanel" aria-labelledby="tab-chart-btn">
@@ -151,8 +163,8 @@
       <!-- ─── TAB 3: Stats (with sub-tabs) ─── -->
       <div id="tab-accuracy" class="tab-pane" role="tabpanel" aria-labelledby="tab-accuracy-btn">
         <div class="stats-filter-bar">
-          <label class="stats-filter-label">Pair:</label>
-          <select id="stats-pair-select" aria-label="Select pair for stats"><option value="">All pairs (app-wide)</option></select>
+          <label class="stats-filter-label" for="stats-pair-select">💱 Pair:</label>
+          <select id="stats-pair-select" class="stats-pair-select" aria-label="Select pair for stats"><option value="">All pairs (app-wide)</option></select>
           <button id="acc-module-refresh" type="button" class="mini-btn" title="Refresh module stats from DB">↻ Refresh</button>
           <span class="hint" id="stats-context-hint">App-wide</span>
         </div>
@@ -249,52 +261,107 @@
               </div>
               <div class="verifier-status-badge" id="verifier-status-badge">Loading…</div>
             </div>
-            <p class="verifier-desc">Self-learning neural network agent. Autonomously ingests every market tick (millisecond-level), extracts 12 features in real-time, uses a 12→8→1 neural network with dropout + L2 regularization to estimate P(win), and learns from each outcome via backpropagation with momentum. Per-asset models adapt independently.</p>
             <div class="verifier-enable-hint" id="verifier-enable-hint" style="display:none">
               ⚙️ <b>Agent is DISABLED.</b> To enable: set env var <code>QX_AGENT_BRAIN=1</code> in Railway → Settings → Variables, then redeploy.
             </div>
-            <!-- Inline key metrics — always visible at glance -->
+            <!-- Inline key metrics — kept lean: P(win), Uptime, Active Pair + per-pair selector (Ticks/Learned moved to Per-Pair Dashboard) -->
             <div class="agent-hero-metrics" id="agent-hero-metrics">
-              <div class="ahm-item"><span class="ahm-label">Ticks</span><span class="ahm-value" id="ahm-ticks">0</span></div>
-              <div class="ahm-sep"></div>
               <div class="ahm-item"><span class="ahm-label">P(win)</span><span class="ahm-value" id="ahm-pwin">—</span></div>
               <div class="ahm-sep"></div>
               <div class="ahm-item"><span class="ahm-label">Uptime</span><span class="ahm-value" id="ahm-uptime">—</span></div>
               <div class="ahm-sep"></div>
               <div class="ahm-item"><span class="ahm-label">Active Pair</span><span class="ahm-value" id="ahm-pair">—</span></div>
+              <div class="ahm-sep"></div>
+              <div class="ahm-item ahm-item--select">
+                <label class="ahm-label" for="agent-pair-select">View Pair</label>
+                <select id="agent-pair-select" class="agent-pair-select" aria-label="Select pair to inspect in Agent tab">
+                  <option value="">(active)</option>
+                </select>
+              </div>
             </div>
           </div>
 
-          <!-- Verdict summary cards — always visible (compact) -->
+          <!-- Verdict summary cards — 4 verdicts only (for currently selected pair);
+               Ticks/Learned moved to Per-Pair Dashboard; Uptime stays in hero only -->
           <div class="verifier-stats-grid" id="verifier-stats-grid">
-            <div class="vstat-card vstat-total"><div class="vstat-label">Ticks Processed</div><div class="vstat-value" id="vstat-total">0</div><div class="vstat-sub" id="vstat-total-sub">total ingested</div></div>
             <div class="vstat-card vstat-veto"><div class="vstat-label">🚫 VETO</div><div class="vstat-value" id="vstat-veto">0</div><div class="vstat-sub" id="vstat-veto-rate">0%</div></div>
             <div class="vstat-card vstat-weaken"><div class="vstat-label">⚠️ WEAKEN</div><div class="vstat-value" id="vstat-weaken">0</div><div class="vstat-sub" id="vstat-weaken-rate">0%</div></div>
             <div class="vstat-card vstat-confirm"><div class="vstat-label">✅ CONFIRM</div><div class="vstat-value" id="vstat-confirm">0</div><div class="vstat-sub" id="vstat-confirm-rate">0%</div></div>
             <div class="vstat-card vstat-pass"><div class="vstat-label">➖ PASS</div><div class="vstat-value" id="vstat-pass">0</div><div class="vstat-sub" id="vstat-pass-rate">0%</div></div>
-            <div class="vstat-card vstat-killed"><div class="vstat-label">Learned</div><div class="vstat-value" id="vstat-killed">0</div><div class="vstat-sub">via backprop</div></div>
-            <div class="vstat-card vstat-uptime"><div class="vstat-label">Uptime</div><div class="vstat-value" id="vstat-uptime">—</div><div class="vstat-sub">since boot</div></div>
           </div>
 
-          <!-- COLLAPSIBLE SECTIONS — clean dropdown accordion -->
+          <!-- COLLAPSIBLE SECTIONS — clean dropdown accordion
+               Order: Per-Pair Dashboard → Recent Decisions → Live Features → Per-Asset Models → Live Stream → 12 Features Legend -->
           <div class="accordion" id="agent-accordion">
 
-            <!-- Section 1: Live Data Stream -->
-            <div class="acc-item acc-item--open" data-acc="live">
-              <button type="button" class="acc-header" aria-expanded="true" aria-controls="acc-live-body">
-                <span class="acc-icon acc-icon--live">📡</span>
-                <span class="acc-title">Live Data Stream</span>
-                <span class="acc-meta" id="acc-live-meta">waiting…</span>
+            <!-- Section 1: Per-Pair Dashboard (NEW — at top, auto-open) -->
+            <div class="acc-item acc-item--open" data-acc="dashboard">
+              <button type="button" class="acc-header" aria-expanded="true" aria-controls="acc-dashboard-body">
+                <span class="acc-icon acc-icon--dashboard">🎯</span>
+                <span class="acc-title">Per-Pair Dashboard</span>
+                <span class="acc-meta" id="acc-dashboard-meta">no pair selected</span>
                 <span class="acc-arrow" aria-hidden="true">▾</span>
               </button>
-              <div class="acc-body" id="acc-live-body" role="region">
-                <div class="agent-live-stream" id="agent-live-stream">
-                  <div class="verifier-empty">Waiting for ticks…</div>
+              <div class="acc-body" id="acc-dashboard-body" role="region">
+                <div class="agent-pair-dashboard" id="agent-pair-dashboard">
+                  <div class="pair-dash-hero">
+                    <div class="pair-dash-pwin">
+                      <span class="pair-dash-label">P(win)</span>
+                      <span class="pair-dash-value" id="pair-dash-pwin">—</span>
+                    </div>
+                    <div class="pair-dash-authority" id="pair-dash-authority">
+                      <span class="authority-badge authority-badge--learning" id="pair-dash-authority-badge">learning</span>
+                    </div>
+                  </div>
+                  <div class="pair-dash-stats">
+                    <div class="pair-dash-stat">
+                      <span class="stat-label">Ticks</span>
+                      <span class="stat-value" id="vstat-total">0</span>
+                      <span class="stat-sub" id="vstat-total-sub">this pair</span>
+                    </div>
+                    <div class="pair-dash-stat">
+                      <span class="stat-label">Samples</span>
+                      <span class="stat-value" id="vstat-killed">0</span>
+                      <span class="stat-sub">learned</span>
+                    </div>
+                    <div class="pair-dash-stat">
+                      <span class="stat-label">Edge AUC</span>
+                      <span class="stat-value" id="pair-dash-auc">—</span>
+                      <span class="stat-sub">discrimination</span>
+                    </div>
+                  </div>
+                  <div class="pair-dash-verdicts">
+                    <div class="pair-dash-verdict vstat-veto"><span class="vd-label">🚫 VETO</span><span class="vd-value" id="pair-vd-veto">0</span><span class="vd-rate" id="pair-vd-veto-rate">0%</span></div>
+                    <div class="pair-dash-verdict vstat-weaken"><span class="vd-label">⚠️ WEAKEN</span><span class="vd-value" id="pair-vd-weaken">0</span><span class="vd-rate" id="pair-vd-weaken-rate">0%</span></div>
+                    <div class="pair-dash-verdict vstat-confirm"><span class="vd-label">✅ CONFIRM</span><span class="vd-value" id="pair-vd-confirm">0</span><span class="vd-rate" id="pair-vd-confirm-rate">0%</span></div>
+                    <div class="pair-dash-verdict vstat-pass"><span class="vd-label">➖ PASS</span><span class="vd-value" id="pair-vd-pass">0</span><span class="vd-rate" id="pair-vd-pass-rate">0%</span></div>
+                  </div>
+                  <div class="verifier-empty" id="pair-dash-empty" hidden>Select a pair above (or use the active pair) to view its dashboard.</div>
                 </div>
               </div>
             </div>
 
-            <!-- Section 2: Live Features for current pair -->
+            <!-- Section 2: Recent Decisions -->
+            <div class="acc-item" data-acc="recent">
+              <button type="button" class="acc-header" aria-expanded="false" aria-controls="acc-recent-body">
+                <span class="acc-icon acc-icon--recent">📋</span>
+                <span class="acc-title">Recent Decisions (last 30)</span>
+                <span class="acc-meta" id="acc-recent-meta">0 decisions</span>
+                <span class="acc-arrow" aria-hidden="true">▾</span>
+              </button>
+              <div class="acc-body" id="acc-recent-body" role="region" hidden>
+                <!-- B-03 (A-03 #3): renamed from verifier-recent-table to
+                     agent-recent-table so renderAgentRecent (3s poll) and
+                     renderVerifierRecent (15s poll) no longer clobber each
+                     other. The verifier endpoint may still poll but its
+                     renderVerifierRecent() now silently no-ops (no target). -->
+                <div class="verifier-recent-table" id="agent-recent-table">
+                  <div class="verifier-empty">No decisions yet. Enable with QX_AGENT_BRAIN=1 env var.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Section 3: Live Features for current pair -->
             <div class="acc-item" data-acc="features">
               <button type="button" class="acc-header" aria-expanded="false" aria-controls="acc-features-body">
                 <span class="acc-icon acc-icon--features">🧠</span>
@@ -309,7 +376,7 @@
               </div>
             </div>
 
-            <!-- Section 3: Per-asset learned models -->
+            <!-- Section 4: Per-asset learned models -->
             <div class="acc-item" data-acc="models">
               <button type="button" class="acc-header" aria-expanded="false" aria-controls="acc-models-body">
                 <span class="acc-icon acc-icon--models">📊</span>
@@ -324,22 +391,22 @@
               </div>
             </div>
 
-            <!-- Section 4: Recent Decisions -->
-            <div class="acc-item" data-acc="recent">
-              <button type="button" class="acc-header" aria-expanded="false" aria-controls="acc-recent-body">
-                <span class="acc-icon acc-icon--recent">📋</span>
-                <span class="acc-title">Recent Decisions (last 30)</span>
-                <span class="acc-meta" id="acc-recent-meta">0 decisions</span>
+            <!-- Section 5: Live Data Stream -->
+            <div class="acc-item" data-acc="live">
+              <button type="button" class="acc-header" aria-expanded="false" aria-controls="acc-live-body">
+                <span class="acc-icon acc-icon--live">📡</span>
+                <span class="acc-title">Live Data Stream</span>
+                <span class="acc-meta" id="acc-live-meta">waiting…</span>
                 <span class="acc-arrow" aria-hidden="true">▾</span>
               </button>
-              <div class="acc-body" id="acc-recent-body" role="region" hidden>
-                <div class="verifier-recent-table" id="verifier-recent-table">
-                  <div class="verifier-empty">No decisions yet. Enable with QX_AGENT_BRAIN=1 env var.</div>
+              <div class="acc-body" id="acc-live-body" role="region" hidden>
+                <div class="agent-live-stream" id="agent-live-stream">
+                  <div class="verifier-empty">Waiting for ticks…</div>
                 </div>
               </div>
             </div>
 
-            <!-- Section 5: 12 Features legend -->
+            <!-- Section 6: 12 Features legend -->
             <div class="acc-item" data-acc="legend">
               <button type="button" class="acc-header" aria-expanded="false" aria-controls="acc-legend-body">
                 <span class="acc-icon acc-icon--legend">🔍</span>
@@ -373,6 +440,10 @@
 
     <!-- RIGHT: signal panel (sidebar on desktop, bottom sheet on mobile) -->
     <aside id="panel" aria-label="Signal panel">
+      <div class="panel-drag-handle" id="panel-drag-handle" aria-hidden="true"></div>
+      <button class="panel-toggle-btn" id="panel-toggle-btn" type="button" aria-label="Toggle signal panel" aria-expanded="false">
+        <span class="panel-toggle-icon" aria-hidden="true">▲</span>
+      </button>
       <div class="panel-section panel-signal">
         <!-- AI AGENT ACTIVITY BADGE — shows whether the agent is actively working on this pair -->
         <div class="ai-activity-strip" id="ai-activity-strip" data-state="loading">

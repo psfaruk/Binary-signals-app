@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, StreamingResponse, Response, JSONResponse
 
 # Load .env from project root (if it exists — Railway uses env vars directly)
 from dotenv import load_dotenv
@@ -112,10 +112,22 @@ _PATTERNS_REFRESH_LOCK = asyncio.Lock()
 _AUTO_TUNE_APPLY_LOCK = asyncio.Lock()
 
 def _check_admin_key(provided: Optional[str]) -> None:
-    """Constant-time admin-key comparison."""
+    """Constant-time admin-key comparison.
+    FIX (A-19 D-03 / S-4): previously FAIL-OPEN — if ADMIN_KEY env var was
+    unset, ALL admin endpoints became unauthenticated silently. Now: FAIL-
+    CLOSED. If ADMIN_KEY is unset, admin endpoints return 503 with a clear
+    message telling the operator to set the env var. This prevents accidental
+    public exposure of /api/debug, /api/db-download, /api/signals/clear etc.
+    on fresh Railway deploys where the operator forgot to set ADMIN_KEY.
+    """
     expected = os.environ.get("ADMIN_KEY", "").strip()
     if not expected:
-        return
+        # FAIL-CLOSED: refuse admin endpoints until ADMIN_KEY is set.
+        raise HTTPException(
+            status_code=503,
+            detail="ADMIN_KEY env var is not set. Admin endpoints are disabled "
+                   "until the operator sets ADMIN_KEY in Railway → Variables."
+        )
     if not provided:
         raise HTTPException(status_code=403, detail="forbidden")
     if not hmac.compare_digest(provided.strip(), expected):
@@ -287,13 +299,23 @@ def _auto_open_browser():
 
 @app.get("/healthz")
 async def healthz(request: Request):
-    """Railway healthcheck endpoint — returns 200 if the process is up."""
+    """Railway healthcheck endpoint.
+    FIX (A-19 D-01): previously always returned HTTP 200 — Railway only checks
+    status codes, so a dead feed (token expired, WS disconnected, all streams
+    stale) passed healthcheck forever and the container was never restarted.
+    Now: returns 503 when feed_healthy=False so Railway's restart policy
+    actually triggers.
+    """
     feed_task = getattr(request.app.state, "feed_task", None)
     feed_task_alive = bool(feed_task is not None and not feed_task.done())
     feed_dead_normal_exit = bool(getattr(request.app.state,
                                          "feed_dead_normal_exit", False))
     feed_healthy = feed_task_alive and not feed_dead_normal_exit
-    return {"ok": True, "feed_connected": bool(getattr(feed, "_connected", False)), "feed_task_alive": feed_task_alive, "feed_dead_normal_exit": feed_dead_normal_exit, "feed_healthy": feed_healthy}
+    payload = {"ok": feed_healthy, "feed_connected": bool(getattr(feed, "_connected", False)), "feed_task_alive": feed_task_alive, "feed_dead_normal_exit": feed_dead_normal_exit, "feed_healthy": feed_healthy}
+    # 503 when feed is dead so Railway restarts the container
+    if not feed_healthy:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 @app.get("/api/token-status")
 async def token_status():
@@ -466,8 +488,11 @@ async def get_pairs_by_category(category: str):
         detail=f"unknown category {category!r}; expected 'real' or 'otc'")
 
 @app.get("/api/db-download")
-async def download_db():
-    """Download the raw signals.db SQLite file."""
+async def download_db(request: Request):
+    """Download the raw signals.db SQLite file.
+    FIX (A-19 D-02 / S-1): added ADMIN_KEY check — was completely public,
+    anyone could download the full DB (learned weights + signal history)."""
+    _check_admin_key(request.headers.get("X-Admin-Key"))
     import os
     import shutil
     import sqlite3
@@ -1760,6 +1785,47 @@ async def ws_endpoint(ws: WebSocket):
             await feed.drop_interest(cid)
         except Exception:
             _logger.exception("drop_interest failed for %s", cid)
+
+# ── Admin: prune non-allowlist pairs ──────────────────────────────────────────
+
+@app.post("/api/admin/prune-pairs")
+async def prune_non_allowlist_pairs(request: Request, dry_run: bool = False):
+    """Delete DB rows for assets NOT in the 15-pair allowlist.
+    FIX (PAIR-ALLOWLIST-2026-08-07 / A-14 #7): one-time migration to clean up
+    historical rows for removed pairs (EURUSD_otc, USDCHF_otc, USDJPY_otc,
+    USDARS_otc, USDBRL_otc, USDSGD_otc, USDCNH_otc, USDTHB_otc, USDRUB_otc,
+    EURGBP_otc, GBPUSD_otc, USDCAD_otc, EURJPY_otc, GBPJPY_otc, EURAUD_otc).
+    Set ?dry_run=true to preview counts without deleting.
+    Requires X-Admin-Key header.
+    """
+    _check_admin_key(request.headers.get("X-Admin-Key"))
+    results = await asyncio.to_thread(_db.prune_non_allowlist_assets, dry_run)
+    return {
+        "dry_run": dry_run,
+        "allowlist_count": 15,
+        "results": results,
+    }
+
+
+@app.get("/api/allowlist")
+async def get_allowlist():
+    """Return the 15-pair allowlist (11 OTC + 4 Real).
+    NEW (PAIR-ALLOWLIST-2026-08-07): single endpoint that exposes the
+    canonical pair list from core/constants. Frontend can use this instead
+    of hardcoding the list.
+    """
+    from core.constants import (
+        ALLOWED_PAIRS_OTC, ALLOWED_PAIRS_REAL, ALLOWED_PAIRS,
+        ALLOWED_PAIRS_BY_CATEGORY,
+    )
+    return {
+        "otc": list(ALLOWED_PAIRS_OTC),
+        "real": list(ALLOWED_PAIRS_REAL),
+        "all": sorted(ALLOWED_PAIRS),
+        "by_category": {k: sorted(v) for k, v in ALLOWED_PAIRS_BY_CATEGORY.items()},
+        "count": {"otc": len(ALLOWED_PAIRS_OTC), "real": len(ALLOWED_PAIRS_REAL), "total": len(ALLOWED_PAIRS)},
+    }
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 

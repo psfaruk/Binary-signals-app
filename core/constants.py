@@ -10,6 +10,85 @@ Single source of truth prevents that drift.
 """
 import os
 
+# ───────────────────────────────────────────────────────────────────────────
+# PAIR ALLOWLIST — SINGLE SOURCE OF TRUTH (FIX 2026-08-07)
+# ───────────────────────────────────────────────────────────────────────────
+# The user trades exactly 15 pairs: 11 OTC + 4 Real. Previously, pair lists
+# were scattered across feed.py, engines/otc/config.py, engines/real/config.py,
+# stats.py, common.js — and they had drifted (otc/config had 26 pairs,
+# real/config had 2, feed.py had 15, JS filtered by suffix only).
+#
+# This is the ONLY place pair lists are defined. Every other module MUST
+# import from here. Adding/removing a pair = edit here only.
+#
+# Quotex silently drops subscriptions past ~15 concurrent and bans at
+# ~76 subscribe attempts / 20 min — 15 is the documented safe ceiling.
+
+ALLOWED_PAIRS_OTC = (
+    "USDZAR_otc",    # USD/ZAR OTC
+    "BRLUSD_otc",    # BRL/USD OTC
+    "USDIDR_otc",    # USD/IDR OTC
+    "NZDUSD_otc",    # NZD/USD OTC
+    "USDCOP_otc",    # USD/COP OTC
+    "USDBDT_otc",    # USD/BDT OTC
+    "USDPKR_otc",    # USD/PKR OTC
+    "USDMXN_otc",    # USD/MXN OTC
+    "USDDZD_otc",    # USD/DZD OTC
+    "USDINR_otc",    # USD/INR OTC
+    "USDPHP_otc",    # USD/PHP OTC
+)
+
+ALLOWED_PAIRS_REAL = (
+    "EURUSD",        # EUR/USD
+    "EURGBP",        # EUR/GBP
+    "AUDUSD",        # AUD/USD
+    "USDJPY",        # USD/JPY
+)
+
+ALLOWED_PAIRS = frozenset(ALLOWED_PAIRS_OTC + ALLOWED_PAIRS_REAL)
+ALLOWED_PAIRS_BY_CATEGORY = {
+    "otc":  frozenset(ALLOWED_PAIRS_OTC),
+    "real": frozenset(ALLOWED_PAIRS_REAL),
+}
+
+
+def is_allowed_pair(asset: str, category: str | None = None) -> bool:
+    """Return True if asset is in the 15-pair allowlist.
+    If category is given ('otc' or 'real'), check only that category."""
+    if not asset:
+        return False
+    if category is None:
+        return asset in ALLOWED_PAIRS
+    return asset in ALLOWED_PAIRS_BY_CATEGORY.get(category, frozenset())
+
+
+def allowlist_sql_filter(column: str = "asset",
+                         category: str | None = None,
+                         prefix: str = "AND"):
+    """Return (sql_fragment, params) for filtering SQL to allowlist pairs.
+    Usage:
+        frag, params = allowlist_sql_filter(category='otc')
+        cur.execute(f"SELECT * FROM t WHERE 1=1 {frag}", params)
+    """
+    pairs = (ALLOWED_PAIRS_BY_CATEGORY[category]
+             if category in ALLOWED_PAIRS_BY_CATEGORY
+             else ALLOWED_PAIRS)
+    placeholders = ",".join("?" * len(pairs))
+    frag = f" {prefix} {column} IN ({placeholders})"
+    return frag, tuple(pairs)
+
+
+def compute_win_rate(correct: int, wrong: int) -> float | None:
+    """Compute win rate as correct / (correct + wrong).
+    Returns None if no graded signals (correct + wrong == 0).
+    Draws and pending are EXCLUDED — they are not wins or losses."""
+    total = correct + wrong
+    if total <= 0:
+        return None
+    return (correct / total) * 100.0
+
+# ───────────────────────────────────────────────────────────────────────────
+
 # FIX (DEEP-AUDIT-2026-07-26 / F-08-01): centralised DB path resolution.
 # Multiple modules (stats.py, auto_tune.py, time_patterns.py) each computed
 # DB_PATH independently via `os.environ.get("DB_PATH", <repo-root>)`. The

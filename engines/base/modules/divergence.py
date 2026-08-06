@@ -56,7 +56,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                          f"momentum {_h_prev[2]:.0%}->{_h_last[2]:.0%} -> PUT (x{_div_mag})"],
             ))
 
-    # Bullish divergence: lower low but momentum stronger
+    # Bullish divergence: lower low but momentum WEAKER (exhaustion)
+    # FIX (PREDICTION-BUG-2026-08-07 / A-17 B05): previously required
+    # momentum STRONGER on lower low (`> prev * 1.25`), which is BEARISH
+    # continuation (sellers pushing harder) — but emitted CALL. Classical
+    # bullish divergence = lower low + WEAKER momentum (sellers exhausted) →
+    # CALL reversal. Flipped the comparison.
     if len(_sw_lows) >= 2:
         _l_last = _sw_lows[-1]
         _l_prev = _sw_lows[-2]
@@ -64,7 +69,7 @@ def analyze(candles, ctx: MarketContext) -> list:
         _l_fresh = (len(_div_cands) - 1 - _l_last[0]) <= _FRESH_SWING_IX
         if (_l_sep >= _MIN_SWING_SEP and _l_fresh
                 and _l_last[1] < _l_prev[1]
-                and _l_last[2] > _l_prev[2] * _MOMENTUM_RATIO_BULL
+                and _l_last[2] < _l_prev[2] * _MOMENTUM_RATIO
                 and _l_prev[2] > _MIN_MOM):
             _div_mag = 2
             results.append(ModuleResult(
@@ -76,7 +81,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reliability="CANDLE",
                 group="DIVERGENCE",
                 reasons=[f"DIVERGENCE Bullish: lower low ({_l_prev[1]:.5g}->{_l_last[1]:.5g}), "
-                         f"momentum {_l_prev[2]:.0%}->{_l_last[2]:.0%} -> CALL (x{_div_mag})"],
+                         f"momentum {_l_prev[2]:.0%}->{_l_last[2]:.0%} (exhaustion) -> CALL (x{_div_mag})"],
             ))
 
     return results

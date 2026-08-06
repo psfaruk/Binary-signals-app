@@ -73,11 +73,15 @@ def detect_candle_patterns(candles):
             })
     if b2 > 0 and b3 < 0 and _abs_body(c3) < _abs_body(c2) * 0.5:
         if c3["open"] <= c2["close"] and c3["close"] >= c2["open"]:
+            # FIX (PREDICTION-BUG-2026-08-07 / A-17 B01): BEAR_HARAMI is a bearish
+            # reversal pattern — small bearish candle inside big bullish candle
+            # signals momentum exhaustion. Classical candlestick theory says PUT.
+            # Previously emitted CALL (continuation) — wrong direction. Flipped.
             patterns.append({
                 "name": "BEAR_HARAMI",
-                "direction": "CALL",
+                "direction": "PUT",
                 "score": 2,
-                "reason": "Bearish Harami (small bearish inside big bullish) → CALL (continuation, 51.8% measured n=501)"
+                "reason": "Bearish Harami (small bearish inside big bullish, momentum exhaustion) → PUT reversal"
             })
     if r3 > 0 and atr > 0:
         uw3 = c3["high"] - max(c3["open"], c3["close"])
@@ -86,11 +90,14 @@ def detect_candle_patterns(candles):
         lw_pct3 = lw3 / r3 * 100
         body_pct3 = _abs_body(c3) / r3 * 100
         if uw_pct3 >= 66 and body_pct3 <= 33 and b3 <= 0:
+            # FIX (PREDICTION-BUG-2026-08-07 / A-17 B02): Bearish Pin Bar / Shooting
+            # Star (long upper wick, bearish close) is a top-reversal signal.
+            # Classical theory says PUT. Previously emitted CALL — wrong direction.
             patterns.append({
                 "name": "BEAR_PIN_BAR",
-                "direction": "CALL",
+                "direction": "PUT",
                 "score": 3,
-                "reason": f"Bearish Pin Bar (upper wick {uw_pct3:.0f}%, body {body_pct3:.0f}%) → CALL (continuation, 51.9% measured n=294)"
+                "reason": f"Bearish Pin Bar (upper wick {uw_pct3:.0f}%, body {body_pct3:.0f}%) → PUT reversal"
             })
     if atr > 0 and _abs_body(c2) > atr * 0.3 and _abs_body(c3) > atr * 0.3:
         if b2 < 0 and b3 > 0 and abs(c3["close"] - c2["open"]) < atr * 0.15:
@@ -103,11 +110,15 @@ def detect_candle_patterns(candles):
                 })
         if b2 > 0 and b3 < 0 and abs(c3["close"] - c2["open"]) < atr * 0.15:
             if _abs_body(c3) > _abs_body(c2) * 0.5:
+                # FIX (PREDICTION-BUG-2026-08-07 / A-17 B03): Bearish Two-Bar
+                # Reversal (big bullish c2, big bearish c3, close near c2 open)
+                # is a top-reversal pattern. Classical theory says PUT.
+                # Previously emitted CALL — wrong direction. Flipped.
                 patterns.append({
                     "name": "BEAR_TWO_BAR_REV",
-                    "direction": "CALL",
+                    "direction": "PUT",
                     "score": 3,
-                    "reason": f"Bearish Two-Bar Reversal (c2 up, c3 down, close near c2 open) → CALL (continuation, 53.2% measured n=231)"
+                    "reason": f"Bearish Two-Bar Reversal (c2 up, c3 down, close near c2 open) → PUT reversal"
                 })
     if r3 > 0 and atr > 0:
         body_pct3 = _abs_body(c3) / r3 * 100

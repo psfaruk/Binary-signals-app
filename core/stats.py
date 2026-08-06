@@ -8,6 +8,9 @@ from core.constants import (
     MODULE_NAMES,
     MODULE_DISPLAY_NAMES,
     STATS_MAX_ROWS,
+    ALLOWED_PAIRS,
+    allowlist_sql_filter,
+    compute_win_rate,
 )
 
 def parse_reasons(reasons_raw):
@@ -76,7 +79,8 @@ def _compute_module_stats_inner(cur):
     """Inner stats computation — takes a cursor, returns the stats dict."""
     _stats_max_rows = STATS_MAX_ROWS
     try:
-        total_row = cur.execute("""
+        allow_frag, allow_params = allowlist_sql_filter(column="asset")
+        total_row = cur.execute(f"""
             SELECT COUNT(*) as n FROM signal_log
             WHERE signal IN ('CALL','PUT')
               AND accuracy IN ('correct','wrong')
@@ -85,14 +89,17 @@ def _compute_module_stats_inner(cur):
                       SELECT ts FROM signal_log
                       WHERE signal IN ('CALL','PUT')
                         AND accuracy IN ('correct','wrong')
+                        {allow_frag}
                       ORDER BY ts DESC LIMIT ?
                   )
               ), 0)
-        """, (_stats_max_rows,)).fetchone()
+              {allow_frag}
+        """, allow_params + (_stats_max_rows,) + allow_params).fetchone()
         total = total_row[0] if total_row else 0
     except sqlite3.OperationalError:
         try:
-            total_row = cur.execute("""
+            allow_frag, allow_params = allowlist_sql_filter(column="asset")
+            total_row = cur.execute(f"""
                 SELECT COUNT(*) as n FROM signal_log
                 WHERE signal IN ('CALL','PUT')
                   AND accuracy IN ('correct','wrong')
@@ -101,16 +108,21 @@ def _compute_module_stats_inner(cur):
                           SELECT ctime FROM signal_log
                           WHERE signal IN ('CALL','PUT')
                             AND accuracy IN ('correct','wrong')
+                            {allow_frag}
                           ORDER BY ctime DESC LIMIT ?
                       )
                   ), 0)
-            """, (_stats_max_rows,)).fetchone()
+                  {allow_frag}
+            """, allow_params + (_stats_max_rows,) + allow_params).fetchone()
             total = total_row[0] if total_row else 0
         except sqlite3.OperationalError:
+            allow_frag, allow_params = allowlist_sql_filter(column="asset")
             total = cur.execute(
-                "SELECT COUNT(*) FROM signal_log "
-                "WHERE signal IN ('CALL','PUT') "
-                "AND accuracy IN ('correct','wrong')"
+                f"SELECT COUNT(*) FROM signal_log "
+                f"WHERE signal IN ('CALL','PUT') "
+                f"AND accuracy IN ('correct','wrong')"
+                f" {allow_frag}",
+                allow_params
             ).fetchone()[0]
     if total == 0:
         return {
@@ -132,23 +144,27 @@ def _compute_module_stats_inner(cur):
         "PUT": {"correct": 0, "wrong": 0},
     }))
     try:
-        rows = cur.execute("""
+        allow_frag, allow_params = allowlist_sql_filter(column="asset")
+        rows = cur.execute(f"""
             SELECT asset, signal, accuracy, reasons
             FROM signal_log
             WHERE signal IN ('CALL', 'PUT')
               AND accuracy IN ('correct', 'wrong')
+              {allow_frag}
             ORDER BY ts DESC
             LIMIT ?
-        """, (_stats_max_rows,)).fetchall()
+        """, allow_params + (_stats_max_rows,)).fetchall()
     except sqlite3.OperationalError:
-        rows = cur.execute("""
+        allow_frag, allow_params = allowlist_sql_filter(column="asset")
+        rows = cur.execute(f"""
             SELECT asset, signal, accuracy, reasons
             FROM signal_log
             WHERE signal IN ('CALL', 'PUT')
               AND accuracy IN ('correct', 'wrong')
+              {allow_frag}
             ORDER BY ctime DESC
             LIMIT ?
-        """, (_stats_max_rows,)).fetchall()
+        """, allow_params + (_stats_max_rows,)).fetchall()
     for row in rows:
         asset = row["asset"]
         final_signal = row["signal"]
@@ -204,7 +220,8 @@ def _compute_module_stats_inner(cur):
             "put_wrong": put_w,
         })
     try:
-        acc_rows = cur.execute("""
+        allow_frag, allow_params = allowlist_sql_filter(column="asset")
+        acc_rows = cur.execute(f"""
             SELECT accuracy, COUNT(*) as n
             FROM signal_log
             WHERE signal IN ('CALL','PUT') AND accuracy IN ('correct','wrong')
@@ -213,14 +230,17 @@ def _compute_module_stats_inner(cur):
                       SELECT ts FROM signal_log
                       WHERE signal IN ('CALL','PUT')
                         AND accuracy IN ('correct','wrong')
+                        {allow_frag}
                       ORDER BY ts DESC LIMIT ?
                   )
               ), 0)
+              {allow_frag}
             GROUP BY accuracy
-        """, (_stats_max_rows,)).fetchall()
+        """, allow_params + (_stats_max_rows,) + allow_params).fetchall()
     except sqlite3.OperationalError:
         try:
-            acc_rows = cur.execute("""
+            allow_frag, allow_params = allowlist_sql_filter(column="asset")
+            acc_rows = cur.execute(f"""
                 SELECT accuracy, COUNT(*) as n
                 FROM signal_log
                 WHERE signal IN ('CALL','PUT') AND accuracy IN ('correct','wrong')
@@ -229,55 +249,59 @@ def _compute_module_stats_inner(cur):
                           SELECT ctime FROM signal_log
                           WHERE signal IN ('CALL','PUT')
                             AND accuracy IN ('correct','wrong')
+                            {allow_frag}
                           ORDER BY ctime DESC LIMIT ?
                       )
                   ), 0)
+                  {allow_frag}
                 GROUP BY accuracy
-            """, (_stats_max_rows,)).fetchall()
+            """, allow_params + (_stats_max_rows,) + allow_params).fetchall()
         except sqlite3.OperationalError:
-            acc_rows = cur.execute("""
+            allow_frag, allow_params = allowlist_sql_filter(column="asset")
+            acc_rows = cur.execute(f"""
                 SELECT accuracy, COUNT(*) as n
                 FROM signal_log
                 WHERE signal IN ('CALL','PUT') AND accuracy IN ('correct','wrong')
+                {allow_frag}
                 GROUP BY accuracy
-            """).fetchall()
+            """, allow_params).fetchall()
     total_correct = sum(r["n"] for r in acc_rows if r["accuracy"] == "correct")
     total_wrong = sum(r["n"] for r in acc_rows if r["accuracy"] == "wrong")
     total_graded = total_correct + total_wrong
     overall_win = (total_correct / total_graded * 100) if total_graded else 0
     # ── Per-pair SIGNAL-level win rate ──────────────────────────────────────
-    # FIX (STATS-MATH-2026-08-06): `pairs` below counts MODULE VOTES, not
-    # signals — one signal contributes a row for every module that voted on
-    # it (3,908 module votes for 2,662 signals in the live DB), and a module
-    # that voted the losing way on a losing signal is scored "correct" by the
-    # counterfactual rule above. The frontend was summing those module rows to
-    # produce the header win-rate pill and the per-pair dropdown, so the number
-    # a user saw next to a pair was a module-vote rate that could not be
-    # reconciled with the Stats tab's own overall_win_pct. This block gives the
-    # UI the honest signal-level count instead.
+    # FIX (PAIR-ALLOWLIST-2026-08-07): filter to the 15-pair allowlist so
+    # removed pairs (EURUSD_otc, USDCHF_otc, USDJPY_otc, USDARS_otc, etc.)
+    # don't resurface in the win-rate dropdown. Uses
+    # core.constants.allowlist_sql_filter() for parameterised SQL.
     pair_signal_stats = {}
     try:
-        sig_rows = cur.execute("""
+        allow_frag, allow_params = allowlist_sql_filter(column="asset")
+        sig_rows = cur.execute(f"""
             SELECT asset,
                    SUM(accuracy = 'correct') AS correct,
                    SUM(accuracy = 'wrong')   AS wrong,
                    SUM(accuracy = 'draw')    AS draws,
-                   COUNT(*)                  AS total
+                   COUNT(*)                  AS total,
+                   MAX(ts)                   AS last_ts
             FROM signal_log
             WHERE signal IN ('CALL','PUT')
               AND accuracy IN ('correct','wrong','draw')
+              {allow_frag}
             GROUP BY asset
-        """).fetchall()
+        """, allow_params).fetchall()
         for r in sig_rows:
             c_, w_ = (r["correct"] or 0), (r["wrong"] or 0)
             graded = c_ + w_
+            win_pct = compute_win_rate(c_, w_)
             pair_signal_stats[r["asset"]] = {
                 "correct": c_,
                 "wrong": w_,
                 "draws": r["draws"] or 0,
                 "graded": graded,
                 "total": r["total"] or 0,
-                "win_pct": round(c_ / graded * 100, 1) if graded else None,
+                "win_pct": round(win_pct, 1) if win_pct is not None else None,
+                "last_ts": r["last_ts"] or 0,
             }
     except sqlite3.Error as e:
         print(f"[stats] per-pair signal stats failed: {e}")

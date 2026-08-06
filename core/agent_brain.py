@@ -1141,6 +1141,31 @@ class AgentBrain:
                             + ", but no asset has passed the edge gate yet")
             else:
                 mode_str = "OBSERVE (learning, not modifying)"
+            # FIX (PER-PAIR-AGENT-2026-08-07 / A-04 #1, A-13 #1): expose
+            # per-pair stats so the UI can show agent data for the currently-
+            # selected pair instead of only global aggregates. Previously the
+            # Agent tab showed "Ticks Processed: 50000" globally — meaningless
+            # when the user is looking at EURUSD_otc. Now `per_pair[asset]`
+            # gives ticks/samples/AUC/verdicts/authority for that specific pair.
+            per_pair: Dict[str, Dict[str, Any]] = {}
+            for asset, m in self.models.items():
+                auc = m.edge_auc()
+                per_pair[asset] = {
+                    "asset": asset,
+                    "ticks_processed": len(m.ticks),
+                    "samples": len(m.recent_predictions),
+                    "edge_auc": round(auc, 4) if auc is not None else None,
+                    "has_authority": m.has_authority(),
+                    "veto": getattr(m, "veto_count", 0),
+                    "confirm": getattr(m, "confirm_count", 0),
+                    "weaken": getattr(m, "weaken_count", 0),
+                    "pass_count": getattr(m, "pass_count", 0),
+                    "flips": getattr(m, "flip_count", 0),
+                    "last_pwin": (m.recent_predictions[-1].get("p_win")
+                                  if m.recent_predictions else None),
+                    "last_decision_at": (m.recent_predictions[-1].get("ts")
+                                         if m.recent_predictions else None),
+                }
             return {
                 "enabled": self.enabled,
                 "active_mode": self.active_mode,
@@ -1172,6 +1197,11 @@ class AgentBrain:
                 "num_features": NUM_FEATURES,
                 "hidden_neurons": HIDDEN_NEURONS,
                 "authority": auth,
+                # NEW: per-pair breakdown — lets the UI show agent state for
+                # the currently-selected pair (resolves "agent computes all
+                # pairs together" complaint).
+                "per_pair": per_pair,
+                "per_pair_count": len(per_pair),
                 "last_saved_ago_sec": (round(time.time() - self._last_save)
                                        if self._last_save else None),
             }

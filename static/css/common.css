@@ -2313,3 +2313,463 @@ select, input{ font-family:var(--sans); }
   #main{ display:block; overflow:visible; }
   #chart-wrap{ height:60vh; min-height:400px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DESIGN SYSTEM v2 (2026-08-07)
+   Appended redesign addressing audits A-02, A-11, A-18, A-20, A-21.
+   • No existing rules removed; new tokens cascade over originals.
+   • Spacing scale unified to 8px grid (4/8/12/16/24/32/48/64) — minor visual
+     shifts in components using --sp-2..--sp-6 are intentional.
+   • !important used only for the stale-overlay conflict guard.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── v2.1 DESIGN TOKENS (extends :root) ────────────────────────────────── */
+:root{
+  /* Color palette (dark theme) — semantic aliases */
+  --bg-base:#0d1117;
+  --bg-elevated:#131722;
+  --bg-card:#161b22;
+  --text-primary:#e6edf3;
+  --text-secondary:#8b949e;
+  --text-tertiary:#484f58;
+  --signal-buy:#00c853;
+  --signal-sell:#ff1744;
+  --signal-neutral:#ffc107;
+  --accent:#ffc107;
+  --border:#30363d;
+
+  /* Typography — clamp-based fluid scale (Inter + JetBrains Mono) */
+  --fs-root:clamp(13px, 0.6vw + 11px, 15px);
+  --fs-xs:clamp(10px, 0.3vw + 9px, 11px);
+  --fs-sm:clamp(11px, 0.4vw + 10px, 12px);
+  --fs-base:clamp(13px, 0.6vw + 11px, 15px);
+  --fs-lg:clamp(15px, 0.8vw + 13px, 18px);
+  --fs-xl:clamp(18px, 1.2vw + 14px, 22px);
+  --fs-2xl:clamp(22px, 2vw + 16px, 28px);
+  --fs-3xl:clamp(28px, 3vw + 18px, 36px);
+  --font-sans:'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono:'JetBrains Mono', 'SF Mono', SFMono-Regular, Consolas, Menlo, monospace;
+
+  /* Spacing — unified 8px grid (4 / 8 / 12 / 16 / 24 / 32 / 48 / 64) */
+  --sp-1:4px;
+  --sp-2:8px;
+  --sp-3:12px;
+  --sp-4:16px;
+  --sp-5:24px;
+  --sp-6:32px;
+  --sp-7:48px;
+  --sp-8:64px;
+
+  /* Radius */
+  --r-sm:6px;
+  --r-md:10px;
+  --r-lg:14px;
+  --r-xl:20px;
+
+  /* Shadows */
+  --shadow-sm:0 1px 2px rgba(0,0,0,.2);
+  --shadow-md:0 4px 12px rgba(0,0,0,.3);
+  --shadow-lg:0 8px 28px rgba(0,0,0,.5);
+
+  /* Animation */
+  --ease-out:cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring:cubic-bezier(0.32, 1.72, 0, 1);
+  --dur-fast:120ms;
+  --dur-base:200ms;
+  --dur-slow:320ms;
+
+  /* Touch — iOS 44px minimum (fixes A-02 #10: --tap:40px < iOS 44px) */
+  --tap:44px;
+}
+
+/* ─── v2.2 BASE CARD CLASS (.card) — unifies 9 unrelated designs (A-11) ──── */
+.card,
+.summary-card,
+.vstat-card,
+.accuracy-stat,
+.micro-item,
+.agent-feature-card,
+.module-stats-row,
+.deep-stat-block,
+.theory-stats-row,
+.legend-item,
+.stats-subtab,
+.phase-card{
+  background:var(--bg-card);
+  padding:var(--sp-4);
+  border-radius:var(--r-md);
+  border:1px solid var(--border);
+  box-shadow:var(--shadow-sm);
+  transition:transform var(--dur-base) var(--ease-out),
+             box-shadow var(--dur-base) var(--ease-out),
+             border-color var(--dur-base) var(--ease-out);
+}
+
+/* Unified hover effect — replaces 7 subtly-different hovers (A-11) */
+.card:hover,
+.summary-card:hover,
+.vstat-card:hover,
+.accuracy-stat:hover,
+.micro-item:hover,
+.agent-feature-card:hover,
+.module-stats-row:hover,
+.deep-stat-block:hover,
+.theory-stats-row:hover,
+.legend-item:hover,
+.phase-card:hover{
+  transform:translateY(-2px);
+  box-shadow:var(--shadow-md);
+  border-color:var(--text-tertiary);
+}
+
+/* .stats-subtab is a tab, not a card — skip the lift on hover */
+.stats-subtab:hover{ transform:none; }
+
+/* ─── v2.3 BUTTON SYSTEM (.btn, .btn--primary/ghost/danger/icon) ────────── */
+.btn,
+.btn--primary,
+.btn--ghost,
+.btn--danger,
+.btn--icon,
+.mini-btn,
+#sound-btn,
+#refresh-btn,
+#market-switch-btn,
+#winrate-btn{
+  min-height:var(--tap);
+  border-radius:var(--r-sm);
+  font-family:var(--font-sans);
+  font-weight:600;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:var(--sp-2);
+  transition:transform var(--dur-fast) var(--ease-out),
+             background var(--dur-fast) var(--ease-out),
+             border-color var(--dur-fast) var(--ease-out),
+             color var(--dur-fast) var(--ease-out);
+}
+
+/* Press feedback */
+.btn:active,
+.btn--primary:active,
+.btn--ghost:active,
+.btn--danger:active,
+.btn--icon:active,
+.mini-btn:active,
+#sound-btn:active,
+#refresh-btn:active,
+#market-switch-btn:active,
+#winrate-btn:active{
+  transform:scale(0.97);
+}
+
+/* Keyboard focus ring */
+.btn:focus-visible,
+.btn--primary:focus-visible,
+.btn--ghost:focus-visible,
+.btn--danger:focus-visible,
+.btn--icon:focus-visible,
+.mini-btn:focus-visible,
+#sound-btn:focus-visible,
+#refresh-btn:focus-visible,
+#market-switch-btn:focus-visible,
+#winrate-btn:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+
+/* Variant fills */
+.btn--primary{ background:var(--accent); color:#000; border:1px solid var(--accent); }
+.btn--primary:hover{ filter:brightness(1.08); }
+.btn--ghost{ background:transparent; color:var(--text-primary); border:1px solid var(--border); }
+.btn--ghost:hover{ background:rgba(255,255,255,.04); border-color:var(--text-tertiary); }
+.btn--danger{ background:var(--signal-sell); color:#fff; border:1px solid var(--signal-sell); }
+.btn--danger:hover{ filter:brightness(1.08); }
+.btn--icon{
+  background:transparent;
+  color:var(--text-secondary);
+  border:1px solid transparent;
+  padding:0 var(--sp-2);
+}
+.btn--icon:hover{ color:var(--text-primary); background:rgba(255,255,255,.04); }
+
+/* ─── v2.4 TAB BAR REDESIGN (fixes A-02 #1 --lg/--md, #2 dead --sm) ─────── */
+/* All tabs unified to a single --md size; --lg/--sm become visual aliases. */
+.tab-btn,
+.tab-btn--lg,
+.tab-btn--sm{
+  padding:var(--sp-2) var(--sp-4);
+  font-size:var(--fs-sm);
+  min-height:var(--tap);
+  scroll-snap-align:start;
+}
+.tab-btn .tab-label,
+.tab-btn--lg .tab-label,
+.tab-btn--sm .tab-label{ font-size:var(--fs-sm); }
+.tab-btn--lg .tab-icon{ font-size:var(--fs-base); }
+
+#tab-bar{
+  scroll-snap-type:x proximity;
+  scroll-behavior:smooth;
+}
+
+/* Active tab: accent color + animated bottom-border indicator */
+.tab-btn.active,
+.tab-btn--lg.active,
+.tab-btn--md.active,
+.tab-btn--sm.active{
+  color:var(--accent);
+  background:transparent;
+  border-bottom-color:transparent;
+  position:relative;
+}
+.tab-btn.active::after,
+.tab-btn--lg.active::after,
+.tab-btn--md.active::after,
+.tab-btn--sm.active::after{
+  content:'';
+  position:absolute;
+  left:50%;
+  bottom:-1px;
+  width:70%;
+  height:2px;
+  background:var(--accent);
+  border-radius:2px 2px 0 0;
+  transform:translateX(-50%);
+  transition:width var(--dur-base) var(--ease-spring);
+  box-shadow:0 0 8px var(--accent-bg);
+}
+
+/* Keyboard (arrow-key) focus ring */
+.tab-btn:focus-visible,
+.tab-btn--lg:focus-visible,
+.tab-btn--md:focus-visible,
+.tab-btn--sm:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:-2px;
+  border-radius:var(--r-sm);
+}
+
+/* ─── v2.5 MOBILE BOTTOM SHEET (#panel on ≤768px) ───────────────────────── */
+/* Peek → expand pattern. Dismissible by tapping chart area or handle.
+   Drag handle: 36×4px centered at top. (fixes A-18 #11 panel-always-covers) */
+@media (max-width:768px){
+  #panel{
+    position:fixed;
+    left:0;
+    right:0;
+    bottom:0;
+    top:auto;
+    width:100%;
+    max-height:85vh;
+    background:var(--bg-card);
+    border:none;
+    border-top:1px solid var(--border);
+    border-radius:16px 16px 0 0;
+    box-shadow:var(--shadow-lg);
+    z-index:200;
+    overflow-y:auto;
+    overflow-x:hidden;
+    padding-bottom:env(safe-area-inset-bottom, 0);
+    /* Peek state: 64px visible at bottom (handle + title strip) */
+    transform:translateY(calc(100% - 64px));
+    transition:transform 280ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  #panel.expanded{ transform:translateY(0); }
+  /* Drag handle — 36×4px centered at top, sticky so it stays visible */
+  #panel::before{
+    content:'';
+    position:sticky;
+    top:0;
+    display:block;
+    width:36px;
+    height:4px;
+    margin:var(--sp-1) auto var(--sp-2);
+    background:var(--text-tertiary);
+    border-radius:2px;
+    z-index:1;
+    opacity:.55;
+    transition:opacity var(--dur-base) var(--ease-out);
+  }
+  #panel.expanded::before{ opacity:1; }
+}
+
+/* ─── v2.6 ANIMATION UTILITIES ──────────────────────────────────────────── */
+@keyframes v2-fade-in{
+  from{ opacity:0; }
+  to  { opacity:1; }
+}
+@keyframes v2-slide-up{
+  from{ opacity:0; transform:translateY(8px); }
+  to  { opacity:1; transform:none; }
+}
+@keyframes v2-scale-in{
+  from{ opacity:0; transform:scale(0.96); }
+  to  { opacity:1; transform:none; }
+}
+.animate-fade-in { animation:v2-fade-in  var(--dur-base) var(--ease-out)   both; }
+.animate-slide-up{ animation:v2-slide-up var(--dur-base) var(--ease-out)   both; }
+.animate-scale-in{ animation:v2-scale-in var(--dur-base) var(--ease-spring) both; }
+
+/* ─── v2.7 CAP CONCURRENT INFINITE ANIMATIONS (A-11 #6 — 6 on Agent tab) ── */
+/* .agent-hero-card subtree: keep only the gradient flow on the top accent bar;
+   kill avatar ring + avatar bob. */
+.agent-hero-card .agent-avatar-ring,
+.agent-hero-card .agent-avatar-core{ animation:none; }
+
+/* .ai-activity-strip subtree: keep only the sweeping highlight on ::before;
+   kill ping ring and loading-state pulse. */
+.ai-activity-strip[data-state="loading"] .ai-activity-dot,
+.ai-activity-strip .ai-activity-dot::after{ animation:none; }
+
+/* ─── v2.8 RESPONSIVE TYPOGRAPHY (clamp-based) ──────────────────────────── */
+html{ font-size:var(--fs-root); }
+body{ font-size:var(--fs-base); }
+h1, h2, h3, h4{ line-height:1.25; }
+h1{ font-size:var(--fs-3xl); }
+h2{ font-size:var(--fs-2xl); }
+h3{ font-size:var(--fs-xl); }
+h4{ font-size:var(--fs-lg); }
+
+/* ─── v2.9 WINRATE DROPDOWN (fixes A-11 #17 — was 80vh, covered chart) ──── */
+.winrate-dropdown{
+  max-height:min(70vh, 480px);
+}
+@media (max-width:768px){
+  .winrate-dropdown{ max-height:min(70vh, 480px); }
+}
+
+/* Diverging bar centered at 50% — buy grows right, sell grows left */
+.wr-pair-bar{
+  position:relative;
+  display:flex;
+  align-items:center;
+  height:4px;
+  background:rgba(255,255,255,.06);
+  border-radius:2px;
+}
+.wr-pair-bar::before{
+  content:'';
+  position:absolute;
+  left:50%;
+  top:0;
+  bottom:0;
+  width:1px;
+  background:var(--text-tertiary);
+  opacity:.5;
+}
+.wr-pair-bar-fill{
+  position:absolute;
+  top:0;
+  bottom:0;
+  border-radius:2px;
+  transition:width var(--dur-base) var(--ease-out);
+}
+.wr-pair-bar-fill.good{ background:linear-gradient(90deg, var(--signal-buy), #66bb6a); }
+.wr-pair-bar-fill.bad { background:linear-gradient(90deg, var(--signal-sell), #ef5350); }
+.wr-pair-bar-fill.mid { background:linear-gradient(90deg, var(--signal-neutral), #ffca28); }
+
+/* FLIP-style reorder animation hook (JS toggles .wr-flip on rows after sort) */
+@keyframes v2-flip{
+  0%  { transform:scale(1);    background:transparent; }
+  35% { transform:scale(1.02); background:var(--accent-bg); }
+  100%{ transform:scale(1);    background:transparent; }
+}
+.winrate-row{ transition:transform var(--dur-base) var(--ease-out); }
+.winrate-row.wr-flip{ animation:v2-flip var(--dur-slow) var(--ease-out); }
+
+/* ─── v2.10 MICROSTRUCTURE BADGES (fixes A-21 #1 — missing variants) ────── */
+.pressure-badge.fight{
+  background:rgba(255,193,7,.18);
+  color:var(--signal-neutral);
+  border:1px solid rgba(255,193,7,.4);
+}
+.react-badge.recovery{
+  background:rgba(0,200,83,.18);
+  color:var(--signal-buy);
+  border:1px solid rgba(0,200,83,.4);
+}
+.react-badge.exhaust{
+  background:rgba(255,23,68,.18);
+  color:var(--signal-sell);
+  border:1px solid rgba(255,23,68,.4);
+}
+.running-conf.confirming,
+.running-conf.opposing{
+  border:1px solid rgba(255,193,7,.4);
+}
+.running-conf.confirming{
+  background:rgba(0,200,83,.18);
+  color:var(--signal-buy);
+  animation:v2-pulse-soft 1.6s var(--ease-out) infinite;
+}
+.running-conf.opposing{
+  background:rgba(255,23,68,.18);
+  color:var(--signal-sell);
+  animation:v2-pulse-soft 1.6s var(--ease-out) infinite;
+}
+@keyframes v2-pulse-soft{
+  0%, 100%{ opacity:1; }
+  50%     { opacity:.65; }
+}
+
+/* ─── v2.11 STALE OVERLAY (fixes A-18 #11 — was relying on #chart-wrap.stale) */
+/* Direct .show class on the overlay itself; previously only worked when the
+   parent #chart-wrap had .stale, which broke when JS toggled the wrong node. */
+#stale-overlay.show{ display:flex !important; }
+
+/* ─── v2.12 REDUCED MOTION GUARD ────────────────────────────────────────── */
+/* Existing global rule (line ~2289) shrinks animation/transition durations to
+   .01ms. This v2 block additionally neutralizes transform-based motion while
+   keeping color changes (A-11 #6 audit requirement). */
+@media (prefers-reduced-motion:reduce){
+  .card,
+  .summary-card,
+  .vstat-card,
+  .accuracy-stat,
+  .micro-item,
+  .agent-feature-card,
+  .module-stats-row,
+  .deep-stat-block,
+  .theory-stats-row,
+  .legend-item,
+  .stats-subtab,
+  .phase-card{
+    transition:none;
+  }
+  .card:hover,
+  .summary-card:hover,
+  .vstat-card:hover,
+  .accuracy-stat:hover,
+  .micro-item:hover,
+  .agent-feature-card:hover,
+  .module-stats-row:hover,
+  .deep-stat-block:hover,
+  .theory-stats-row:hover,
+  .legend-item:hover,
+  .phase-card:hover{
+    transform:none;
+  }
+  .btn:active,
+  .btn--primary:active,
+  .btn--ghost:active,
+  .btn--danger:active,
+  .btn--icon:active,
+  .mini-btn:active,
+  #sound-btn:active,
+  #refresh-btn:active,
+  #market-switch-btn:active,
+  #winrate-btn:active{
+    transform:none;
+  }
+  .animate-fade-in,
+  .animate-slide-up,
+  .animate-scale-in,
+  .winrate-row.wr-flip,
+  .running-conf.confirming,
+  .running-conf.opposing{
+    animation:none;
+  }
+  #panel{ transition:none; }
+}

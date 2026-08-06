@@ -1189,3 +1189,125 @@ def cleanup(days=7):
         print(f"[db] cleanup: removed {deleted_cm} candle_micro + "
               f"{deleted_sl} signal_log rows older than {days}d")
     return deleted_cm, deleted_sl
+
+
+def prune_non_allowlist_assets(dry_run: bool = False) -> dict:
+    """Delete rows for assets NOT in the 15-pair allowlist.
+
+    FIX (PAIR-ALLOWLIST-2026-08-07 / A-14 #7): signal_log and 13 other tables
+    were never pruned by allowlist — only by age. Rows for ~14 removed pairs
+    (EURUSD_otc, USDCHF_otc, USDJPY_otc, USDARS_otc, USDBRL_otc, USDSGD_otc,
+    USDCNH_otc, USDTHB_otc, USDRUB_otc, EURGBP_otc, GBPUSD_otc, USDCAD_otc,
+    EURJPY_otc, GBPJPY_otc, EURAUD_otc) persisted forever and resurfaced in
+    every stats query. This function deletes them.
+
+    Returns a dict mapping table_name -> rows_deleted.
+    Set dry_run=True to preview counts without deleting.
+    """
+    from core.constants import ALLOWED_PAIRS, ALLOWED_PAIRS_OTC, ALLOWED_PAIRS_REAL
+    # Tables with an `asset` column that should be filtered.
+    _ASSET_TABLES = [
+        "signal_log",
+        "candle_micro",
+        "module_votes",
+        "theory_votes",
+        "pair_hourly_patterns",
+        "time_session_patterns",
+        "brain_predictions",
+        "brain_module_votes",
+        "brain_learning",
+        "agent_models",
+        "algorithm_changes",
+        "pair_performance_daily",
+        "quotex_algo_patterns",
+    ]
+    allowed = tuple(ALLOWED_PAIRS)
+    if not allowed:
+        return {"error": "ALLOWED_PAIRS is empty"}
+
+    conn = _conn()
+    cur = conn.cursor()
+    results: dict = {}
+    try:
+        for table in _ASSET_TABLES:
+            # Verify the table and column exist before deleting.
+            try:
+                cur.execute(f"PRAGMA table_info({table})")
+                cols = [row[1] for row in cur.fetchall()]
+            except sqlite3.OperationalError:
+                results[table] = "table not found"
+                continue
+            if "asset" not in cols:
+                results[table] = "no asset column"
+                continue
+
+            # Count rows to be deleted
+            placeholders = ",".join("?" * len(allowed))
+            cur.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE asset NOT IN ({placeholders})",
+                allowed,
+            )
+            count = cur.fetchone()[0]
+            if count == 0:
+                results[table] = 0
+                continue
+
+            if dry_run:
+                results[table] = f"would delete {count}"
+            else:
+                # Delete in batches to avoid locking the DB for too long.
+                BATCH = 1000
+                deleted = 0
+                while True:
+                    cur.execute(
+                        f"DELETE FROM {table} WHERE rowid IN ("
+                        f"    SELECT rowid FROM {table} "
+                        f"    WHERE asset NOT IN ({placeholders}) LIMIT ?"
+                        f")",
+                        allowed + (BATCH,),
+                    )
+                    n = cur.rowcount
+                    conn.commit()
+                    deleted += n
+                    if n < BATCH:
+                        break
+                results[table] = deleted
+
+        # Special case: brain_insights has `applies_to` instead of `asset`
+        try:
+            cur.execute("PRAGMA table_info(brain_insights)")
+            cols = [row[1] for row in cur.fetchall()]
+            if "applies_to" in cols:
+                placeholders = ",".join("?" * len(allowed))
+                cur.execute(
+                    f"SELECT COUNT(*) FROM brain_insights WHERE applies_to NOT IN ({placeholders})",
+                    allowed,
+                )
+                count = cur.fetchone()[0]
+                if count > 0:
+                    if dry_run:
+                        results["brain_insights"] = f"would delete {count}"
+                    else:
+                        cur.execute(
+                            f"DELETE FROM brain_insights WHERE applies_to NOT IN ({placeholders})",
+                            allowed,
+                        )
+                        conn.commit()
+                        results["brain_insights"] = cur.rowcount
+                else:
+                    results["brain_insights"] = 0
+        except sqlite3.OperationalError:
+            pass
+
+        if not dry_run:
+            # Vacuum to reclaim space
+            try:
+                conn.commit()
+                cur.execute("VACUUM")
+                results["_vacuum"] = "ok"
+            except sqlite3.OperationalError as e:
+                results["_vacuum"] = f"failed: {e}"
+
+        return results
+    finally:
+        conn.close()

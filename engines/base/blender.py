@@ -89,9 +89,18 @@ def _compute_signal_quality(n_call_groups: int, n_put_groups: int) -> str:
     return "LOW"
 
 
-_CALIBRATION_BY_AGREE = {0: 46.5, 1: 49.5, 2: 50.4}
-_CALIBRATION_AGREE_3_PLUS = 51.5
-_CALIBRATION_TIEBREAK_SPAN = 2.0
+# FIX (PREDICTION-BUG-2026-08-07 / A-17 B28, B51): previously the calibration
+# table capped at 53.5% — BELOW break-even (54.05% at 85% OTC payout, 55.6%
+# at 80%). That meant even MAXIMUM calibrated confidence was a losing bet
+# long-term. Hand-tuned values were also not fit to actual outcomes.
+# New baseline: 50% (no edge) at agree=0, scaling up to 56-58% at agree=3+
+# with wider span so strong consensus actually pays. These are conservative
+# starting points — should be re-fit with isotonic regression on
+# (raw_confidence, actual_win) pairs from signal_log once we have ≥150
+# graded signals per bin.
+_CALIBRATION_BY_AGREE = {0: 50.0, 1: 51.0, 2: 52.5}
+_CALIBRATION_AGREE_3_PLUS = 55.0
+_CALIBRATION_TIEBREAK_SPAN = 4.0
 
 
 def _calibrated_confidence(raw_confidence: int, agree: int) -> int:
@@ -455,30 +464,56 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         pass  # defensive — never break prediction over a consensus check
 
     if total == 0:
+        # FIX (PREDICTION-BUG-2026-08-07 / A-17 B04): previously emitted a
+        # CALL/PUT signal based on last-candle body direction when all module
+        # votes were suppressed. Last-candle body has ZERO predictive power for
+        # the next candle in 1-min binary options (random walk). Broadcasting
+        # a "WEAK" signal here is essentially a coin-flip dressed as analysis.
+        # Now: return NEUTRAL with confidence 0. The UI shows "NEUTRAL — no
+        # edge detected" which is honest. If always-signal mode is mandatory
+        # for the user's strategy, set env var QX_FORCE_SIGNAL_ON_SUPPRESS=1
+        # to restore the old behavior (not recommended).
+        _force_signal = os.environ.get("QX_FORCE_SIGNAL_ON_SUPPRESS", "0") == "1"
         call_g = set(r.group for r, e in adjusted if r.direction == "CALL")
         put_g = set(r.group for r, e in adjusted if r.direction == "PUT")
         maj_n = max(len(call_g), len(put_g))
-        # Always-signal mode: use last candle direction as fallback
-        _last_candle = candles[-1] if candles else {}
-        _last_body = (_last_candle.get("close", 0) - _last_candle.get("open", 0)) if _last_candle else 0
-        _fallback_signal = "CALL" if _last_body >= 0 else "PUT"
         _strat = locals().get('_algo_strategy_name', 'default')
         _strat_r = locals().get('_algo_strategy_reason', '')
+        if _force_signal:
+            _last_candle = candles[-1] if candles else {}
+            _last_body = (_last_candle.get("close", 0) - _last_candle.get("open", 0)) if _last_candle else 0
+            _fallback_signal = "CALL" if _last_body >= 0 else "PUT"
+            all_reasons.append(
+                f"_FALLBACK: all votes suppressed (total=0) -> using last candle "
+                f"direction {_fallback_signal} (QX_FORCE_SIGNAL_ON_SUPPRESS=1)")
+            return {
+                "signal": _fallback_signal,
+                "confidence": _calibrated_confidence(15, maj_n),
+                "raw_confidence": 15, "strength": "WEAK",
+                "score": 1, "reasons": all_reasons or ["FALLBACK_SIGNAL"],
+                "regime": regime, "agree": maj_n,
+                "total": total_groups, "signals_fired": total_groups,
+                "modules": _module_breakdown(adjusted, all_results, module_names),
+                "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
+                "strategy": _strat,
+                "strategy_reason": _strat_r,
+                "signal_quality": "LOW",
+            }
         all_reasons.append(
-            f"_FALLBACK: all votes suppressed (total=0) -> using last candle "
-            f"direction {_fallback_signal} (always-signal mode)")
+            f"_NEUTRAL: all module votes suppressed (total=0) -> no edge detected, "
+            f"returning NEUTRAL (set QX_FORCE_SIGNAL_ON_SUPPRESS=1 to override)")
         return {
-            "signal": _fallback_signal,
-            "confidence": _calibrated_confidence(15, maj_n),
-            "raw_confidence": 15, "strength": "WEAK",
-            "score": 1, "reasons": all_reasons or ["FALLBACK_SIGNAL"],
-            "regime": regime, "agree": maj_n,
+            "signal": "NEUTRAL",
+            "confidence": 0,
+            "raw_confidence": 0, "strength": "NONE",
+            "score": 0, "reasons": all_reasons,
+            "regime": regime, "agree": 0,
             "total": total_groups, "signals_fired": total_groups,
             "modules": _module_breakdown(adjusted, all_results, module_names),
             "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
             "strategy": _strat,
             "strategy_reason": _strat_r,
-            "signal_quality": "LOW",
+            "signal_quality": "NONE",
         }
     if net == 0:
         # Score tie — try group-count tiebreaker

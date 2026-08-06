@@ -1,14 +1,66 @@
 (function(global){
 'use strict';
 const WS_URL = (location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws', RECONNECT_BASE = 1000, RECONNECT_MAX = 30000, TICK_TAPE_MAX = 40, HISTORY_MAX = 100;
-const MODULE_NAMES = ['candle_reaction','pattern','key_level'];
-const MODULE_DISPLAY = {'candle_reaction': 'Candle Reaction','pattern':         'Pattern','key_level':       'Key Level'};
+// FIX (MODULE-LIST-2026-08-07 / A-10 P3): frontend module list was 3-behind
+// backend. Backend has 7 modules (candle_reaction, pattern, key_level,
+// market_state, wickwall, divergence, tickrun) but JS only knew about 3.
+// Stats "By Module" subtab never showed 4 of 7 modules. Now synced.
+const MODULE_NAMES = ['candle_reaction','pattern','key_level','market_state','wickwall','divergence','tickrun'];
+const MODULE_DISPLAY = {
+  'candle_reaction': 'Candle Reaction',
+  'pattern':         'Pattern',
+  'key_level':       'Key Level',
+  'market_state':    'Market State',
+  'wickwall':        'Wick Wall',
+  'divergence':      'Divergence',
+  'tickrun':         'Tick Run',
+};
 // Both engines use the same modules now.
-const OTC_MODULES  = ['candle_reaction','pattern','key_level'];
-const REAL_MODULES = ['candle_reaction','pattern','key_level'];
+const OTC_MODULES  = MODULE_NAMES;
+const REAL_MODULES = MODULE_NAMES;
+// FIX (PAIR-ALLOWLIST-2026-08-07 / A-14): frontend allowlist mirrors
+// core/constants.py. Used to filter winrate dropdown, history, stats, and
+// agent panels so removed pairs (EURUSD_otc, USDJPY_otc, etc.) never
+// resurface. Backend is the source of truth; this is defence-in-depth.
+const ALLOWED_PAIRS_OTC = [
+  'USDZAR_otc','BRLUSD_otc','USDIDR_otc','NZDUSD_otc','USDCOP_otc',
+  'USDBDT_otc','USDPKR_otc','USDMXN_otc','USDDZD_otc','USDINR_otc','USDPHP_otc',
+];
+const ALLOWED_PAIRS_REAL = ['EURUSD','EURGBP','AUDUSD','USDJPY'];
+const ALLOWED_PAIRS = new Set([...ALLOWED_PAIRS_OTC, ...ALLOWED_PAIRS_REAL]);
+function isAllowedPair(asset, category) {
+  if (!asset) return false;
+  if (!category) return ALLOWED_PAIRS.has(asset);
+  if (category === 'otc')  return ALLOWED_PAIRS_OTC.includes(asset);
+  if (category === 'real') return ALLOWED_PAIRS_REAL.includes(asset);
+  return ALLOWED_PAIRS.has(asset);
+}
 let ws = null, reconnectTimer = null, reconnectAttempts = 0;
 let currentCategory = 'otc';         // set by initApp
 let currentAsset = '';               // set by initApp based on category
+// B-03: separate "Agent tab pair" from the chart pair. The user can inspect
+// any pair's agent dashboard without changing the chart. When null/empty,
+// the Agent tab falls back to the chart pair (currentAsset) — that keeps the
+// default "follow the chart" behaviour unless the user manually picks a pair.
+let agentSelectedPair = '';          // '' → follow currentAsset
+global.currentAsset = '';
+global.currentCategory = 'otc';
+global.agentSelectedPair = '';
+function setAgentSelectedPair(a) {
+  agentSelectedPair = a || '';
+  global.agentSelectedPair = agentSelectedPair;
+}
+function setCurrentAsset(a) {
+  currentAsset = a;
+  global.currentAsset = a;
+  // Notify agent-panel.js (and any other listeners) that the active pair
+  // changed — replaces the 1s poll that wasted 60 CPU wakeups/min.
+  try { global.dispatchEvent?.(new CustomEvent('asset-change', { detail: a })); } catch(_){}
+}
+function setCurrentCategory(c) {
+  currentCategory = c;
+  global.currentCategory = c;
+}
 let currentPeriod = 60;
 let chart = null, candleSeries = null, ghostSeries = null, candleData = [], lastPrediction = null, signalHistory = [];
 let totalCorrect = 0, totalSignals = 0;
@@ -1349,6 +1401,19 @@ function switchTab(tabName){
     const pane = $('tab-' + name);
     if(pane) pane.classList.toggle('active', name === tabName);
   });
+  // B-03: expose active tab on #tab-content-wrap so CSS can apply per-tab
+  // sizing budgets (e.g. tighter rows on History, wider cards on Agent).
+  const wrap = $('tab-content-wrap');
+  if(wrap) wrap.setAttribute('data-active-tab', tabName);
+  // B-03 (A-07 #22): gate Agent polling on the Agent tab. The 3s/2s/10s
+  // intervals used to run forever even if the user never opened the tab —
+  // 3 useless fetches every 10s. Now we start them on entry and stop on
+  // exit. startAgentPanel()/stopAgentPanel() are defined later in this file.
+  if(tabName === 'verifier'){
+    if(typeof startAgentPanel === 'function') startAgentPanel();
+  } else {
+    if(typeof stopAgentPanel === 'function') stopAgentPanel();
+  }
   if(tabName === 'history'){
     renderHistoryPairSelect();
     loadServerHistory();
@@ -1370,7 +1435,14 @@ function switchTab(tabName){
       }catch(_){}
     }
   } else if(tabName === 'verifier'){
-    // Trigger immediate refresh of verifier panel when opened
+    // Trigger immediate refresh of agent panel when opened.
+    // (Verifier was the old name for this tab — kept for back-compat.)
+    if(typeof fetchAgentStatus === 'function') fetchAgentStatus();
+    if(typeof fetchAgentLive === 'function') fetchAgentLive();
+    if(typeof fetchAgentFeatures === 'function') fetchAgentFeatures();
+    if(typeof fetchAgentModels === 'function') fetchAgentModels();
+    // Also refresh the legacy verifier endpoints (still polled in case the
+    // backend hasn't fully migrated to /api/agent/*).
     if(typeof fetchVerifierStatus === 'function') fetchVerifierStatus();
     if(typeof fetchVerifierRecent === 'function') fetchVerifierRecent();
   }
@@ -1442,6 +1514,40 @@ function renderStatsPairSelect(){
     sel.value = prevVal;
   }
 }
+// B-03: populate the per-pair dropdown in the Agent tab. Mirrors #pair-select
+// filtered to the current category. The first option ("(active)") means
+// "follow the chart pair" — selecting it clears agentSelectedPair so the
+// dashboard tracks currentAsset instead of a fixed pair.
+function populateAgentPairSelect(){
+  const sel = $('agent-pair-select');
+  if(!sel) return;
+  let activeList;
+  if(currentCategory === 'real') activeList = realPairsList;
+  else                           activeList = otcPairsList;
+  // Preserve current selection (or fall back to "(active)")
+  const prevVal = sel.value;
+  sel.innerHTML = '';
+  const activeOpt = document.createElement('option');
+  activeOpt.value = '';
+  activeOpt.textContent = '(active pair)';
+  sel.appendChild(activeOpt);
+  activeList.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.asset;
+    opt.textContent = p.display + (p.payout ? ' (' + p.payout + '%)' : '');
+    if(p.locked){
+      opt.disabled = true;
+      opt.textContent += ' 🔒';
+    }
+    sel.appendChild(opt);
+  });
+  // Restore selection if still valid; otherwise reset to "(active)"
+  if(prevVal && Array.from(sel.options).some(o => o.value === prevVal)){
+    sel.value = prevVal;
+  } else {
+    sel.value = agentSelectedPair || '';
+  }
+}
 function renderPairs(payload){
   if(Array.isArray(payload)){
     realPairsList = [];
@@ -1497,7 +1603,7 @@ function renderPairs(payload){
   if(!stillThere && activeList.length > 0){
     const firstOk = activeList.find(p => !p.locked) || activeList[0];
     if(firstOk){
-      currentAsset = firstOk.asset;
+      setCurrentAsset(firstOk.asset);
       pairSelect.value = currentAsset;
       if(ws && ws.readyState === WebSocket.OPEN){
         send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
@@ -1512,6 +1618,8 @@ function renderPairs(payload){
   if(cur && payoutLabel) payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
   _updateSwitchButtonLabel();
   renderHistoryPairSelect();
+  // B-03: keep the Agent tab's per-pair dropdown in sync with the pairs list.
+  populateAgentPairSelect();
 }
 function _updateSwitchButtonLabel(){
   const btn = $('market-switch-btn');
@@ -1784,7 +1892,7 @@ function wireEvents(){
   if(pairSelect){
     pairSelect.addEventListener('change', () => {
       if(pairSelect.value === currentAsset) return;
-      currentAsset = pairSelect.value;
+      setCurrentAsset(pairSelect.value);
       const cur = pairsList.find(p => p.asset === currentAsset);
       const payoutLabel = $('payout-label');
       if(cur && payoutLabel) payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
@@ -1842,6 +1950,19 @@ function wireEvents(){
           if(topbarSelect.onchange) topbarSelect.onchange();
         }
       }
+    });
+  }
+  // B-03: per-pair Agent selector — let the user inspect agent data for any
+  // pair without switching the chart. Empty value = "follow chart pair".
+  const agentPairSelect = $('agent-pair-select');
+  if(agentPairSelect){
+    agentPairSelect.addEventListener('change', () => {
+      setAgentSelectedPair(agentPairSelect.value);
+      // Refresh features immediately for the chosen pair (or chart pair).
+      if(typeof fetchAgentFeatures === 'function') fetchAgentFeatures();
+      // Also refresh status so the per-pair dashboard updates right away
+      // instead of waiting up to 3s for the next poll.
+      if(typeof fetchAgentStatus === 'function') fetchAgentStatus();
     });
   }
   ['history-time-filter','history-direction-filter','history-accuracy-filter'].forEach(id => {
@@ -1963,6 +2084,35 @@ function wireEvents(){
   if(typeof wireHistoryFilterToggle === "function") wireHistoryFilterToggle();
   if(typeof wireHistoryExtraControls === "function") wireHistoryExtraControls();
   if(typeof initTooltipSystem === "function") initTooltipSystem();
+  // B-03: mobile panel toggle — peek/expand the bottom-sheet #panel on ≤768px.
+  // Persists to sessionStorage so a dismissed panel stays dismissed across
+  // page navigations (matches user expectation on mobile).
+  const panelToggleBtn = $('panel-toggle-btn');
+  if(panelToggleBtn && !panelToggleBtn._wired){
+    panelToggleBtn._wired = true;
+    const applyPanelState = (expanded) => {
+      const panel = $('panel');
+      if(!panel) return;
+      panel.classList.toggle('expanded', expanded);
+      panelToggleBtn.setAttribute('aria-expanded', String(expanded));
+      try{ sessionStorage.setItem('panelExpanded', expanded ? '1' : '0'); }catch(_){}
+    };
+    panelToggleBtn.addEventListener('click', () => {
+      const panel = $('panel');
+      const isExpanded = panel ? panel.classList.contains('expanded') : false;
+      applyPanelState(!isExpanded);
+    });
+    panelToggleBtn.addEventListener('keydown', (e) => {
+      if(e.key === 'Enter' || e.key === ' '){
+        e.preventDefault();
+        panelToggleBtn.click();
+      }
+    });
+    // Restore saved state (default: collapsed/peek on mobile).
+    let _initialExpanded = false;
+    try{ _initialExpanded = sessionStorage.getItem('panelExpanded') === '1'; }catch(_){}
+    applyPanelState(_initialExpanded);
+  }
 }
 function safeInit(){
   if(safeInit._retries && safeInit._retries > 100) return;
@@ -2015,9 +2165,12 @@ function initApp(category){
     const pane = document.getElementById('tab-' + name);
     if(pane) pane.classList.toggle('active', name === 'chart');
   });
-  currentCategory = category;
-  if(category === 'real')  currentAsset = 'EURUSD';
-  else                     currentAsset = 'EURUSD_otc';
+  setCurrentCategory(category);
+  // FIX (PAIR-ALLOWLIST-2026-08-07): default to first allowed pair per
+  // category, not hardcoded EURUSD/EURUSD_otc (EURUSD_otc is NOT in the
+  // OTC allowlist — was causing "undefined" agent model creation).
+  if(category === 'real')  setCurrentAsset(ALLOWED_PAIRS_REAL[0] || 'EURUSD');
+  else                     setCurrentAsset(ALLOWED_PAIRS_OTC[0]  || 'USDZAR_otc');
   try{ localStorage.setItem('marketCategory', category); }catch(_){}
   _lastInitCategory = category;
   // Local $ helper bound to document.
@@ -2095,6 +2248,8 @@ function onPageHide(){
     if(_keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
     if(_historyRefreshInterval){ clearInterval(_historyRefreshInterval); _historyRefreshInterval = null; }
     if(_winRateRefreshInterval){ clearInterval(_winRateRefreshInterval); _winRateRefreshInterval = null; }
+    // B-03: also stop agent polling on page hide (A-07 #22).
+    if(typeof stopAgentPanel === 'function') stopAgentPanel();
     if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
     if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
     if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -2133,16 +2288,21 @@ function computePairWinRates(statsData){
   // module, so a pair with 100 signals reported ~150 "signals" and a win rate
   // that could never be reconciled with the Stats tab's overall_win_pct.
   // `pair_signals` is the signal-level count from signal_log.
+  //
+  // FIX (PAIR-ALLOWLIST-2026-08-07 / A-15 #1): previously filtered by
+  // `_otc` SUFFIX ONLY — any _otc-suffixed row from signal_log appeared,
+  // including 9 removed OTC pairs (EURUSD_otc, USDCHF_otc, USDJPY_otc,
+  // USDARS_otc, USDBRL_otc, USDSGD_otc, USDCNH_otc, USDTHB_otc, USDRUB_otc).
+  // Now filters to the 15-pair allowlist. Backend also filters (defence in
+  // depth), but this guards against stale DB rows / cached responses.
   if(!statsData) return [];
   const src = statsData.pair_signals || null;
   const result = [];
   if(src){
     for(const asset in src){
       if(!Object.prototype.hasOwnProperty.call(src, asset)) continue;
-      // OTC assets belong to the OTC page only; real-market assets to the
-      // Live page only. `_otc` suffix is the single source of truth for
-      // category — it's what feed.available_pairs() splits on.
-      if(/_otc$/i.test(asset) !== (currentCategory === 'otc')) continue;
+      // ALLOWLIST filter (defence-in-depth — backend already filters)
+      if(!isAllowedPair(asset, currentCategory)) continue;
       const s = src[asset] || {};
       result.push({
         asset: asset,
@@ -2153,8 +2313,32 @@ function computePairWinRates(statsData){
         draws: s.draws || 0,
         graded: s.graded || 0,
         win_pct: (s.win_pct != null) ? Math.round(s.win_pct) : null,
+        last_ts: s.last_ts || 0,
       });
     }
+    // FIX (A-15): also include allowed pairs with ZERO signals so the user
+    // sees all 11 OTC (or 4 real) pairs, not just the ones with history.
+    // Renders as "—" until signals come in. Previously a pair with 0 signals
+    // just vanished, making the dropdown look incomplete.
+    const present = new Set(result.map(r => r.asset));
+    const allowList = currentCategory === 'real' ? ALLOWED_PAIRS_REAL : ALLOWED_PAIRS_OTC;
+    for(const asset of allowList){
+      if(!present.has(asset)){
+        result.push({
+          asset: asset,
+          display: prettyPairName(asset),
+          total: 0, correct: 0, wrong: 0, draws: 0, graded: 0,
+          win_pct: null, last_ts: 0,
+        });
+      }
+    }
+    // Sort: pairs with data first (by win_pct desc), then empty pairs (alpha)
+    result.sort((a, b) => {
+      if(a.graded === 0 && b.graded === 0) return a.asset.localeCompare(b.asset);
+      if(a.graded === 0) return 1;
+      if(b.graded === 0) return -1;
+      return (b.win_pct || 0) - (a.win_pct || 0);
+    });
     return result;
   }
   // Backend predates pair_signals — show nothing rather than a wrong number.
@@ -2196,7 +2380,8 @@ function renderWinRateButton(statsData){
     const src = statsData.pair_signals;
     for(const asset in src){
       if(!Object.prototype.hasOwnProperty.call(src, asset)) continue;
-      if(/_otc$/i.test(asset) !== (currentCategory === 'otc')) continue;
+      // FIX (PAIR-ALLOWLIST-2026-08-07): filter to allowlist, not just suffix
+      if(!isAllowedPair(asset, currentCategory)) continue;
       const s = src[asset];
       if(!s) continue;
       catCorrect += (s.correct || 0);
@@ -2293,6 +2478,13 @@ function renderWinRateDropdown(statsData){
     const metaText = p.graded > 0
       ? (p.correct + 'W / ' + p.wrong + 'L · ' + p.graded + ' graded')
       : (p.total > 0 ? p.total + ' ungraded' : 'no data');
+    // B-03: new diverging-bar markup. Outer .wr-pair-bar carries data-pct for
+    // CSS hooks; .wr-bar-fill is the new class for the colored fill (per the
+    // B-02 #wr-pair-bar-tmpl template); .wr-bar-center is the 50% reference
+    // tick. We also keep .wr-pair-bar-fill (the legacy class) on the same
+    // element so the existing CSS rules (color + absolute positioning) keep
+    // applying until the CSS task catches up with .wr-bar-fill — avoids a
+    // visual regression where bars would otherwise be unstyled.
     html += '<div class="winrate-row' + (isCurrent ? ' current' : '') + '" '
          +  'data-asset="' + esc(p.asset) + '" role="listitem" '
          +  'tabindex="0" '
@@ -2301,7 +2493,10 @@ function renderWinRateDropdown(statsData){
          +    '<div class="wr-pair-name">' + esc(p.display) + (isCurrent ? ' ●' : '') + '</div>'
          +    '<div class="wr-pair-meta">' + metaText + '</div>'
          +  '</div>'
-         +  '<div class="wr-pair-bar"><div class="wr-pair-bar-fill ' + cls + '" style="width:' + barWidth + '%"></div></div>'
+         +  '<div class="wr-pair-bar" data-pct="' + (p.win_pct != null ? p.win_pct : 0) + '">'
+         +    '<div class="wr-bar-fill wr-pair-bar-fill ' + cls + '" style="width:' + barWidth + '%"></div>'
+         +    '<div class="wr-bar-center"></div>'
+         +  '</div>'
          +  '<div class="wr-pair-pct ' + cls + '">' + pctText + '</div>'
          +  '</div>';
   }
@@ -3042,7 +3237,7 @@ function _verifierLayerBadge(v){
 
 function updateVerifierStatus(s){
   const $ = (id) => document.getElementById(id);
-  if(!$('vstat-total')) return;
+  if(!$('verifier-status-badge') && !$('vstat-verifier-total')) return;
   const badge = $('verifier-status-badge');
   if(badge){
     if(s.enabled){
@@ -3053,17 +3248,23 @@ function updateVerifierStatus(s){
       badge.className = 'verifier-status-badge disabled';
     }
   }
-  $('vstat-total').textContent = s.total_verified || 0;
-  $('vstat-veto').textContent = s.total_veto || 0;
-  $('vstat-veto-rate').textContent = (s.veto_rate || 0) + '%';
-  $('vstat-weaken').textContent = s.total_weaken || 0;
-  $('vstat-weaken-rate').textContent = (s.weaken_rate || 0) + '%';
-  $('vstat-confirm').textContent = s.total_confirm || 0;
-  $('vstat-confirm-rate').textContent = (s.confirm_rate || 0) + '%';
-  $('vstat-pass').textContent = s.total_pass || 0;
-  $('vstat-pass-rate').textContent = (s.pass_rate || 0) + '%';
-  $('vstat-killed').textContent = s.total_killed || 0;
-  $('vstat-uptime').textContent = s.uptime_human || '—';
+  // B-03 (A-03 #2): #vstat-total and #vstat-killed were moved into the
+  // Per-Pair Dashboard by B-02 — they now show PER-PAIR ticks/learned, owned
+  // exclusively by updateAgentStatus(). The verifier must NOT clobber them.
+  // Write to dedicated #vstat-verifier-* targets instead; if those don't
+  // exist (B-02 doesn't render them), the writes silently no-op.
+  if($('vstat-verifier-total'))  $('vstat-verifier-total').textContent = s.total_verified || 0;
+  if($('vstat-verifier-killed')) $('vstat-verifier-killed').textContent = s.total_killed || 0;
+  // Global verdict summary grid (top of Agent tab) — shared with agent poll.
+  if($('vstat-veto'))          $('vstat-veto').textContent = s.total_veto || 0;
+  if($('vstat-veto-rate'))     $('vstat-veto-rate').textContent = (s.veto_rate || 0) + '%';
+  if($('vstat-weaken'))        $('vstat-weaken').textContent = s.total_weaken || 0;
+  if($('vstat-weaken-rate'))   $('vstat-weaken-rate').textContent = (s.weaken_rate || 0) + '%';
+  if($('vstat-confirm'))       $('vstat-confirm').textContent = s.total_confirm || 0;
+  if($('vstat-confirm-rate'))  $('vstat-confirm-rate').textContent = (s.confirm_rate || 0) + '%';
+  if($('vstat-pass'))          $('vstat-pass').textContent = s.total_pass || 0;
+  if($('vstat-pass-rate'))     $('vstat-pass-rate').textContent = (s.pass_rate || 0) + '%';
+  if($('vstat-uptime'))        $('vstat-uptime').textContent = s.uptime_human || '—';
   if(s.total_verified !== _verifierLastTotal && _verifierLastTotal !== -1){
     fetchVerifierRecent();
   }
@@ -3237,11 +3438,93 @@ function updateAgentStatus(s){
       hint.style.display = 'block';
     }
   }
-  $('vstat-total').textContent = s.total_ticks_processed || 0;
-  $('vstat-veto').textContent = s.total_veto || 0;
-  $('vstat-weaken').textContent = s.total_weaken || 0;
-  $('vstat-confirm').textContent = s.total_confirm || 0;
-  $('vstat-pass').textContent = s.total_pass || 0;
+  // B-03 (A-13 #1): the Per-Pair Dashboard (added in B-02) shows agent state
+  // for the currently-selected pair — NOT global aggregates. The chart's
+  // #vstat-total/#vstat-killed are now per-pair ticks/learned. We fall back
+  // to global values if per_pair is missing or the chosen pair isn't tracked
+  // yet (e.g. brand-new asset the agent has never seen).
+  const _pair = agentSelectedPair || currentAsset || '';
+  const _pp = (s.per_pair && _pair && s.per_pair[_pair]) ? s.per_pair[_pair] : null;
+  // Per-pair dashboard: ticks + learned (was: global ticks + global learned).
+  if($('vstat-total')){
+    $('vstat-total').textContent = _pp ? (_pp.ticks_processed || 0)
+                                       : (s.total_ticks_processed || 0);
+  }
+  if($('vstat-total-sub')){
+    // Sub-label context — samples for this pair, or global decisions.
+    $('vstat-total-sub').textContent = _pp
+      ? ((_pp.samples || 0) + ' samples')
+      : ((s.total_signals_evaluated || 0) + ' decisions');
+  }
+  // Per-pair Samples/learned card (B-02 reuses #vstat-killed for this slot).
+  // We no longer swap the label to "Flipped" in final mode here — the
+  // per-pair dashboard has its own labels in B-02 markup. Keep it simple.
+  if($('vstat-killed')){
+    if(_pp){
+      $('vstat-killed').textContent = _pp.samples || 0;
+    } else if(s.final_mode){
+      $('vstat-killed').textContent = s.total_flips || 0;
+    } else {
+      $('vstat-killed').textContent = s.total_signals_learned || 0;
+    }
+  }
+  // Per-pair dashboard hero: P(win), authority badge, edge AUC.
+  if($('pair-dash-pwin')){
+    const _pwin = _pp ? _pp.last_pwin : null;
+    $('pair-dash-pwin').textContent = (_pwin != null)
+      ? ((_pwin * 100).toFixed(1) + '%')
+      : '—';
+  }
+  if($('pair-dash-authority-badge')){
+    const _badge = $('pair-dash-authority-badge');
+    if(_pp && _pp.has_authority){
+      _badge.textContent = 'authorised';
+      _badge.className = 'authority-badge authority-badge--authorised';
+    } else if(_pp){
+      _badge.textContent = 'learning';
+      _badge.className = 'authority-badge authority-badge--learning';
+    } else {
+      _badge.textContent = '—';
+      _badge.className = 'authority-badge authority-badge--learning';
+    }
+  }
+  if($('pair-dash-auc')){
+    const _auc = _pp ? _pp.edge_auc : null;
+    $('pair-dash-auc').textContent = (_auc != null) ? _auc.toFixed(3) : '—';
+  }
+  // Per-pair verdict breakdown (separate from the global verdict grid above).
+  // Backend per_pair uses pass_count (avoid clashing with JS keyword `pass`).
+  const _ppV = {
+    veto:    _pp ? (_pp.veto    || 0) : 0,
+    weaken:  _pp ? (_pp.weaken  || 0) : 0,
+    confirm: _pp ? (_pp.confirm || 0) : 0,
+    pass:    _pp ? (_pp.pass_count || 0) : 0,
+  };
+  const _ppTotal = _ppV.veto + _ppV.weaken + _ppV.confirm + _ppV.pass;
+  const _ppRate = (v) => _ppTotal ? Math.round(v / _ppTotal * 100) + '%' : '—';
+  if($('pair-vd-veto'))         $('pair-vd-veto').textContent       = _ppV.veto;
+  if($('pair-vd-veto-rate'))    $('pair-vd-veto-rate').textContent  = _ppRate(_ppV.veto);
+  if($('pair-vd-weaken'))       $('pair-vd-weaken').textContent     = _ppV.weaken;
+  if($('pair-vd-weaken-rate'))  $('pair-vd-weaken-rate').textContent= _ppRate(_ppV.weaken);
+  if($('pair-vd-confirm'))      $('pair-vd-confirm').textContent    = _ppV.confirm;
+  if($('pair-vd-confirm-rate')) $('pair-vd-confirm-rate').textContent = _ppRate(_ppV.confirm);
+  if($('pair-vd-pass'))         $('pair-vd-pass').textContent       = _ppV.pass;
+  if($('pair-vd-pass-rate'))    $('pair-vd-pass-rate').textContent  = _ppRate(_ppV.pass);
+  // Show "no data for this pair" placeholder when the agent hasn't seen it.
+  if($('pair-dash-empty')){
+    $('pair-dash-empty').hidden = !!_pp;
+  }
+  // Accordion meta — which pair the dashboard is showing.
+  if($('acc-dashboard-meta')){
+    $('acc-dashboard-meta').textContent = _pair
+      ? (prettyPairName(_pair) + (_pp ? '' : ' (no data)'))
+      : 'no pair selected';
+  }
+  // Global verdict summary grid (top of Agent tab) — these stay GLOBAL.
+  if($('vstat-veto'))          $('vstat-veto').textContent = s.total_veto || 0;
+  if($('vstat-weaken'))        $('vstat-weaken').textContent = s.total_weaken || 0;
+  if($('vstat-confirm'))       $('vstat-confirm').textContent = s.total_confirm || 0;
+  if($('vstat-pass'))          $('vstat-pass').textContent = s.total_pass || 0;
   // FIX (2026-08-06): the four "%" sub-labels under VETO/WEAKEN/CONFIRM/PASS
   // were markup-only — nothing ever wrote to them, so they read "0%" forever
   // no matter what the agent did. Rates are a share of decisions, not ticks.
@@ -3251,9 +3534,6 @@ function updateAgentStatus(s){
   if($('vstat-weaken-rate'))  $('vstat-weaken-rate').textContent  = _rate(s.total_weaken);
   if($('vstat-confirm-rate')) $('vstat-confirm-rate').textContent = _rate(s.total_confirm);
   if($('vstat-pass-rate'))    $('vstat-pass-rate').textContent    = _rate(s.total_pass);
-  if($('vstat-total-sub')){
-    $('vstat-total-sub').textContent = _dec + ' decisions';
-  }
   // Authority gate summary — shows how much of the requested mode is actually
   // in force. Without it "● FINAL" implied full control it may not have.
   const auth = s.authority || null;
@@ -3263,23 +3543,9 @@ function updateAgentStatus(s){
       ' assets passed the edge gate' +
       (auth.median_edge_auc != null ? ' · median AUC ' + auth.median_edge_auc : '');
   }
-  // In final mode, show flips/kept/neutralized instead of learned
-  if(s.final_mode){
-    const killedEl = $('vstat-killed');
-    if(killedEl){
-      killedEl.parentElement.querySelector('.vstat-label').textContent = '🔄 Flipped';
-      killedEl.textContent = s.total_flips || 0;
-      killedEl.parentElement.querySelector('.vstat-sub').textContent = `${s.total_kept||0} kept, ${s.total_neutralized||0} neutral`;
-    }
-  } else {
-    const killedEl = $('vstat-killed');
-    if(killedEl){
-      killedEl.parentElement.querySelector('.vstat-label').textContent = 'Signals Learned';
-      killedEl.parentElement.querySelector('.vstat-sub').textContent = 'VETO→NEUTRAL';
-      killedEl.textContent = s.total_signals_learned || 0;
-    }
-  }
-  $('vstat-uptime').textContent = s.uptime_human || '—';
+  // Hero uptime (B-02 moved uptime from #vstat-uptime to #ahm-uptime).
+  if($('ahm-uptime')) $('ahm-uptime').textContent = s.uptime_human || '—';
+  if($('vstat-uptime')) $('vstat-uptime').textContent = s.uptime_human || '—';
   // Refresh live stream when new ticks arrive
   if(s.total_ticks_processed !== _agentLastTickCount && _agentLastTickCount !== -1){
     fetchAgentLive();
@@ -3377,7 +3643,11 @@ function renderAgentModels(data){
 
 function renderAgentRecent(data){
   const $ = (id) => document.getElementById(id);
-  const tbl = $('verifier-recent-table');
+  // B-03 (A-03 #3): write to #agent-recent-table (renamed in B-02 HTML) so
+  // the 3s agent poll and the 15s verifier poll no longer fight over the
+  // same DOM node. Fall back to #verifier-recent-table for back-compat with
+  // any page that hasn't been updated yet.
+  const tbl = $('agent-recent-table') || $('verifier-recent-table');
   if(!tbl) return;
   if(!data.thoughts || data.thoughts.length === 0){
     tbl.innerHTML = '<div class="verifier-empty">No decisions yet.</div>';
@@ -3440,9 +3710,14 @@ async function fetchAgentLive(){
 async function fetchAgentFeatures(){
   const $ = (id) => document.getElementById(id);
   if(!$('agent-features-grid')) return;
-  if(!window.currentAsset) return;
+  // B-03: prefer the user's Agent-tab pair selection; fall back to the chart
+  // pair. Previously this hard-coded window.currentAsset, so opening the
+  // Agent tab always showed features for the chart pair — useless when the
+  // user picked a different pair in #agent-pair-select.
+  const _asset = agentSelectedPair || window.currentAsset || '';
+  if(!_asset) return;
   try{
-    const r = await fetch('/api/agent/features/' + encodeURIComponent(window.currentAsset));
+    const r = await fetch('/api/agent/features/' + encodeURIComponent(_asset));
     if(!r.ok) return;
     const data = await r.json();
     renderAgentFeatures(data);
@@ -3461,12 +3736,18 @@ async function fetchAgentModels(){
 }
 
 function startAgentPanel(){
-  if(_agentPollTimer) return;
+  // B-03 (A-07 #22): only start when the Agent tab is active. switchTab()
+  // calls this on entry. The old code auto-started on DOMContentLoaded,
+  // so 3 intervals (3s/2s/10s) ran forever even if the user never opened
+  // the tab — 6 fetches/min of /api/agent/* for nothing.
+  if(_agentPollTimer) return;  // already running
   const $ = (id) => document.getElementById(id);
-  if(!$('vstat-total')) return;
+  // Bail if the Agent tab markup isn't on this page.
+  if(!$('vstat-total') && !$('agent-pair-dashboard')) return;
   fetchAgentStatus();
   fetchAgentLive();
   fetchAgentModels();
+  fetchAgentFeatures();
   _agentPollTimer = setInterval(() => {
     fetchAgentStatus();
     fetchAgentLive();
@@ -3475,8 +3756,20 @@ function startAgentPanel(){
   _agentModelTimer = setInterval(fetchAgentModels, 10000);
 }
 
-if(document.readyState === 'loading'){
-  document.addEventListener('DOMContentLoaded', startAgentPanel);
-} else {
-  startAgentPanel();
+function stopAgentPanel(){
+  // B-03 (A-07 #22): clear all 3 agent intervals when leaving the Agent tab.
+  // Without this, the panel kept polling in the background after the user
+  // switched to Chart/History/Stats.
+  if(_agentPollTimer){    clearInterval(_agentPollTimer);    _agentPollTimer = null; }
+  if(_agentFeatureTimer){ clearInterval(_agentFeatureTimer); _agentFeatureTimer = null; }
+  if(_agentModelTimer){   clearInterval(_agentModelTimer);   _agentModelTimer = null; }
+  // Reset tick counter so the next startAgentPanel() does an immediate
+  // live-stream refresh instead of skipping it (the "new ticks arrived"
+  // heuristic compares against the last seen count).
+  _agentLastTickCount = -1;
 }
+
+// B-03: do NOT auto-start on DOMContentLoaded. The Agent tab is lazy-loaded
+// by switchTab('verifier') → startAgentPanel(). This saves 3 intervals worth
+// of polling for users who never open the Agent tab.
+// (The old auto-start block is intentionally removed — see A-07 #22.)

@@ -86,34 +86,25 @@ def _otc_display(clean: str) -> str:
     return c if c.upper().endswith("OTC") else f"{c} OTC"
 
 # ───────────────────────────────────────────────────────────────────────────
-# TRADED PAIRS — the exact instruments this app subscribes to.
+# TRADED PAIRS — imported from core/constants.py (SINGLE SOURCE OF TRUTH).
 #
-# These are PER-CATEGORY allow-lists of full instrument names, not bases.
-# That distinction matters: the user's selection is asymmetric — EUR/USD is
-# wanted on the real market but NOT as OTC, while USD/ZAR is wanted as OTC but
-# NOT on the real market. A base-level filter (what this used to be) cannot
-# express that and would surface each base on both tabs.
+# FIX (PAIR-ALLOWLIST-2026-08-07): previously _FOREX_OTC/_FOREX_REAL were
+# defined inline here AND in engines/otc/config.py AND in engines/real/config.py
+# AND the frontend filtered by suffix only — they had drifted. Now all
+# modules import from core.constants so adding/removing a pair is a one-line
+# edit in constants.py and every consumer (feed, config, stats, server, JS)
+# picks it up automatically.
 #
-# SELECTION (USER 2026-08-07): trimmed to 15 pairs — 4 real + 11 OTC.
-# Quotex silently drops subscriptions past ~15 concurrent and bans at ~76
-# subscribe attempts / 20 min, so 51 eligible pairs meant 8 streams that never
-# received a single tick. 15 is the documented safe ceiling and every pair
-# here is one the DB already has signal history for.
-#
-# To change what the app trades, edit these two lists — nothing else.
-# Anything removed here still keeps its rows in signal_log; it just stops
-# being offered and stops consuming a subscription slot.
+# To change what the app trades, edit core/constants.py — nothing else.
+from core.constants import (
+    ALLOWED_PAIRS_OTC as _OTC_ALLOWED_CONST,
+    ALLOWED_PAIRS_REAL as _REAL_ALLOWED_CONST,
+    is_allowed_pair as _is_allowed_pair,
+)
 
-# OTC instruments (broker-synthetic, tradeable 24/7).
-_FOREX_OTC = [
-    "USDZAR_otc", "BRLUSD_otc", "USDIDR_otc", "NZDUSD_otc",
-    "USDCOP_otc", "USDBDT_otc", "USDPKR_otc", "USDMXN_otc",
-    "USDDZD_otc", "USDINR_otc", "USDPHP_otc",
-]
-# Real-market instruments (follow actual market hours; closed at weekends).
-_FOREX_REAL = [
-    "EURUSD", "EURGBP", "AUDUSD", "USDJPY",
-]
+# Aliases kept for backward-compat with the rest of feed.py
+_FOREX_OTC = list(_OTC_ALLOWED_CONST)
+_FOREX_REAL = list(_REAL_ALLOWED_CONST)
 _REAL_ALLOWED = frozenset(_FOREX_REAL)
 _OTC_ALLOWED = frozenset(_FOREX_OTC)
 _CANONICAL_DISPLAY = {

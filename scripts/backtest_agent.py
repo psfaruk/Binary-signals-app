@@ -306,15 +306,30 @@ def main():
             wins.append(w); flips.append(f); aucs.append(st["auc"])
             print(f"  {sd:>7} {st['traded']:>7} {w:>11.2f}% "
                   f"{st['flipped']:>6} {f:>9.2f}% {st['auc']:>8.4f}")
-        print(f"\n  traded win  mean/sd : {statistics.mean(wins):.2f}% / "
-              f"{statistics.pstdev(wins):.2f}pp  "
-              f"range {min(wins):.2f}-{max(wins):.2f}")
-        print(f"  flip win    mean/sd : {statistics.mean(flips):.2f}% / "
-              f"{statistics.pstdev(flips):.2f}pp  "
-              f"range {min(flips):.2f}-{max(flips):.2f}")
-        print(f"  AUC         mean/sd : {statistics.mean(aucs):.4f} / "
-              f"{statistics.pstdev(aucs):.4f}  "
-              f"range {min(aucs):.4f}-{max(aucs):.4f}")
+        # FIX (BACKTEST-CRASH-2026-08-07): statistics.pstdev crashes on
+        # lists containing NaN/None (float has no .numerator). Filter those
+        # out before computing mean/sd. Also guard against empty lists.
+        wins_f  = [w for w in wins  if w is not None and not (isinstance(w, float) and math.isnan(w))]
+        flips_f = [f for f in flips if f is not None and not (isinstance(f, float) and math.isnan(f))]
+        aucs_f  = [a for a in aucs  if a is not None and not (isinstance(a, float) and math.isnan(a))]
+        if wins_f:
+            print(f"\n  traded win  mean/sd : {statistics.mean(wins_f):.2f}% / "
+                  f"{statistics.pstdev(wins_f):.2f}pp  "
+                  f"range {min(wins_f):.2f}-{max(wins_f):.2f}")
+        else:
+            print("\n  traded win  mean/sd : (no data)")
+        if flips_f:
+            print(f"  flip win    mean/sd : {statistics.mean(flips_f):.2f}% / "
+                  f"{statistics.pstdev(flips_f):.2f}pp  "
+                  f"range {min(flips_f):.2f}-{max(flips_f):.2f}")
+        else:
+            print("  flip win    mean/sd : (no data)")
+        if aucs_f:
+            print(f"  AUC         mean/sd : {statistics.mean(aucs_f):.4f} / "
+                  f"{statistics.pstdev(aucs_f):.4f}  "
+                  f"range {min(aucs_f):.4f}-{max(aucs_f):.4f}")
+        else:
+            print("  AUC         mean/sd : (no data)")
         print("\n  A real edge is stable across seeds. If traded-win swings by "
               "more than\n  a couple of points here, you are looking at noise, "
               "not skill.")

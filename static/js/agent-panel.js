@@ -221,23 +221,32 @@
       pairEl.textContent = formatPair(window.currentAsset);
     }
 
-    // Listen for currentAsset changes (poll every 1s — cheap)
-    let _lastAsset = window.currentAsset || null;
-    setInterval(() => {
-      const cur = window.currentAsset || null;
-      if(cur !== _lastAsset){
-        _lastAsset = cur;
-        // Refresh pair display in both places
-        const pairEl1 = $('ai-activity-pair');
-        const pairEl2 = $('ahm-pair');
-        const pairTxt = cur ? formatPair(cur) : '—';
-        if(pairEl1) pairEl1.textContent = pairTxt;
-        if(pairEl2) pairEl2.textContent = pairTxt;
-        // Update features accordion meta
-        const featMeta = $('acc-features-meta');
-        if(featMeta) featMeta.textContent = cur ? formatPair(cur) : 'no pair selected';
-      }
-    }, 1000);
+    // B-03 (A-07 #13): replace the 1s setInterval poll of window.currentAsset
+    // with an event listener. common.js now dispatches an 'asset-change'
+    // CustomEvent on window whenever setCurrentAsset() is called — so we get
+    // push notifications instead of polling 60×/min.
+    // The old poll also kept the per-pair label in sync; we replicate that
+    // behaviour in the handler.
+    const onAssetChange = (e) => {
+      const cur = (e && e.detail) || window.currentAsset || null;
+      const pairEl1 = $('ai-activity-pair');
+      const pairEl2 = $('ahm-pair');
+      const pairTxt = cur ? formatPair(cur) : '—';
+      if(pairEl1) pairEl1.textContent = pairTxt;
+      if(pairEl2) pairEl2.textContent = pairTxt;
+      // Update features accordion meta
+      const featMeta = $('acc-features-meta');
+      if(featMeta) featMeta.textContent = cur ? formatPair(cur) : 'no pair selected';
+      // B-03: if the user hasn't manually picked a pair in #agent-pair-select
+      // (i.e. agentSelectedPair is empty), refresh agent features for the new
+      // chart pair so the dashboard tracks the chart.
+      try{
+        if(typeof window.agentSelectedPair === 'string' && window.agentSelectedPair === ''){
+          if(typeof window.fetchAgentFeatures === 'function') window.fetchAgentFeatures();
+        }
+      }catch(_){}
+    };
+    window.addEventListener('asset-change', onAssetChange);
   }
 
   if(document.readyState === 'loading'){
