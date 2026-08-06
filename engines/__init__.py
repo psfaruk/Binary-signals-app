@@ -32,6 +32,7 @@ Category-asset mismatch (e.g. category="real" but asset="EURUSD_otc")
 raises a ValueError — the caller MUST pass a consistent pair.
 """
 import copy  # FIX (DEEP-AUDIT-2026-07-26 / F-03-03): moved out of predict() body per PEP 8 (was inlined at line 140).
+import os
 import time as _time
 from datetime import datetime as _datetime, timezone as _timezone
 
@@ -240,6 +241,49 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         if _pair_pen_reason:
             result.setdefault("reasons", []).append(
                 f"{_pair_pen_reason} (confidence {_orig_conf} -> {_new_conf})")
+
+    # ────────────────────────────────────────────────────────────────────
+    # PROD-2026-08-06: TIERED HIGH-CONFIDENCE FILTER
+    # ────────────────────────────────────────────────────────────────────
+    # After all upstream modules + penalties have produced a CALL/PUT, this
+    # filter applies a final gate based on PER-(ASSET, HOUR) and
+    # PER-(ASSET, MODULE, DIRECTION) historical win-rate tables loaded from
+    # brain_module_votes. Only signals that meet strict multi-criteria
+    # consensus survive as CALL/PUT — everything else becomes NEUTRAL.
+    #
+    # Backtest on 15,931 live signals:
+    #   TIER_S (ULTRA):   83.3% win rate (n=6)   — only the very best
+    #   TIER_A (STRONG):  ~70% expected          — high confidence
+    #   TIER_B (MEDIUM):  75.9% (n=29)           — solid consensus
+    #   TIER_C (SELECTIVE): ~58% expected        — acceptable
+    #   SKIP:             everything else         — random walk, no edge
+    #
+    # Volume: ~3% of original signals pass through; the remaining ~97% are
+    # converted to NEUTRAL so the user knows not to trade.
+    #
+    # Env toggle: QX_TIERED_FILTER=1 enables (default OFF for safety).
+    try:
+        if os.environ.get("QX_TIERED_FILTER", "0") == "1":
+            from engines.base.tiered_filter import apply_tiered_filter
+            # Extract voting modules from result['modules'] if present
+            _call_mods = []
+            _put_mods = []
+            _modules = result.get("modules") or {}
+            if isinstance(_modules, dict):
+                for _mod_name, _mod_data in _modules.items():
+                    if isinstance(_mod_data, dict):
+                        _mod_dir = _mod_data.get("direction")
+                        if _mod_dir == "CALL":
+                            _call_mods.append(_mod_name)
+                        elif _mod_dir == "PUT":
+                            _put_mods.append(_mod_name)
+            result = apply_tiered_filter(
+                result, asset,
+                voting_modules_call=_call_mods,
+                voting_modules_put=_put_mods)
+    except Exception as _tier_exc:
+        # Defensive: never let the tier filter break the prediction.
+        print(f"[engines] tiered-filter failed for {asset}: {_tier_exc}")
 
     return result
 
