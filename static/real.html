@@ -251,10 +251,13 @@
     <div id="tab-verifier" class="tab-pane" role="tabpanel" aria-labelledby="tab-verifier-btn">
       <div class="verifier-panel">
         <div class="verifier-header">
-          <h2>🤖 Autonomous AI Agent</h2>
+          <h2>🤖 Autonomous AI Agent V2</h2>
           <div class="verifier-status-badge" id="verifier-status-badge">Loading…</div>
         </div>
-        <p class="verifier-desc">Self-learning AI agent. Autonomously ingests every market tick, extracts 8 features in real-time, uses logistic regression to estimate P(win), and learns from each outcome via online gradient descent. Per-asset models adapt independently.</p>
+        <p class="verifier-desc">Self-learning neural network agent. Autonomously ingests every market tick (millisecond-level), extracts 12 features in real-time, uses a 12→8→1 neural network with dropout + L2 regularization to estimate P(win), and learns from each outcome via backpropagation with momentum. Per-asset models adapt independently. Includes Monte Carlo ensemble (5-pass) + Platt calibration for better prediction quality.</p>
+        <div class="verifier-enable-hint" id="verifier-enable-hint" style="display:none;padding:10px 14px;margin-bottom:14px;background:rgba(255,193,7,0.1);border:1px solid rgba(255,193,7,0.4);border-radius:6px;font-size:12px;color:#ffc107;">
+          ⚙️ <b>Agent is DISABLED.</b> To enable: set env var <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_BRAIN=1</code> in Railway → Settings → Variables, then redeploy.
+        </div>
 
         <div class="verifier-stats-grid" id="verifier-stats-grid">
           <div class="vstat-card vstat-total"><div class="vstat-label">Ticks Processed</div><div class="vstat-value" id="vstat-total">0</div></div>

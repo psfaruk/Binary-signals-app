@@ -3175,13 +3175,32 @@ function updateAgentStatus(s){
   const $ = (id) => document.getElementById(id);
   if(!$('vstat-total')) return;
   const badge = $('verifier-status-badge');
+  const hint = $('verifier-enable-hint');
   if(badge){
-    if(s.enabled){
-      badge.textContent = '● LIVE';
+    if(s.active_mode){
+      badge.textContent = '● ACTIVE';
+      badge.className = 'verifier-status-badge enabled';
+    } else if(s.enabled){
+      badge.textContent = '● OBSERVE';
       badge.className = 'verifier-status-badge enabled';
     } else {
       badge.textContent = '○ DISABLED';
       badge.className = 'verifier-status-badge disabled';
+    }
+  }
+  // Show enable hint when in observe mode (suggesting activation)
+  if(hint){
+    if(s.active_mode){
+      hint.style.display = 'none';
+    } else if(s.enabled){
+      // Observe mode — show different hint
+      hint.style.display = 'block';
+      hint.innerHTML = '👁️ <b>OBSERVE mode.</b> Agent is learning but NOT modifying signals. To make it actively filter signals (VETO/WEAKEN/CONFIRM), set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_BRAIN=1</code> in Railway → Variables, then redeploy.';
+      hint.style.background = 'rgba(0,200,83,0.05)';
+      hint.style.borderColor = 'rgba(0,200,83,0.3)';
+      hint.style.color = '#00c853';
+    } else {
+      hint.style.display = 'block';
     }
   }
   $('vstat-total').textContent = s.total_ticks_processed || 0;

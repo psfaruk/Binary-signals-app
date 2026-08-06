@@ -456,12 +456,23 @@ class AssetModel:
 
 
 class AgentBrain:
-    """Autonomous AI agent V2 with neural network."""
+    """Autonomous AI agent V2 with neural network.
+
+    Two modes:
+      - ACTIVE (QX_AGENT_BRAIN=1): agent processes ticks, evaluates signals,
+        AND modifies them (VETO/WEAKEN/CONFIRM).
+      - OBSERVE (default, no env var): agent processes ticks, evaluates signals,
+        learns from outcomes, BUT does NOT modify signals.
+        This lets users see the agent working in the dashboard without
+        risking signal quality until they explicitly enable it.
+    """
 
     def __init__(self):
         self.models: Dict[str, AssetModel] = {}
         self.lock = threading.RLock()
-        self.enabled = os.environ.get("QX_AGENT_BRAIN", "0") == "1"
+        # Agent is ALWAYS running (observing). The env var controls whether
+        # it MODIFIES signals (active mode) or just observes.
+        self.active_mode = os.environ.get("QX_AGENT_BRAIN", "0") == "1"
         self.started_at = time.time()
         self.thoughts = deque(maxlen=THOUGHT_BUFFER_SIZE)
         self.total_ticks_processed = 0
@@ -471,6 +482,11 @@ class AgentBrain:
         self.total_confirm = 0
         self.total_weaken = 0
         self.total_pass = 0
+
+    @property
+    def enabled(self):
+        """Always enabled for observation. Use active_mode to check if modifying."""
+        return True
 
     def _get_model(self, asset: str) -> AssetModel:
         with self.lock:
@@ -490,6 +506,7 @@ class AgentBrain:
             self.thoughts.appendleft(thought)
 
     def process_tick(self, asset: str, price: float, ts_ms: float):
+        # Always process ticks (even in observe mode) so the agent learns
         if not self.enabled:
             return
         try:
@@ -550,6 +567,8 @@ class AgentBrain:
             p_win = model.calibrate_p(p_raw)
 
             # Verdict based on calibrated P(win)
+            # In OBSERVE mode, always return PASS (don't modify signals)
+            # but still record what the agent WOULD have done.
             if p_win >= P_STRONG_CONFIRM:
                 verdict = "CONFIRM"
                 conf_mult = 1.2
@@ -563,6 +582,11 @@ class AgentBrain:
                 verdict = "WEAKEN"
                 conf_mult = 0.5
             else:
+                verdict = "PASS"
+                conf_mult = 1.0
+
+            # In observe mode, don't actually modify the signal
+            if not self.active_mode:
                 verdict = "PASS"
                 conf_mult = 1.0
 
@@ -641,6 +665,8 @@ class AgentBrain:
             uptime = time.time() - self.started_at
             return {
                 "enabled": self.enabled,
+                "active_mode": self.active_mode,
+                "mode": "ACTIVE (modifying signals)" if self.active_mode else "OBSERVE (learning, not modifying)",
                 "uptime_seconds": round(uptime, 0),
                 "uptime_human": _human_duration(uptime),
                 "total_ticks_processed": self.total_ticks_processed,
