@@ -1316,6 +1316,33 @@ async def streaming_status():
         "note": "core/smart_streaming.py implemented but not yet wired into feed.py",
     }
 
+
+@app.get("/api/verifier/status")
+async def verifier_status():
+    """Signal Verifier Agent status — shows verdict counts + uptime."""
+    try:
+        from core.signal_verifier import get_verifier_status
+        return get_verifier_status()
+    except Exception as e:
+        return {"enabled": False, "error": str(e),
+                "hint": "Set QX_SIGNAL_VERIFIER=1 to enable the agent"}
+
+
+@app.get("/api/verifier/recent")
+async def verifier_recent(limit: int = 50):
+    """Recent Signal Verifier Agent verdicts (last N signals analyzed)."""
+    try:
+        from core.signal_verifier import get_verifier_recent
+        limit = max(1, min(200, limit))
+        verdicts = get_verifier_recent(limit)
+        return {
+            "count": len(verdicts),
+            "verdicts": verdicts,
+        }
+    except Exception as e:
+        return {"count": 0, "verdicts": [], "error": str(e)}
+
+
 @app.post("/api/patterns/refresh")
 async def patterns_refresh(request: Request):
     """Recompute ALL patterns from signal_log. Call after backtest or manually."""

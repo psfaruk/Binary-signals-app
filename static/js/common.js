@@ -2994,3 +2994,144 @@ function wireHistoryExtraControls(){
   }
 }
 })(window);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIGNAL VERIFIER AGENT PANEL (PROD-2026-08-06)
+// Polls /api/verifier/status + /api/verifier/recent every 5s and renders
+// live verdict counts + recent verdict table.
+// ═══════════════════════════════════════════════════════════════════════════
+(function verifierPanel(window){
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  let pollTimer = null;
+  let recentTimer = null;
+  let lastTotal = -1;
+
+  function fmtTime(ts){
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  }
+
+  function fmtAsset(a){
+    if(!a) return '—';
+    return a.replace('_otc','').replace(/([A-Z]{3})([A-Z]{3})/,'$1/$2');
+  }
+
+  function updateStatus(s){
+    if(!$('vstat-total')) return; // panel not on this page
+    const badge = $('verifier-status-badge');
+    if(badge){
+      if(s.enabled){
+        badge.textContent = '● LIVE';
+        badge.className = 'verifier-status-badge enabled';
+      } else {
+        badge.textContent = '○ DISABLED';
+        badge.className = 'verifier-status-badge disabled';
+      }
+    }
+    $('vstat-total').textContent = s.total_verified || 0;
+    $('vstat-veto').textContent = s.total_veto || 0;
+    $('vstat-veto-rate').textContent = (s.veto_rate || 0) + '%';
+    $('vstat-weaken').textContent = s.total_weaken || 0;
+    $('vstat-weaken-rate').textContent = (s.weaken_rate || 0) + '%';
+    $('vstat-confirm').textContent = s.total_confirm || 0;
+    $('vstat-confirm-rate').textContent = (s.confirm_rate || 0) + '%';
+    $('vstat-pass').textContent = s.total_pass || 0;
+    $('vstat-pass-rate').textContent = (s.pass_rate || 0) + '%';
+    $('vstat-killed').textContent = s.total_killed || 0;
+    $('vstat-uptime').textContent = s.uptime_human || '—';
+    // Detect new verdicts -> refresh recent table immediately
+    if(s.total_verified !== lastTotal && lastTotal !== -1){
+      fetchRecent();
+    }
+    lastTotal = s.total_verified;
+  }
+
+  function layerBadge(v){
+    if(v === 'VETO') return '<span style="color:#ff1744">V</span>';
+    if(v === 'WEAKEN') return '<span style="color:#ffc107">W</span>';
+    if(v === 'CONFIRM') return '<span style="color:#00c853">C</span>';
+    return '<span style="color:#8b949e">·</span>';
+  }
+
+  function renderRecent(data){
+    const tbl = $('verifier-recent-table');
+    if(!tbl) return;
+    if(!data.verdicts || data.verdicts.length === 0){
+      tbl.innerHTML = '<div class="verifier-empty">No verdicts yet. ' +
+        (updateStatus && $('verifier-status-badge') &&
+         $('verifier-status-badge').classList.contains('disabled')
+          ? 'Enable with QX_SIGNAL_VERIFIER=1 env var.'
+          : 'Waiting for first signal…') + '</div>';
+      return;
+    }
+    let html = '<div class="vrow vrow-head">' +
+      '<div>Time</div><div>Asset</div><div>Sig</div><div>Verdict</div>' +
+      '<div>Conf</div><div>Layers</div><div>Reason</div></div>';
+    data.verdicts.slice(0, 30).forEach(v => {
+      const sigClass = v.signal === 'CALL' ? 'call' : 'put';
+      const layers = v.layers || {};
+      const layerStr = 'L1'+layerBadge(layers.L1_price_action)+' ' +
+                       'L2'+layerBadge(layers.L2_wick_rejection)+' ' +
+                       'L3'+layerBadge(layers.L3_tick_momentum)+' ' +
+                       'L4'+layerBadge(layers.L4_key_level)+' ' +
+                       'L5'+layerBadge(layers.L5_historical);
+      const confStr = v.original_conf + '→' + v.final_conf +
+        (v.final_signal === 'NEUTRAL' ? ' ✗' : '');
+      const reason = (v.reason || '').split('|').slice(-1)[0].trim().slice(0, 80);
+      html += '<div class="vrow' + (v.killed ? ' killed' : '') + '">' +
+        '<div class="v-time">' + fmtTime(v.ts) + '</div>' +
+        '<div class="v-asset">' + fmtAsset(v.asset) + '</div>' +
+        '<div class="v-signal ' + sigClass + '">' + v.signal + '</div>' +
+        '<div class="v-verdict ' + (v.verdict || '').toLowerCase() + '">' + v.verdict + '</div>' +
+        '<div class="v-conf">' + confStr + '</div>' +
+        '<div class="v-layers">' + layerStr + '</div>' +
+        '<div class="v-conf" style="font-size:10px;color:#8b949e">' + reason + '</div>' +
+        '</div>';
+    });
+    tbl.innerHTML = html;
+  }
+
+  async function fetchStatus(){
+    try{
+      const r = await fetch('/api/verifier/status');
+      if(!r.ok) return;
+      const data = await r.json();
+      updateStatus(data);
+    }catch(e){ /* silent — UI keeps last known state */ }
+  }
+
+  async function fetchRecent(){
+    try{
+      const r = await fetch('/api/verifier/recent?limit=30');
+      if(!r.ok) return;
+      const data = await r.json();
+      renderRecent(data);
+    }catch(e){ /* silent */ }
+  }
+
+  function start(){
+    if(pollTimer) return; // already running
+    // Only start if panel exists on this page
+    if(!$('vstat-total')) return;
+    fetchStatus();
+    fetchRecent();
+    pollTimer = setInterval(fetchStatus, 5000);  // every 5s
+    recentTimer = setInterval(fetchRecent, 15000); // every 15s
+  }
+
+  // Start on DOM ready
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+
+  // Re-start when verifier tab is clicked (in case it was hidden)
+  document.addEventListener('click', (e) => {
+    if(e.target && e.target.id === 'tab-verifier-btn'){
+      setTimeout(() => { fetchStatus(); fetchRecent(); }, 100);
+    }
+  });
+
+})(window);

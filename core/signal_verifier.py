@@ -106,6 +106,109 @@ _HIST_CACHE_TTL = 300  # 5 minutes
 _HIST_LOCK = threading.Lock()
 
 
+# ── State tracking (for visibility endpoints) ───────────────────────────────
+# In-memory store of last N verdicts + cumulative counters.
+# Exposed via /api/verifier/status and /api/verifier/recent for UI visibility.
+
+_VERIFIER_STATE_LOCK = threading.Lock()
+_VERIFIER_RECENT_MAX = 200  # keep last 200 verdicts in memory
+_verifier_state = {
+    "total_verified": 0,
+    "total_veto": 0,
+    "total_weaken": 0,
+    "total_confirm": 0,
+    "total_pass": 0,
+    "total_killed": 0,   # signals converted to NEUTRAL by VETO
+    "total_weakened": 0,  # signals that had confidence reduced
+    "started_at": time.time(),
+    "recent": [],        # list of recent verdict dicts (newest first)
+}
+
+
+def _record_verdict(asset: str, signal: str, hour_utc: int, verdict: str,
+                    conf_mult: float, layers: Dict, reason: str,
+                    original_conf: float, final_conf: float,
+                    final_signal: str) -> None:
+    """Record a verdict in the in-memory state for UI visibility."""
+    with _VERIFIER_STATE_LOCK:
+        _verifier_state["total_verified"] += 1
+        if verdict == "VETO":
+            _verifier_state["total_veto"] += 1
+            if final_signal == "NEUTRAL":
+                _verifier_state["total_killed"] += 1
+        elif verdict == "WEAKEN":
+            _verifier_state["total_weaken"] += 1
+            if final_conf < original_conf:
+                _verifier_state["total_weakened"] += 1
+        elif verdict == "CONFIRM":
+            _verifier_state["total_confirm"] += 1
+        else:
+            _verifier_state["total_pass"] += 1
+
+        entry = {
+            "ts": time.time(),
+            "asset": asset,
+            "signal": signal,
+            "hour_utc": hour_utc,
+            "verdict": verdict,
+            "conf_mult": round(conf_mult, 2),
+            "original_conf": original_conf,
+            "final_conf": final_conf,
+            "final_signal": final_signal,
+            "killed": (verdict == "VETO" and final_signal == "NEUTRAL"),
+            "layers": {k: v["verdict"] for k, v in layers.items()},
+            "reason": reason[:300],
+        }
+        _verifier_state["recent"].insert(0, entry)
+        if len(_verifier_state["recent"]) > _VERIFIER_RECENT_MAX:
+            _verifier_state["recent"] = _verifier_state["recent"][:_VERIFIER_RECENT_MAX]
+
+
+def get_verifier_status() -> Dict[str, Any]:
+    """Return current verifier state for /api/verifier/status endpoint."""
+    with _VERIFIER_STATE_LOCK:
+        s = _verifier_state
+        uptime = time.time() - s["started_at"]
+        total = s["total_verified"]
+        return {
+            "enabled": os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1",
+            "uptime_seconds": round(uptime, 0),
+            "uptime_human": _human_duration(uptime),
+            "total_verified": total,
+            "total_veto": s["total_veto"],
+            "total_weaken": s["total_weaken"],
+            "total_confirm": s["total_confirm"],
+            "total_pass": s["total_pass"],
+            "total_killed": s["total_killed"],
+            "total_weakened": s["total_weakened"],
+            "veto_rate": round(100 * s["total_veto"] / total, 1) if total > 0 else 0,
+            "weaken_rate": round(100 * s["total_weaken"] / total, 1) if total > 0 else 0,
+            "confirm_rate": round(100 * s["total_confirm"] / total, 1) if total > 0 else 0,
+            "pass_rate": round(100 * s["total_pass"] / total, 1) if total > 0 else 0,
+            "recent_count": len(s["recent"]),
+        }
+
+
+def get_verifier_recent(limit: int = 50) -> List[Dict[str, Any]]:
+    """Return recent verdicts for /api/verifier/recent endpoint."""
+    with _VERIFIER_STATE_LOCK:
+        return list(_verifier_state["recent"][:limit])
+
+
+def _human_duration(seconds: float) -> str:
+    """Convert seconds to human-readable duration."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds/60)}m {int(seconds%60)}s"
+    if seconds < 86400:
+        return f"{int(seconds/3600)}h {int((seconds%3600)/60)}m"
+    return f"{int(seconds/86400)}d {int((seconds%86400)/3600)}h"
+
+
+
+
+
 # ── Helper functions ─────────────────────────────────────────────────────────
 
 def _body(c: Dict) -> float:
@@ -430,6 +533,16 @@ def verify_signal(prediction: Dict[str, Any],
     # Build reason string
     reason_parts = [f"{lname}: {result['reason']}" for lname, result in layers.items()]
     reason = f"{verdict} (veto={veto_count} weaken={weaken_count} confirm={confirm_count}) | " + " | ".join(reason_parts)
+
+    # Visible console log so Railway logs show every verdict in real time
+    _verdict_emoji = {"VETO": "🚫", "WEAKEN": "⚠️", "CONFIRM": "✅", "PASS": "➖"}.get(verdict, "?")
+    print(f"[verifier] {_verdict_emoji} {verdict} {asset} {signal} h={hour_utc} "
+          f"veto={veto_count} weaken={weaken_count} confirm={confirm_count} "
+          f"| L1={layers['L1_price_action']['verdict'][:1]} "
+          f"L2={layers['L2_wick_rejection']['verdict'][:1]} "
+          f"L3={layers['L3_tick_momentum']['verdict'][:1]} "
+          f"L4={layers['L4_key_level']['verdict'][:1]} "
+          f"L5={layers['L5_historical']['verdict'][:1]}")
 
     return {
         "verdict": verdict,

@@ -978,7 +978,7 @@ class QuotexFeed:
         if os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1" and \
                 result.get("signal") in ("CALL", "PUT"):
             try:
-                from core.signal_verifier import verify_signal
+                from core.signal_verifier import verify_signal, _record_verdict
                 from datetime import datetime, timezone
                 _verify_hour = datetime.now(timezone.utc).hour
                 _tick_prices = [t for t in base_ticks if isinstance(t, (int, float))]
@@ -986,6 +986,8 @@ class QuotexFeed:
                         isinstance(_tick_prices[0], dict):
                     _tick_prices = [t.get('price', t.get('close', 0))
                                     for t in _tick_prices]
+                _orig_signal = result.get("signal")
+                _orig_conf = result.get("confidence", 0)
                 _verify = verify_signal(result, closed, _tick_prices,
                                         stream.asset, _verify_hour)
                 _verdict = _verify.get("verdict", "PASS")
@@ -997,16 +999,33 @@ class QuotexFeed:
                     result.setdefault("reasons", []).append(
                         f"_VERIFIER_VETO: {_verify.get('reason', '')[:200]}")
                 elif _verdict == "WEAKEN":
-                    _orig_conf = result.get("confidence", 0)
                     result["confidence"] = int(_orig_conf * _adj)
                     result.setdefault("reasons", []).append(
                         f"_VERIFIER_WEAKEN: {_verify.get('reason', '')[:200]} "
                         f"(conf {_orig_conf} -> {result['confidence']})")
                 elif _verdict == "CONFIRM":
-                    _orig_conf = result.get("confidence", 0)
                     result["confidence"] = min(100, int(_orig_conf * _adj))
                     result.setdefault("reasons", []).append(
                         f"_VERIFIER_CONFIRM: {_verify.get('reason', '')[:200]}")
+                # Attach verdict to result for UI visibility
+                result["verifier_verdict"] = _verdict
+                result["verifier_layers"] = {
+                    k: v["verdict"] for k, v in _verify.get("layers", {}).items()
+                }
+                result["verifier_conf_mult"] = _adj
+                # Record for /api/verifier/status visibility
+                _record_verdict(
+                    asset=stream.asset,
+                    signal=_orig_signal,
+                    hour_utc=_verify_hour,
+                    verdict=_verdict,
+                    conf_mult=_adj,
+                    layers=_verify.get("layers", {}),
+                    reason=_verify.get("reason", ""),
+                    original_conf=_orig_conf,
+                    final_conf=result.get("confidence", 0),
+                    final_signal=result.get("signal", "NEUTRAL"),
+                )
             except Exception as _ve:
                 print(f"[feed] signal_verifier error for {stream.asset}: {_ve}")
 

@@ -77,6 +77,7 @@
     <button class="tab-btn active" data-tab="chart" role="tab" id="tab-chart-btn" aria-selected="true" aria-controls="tab-chart">📈 Chart</button>
     <button class="tab-btn" data-tab="history" role="tab" id="tab-history-btn" aria-selected="false" aria-controls="tab-history">📜 History</button>
     <button class="tab-btn" data-tab="accuracy" role="tab" id="tab-accuracy-btn" aria-selected="false" aria-controls="tab-accuracy">📊 Stats</button>
+    <button class="tab-btn" data-tab="verifier" role="tab" id="tab-verifier-btn" aria-selected="false" aria-controls="tab-verifier">🤖 Agent</button>
   </nav>
   <main id="main" tabindex="-1">
     <div id="tab-content-wrap">
@@ -246,6 +247,44 @@
         </div>
       </div>
     </aside>
+
+    <div id="tab-verifier" class="tab-pane" role="tabpanel" aria-labelledby="tab-verifier-btn">
+      <div class="verifier-panel">
+        <div class="verifier-header">
+          <h2>🤖 Signal Verifier Agent</h2>
+          <div class="verifier-status-badge" id="verifier-status-badge">Loading…</div>
+        </div>
+        <p class="verifier-desc">Real-time multi-layer analysis agent. Each CALL/PUT signal is verified against price action, wick rejection, tick momentum, key levels, and historical patterns BEFORE broadcast. VETO = signal killed, WEAKEN = confidence reduced, CONFIRM = confidence boosted.</p>
+
+        <div class="verifier-stats-grid" id="verifier-stats-grid">
+          <div class="vstat-card vstat-total"><div class="vstat-label">Total Verified</div><div class="vstat-value" id="vstat-total">0</div></div>
+          <div class="vstat-card vstat-veto"><div class="vstat-label">🚫 VETO</div><div class="vstat-value" id="vstat-veto">0</div><div class="vstat-sub" id="vstat-veto-rate">0%</div></div>
+          <div class="vstat-card vstat-weaken"><div class="vstat-label">⚠️ WEAKEN</div><div class="vstat-value" id="vstat-weaken">0</div><div class="vstat-sub" id="vstat-weaken-rate">0%</div></div>
+          <div class="vstat-card vstat-confirm"><div class="vstat-label">✅ CONFIRM</div><div class="vstat-value" id="vstat-confirm">0</div><div class="vstat-sub" id="vstat-confirm-rate">0%</div></div>
+          <div class="vstat-card vstat-pass"><div class="vstat-label">➖ PASS</div><div class="vstat-value" id="vstat-pass">0</div><div class="vstat-sub" id="vstat-pass-rate">0%</div></div>
+          <div class="vstat-card vstat-killed"><div class="vstat-label">Killed</div><div class="vstat-value" id="vstat-killed">0</div><div class="vstat-sub">VETO→NEUTRAL</div></div>
+          <div class="vstat-card vstat-uptime"><div class="vstat-label">Uptime</div><div class="vstat-value" id="vstat-uptime">—</div></div>
+        </div>
+
+        <div class="verifier-recent-section">
+          <h3>📋 Recent Verdicts (last 30)</h3>
+          <div class="verifier-recent-table" id="verifier-recent-table">
+            <div class="verifier-empty">No verdicts yet. Enable with QX_SIGNAL_VERIFIER=1 env var.</div>
+          </div>
+        </div>
+
+        <div class="verifier-layers-legend">
+          <h3>🔍 Layer Analysis (per verdict)</h3>
+          <div class="legend-grid">
+            <div class="legend-item"><span class="legend-icon">L1</span> <b>Price Action</b> — last 3 candle bodies vs signal direction</div>
+            <div class="legend-item"><span class="legend-icon">L2</span> <b>Wick Rejection</b> — long wick = rejection from that side</div>
+            <div class="legend-item"><span class="legend-icon">L3</span> <b>Tick Momentum</b> — last 30 ticks velocity vs signal</div>
+            <div class="legend-item"><span class="legend-icon">L4</span> <b>Key Levels</b> — swing high/low proximity</div>
+            <div class="legend-item"><span class="legend-icon">L5</span> <b>Historical Pattern</b> — same setup win rate last 7d</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
 </div>
 <div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title" aria-describedby="detail-body" tabindex="-1">
