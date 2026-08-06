@@ -295,16 +295,20 @@
         </div>
 
         <div class="verifier-layers-legend">
-          <h3>🔍 8 Features the Agent Learns</h3>
+          <h3>🔍 12 Features the Agent Learns (Neural Network V2)</h3>
           <div class="legend-grid">
-            <div class="legend-item"><span class="legend-icon">f1</span> <b>Tick Momentum</b> — velocity of last 30 ticks (ATR/sec)</div>
-            <div class="legend-item"><span class="legend-icon">f2</span> <b>Tick Acceleration</b> — 2nd derivative (velocity change)</div>
-            <div class="legend-item"><span class="legend-icon">f3</span> <b>Order Flow</b> — uptick/downtick ratio (buyer vs seller)</div>
-            <div class="legend-item"><span class="legend-icon">f4</span> <b>Micro Volatility</b> — 3-sec price range / ATR</div>
-            <div class="legend-item"><span class="legend-icon">f5</span> <b>HTF Alignment</b> — 5-min vs 20-min EMA separation</div>
-            <div class="legend-item"><span class="legend-icon">f6</span> <b>Gap vs Prev Close</b> — current price vs last close (ATR)</div>
-            <div class="legend-item"><span class="legend-icon">f7</span> <b>Tick Rate</b> — broker behavior (slow/burst/normal)</div>
-            <div class="legend-item"><span class="legend-icon">f8</span> <b>Candle Position</b> — where in current candle (0-1)</div>
+            <div class="legend-item"><span class="legend-icon">f1</span> <b>Tick Momentum 30</b> — velocity of last 30 ticks (ATR/sec)</div>
+            <div class="legend-item"><span class="legend-icon">f2</span> <b>Tick Momentum 10</b> — velocity of last 10 ticks (faster signal)</div>
+            <div class="legend-item"><span class="legend-icon">f3</span> <b>Tick Acceleration</b> — 2nd derivative (velocity change)</div>
+            <div class="legend-item"><span class="legend-icon">f4</span> <b>Order Flow 30</b> — uptick ratio last 30 ticks (buyer vs seller)</div>
+            <div class="legend-item"><span class="legend-icon">f5</span> <b>Order Flow 10</b> — uptick ratio last 10 ticks (recent)</div>
+            <div class="legend-item"><span class="legend-icon">f6</span> <b>Micro Volatility 3s</b> — 3-sec price range / ATR</div>
+            <div class="legend-item"><span class="legend-icon">f7</span> <b>Micro Volatility 10s</b> — 10-sec price range / ATR</div>
+            <div class="legend-item"><span class="legend-icon">f8</span> <b>HTF Alignment</b> — 5-min vs 20-min EMA separation</div>
+            <div class="legend-item"><span class="legend-icon">f9</span> <b>Gap vs Prev Close</b> — current price vs last close (ATR)</div>
+            <div class="legend-item"><span class="legend-icon">f10</span> <b>Tick Rate</b> — broker behavior (slow/burst/normal)</div>
+            <div class="legend-item"><span class="legend-icon">f11</span> <b>Candle Body %</b> — last candle body / range (momentum)</div>
+            <div class="legend-item"><span class="legend-icon">f12</span> <b>Hour Normalized</b> — time of day (trap vs boost hours)</div>
           </div>
         </div>
       </div>

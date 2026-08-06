@@ -3311,7 +3311,7 @@ function renderAgentRecent(data){
     const pWin = d.p_win != null ? (d.p_win * 100).toFixed(0) + '%' : '—';
     const features = d.features || [];
     const activeFeatures = features
-      .map((f, i) => ({f, i, name: ['f1','f2','f3','f4','f5','f6','f7','f8'][i]}))
+      .map((f, i) => ({f, i, name: ['f1','f2','f3','f4','f5','f6','f7','f8','f9','f10','f11','f12'][i] || ('f'+(i+1))}))
       .filter(x => Math.abs(x.f) > 0.3)
       .map(x => x.name + (x.f >= 0 ? '+' : '') + x.f.toFixed(1))
       .join(' ') || 'none active';
