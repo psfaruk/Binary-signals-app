@@ -1326,12 +1326,19 @@ async def streaming_status():
 
 
 def _active_analyzer() -> str:
-    """Which signal analyzer feed.py is actually running (mirrors _run_eoc)."""
-    if os.environ.get("QX_REALTIME_ANALYZER", "0") == "1":
-        return "realtime_analyzer"
-    if os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1":
-        return "signal_verifier"
-    return "agent_brain"
+    """Which signal analyzer feed.py is actually running.
+
+    MUST mirror the `_analyzer` resolution in feed.py._run_eoc: priority is
+    AGENT_BRAIN > REALTIME > VERIFIER, and Agent Brain is also the default
+    when none of the three env vars is set.
+    """
+    use_agent = (os.environ.get("QX_AGENT_BRAIN", "0") == "1"
+                 or os.environ.get("QX_AGENT_FINAL", "0") == "1")
+    use_realtime = os.environ.get("QX_REALTIME_ANALYZER", "0") == "1"
+    use_verifier = os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1"
+    if use_agent or not (use_realtime or use_verifier):
+        return "agent_brain"
+    return "realtime_analyzer" if use_realtime else "signal_verifier"
 
 
 @app.get("/api/verifier/status")

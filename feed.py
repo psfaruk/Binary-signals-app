@@ -1038,9 +1038,16 @@ class QuotexFeed:
         #   QX_REALTIME_ANALYZER=1 → real-time ms analyzer (realtime_analyzer.py)
         #   QX_SIGNAL_VERIFIER=1 → old statistical verifier (signal_verifier.py)
         # Agent Brain in OBSERVE mode always evaluates + records, but doesn't modify.
-        _use_agent = os.environ.get("QX_AGENT_BRAIN", "0") == "1"  # active mode
+        _use_agent = (os.environ.get("QX_AGENT_BRAIN", "0") == "1"
+                      or os.environ.get("QX_AGENT_FINAL", "0") == "1")
         _use_realtime = os.environ.get("QX_REALTIME_ANALYZER", "0") == "1"
         _use_verifier = os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1"
+        # Documented priority is AGENT_BRAIN > REALTIME > VERIFIER, and Agent
+        # Brain is also the default when nothing is requested — it is the only
+        # analyzer that learns, and it is the one the Agent tab reports on.
+        # The alternates take over only when the agent is NOT requested.
+        _analyzer = ("agent" if (_use_agent or not (_use_realtime or _use_verifier))
+                     else ("realtime" if _use_realtime else "verifier"))
         # Agent always evaluates (for visibility). Other analyzers only if enabled.
         _agent_always = True
         if (_agent_always or _use_agent or _use_realtime or _use_verifier) and \
@@ -1056,9 +1063,11 @@ class QuotexFeed:
                 # QX_REALTIME_ANALYZER and QX_SIGNAL_VERIFIER did nothing, and
                 # /api/verifier/status served a permanently-zero recorder
                 # ("enabled: true, total_verified: 0") to the dashboard.
-                # Agent Brain is the intended default; the alternates now
-                # actually respond to their env vars again.
-                if not (_use_realtime or _use_verifier):
+                # The alternates respond to their env vars again, but only when
+                # Agent Brain is not requested — this deployment has all three
+                # vars set to 1, and Agent Brain must keep winning there or the
+                # agent silently stops learning and the Agent tab goes blank.
+                if _analyzer == "agent":
                     # Agent Brain always evaluates (for visibility + learning).
                     # In observe mode (default) it returns PASS without modifying.
                     # In active mode (QX_AGENT_BRAIN=1) it returns VETO/WEAKEN/CONFIRM.
