@@ -971,16 +971,14 @@ class QuotexFeed:
         stream._live_reeval_ticks = 0
 
         # ── SIGNAL VERIFIER AGENT (PROD-2026-08-06) ──────────────────────
-        # Real-time multi-layer verification on actual candle + tick data.
-        # Sits between engine prediction and broadcast. Issues VETO/WEAKEN/
-        # CONFIRM verdict that can modify or kill the signal.
-        # Two analyzers available:
+        # Three analyzers available (priority order: AGENT_BRAIN > REALTIME > VERIFIER):
+        #   QX_AGENT_BRAIN=1     → autonomous AI with online learning (agent_brain.py)
+        #   QX_REALTIME_ANALYZER=1 → real-time ms analyzer (realtime_analyzer.py)
         #   QX_SIGNAL_VERIFIER=1 → old statistical verifier (signal_verifier.py)
-        #   QX_REALTIME_ANALYZER=1 → new real-time ms analyzer (realtime_analyzer.py)
-        # If both enabled, REALTIME_ANALYZER takes precedence.
+        _use_agent = os.environ.get("QX_AGENT_BRAIN", "0") == "1"
         _use_realtime = os.environ.get("QX_REALTIME_ANALYZER", "0") == "1"
         _use_verifier = os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1"
-        if (_use_realtime or _use_verifier) and \
+        if (_use_agent or _use_realtime or _use_verifier) and \
                 result.get("signal") in ("CALL", "PUT"):
             try:
                 from datetime import datetime, timezone
@@ -988,12 +986,15 @@ class QuotexFeed:
                 _orig_signal = result.get("signal")
                 _orig_conf = result.get("confidence", 0)
 
-                if _use_realtime:
+                if _use_agent:
+                    from core.agent_brain import agent
+                    _verify = agent.evaluate(result, stream.asset, closed)
+                    # Use agent's own recording via its evaluate() + learn()
+                    _record_fn = lambda **kw: None  # agent handles its own state
+                elif _use_realtime:
                     from core.realtime_analyzer import (
                         analyze_realtime, _record_verdict as _record_rt,
                     )
-                    # current candle ticks = stream.ticks (first tick(s) of new candle)
-                    # previous candle ticks = base_ticks (just-closed candle)
                     _curr_ticks = list(stream.ticks)
                     _prev_ticks = list(base_ticks)
                     _verify = analyze_realtime(
@@ -1211,6 +1212,16 @@ class QuotexFeed:
                 )
         except Exception as _e:
             print(f"[db] log_signal error: {_e}")
+        # ── Agent learning hook ──────────────────────────────────────────
+        # After grading, tell the agent whether its prediction was right so
+        # it can update its weights via online gradient descent.
+        if os.environ.get("QX_AGENT_BRAIN", "0") == "1" and sig in ("CALL", "PUT"):
+            try:
+                from core.agent_brain import agent
+                _was_correct = (accuracy == "correct")
+                agent.learn(asset, sig, _was_correct)
+            except Exception as _le:
+                print(f"[agent] learn hook error: {_le}")
         return accuracy
 
     def _save_micro(self, asset: str, period: int, closed: dict,
@@ -1906,8 +1917,17 @@ class QuotexFeed:
                                 break
                         if b_idx is None:
                             for t in remaining:
-                                stream.ticks.append(float(t["price"]))
-                                self._track_tick(stream, float(t["price"]))
+                                _px = float(t["price"])
+                                _ts = float(t.get("time", 0)) * 1000.0
+                                stream.ticks.append(_px)
+                                self._track_tick(stream, _px)
+                                # Feed tick to autonomous agent
+                                if os.environ.get("QX_AGENT_BRAIN", "0") == "1":
+                                    try:
+                                        from core.agent_brain import agent
+                                        agent.process_tick(stream.asset, _px, _ts)
+                                    except Exception:
+                                        pass
                             break
                         b_tick = remaining[b_idx]
                         tick_new_open = _floor_to_period(
@@ -1938,13 +1958,29 @@ class QuotexFeed:
                                         stream.period, real_open)
                                 reanchored = True
                             for t in cur:
-                                stream.ticks.append(float(t["price"]))
-                                self._track_tick(stream, float(t["price"]))
+                                _px = float(t["price"])
+                                _ts = float(t.get("time", 0)) * 1000.0
+                                stream.ticks.append(_px)
+                                self._track_tick(stream, _px)
+                                if os.environ.get("QX_AGENT_BRAIN", "0") == "1":
+                                    try:
+                                        from core.agent_brain import agent
+                                        agent.process_tick(stream.asset, _px, _ts)
+                                    except Exception:
+                                        pass
                             remaining = []   # consumed
                             break
                         for t in remaining[:b_idx]:
-                            stream.ticks.append(float(t["price"]))
-                            self._track_tick(stream, float(t["price"]))
+                            _px = float(t["price"])
+                            _ts = float(t.get("time", 0)) * 1000.0
+                            stream.ticks.append(_px)
+                            self._track_tick(stream, _px)
+                            if os.environ.get("QX_AGENT_BRAIN", "0") == "1":
+                                try:
+                                    from core.agent_brain import agent
+                                    agent.process_tick(stream.asset, _px, _ts)
+                                except Exception:
+                                    pass
                         first_px = float(b_tick["price"])
                         if _iter == 0:
                             print(f"[feed] tick-close  {stream.asset}@{stream.period}s "

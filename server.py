@@ -1343,6 +1343,60 @@ async def verifier_recent(limit: int = 50):
         return {"count": 0, "verdicts": [], "error": str(e)}
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTONOMOUS AI AGENT ENDPOINTS (PROD-AGENT-2026-08-06)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/agent/status")
+async def agent_status():
+    """Agent Brain status — overall stats, uptime, learning progress."""
+    try:
+        from core.agent_brain import agent
+        return agent.get_status()
+    except Exception as e:
+        return {"enabled": False, "error": str(e),
+                "hint": "Set QX_AGENT_BRAIN=1 to enable the autonomous agent"}
+
+
+@app.get("/api/agent/live")
+async def agent_live(limit: int = 50):
+    """Agent Brain live thought stream — recent ticks, evaluations, learning events."""
+    try:
+        from core.agent_brain import agent
+        limit = max(1, min(200, limit))
+        thoughts = agent.get_live_feed(limit)
+        return {
+            "count": len(thoughts),
+            "thoughts": thoughts,
+            "status": agent.get_status(),
+        }
+    except Exception as e:
+        return {"count": 0, "thoughts": [], "error": str(e)}
+
+
+@app.get("/api/agent/models")
+async def agent_models():
+    """Agent Brain per-asset learned models — weights, accuracy, samples."""
+    try:
+        from core.agent_brain import agent
+        return {
+            "models": agent.get_models(),
+            "feature_names": agent.get_status().get("feature_names", []),
+        }
+    except Exception as e:
+        return {"models": [], "error": str(e)}
+
+
+@app.get("/api/agent/features/{asset}")
+async def agent_features(asset: str):
+    """Agent Brain live features for a specific asset — real-time values."""
+    try:
+        from core.agent_brain import agent
+        return agent.get_current_features(asset)
+    except Exception as e:
+        return {"enabled": False, "error": str(e)}
+
+
 @app.post("/api/patterns/refresh")
 async def patterns_refresh(request: Request):
     """Recompute ALL patterns from signal_log. Call after backtest or manually."""

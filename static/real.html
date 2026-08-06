@@ -251,37 +251,60 @@
     <div id="tab-verifier" class="tab-pane" role="tabpanel" aria-labelledby="tab-verifier-btn">
       <div class="verifier-panel">
         <div class="verifier-header">
-          <h2>🤖 Signal Verifier Agent</h2>
+          <h2>🤖 Autonomous AI Agent</h2>
           <div class="verifier-status-badge" id="verifier-status-badge">Loading…</div>
         </div>
-        <p class="verifier-desc">Real-time multi-layer analysis agent. Each CALL/PUT signal is verified against price action, wick rejection, tick momentum, key levels, and historical patterns BEFORE broadcast. VETO = signal killed, WEAKEN = confidence reduced, CONFIRM = confidence boosted.</p>
+        <p class="verifier-desc">Self-learning AI agent. Autonomously ingests every market tick, extracts 8 features in real-time, uses logistic regression to estimate P(win), and learns from each outcome via online gradient descent. Per-asset models adapt independently.</p>
 
         <div class="verifier-stats-grid" id="verifier-stats-grid">
-          <div class="vstat-card vstat-total"><div class="vstat-label">Total Verified</div><div class="vstat-value" id="vstat-total">0</div></div>
-          <div class="vstat-card vstat-veto"><div class="vstat-label">🚫 VETO</div><div class="vstat-value" id="vstat-veto">0</div><div class="vstat-sub" id="vstat-veto-rate">0%</div></div>
-          <div class="vstat-card vstat-weaken"><div class="vstat-label">⚠️ WEAKEN</div><div class="vstat-value" id="vstat-weaken">0</div><div class="vstat-sub" id="vstat-weaken-rate">0%</div></div>
-          <div class="vstat-card vstat-confirm"><div class="vstat-label">✅ CONFIRM</div><div class="vstat-value" id="vstat-confirm">0</div><div class="vstat-sub" id="vstat-confirm-rate">0%</div></div>
-          <div class="vstat-card vstat-pass"><div class="vstat-label">➖ PASS</div><div class="vstat-value" id="vstat-pass">0</div><div class="vstat-sub" id="vstat-pass-rate">0%</div></div>
-          <div class="vstat-card vstat-killed"><div class="vstat-label">Killed</div><div class="vstat-value" id="vstat-killed">0</div><div class="vstat-sub">VETO→NEUTRAL</div></div>
+          <div class="vstat-card vstat-total"><div class="vstat-label">Ticks Processed</div><div class="vstat-value" id="vstat-total">0</div></div>
+          <div class="vstat-card vstat-veto"><div class="vstat-label">🚫 VETO</div><div class="vstat-value" id="vstat-veto">0</div></div>
+          <div class="vstat-card vstat-weaken"><div class="vstat-label">⚠️ WEAKEN</div><div class="vstat-value" id="vstat-weaken">0</div></div>
+          <div class="vstat-card vstat-confirm"><div class="vstat-label">✅ CONFIRM</div><div class="vstat-value" id="vstat-confirm">0</div></div>
+          <div class="vstat-card vstat-pass"><div class="vstat-label">➖ PASS</div><div class="vstat-value" id="vstat-pass">0</div></div>
+          <div class="vstat-card vstat-killed"><div class="vstat-label">Signals Learned</div><div class="vstat-value" id="vstat-killed">0</div></div>
           <div class="vstat-card vstat-uptime"><div class="vstat-label">Uptime</div><div class="vstat-value" id="vstat-uptime">—</div></div>
         </div>
 
+        <div class="agent-live-section">
+          <h3>📡 Live Data Stream (what the agent sees)</h3>
+          <div class="agent-live-stream" id="agent-live-stream">
+            <div class="verifier-empty">Waiting for ticks…</div>
+          </div>
+        </div>
+
+        <div class="agent-features-section">
+          <h3>🧠 Live Features (what the agent computes for current asset)</h3>
+          <div class="agent-features-grid" id="agent-features-grid">
+            <div class="verifier-empty">Select a pair to see live features…</div>
+          </div>
+        </div>
+
+        <div class="agent-models-section">
+          <h3>📊 Per-Asset Learned Models</h3>
+          <div class="agent-models-table" id="agent-models-table">
+            <div class="verifier-empty">No models yet. Agent starts learning after first signal.</div>
+          </div>
+        </div>
+
         <div class="verifier-recent-section">
-          <h3>📋 Recent Verdicts (last 30)</h3>
+          <h3>📋 Recent Decisions (last 30)</h3>
           <div class="verifier-recent-table" id="verifier-recent-table">
-            <div class="verifier-empty">No verdicts yet. Enable with QX_SIGNAL_VERIFIER=1 env var.</div>
+            <div class="verifier-empty">No decisions yet. Enable with QX_AGENT_BRAIN=1 env var.</div>
           </div>
         </div>
 
         <div class="verifier-layers-legend">
-          <h3>🔍 Layer Analysis (per verdict)</h3>
+          <h3>🔍 8 Features the Agent Learns</h3>
           <div class="legend-grid">
-            <div class="legend-item"><span class="legend-icon">L1</span> <b>Pre-Candle Momentum</b> — last 5s of previous candle (velocity + acceleration in ATR/sec)</div>
-            <div class="legend-item"><span class="legend-icon">L2</span> <b>Opening Behavior</b> — first 3s of new candle (gap + continuation vs prev close)</div>
-            <div class="legend-item"><span class="legend-icon">L3</span> <b>Tick Arrival Rate</b> — broker behavior (slowdown = throttle, burst = spike risk)</div>
-            <div class="legend-item"><span class="legend-icon">L4</span> <b>Micro-Volatility</b> — per-second price change in ATR (spike = slippage)</div>
-            <div class="legend-item"><span class="legend-icon">L5</span> <b>Order Flow</b> — tick rule (uptick/downtick ratio over last 30 ticks)</div>
-            <div class="legend-item"><span class="legend-icon">L6</span> <b>HTF Alignment</b> — 5-min EMA proxy vs 20-min (counter-trend = weaken)</div>
+            <div class="legend-item"><span class="legend-icon">f1</span> <b>Tick Momentum</b> — velocity of last 30 ticks (ATR/sec)</div>
+            <div class="legend-item"><span class="legend-icon">f2</span> <b>Tick Acceleration</b> — 2nd derivative (velocity change)</div>
+            <div class="legend-item"><span class="legend-icon">f3</span> <b>Order Flow</b> — uptick/downtick ratio (buyer vs seller)</div>
+            <div class="legend-item"><span class="legend-icon">f4</span> <b>Micro Volatility</b> — 3-sec price range / ATR</div>
+            <div class="legend-item"><span class="legend-icon">f5</span> <b>HTF Alignment</b> — 5-min vs 20-min EMA separation</div>
+            <div class="legend-item"><span class="legend-icon">f6</span> <b>Gap vs Prev Close</b> — current price vs last close (ATR)</div>
+            <div class="legend-item"><span class="legend-icon">f7</span> <b>Tick Rate</b> — broker behavior (slow/burst/normal)</div>
+            <div class="legend-item"><span class="legend-icon">f8</span> <b>Candle Position</b> — where in current candle (0-1)</div>
           </div>
         </div>
       </div>

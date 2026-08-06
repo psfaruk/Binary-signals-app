@@ -3148,3 +3148,246 @@ if(document.readyState === 'loading'){
 } else {
   startVerifierPanel();
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTONOMOUS AI AGENT PANEL (PROD-AGENT-2026-08-06)
+// Polls /api/agent/* endpoints and renders:
+//   - Live thought stream (ticks + evaluations + learning events)
+//   - Live features for current asset
+//   - Per-asset learned models (weights, accuracy, samples)
+//   - Recent decisions
+// ═══════════════════════════════════════════════════════════════════════════
+let _agentPollTimer = null;
+let _agentFeatureTimer = null;
+let _agentModelTimer = null;
+let _agentLastTickCount = -1;
+
+function fmtAgentTime(ts){
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+function fmtAgentAsset(a){
+  if(!a) return '—';
+  return a.replace('_otc','').replace(/([A-Z]{3})([A-Z]{3})/,'$1/$2');
+}
+
+function updateAgentStatus(s){
+  const $ = (id) => document.getElementById(id);
+  if(!$('vstat-total')) return;
+  const badge = $('verifier-status-badge');
+  if(badge){
+    if(s.enabled){
+      badge.textContent = '● LIVE';
+      badge.className = 'verifier-status-badge enabled';
+    } else {
+      badge.textContent = '○ DISABLED';
+      badge.className = 'verifier-status-badge disabled';
+    }
+  }
+  $('vstat-total').textContent = s.total_ticks_processed || 0;
+  $('vstat-veto').textContent = s.total_veto || 0;
+  $('vstat-weaken').textContent = s.total_weaken || 0;
+  $('vstat-confirm').textContent = s.total_confirm || 0;
+  $('vstat-pass').textContent = s.total_pass || 0;
+  $('vstat-killed').textContent = s.total_signals_learned || 0;
+  $('vstat-uptime').textContent = s.uptime_human || '—';
+  // Refresh live stream when new ticks arrive
+  if(s.total_ticks_processed !== _agentLastTickCount && _agentLastTickCount !== -1){
+    fetchAgentLive();
+  }
+  _agentLastTickCount = s.total_ticks_processed;
+}
+
+function renderAgentLive(data){
+  const $ = (id) => document.getElementById(id);
+  const stream = $('agent-live-stream');
+  if(!stream) return;
+  if(!data.thoughts || data.thoughts.length === 0){
+    const badge = $('verifier-status-badge');
+    const isDisabled = badge && badge.classList.contains('disabled');
+    stream.innerHTML = '<div class="verifier-empty">' +
+      (isDisabled ? 'Enable with QX_AGENT_BRAIN=1 env var.'
+                  : 'Waiting for ticks…') + '</div>';
+    return;
+  }
+  let html = '';
+  data.thoughts.slice(0, 40).forEach(t => {
+    const typeClass = (t.type || 'tick').toLowerCase();
+    html += '<div class="agent-thought">' +
+      '<span class="at-time">' + fmtAgentTime(t.ts) + '</span>' +
+      '<span class="at-type ' + typeClass + '">' + t.type + '</span>' +
+      '<span class="at-msg">' + (t.message || '').replace(/</g,'&lt;') + '</span>' +
+      '</div>';
+  });
+  stream.innerHTML = html;
+}
+
+function renderAgentFeatures(data){
+  const $ = (id) => document.getElementById(id);
+  const grid = $('agent-features-grid');
+  if(!grid) return;
+  if(!data.enabled){
+    grid.innerHTML = '<div class="verifier-empty">Agent disabled. Set QX_AGENT_BRAIN=1.</div>';
+    return;
+  }
+  if(!data.features || data.features.length === 0){
+    grid.innerHTML = '<div class="verifier-empty">Waiting for ticks on ' +
+      (data.asset || 'this asset') + '… (' + (data.tick_count || 0) + ' ticks buffered)</div>';
+    return;
+  }
+  let html = '';
+  data.features.forEach(f => {
+    const valPct = Math.abs(f.value) * 50; // -1..1 → 0..50%
+    const dir = f.value >= 0 ? 1 : -1;
+    const barStyle = 'width:' + valPct + '%; transform: translateX(' + (dir > 0 ? 0 : -100) + '%)';
+    html += '<div class="agent-feature-card' + (f.active ? ' active' : '') + '">' +
+      '<div class="af-name">' + f.name + '</div>' +
+      '<div class="af-value">' + (f.value >= 0 ? '+' : '') + f.value.toFixed(3) + '</div>' +
+      '<div class="af-bar"><div class="af-bar-fill" style="' + barStyle + '"></div></div>' +
+      '</div>';
+  });
+  // Add P(win) + accuracy summary card
+  if(data.last_p_win != null){
+    html += '<div class="agent-feature-card" style="border-color:rgba(0,200,83,0.4);background:rgba(0,200,83,0.05)">' +
+      '<div class="af-name">P(win) estimate</div>' +
+      '<div class="af-value" style="color:#00c853">' + (data.last_p_win * 100).toFixed(1) + '%</div>' +
+      '<div class="af-bar"><div class="af-bar-fill" style="width:' + (data.last_p_win * 100) + '%;left:0;transform:none;background:#00c853"></div></div>' +
+      '</div>';
+    html += '<div class="agent-feature-card">' +
+      '<div class="af-name">Model accuracy</div>' +
+      '<div class="af-value">' + (data.accuracy * 100).toFixed(1) + '%</div>' +
+      '<div style="font-size:10px;color:#8b949e">' + (data.samples || 0) + ' samples</div>' +
+      '</div>';
+  }
+  grid.innerHTML = html;
+}
+
+function renderAgentModels(data){
+  const $ = (id) => document.getElementById(id);
+  const tbl = $('agent-models-table');
+  if(!tbl) return;
+  if(!data.models || data.models.length === 0){
+    tbl.innerHTML = '<div class="verifier-empty">No models yet. Agent starts learning after first signal.</div>';
+    return;
+  }
+  let html = '<div class="am-row am-head">' +
+    '<div>Asset</div><div>Samples</div><div>Accuracy</div><div>Loss</div><div>Weights (f1-f8)</div></div>';
+  data.models.forEach(m => {
+    const accCls = m.accuracy >= 0.55 ? 'good' : (m.accuracy < 0.45 && m.samples > 5 ? 'bad' : '');
+    const weightsStr = (m.weights || []).map(w => (w >= 0 ? '+' : '') + w.toFixed(2)).join(' ');
+    html += '<div class="am-row">' +
+      '<div class="am-asset">' + fmtAgentAsset(m.asset) + '</div>' +
+      '<div class="am-samples">' + m.samples + '</div>' +
+      '<div class="am-acc ' + accCls + '">' + (m.accuracy * 100).toFixed(1) + '%</div>' +
+      '<div class="am-samples">' + m.avg_loss.toFixed(3) + '</div>' +
+      '<div class="am-weights" title="' + weightsStr + '">' + weightsStr + '</div>' +
+      '</div>';
+  });
+  tbl.innerHTML = html;
+}
+
+function renderAgentRecent(data){
+  const $ = (id) => document.getElementById(id);
+  const tbl = $('verifier-recent-table');
+  if(!tbl) return;
+  if(!data.thoughts || data.thoughts.length === 0){
+    tbl.innerHTML = '<div class="verifier-empty">No decisions yet.</div>';
+    return;
+  }
+  // Filter to evaluate-type thoughts
+  const evals = data.thoughts.filter(t => t.type === 'evaluate').slice(0, 30);
+  if(evals.length === 0){
+    tbl.innerHTML = '<div class="verifier-empty">No evaluations yet. Waiting for first signal…</div>';
+    return;
+  }
+  let html = '<div class="vrow vrow-head">' +
+    '<div>Time</div><div>Asset</div><div>Sig</div><div>Verdict</div>' +
+    '<div>P(win)</div><div>Features</div><div>Reason</div></div>';
+  evals.forEach(v => {
+    const d = v.data || {};
+    const sig = d.signal || '?';
+    const sigClass = sig === 'CALL' ? 'call' : 'put';
+    const verdict = (d.verdict || 'PASS').toUpperCase();
+    const pWin = d.p_win != null ? (d.p_win * 100).toFixed(0) + '%' : '—';
+    const features = d.features || [];
+    const activeFeatures = features
+      .map((f, i) => ({f, i, name: ['f1','f2','f3','f4','f5','f6','f7','f8'][i]}))
+      .filter(x => Math.abs(x.f) > 0.3)
+      .map(x => x.name + (x.f >= 0 ? '+' : '') + x.f.toFixed(1))
+      .join(' ') || 'none active';
+    const reason = (v.message || '').slice(0, 60);
+    html += '<div class="vrow">' +
+      '<div class="v-time">' + fmtAgentTime(v.ts) + '</div>' +
+      '<div class="v-asset">' + fmtAgentAsset(v.asset) + '</div>' +
+      '<div class="v-signal ' + sigClass + '">' + sig + '</div>' +
+      '<div class="v-verdict ' + verdict.toLowerCase() + '">' + verdict + '</div>' +
+      '<div class="v-conf">' + pWin + '</div>' +
+      '<div class="v-layers" style="font-size:9px">' + activeFeatures + '</div>' +
+      '<div class="v-conf" style="font-size:10px;color:#8b949e">' + reason + '</div>' +
+      '</div>';
+  });
+  tbl.innerHTML = html;
+}
+
+async function fetchAgentStatus(){
+  try{
+    const r = await fetch('/api/agent/status');
+    if(!r.ok) return;
+    const data = await r.json();
+    updateAgentStatus(data);
+  }catch(e){}
+}
+
+async function fetchAgentLive(){
+  try{
+    const r = await fetch('/api/agent/live?limit=40');
+    if(!r.ok) return;
+    const data = await r.json();
+    renderAgentLive(data);
+    renderAgentRecent(data);
+  }catch(e){}
+}
+
+async function fetchAgentFeatures(){
+  const $ = (id) => document.getElementById(id);
+  if(!$('agent-features-grid')) return;
+  if(!window.currentAsset) return;
+  try{
+    const r = await fetch('/api/agent/features/' + encodeURIComponent(window.currentAsset));
+    if(!r.ok) return;
+    const data = await r.json();
+    renderAgentFeatures(data);
+  }catch(e){}
+}
+
+async function fetchAgentModels(){
+  const $ = (id) => document.getElementById(id);
+  if(!$('agent-models-table')) return;
+  try{
+    const r = await fetch('/api/agent/models');
+    if(!r.ok) return;
+    const data = await r.json();
+    renderAgentModels(data);
+  }catch(e){}
+}
+
+function startAgentPanel(){
+  if(_agentPollTimer) return;
+  const $ = (id) => document.getElementById(id);
+  if(!$('vstat-total')) return;
+  fetchAgentStatus();
+  fetchAgentLive();
+  fetchAgentModels();
+  _agentPollTimer = setInterval(() => {
+    fetchAgentStatus();
+    fetchAgentLive();
+  }, 3000);
+  _agentFeatureTimer = setInterval(fetchAgentFeatures, 2000);
+  _agentModelTimer = setInterval(fetchAgentModels, 10000);
+}
+
+if(document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', startAgentPanel);
+} else {
+  startAgentPanel();
+}
