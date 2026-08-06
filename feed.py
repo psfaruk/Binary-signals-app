@@ -36,6 +36,11 @@ HOUSEKEEP_SECS = int(os.environ.get("HOUSEKEEP_SECS", "5"))
 WATCHDOG_INTERVAL = float(os.environ.get("WATCHDOG_INTERVAL", "30.0"))
 GLOBAL_STALE_SECS = int(os.environ.get("GLOBAL_STALE_SECS", "180"))
 MAX_ALWAYS_ON_STREAMS = int(os.environ.get("MAX_ALWAYS_ON_STREAMS", "30"))
+# Share of the always-on cap reserved for REAL-market pairs. Quotex offers far
+# more OTC instruments than the cap allows, so without a reserved share the
+# OTC list takes every slot and the Real tab gets no background streams at all.
+# Unused quota is donated to the other category — see _eligible_always_on().
+ALWAYS_ON_REAL_SHARE = float(os.environ.get("QX_ALWAYS_ON_REAL_SHARE", "0.4"))
 # Loss-cluster cooldown: 5 wrong in a row → 30-min cooldown.
 LOSS_COOLDOWN_SEC = int(os.environ.get("QX_LOSS_COOLDOWN_SEC", "1800"))
 LOSS_COOLDOWN_THRESHOLD = int(os.environ.get("QX_LOSS_THRESHOLD", "999"))
@@ -2449,8 +2454,20 @@ class QuotexFeed:
         self._connected_event.clear()
         self._record_stream_error()
 
-    def _reconcile_always_on(self) -> None:
-        """Keep eligible forex pairs running as ALWAYS-ON 1m streams."""
+    def _eligible_always_on(self) -> set[tuple[str, int]]:
+        """The prioritised, CAPPED set of (asset, period) to keep always-on.
+
+        FIX (STREAM-CAP-2026-08-06): this used to live only inside
+        _reconcile_always_on(), while _watchdog_always_on() rebuilt its own
+        UNCAPPED eligibility set and created a stream for every entry in it —
+        so the watchdog silently undid the cap a few seconds after reconcile
+        applied it. The bug was invisible while only ~22 pairs were eligible
+        (under the 30 cap), but the pair-split fix raised eligibility to 51 and
+        the watchdog promptly opened 48 always-on subscriptions. Quotex
+        silently drops subscriptions past ~15 concurrent and bans at ~76
+        subscribe attempts / 20 min, so this is how you lose the token.
+        Both callers now share this one capped source of truth.
+        """
         eligible_all = set()
         for p in self._pairs_list:
             is_curated_otc = p["asset"].endswith("_otc")
@@ -2462,21 +2479,33 @@ class QuotexFeed:
             elif not p.get("locked"):
                 # Real pair — eligible only if not locked.
                 eligible_all.add((p["asset"], 60))
-        otc_assets = {p["asset"] for p in self._pairs_list
-                      if p["asset"].endswith("_otc")}
         _MAX = MAX_ALWAYS_ON_STREAMS  # module-level constant
-        _prioritized = []
-        for key in eligible_all:
-            asset = key[0]
-            if asset in otc_assets:
-                priority = 0  # OTC — always tradeable, highest priority
-            else:
-                priority = 1  # real pair
-            pair_info = next((p for p in self._pairs_list if p["asset"] == asset), {})
-            payout = pair_info.get("payout") or 0
-            _prioritized.append((key, priority, -payout))
-        _prioritized.sort(key=lambda x: (x[1], x[2]))
-        eligible = {item[0] for item in _prioritized[:_MAX]}
+        _by_asset = {p["asset"]: p for p in self._pairs_list}
+
+        def _payout(key):
+            return (_by_asset.get(key[0], {}).get("payout") or 0)
+
+        # Rank within each category by payout, best first.
+        otc = sorted((k for k in eligible_all if k[0].endswith("_otc")),
+                     key=lambda k: (-_payout(k), k[0]))
+        real = sorted((k for k in eligible_all if not k[0].endswith("_otc")),
+                      key=lambda k: (-_payout(k), k[0]))
+
+        # FIX (STREAM-QUOTA-2026-08-06): the old rule was a flat "OTC first,
+        # then real", which was harmless when only 17 OTC pairs existed but
+        # starves the Real tab now that 32 do — 32 OTC pairs would take every
+        # slot and no real pair would ever get a background stream, so the
+        # Real tab would have no signal history until a user manually opened
+        # each pair. Each category now gets a guaranteed share of the cap, and
+        # whichever category has spare capacity donates it to the other.
+        real_quota = min(len(real), max(1, int(round(_MAX * ALWAYS_ON_REAL_SHARE))))
+        otc_quota = min(len(otc), _MAX - real_quota)
+        real_quota = min(len(real), _MAX - otc_quota)   # absorb OTC leftovers
+        return set(otc[:otc_quota]) | set(real[:real_quota])
+
+    def _reconcile_always_on(self) -> None:
+        """Keep eligible forex pairs running as ALWAYS-ON 1m streams."""
+        eligible = self._eligible_always_on()
         for key, s in list(self._streams.items()):
             if s.always_on and key not in eligible:
                 s.always_on = False
@@ -2492,18 +2521,13 @@ class QuotexFeed:
                 s.idle_since = None
 
     async def _watchdog_always_on(self) -> None:
-        """Restart dead always_on streams. CRITICAL for Railway deployment."""
-        eligible_assets = set()
-        for p in self._pairs_list:
-            is_curated_otc = p["asset"].endswith("_otc")
-            is_live_real = (not is_curated_otc) and p["status"] == "live" and not p.get("locked")
-            if not (is_curated_otc or is_live_real):
-                continue
-            if is_curated_otc:
-                eligible_assets.add(p["asset"])
-            elif not p.get("locked"):
-                # Real pair — eligible only if not locked.
-                eligible_assets.add(p["asset"])
+        """Restart dead always_on streams. CRITICAL for Railway deployment.
+
+        Uses the SAME capped eligibility as _reconcile_always_on() — see
+        _eligible_always_on(). Building an independent uncapped set here is
+        what let the always-on count reach 48 against a cap of 30.
+        """
+        eligible_assets = {a for a, _p in self._eligible_always_on()}
         for asset in eligible_assets:
             key = (asset, 60)  # always_on is always 1m
             stream = self._streams.get(key)

@@ -41,6 +41,7 @@ else:
     print("[server] QX_USE_RAW_WS=0 — vendored pyquotex with Firefox TLS " "(Cloudflare bypass)")
 
 # Always import the real feed. sim_feed.py is no longer used.
+import feed as _feed_mod
 from feed import QuotexFeed as _Feed
 print("[server] ✅ using REAL Quotex feed (live data only — sim mode disabled)")
 
@@ -1314,7 +1315,15 @@ async def streaming_status():
         "on_demand_streams": len(on_demand),
         "streams_with_recent_ticks": recent_ticks,
         "stale_streams": stale_streams,
-        "max_always_on": int(os.environ.get("MAX_ALWAYS_ON_STREAMS", "15")),
+        # Read the value feed.py actually enforces. This used to re-read the
+        # env var with its own default of "15" while feed.py defaulted to
+        # "30", so the dashboard reported a cap that was never in force.
+        "max_always_on": getattr(_feed_mod, "MAX_ALWAYS_ON_STREAMS", None),
+        "always_on_over_cap": max(
+            0, len(always_on) - (getattr(_feed_mod, "MAX_ALWAYS_ON_STREAMS", 0) or 0)),
+        "streams_never_ticked": sum(
+            1 for _k, s in streams.items()
+            if not getattr(s, 'last_real_tick_wall', 0)),
         "total_configured_pairs": len(getattr(feed, '_pairs_list', [])),
         "quotex_limits": {"concurrent_subscriptions": "~15 (silent drops above this)", "tick_rate_per_pair": "~5-10/sec", "ping_interval": "25s", "anti_abuse_threshold": "76 attempts/20min → ban"},
         "recommendation": (
