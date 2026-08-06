@@ -3189,12 +3189,28 @@ function computePairWinRates(statsData){
        modules: [...]
        pairs: { "EURUSD_otc": { "candle_reaction": {...}, "pattern": {...}, ... }, ... }
      Each per-pair-per-module entry has: total, correct, wrong, win_pct.
-     We aggregate per pair to get an overall pair win rate. */
+     We aggregate per pair to get an overall pair win rate.
+
+     FIX (USER REPORT 2026-08-06): /api/stats.pairs is app-wide — it carries
+     ALL 19 assets from BOTH categories. This loop had no category filter, so
+     the win-rate dropdown rendered the Real AND the OTC copy of every shared
+     symbol on BOTH pages. Combined with prettyPairName() stripping the `_otc`
+     suffix, EURUSD and EURUSD_otc both rendered as the label "EUR/USD" — the
+     same pair appearing twice with different numbers, and the OTC row (broker
+     -synthetic prices) showing up on the Live page as if it were real-market
+     data. Now filtered to the active category, matching every other pair
+     surface in the app (#pair-select, #history-pair-select,
+     #stats-pair-select), which have always filtered on currentCategory. */
   if(!statsData || !statsData.pairs) return [];
   const result = [];
   const pairsObj = statsData.pairs;
   for(const asset in pairsObj){
     if(!Object.prototype.hasOwnProperty.call(pairsObj, asset)) continue;
+    // OTC assets belong to the OTC page only; real-market assets to the Live
+    // page only. `_otc` suffix is the single source of truth for category —
+    // it's what feed.available_pairs() splits real_pairs/otc_pairs on.
+    const isOtcAsset = /_otc$/i.test(asset);
+    if(isOtcAsset !== (currentCategory === 'otc')) continue;
     const modulesObj = pairsObj[asset];
     let total = 0, correct = 0, wrong = 0;
     for(const modKey in modulesObj){
@@ -3222,13 +3238,20 @@ function computePairWinRates(statsData){
 
 function prettyPairName(asset){
   if(!asset) return '—';
+  // FIX (USER REPORT 2026-08-06): keep the OTC marker in the label. Stripping
+  // it made EURUSD and EURUSD_otc render as the identical string "EUR/USD",
+  // so anywhere the two categories met the user saw the same pair listed
+  // twice with no way to tell which row was broker-synthetic OTC and which
+  // was real-market. Callers are all label/heading text — nothing compares
+  // this string against an asset id — so the suffix is safe to keep.
+  const isOtc = /_otc$/i.test(asset);
   let s = String(asset).replace(/_(otc|real)$/i, '');
   // EURUSD → EUR/USD
   if(s.length === 6 && /^[A-Z]{6}$/.test(s)){
-    return s.slice(0,3) + '/' + s.slice(3);
+    s = s.slice(0,3) + '/' + s.slice(3);
   }
-  // Otherwise just return as-is (already a display name) — fallback
-  return s;
+  // Otherwise leave as-is (already a display name) — fallback
+  return isOtc ? s + ' OTC' : s;
 }
 
 function classifyPct(pct){
@@ -3239,19 +3262,22 @@ function classifyPct(pct){
 }
 
 function renderWinRateButton(statsData){
-  /* Update the header button label with overall win rate */
+  /* Update the header button label with overall win rate.
+
+     FIX (USER REPORT 2026-08-06): was reading the app-wide
+     `overall_win_pct` (Real + OTC combined), so the header pill on the Live
+     page reported a number driven mostly by OTC signals. Derived from the
+     category-filtered per-pair aggregate instead, so it matches the pills
+     and the pair rows in the dropdown below it. */
   const btnEl = $('winrate-pct');
   if(!btnEl) return;
   let overallPct = null;
-  let totalGraded = 0;
-  if(statsData){
-    totalGraded = (statsData.total_graded_signals || statsData.total_graded || 0);
-    if(statsData.overall_win_pct != null){
-      overallPct = Math.round(statsData.overall_win_pct);
-    } else if(statsData.total_correct != null && totalGraded > 0){
-      overallPct = Math.round((statsData.total_correct / totalGraded) * 100);
-    }
+  let catCorrect = 0, catGraded = 0;
+  for(const p of computePairWinRates(statsData)){
+    catCorrect += (p.correct || 0);
+    catGraded += (p.graded || 0);
   }
+  if(catGraded > 0) overallPct = Math.round((catCorrect / catGraded) * 100);
   if(overallPct == null){
     btnEl.textContent = '—%';
     btnEl.className = 'winrate-pct';
@@ -3279,14 +3305,21 @@ function renderWinRateDropdown(statsData){
   const bestEl = $('winrate-best');
   const worstEl = $('winrate-worst');
 
-  const overallPct = statsData && statsData.overall_win_pct != null
-    ? Math.round(statsData.overall_win_pct) : null;
+  /* FIX (USER REPORT 2026-08-06): these two pills used the server's app-wide
+     `overall_win_pct` / `total_graded_signals`, which aggregate BOTH
+     categories. With 14 OTC pairs against 5 real ones, the Live page's
+     headline win rate was dominated by OTC (broker-synthetic) results — the
+     same cross-tab leak as the duplicated pair rows below. Recompute both
+     from `pairs`, which computePairWinRates() now filters to the active
+     category, so the pills describe the page you're actually on. */
+  let catCorrect = 0, catGraded = 0;
+  for(const p of pairs){ catCorrect += (p.correct || 0); catGraded += (p.graded || 0); }
+  const overallPct = catGraded > 0 ? Math.round((catCorrect / catGraded) * 100) : null;
   if(overallEl){
     if(overallPct == null){ overallEl.textContent = '—'; overallEl.className = 'pill-value'; }
     else { overallEl.textContent = overallPct + '%'; overallEl.className = 'pill-value ' + classifyPct(overallPct); }
   }
-  const totalGraded = statsData ? (statsData.total_graded_signals || statsData.total_graded || 0) : 0;
-  if(signalsEl) signalsEl.textContent = totalGraded;
+  if(signalsEl) signalsEl.textContent = catGraded;
 
   /* Best/Worst — graded pairs with enough samples to mean anything.
      FIX (MODULE-TRACKING-2026-08-05): the filter was `p.graded > 0`, so a pair
@@ -4087,8 +4120,14 @@ async function renderTimePatterns(){
   else if(Array.isArray(data.hourly_patterns)) rows = data.hourly_patterns;
   else if(data.hours && Array.isArray(data.hours)) rows = data.hours;
   else if(data.pairs){
-    /* Per-pair aggregate — show each pair's best hour */
-    const pairsArr = Object.keys(data.pairs).map(k => ({pair:k, hours:data.pairs[k]}));
+    /* Per-pair aggregate — show each pair's best hour.
+       FIX (USER REPORT 2026-08-06): same category filter as
+       computePairWinRates(). This payload is app-wide, so without it the
+       Time Patterns view would list the Real and the OTC copy of every
+       shared symbol side by side on both pages. */
+    const pairsArr = Object.keys(data.pairs)
+      .filter(k => /_otc$/i.test(k) === (currentCategory === 'otc'))
+      .map(k => ({pair:k, hours:data.pairs[k]}));
     if(pairsArr.length === 0){
       container.innerHTML = '<div class="accuracy-empty">No time-pattern data yet.</div>';
       return;
