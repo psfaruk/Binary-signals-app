@@ -974,22 +974,45 @@ class QuotexFeed:
         # Real-time multi-layer verification on actual candle + tick data.
         # Sits between engine prediction and broadcast. Issues VETO/WEAKEN/
         # CONFIRM verdict that can modify or kill the signal.
-        # Env toggle: QX_SIGNAL_VERIFIER=1 enables (default OFF for safety).
-        if os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1" and \
+        # Two analyzers available:
+        #   QX_SIGNAL_VERIFIER=1 → old statistical verifier (signal_verifier.py)
+        #   QX_REALTIME_ANALYZER=1 → new real-time ms analyzer (realtime_analyzer.py)
+        # If both enabled, REALTIME_ANALYZER takes precedence.
+        _use_realtime = os.environ.get("QX_REALTIME_ANALYZER", "0") == "1"
+        _use_verifier = os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1"
+        if (_use_realtime or _use_verifier) and \
                 result.get("signal") in ("CALL", "PUT"):
             try:
-                from core.signal_verifier import verify_signal, _record_verdict
                 from datetime import datetime, timezone
                 _verify_hour = datetime.now(timezone.utc).hour
-                _tick_prices = [t for t in base_ticks if isinstance(t, (int, float))]
-                if hasattr(_tick_prices, '__len__') and len(_tick_prices) > 0 and \
-                        isinstance(_tick_prices[0], dict):
-                    _tick_prices = [t.get('price', t.get('close', 0))
-                                    for t in _tick_prices]
                 _orig_signal = result.get("signal")
                 _orig_conf = result.get("confidence", 0)
-                _verify = verify_signal(result, closed, _tick_prices,
-                                        stream.asset, _verify_hour)
+
+                if _use_realtime:
+                    from core.realtime_analyzer import (
+                        analyze_realtime, _record_verdict as _record_rt,
+                    )
+                    # current candle ticks = stream.ticks (first tick(s) of new candle)
+                    # previous candle ticks = base_ticks (just-closed candle)
+                    _curr_ticks = list(stream.ticks)
+                    _prev_ticks = list(base_ticks)
+                    _verify = analyze_realtime(
+                        result, closed, _curr_ticks, _prev_ticks, stream.asset)
+                    _record_fn = _record_rt
+                else:
+                    from core.signal_verifier import (
+                        verify_signal, _record_verdict,
+                    )
+                    _tick_prices = [t for t in base_ticks
+                                     if isinstance(t, (int, float))]
+                    if hasattr(_tick_prices, '__len__') and len(_tick_prices) > 0 and \
+                            isinstance(_tick_prices[0], dict):
+                        _tick_prices = [t.get('price', t.get('close', 0))
+                                        for t in _tick_prices]
+                    _verify = verify_signal(result, closed, _tick_prices,
+                                            stream.asset, _verify_hour)
+                    _record_fn = _record_verdict
+
                 _verdict = _verify.get("verdict", "PASS")
                 _adj = _verify.get("confidence_adjustment", 1.0)
                 if _verdict == "VETO":
@@ -1014,7 +1037,7 @@ class QuotexFeed:
                 }
                 result["verifier_conf_mult"] = _adj
                 # Record for /api/verifier/status visibility
-                _record_verdict(
+                _record_fn(
                     asset=stream.asset,
                     signal=_orig_signal,
                     hour_utc=_verify_hour,

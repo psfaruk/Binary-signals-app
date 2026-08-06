@@ -276,11 +276,12 @@
         <div class="verifier-layers-legend">
           <h3>🔍 Layer Analysis (per verdict)</h3>
           <div class="legend-grid">
-            <div class="legend-item"><span class="legend-icon">L1</span> <b>Price Action</b> — last 3 candle bodies vs signal direction</div>
-            <div class="legend-item"><span class="legend-icon">L2</span> <b>Wick Rejection</b> — long wick = rejection from that side</div>
-            <div class="legend-item"><span class="legend-icon">L3</span> <b>Tick Momentum</b> — last 30 ticks velocity vs signal</div>
-            <div class="legend-item"><span class="legend-icon">L4</span> <b>Key Levels</b> — swing high/low proximity</div>
-            <div class="legend-item"><span class="legend-icon">L5</span> <b>Historical Pattern</b> — same setup win rate last 7d</div>
+            <div class="legend-item"><span class="legend-icon">L1</span> <b>Pre-Candle Momentum</b> — last 5s of previous candle (velocity + acceleration in ATR/sec)</div>
+            <div class="legend-item"><span class="legend-icon">L2</span> <b>Opening Behavior</b> — first 3s of new candle (gap + continuation vs prev close)</div>
+            <div class="legend-item"><span class="legend-icon">L3</span> <b>Tick Arrival Rate</b> — broker behavior (slowdown = throttle, burst = spike risk)</div>
+            <div class="legend-item"><span class="legend-icon">L4</span> <b>Micro-Volatility</b> — per-second price change in ATR (spike = slippage)</div>
+            <div class="legend-item"><span class="legend-icon">L5</span> <b>Order Flow</b> — tick rule (uptick/downtick ratio over last 30 ticks)</div>
+            <div class="legend-item"><span class="legend-icon">L6</span> <b>HTF Alignment</b> — 5-min EMA proxy vs 20-min (counter-trend = weaken)</div>
           </div>
         </div>
       </div>

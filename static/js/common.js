@@ -3091,11 +3091,14 @@ function renderVerifierRecent(data){
   data.verdicts.slice(0, 30).forEach(v => {
     const sigClass = v.signal === 'CALL' ? 'call' : 'put';
     const layers = v.layers || {};
-    const layerStr = 'L1'+_verifierLayerBadge(layers.L1_price_action)+' ' +
-                     'L2'+_verifierLayerBadge(layers.L2_wick_rejection)+' ' +
-                     'L3'+_verifierLayerBadge(layers.L3_tick_momentum)+' ' +
-                     'L4'+_verifierLayerBadge(layers.L4_key_level)+' ' +
-                     'L5'+_verifierLayerBadge(layers.L5_historical);
+    // Support both old verifier layer names (L1_price_action...) and
+    // new realtime analyzer names (L1_pre_candle_momentum...)
+    const layerStr = 'L1'+_verifierLayerBadge(layers.L1_pre_candle_momentum || layers.L1_price_action)+' ' +
+                     'L2'+_verifierLayerBadge(layers.L2_opening_behavior || layers.L2_wick_rejection)+' ' +
+                     'L3'+_verifierLayerBadge(layers.L3_tick_arrival_rate || layers.L3_tick_momentum)+' ' +
+                     'L4'+_verifierLayerBadge(layers.L4_micro_volatility || layers.L4_key_level)+' ' +
+                     'L5'+_verifierLayerBadge(layers.L5_order_flow || layers.L5_historical) +
+                     (layers.L6_htf_alignment ? ' L6'+_verifierLayerBadge(layers.L6_htf_alignment) : '');
     const confStr = v.original_conf + '→' + v.final_conf +
       (v.final_signal === 'NEUTRAL' ? ' ✗' : '');
     const reason = (v.reason || '').split('|').slice(-1)[0].trim().slice(0, 80);
