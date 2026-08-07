@@ -29,6 +29,71 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     if category == "alltime_otc":
         category = "otc"
 
+    # ── BREAKEVEN GATE (DEEP-FIX-2026-08-07) ──────────────────────────────
+    # Before running the full prediction pipeline (7 modules × weighted blend
+    # × agent evaluation), check whether this pair historically beats its
+    # payout-adjusted breakeven rate. If the pair is a proven loser, skip
+    # the expensive prediction and return NEUTRAL immediately.
+    # This prevents chronic-loser pairs (BRLUSD_otc 44.3%, USDCOP_otc 44.8%,
+    # USDBDT_otc 45.4%) from generating losing signals all day.
+    # Disabled via QX_BREAKEVEN_GATE=0.
+    try:
+        if os.environ.get("QX_BREAKEVEN_GATE", "1") == "1" and asset:
+            from core.breakeven import is_pair_profitable as _is_profitable
+            _is_prof, _breason, _wr, _be, _n = _is_profitable(asset, period)
+            if not _is_prof:
+                print(f"[engines] ⛔ BREAKEVEN GATE: {_breason}")
+                # Send alert (debounced per-asset so it doesn't spam)
+                try:
+                    import alerts as _alerts
+                    from core.breakeven import breakeven_for_payout as _be_for_payout
+                    _alerts.breakeven_gate_triggered(asset, _wr, _be)
+                except Exception:
+                    pass
+                return {
+                    "signal": "NEUTRAL",
+                    "confidence": 0,
+                    "strength": "WEAK",
+                    "score": 0.0,
+                    "reasons": [_breason],
+                    "modules": {},
+                    "regime": "breakeven_gate",
+                    "category": category if category in ("otc", "real") else "otc",
+                    "breakeven_gate": True,
+                    "pair_win_rate": _wr,
+                    "breakeven_pct": _be,
+                    "sample_count": _n,
+                    "skipped": True,
+                }
+    except Exception as _be_gate_exc:
+        # Never let the breakeven gate crash the prediction pipeline.
+        print(f"[engines] breakeven gate check failed for {asset}: {_be_gate_exc}")
+
+    # ── PAIR HEALTH GATE (DEEP-FIX-2026-08-07) ────────────────────────────
+    # Check if the pair is in cooldown (≥8 consecutive losses → skip 30 min).
+    # This is a faster-acting gate than the breakeven gate — it catches
+    # intraday regime changes before they accumulate into a bad day.
+    try:
+        if os.environ.get("QX_PAIR_HEALTH_GATE", "1") == "1" and asset:
+            from core.pair_health import is_pair_healthy as _is_healthy
+            _healthy, _hreason = _is_healthy(asset)
+            if not _healthy:
+                print(f"[engines] ⛔ PAIR HEALTH: {_hreason}")
+                return {
+                    "signal": "NEUTRAL",
+                    "confidence": 0,
+                    "strength": "WEAK",
+                    "score": 0.0,
+                    "reasons": [f"[PAIR_HEALTH] {_hreason}"],
+                    "modules": {},
+                    "regime": "pair_health_gate",
+                    "category": category if category in ("otc", "real") else "otc",
+                    "pair_health_gate": True,
+                    "skipped": True,
+                }
+    except Exception as _ph_exc:
+        print(f"[engines] pair health check failed for {asset}: {_ph_exc}")
+
     # Trap-hour auto-skip: NEUTRAL for (asset, hour) pairs the live brain flagged.
     try:
         _now_utc = _datetime.now(_timezone.utc)

@@ -26,7 +26,7 @@ def analyze(candles, ctx: MarketContext) -> list:
     trend_regime = regime.get("regime", "RANGE")
     trend_strength = regime.get("trend_strength", 0.0)
 
-    # SIGNAL 1: Support wick rejection
+    # SIGNAL 1: Support / Resistance wick rejection
     if level_conf.get("near_level", False):
         lvl_type = level_conf.get("level_type")
         action = level_conf.get("action")
@@ -40,6 +40,15 @@ def analyze(candles, ctx: MarketContext) -> list:
                         module_name="key_level", direction="CALL", score=4, confidence=70,
                         signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
                         reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) -> CALL (failed breakdown)"]))
+                # FIX (DEEP-FIX-2026-08-07 / A-17 B09): Resistance wick rejection → PUT
+                # was MISSING — only support → CALL existed, creating a structural
+                # CALL bias. Resistance rejection (price spikes above resistance but
+                # closes back below) is a classic bearish reversal signal.
+                elif lvl_type == "resistance":
+                    results.append(ModuleResult(
+                        module_name="key_level", direction="PUT", score=4, confidence=70,
+                        signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
+                        reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) -> PUT (failed breakout)"]))
 
     # SIGNAL 3: Previous candle high/low as micro-S/R (prev_low only)
     if len(candles) >= 2 and atr > 0:

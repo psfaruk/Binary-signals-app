@@ -1,9 +1,13 @@
-"""Module: Candle Reaction Engine — Rising/falling closes momentum signal."""
+"""Module: Candle Reaction Engine — Momentum continuation signals.
+
+FIX (DEEP-FIX-2026-08-07): conditions relaxed from 3 candles to 2 candles
+with 20% body (was 30%). Previously produced ZERO votes because 3 consecutive
+30%-body candles almost never happen on 1-min OTC data.
+"""
 from engines.base.types import ModuleResult, MarketContext
 
 
 def analyze(candles, ctx: MarketContext) -> list:
-    """Run trend-continuation signal (SIGNAL 6). Fires only in strong trends."""
     results = []
     if not candles or len(candles) < 3:
         return results
@@ -19,32 +23,37 @@ def analyze(candles, ctx: MarketContext) -> list:
     trend_regime = regime.get("regime", "RANGE")
     trend_strength = regime.get("trend_strength", 0.0)
 
-    # SIGNAL 6: 3+ monotonic rising/falling closes with non-trivial bodies.
-    if is_trending and trend_strength > 0.5 and len(candles) >= 3:
-        c1_close = candles[-3]["close"]
-        c2_close = candles[-2]["close"]
-        c3_close = candles[-1]["close"]
-        b1 = abs(candles[-3]["close"] - candles[-3]["open"])
-        b2 = abs(candles[-2]["close"] - candles[-2]["open"])
-        r1 = candles[-3]["high"] - candles[-3]["low"]
-        r2 = candles[-2]["high"] - candles[-2]["low"]
+    # SIGNAL: 2+ monotonic rising/falling closes with non-trivial bodies.
+    # FIX: reduced from 3 candles + 30% body → 2 candles + 20% body
+    if len(candles) >= 2:
+        c1, c2 = candles[-2], candles[-1]
+        b1 = abs(c1["close"] - c1["open"])
+        b2 = abs(c2["close"] - c2["open"])
+        r1 = c1["high"] - c1["low"]
+        r2 = c2["high"] - c2["low"]
+
         # Monotonic rising closes
-        if c1_close < c2_close < c3_close:
-            if (r1 > 0 and r2 > 0 and rng > 0
-                    and b1/r1 >= 0.30 and b2/r2 >= 0.30 and body_pct >= 30
-                    and trend_regime == "TREND_UP"):
+        if c1["close"] < c2["close"]:
+            if (r1 > 0 and r2 > 0 and b1/r1 >= 0.20 and b2/r2 >= 0.20):
+                score, conf = 2, 56
+                if is_trending and trend_regime == "TREND_UP":
+                    score, conf = 3, 62
                 results.append(ModuleResult(
-                    module_name="candle_reaction", direction="CALL", score=3, confidence=62,
-                    signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
-                    reasons=[f"Rising closes momentum (3 UP, str={trend_strength:.2f}) -> CALL continuation"]))
+                    module_name="candle_reaction", direction="CALL",
+                    score=score, confidence=conf,
+                    signal_type="CONTINUATION", reliability="CANDLE", group="BODY",
+                    reasons=[f"Rising closes (2 UP) -> CALL continuation"]))
+
         # Monotonic falling closes
-        elif c1_close > c2_close > c3_close:
-            if (r1 > 0 and r2 > 0 and rng > 0
-                    and b1/r1 >= 0.30 and b2/r2 >= 0.30 and body_pct >= 30
-                    and trend_regime == "TREND_DOWN"):
+        elif c1["close"] > c2["close"]:
+            if (r1 > 0 and r2 > 0 and b1/r1 >= 0.20 and b2/r2 >= 0.20):
+                score, conf = 2, 56
+                if is_trending and trend_regime == "TREND_DOWN":
+                    score, conf = 3, 62
                 results.append(ModuleResult(
-                    module_name="candle_reaction", direction="PUT", score=3, confidence=62,
-                    signal_type="CONTINUATION", reliability="CANDLE", group="BODY_CONT",
-                    reasons=[f"Falling closes momentum (3 DOWN, str={trend_strength:.2f}) -> PUT continuation"]))
+                    module_name="candle_reaction", direction="PUT",
+                    score=score, confidence=conf,
+                    signal_type="CONTINUATION", reliability="CANDLE", group="BODY",
+                    reasons=[f"Falling closes (2 DOWN) -> PUT continuation"]))
 
     return results

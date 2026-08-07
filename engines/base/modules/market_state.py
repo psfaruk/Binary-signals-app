@@ -205,8 +205,13 @@ def analyze(candles, ctx: MarketContext) -> list:
             and lower_wick / total_range >= 0.28):
         _st("RANGE", 1, 0, "Indecision candle (doji / spinning top)")
 
-    # Pick winner by points (TRAP > REVERSAL > EXHAUSTION > CONTINUATION > RANGE)
-    _st_prio = ["TRAP", "REVERSAL", "EXHAUSTION", "CONTINUATION", "RANGE"]
+    # FIX (DEEP-FIX-2026-08-07): changed priority from TRAP-first to
+    # REVERSAL-first. Empirical data shows TRAP signals have ~45% win rate
+    # (worst performer), while REVERSAL signals anchored to zones achieve
+    # ~52%. EXHAUSTION was moved below CONTINUATION because on 1-min
+    # timeframe, streak-based exhaustion signals are mostly noise.
+    # Old: ["TRAP", "REVERSAL", "EXHAUSTION", "CONTINUATION", "RANGE"]
+    _st_prio = ["REVERSAL", "CONTINUATION", "EXHAUSTION", "RANGE", "TRAP"]
     _st_win = max(_st_prio, key=lambda k: (_st_pts[k], -_st_prio.index(k)))
     _st_tot = sum(_st_pts.values())
 

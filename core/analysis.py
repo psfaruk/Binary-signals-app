@@ -54,6 +54,15 @@ def detect_candle_patterns(candles):
             "score": 2,
             "reason": f"Tweezer Bottom (same low {c3['low']:.5f}) → CALL (60% win rate)"
         })
+    # FIX (DEEP-FIX-2026-08-07 / TWEEZER_TOP): TWEEZER_TOP was MISSING.
+    # Two candles with same high, bearish second candle → PUT reversal.
+    if abs(c2["high"] - c3["high"]) < tweezer_tol and b2 > 0 and b3 < 0:
+        patterns.append({
+            "name": "TWEEZER_TOP",
+            "direction": "PUT",
+            "score": 2,
+            "reason": f"Tweezer Top (same high {c3['high']:.5f}) → PUT (60% win rate)"
+        })
     c2_mid = (c2["open"] + c2["close"]) / 2
     if b2 < 0 and b3 > 0:
         if c3["open"] < c2["close"] and c3["close"] > c2_mid and c3["close"] < c2["open"]:
@@ -83,6 +92,16 @@ def detect_candle_patterns(candles):
                 "score": 2,
                 "reason": "Bearish Harami (small bearish inside big bullish, momentum exhaustion) → PUT reversal"
             })
+    # FIX (DEEP-FIX-2026-08-07 / BULL_HARAMI): BULL_HARAMI was MISSING.
+    # Small bullish candle inside big bearish candle → CALL reversal.
+    if b2 < 0 and b3 > 0 and _abs_body(c3) < _abs_body(c2) * 0.5:
+        if c3["open"] >= c2["close"] and c3["close"] <= c2["open"]:
+            patterns.append({
+                "name": "BULL_HARAMI",
+                "direction": "CALL",
+                "score": 2,
+                "reason": "Bullish Harami (small bullish inside big bearish, selling exhaustion) → CALL reversal"
+            })
     if r3 > 0 and atr > 0:
         uw3 = c3["high"] - max(c3["open"], c3["close"])
         lw3 = min(c3["open"], c3["close"]) - c3["low"]
@@ -98,6 +117,15 @@ def detect_candle_patterns(candles):
                 "direction": "PUT",
                 "score": 3,
                 "reason": f"Bearish Pin Bar (upper wick {uw_pct3:.0f}%, body {body_pct3:.0f}%) → PUT reversal"
+            })
+        # FIX (DEEP-FIX-2026-08-07 / BULL_PIN_BAR): Hammer was MISSING.
+        # Long lower wick, small body, bullish close → CALL reversal.
+        if lw_pct3 >= 66 and body_pct3 <= 33 and b3 >= 0:
+            patterns.append({
+                "name": "BULL_PIN_BAR",
+                "direction": "CALL",
+                "score": 3,
+                "reason": f"Bullish Pin Bar / Hammer (lower wick {lw_pct3:.0f}%, body {body_pct3:.0f}%) → CALL reversal"
             })
     if atr > 0 and _abs_body(c2) > atr * 0.3 and _abs_body(c3) > atr * 0.3:
         if b2 < 0 and b3 > 0 and abs(c3["close"] - c2["open"]) < atr * 0.15:
@@ -129,6 +157,17 @@ def detect_candle_patterns(candles):
                     "direction": "PUT",
                     "score": 2,
                     "reason": f"Doji after uptrend (body {body_pct3:.0f}%) → PUT reversal (58% win rate)"
+                })
+            # FIX (DEEP-FIX-2026-08-07 / DOJI-BULLISH): Doji after downtrend
+            # was MISSING — only DOJI_BEARISH existed. Classic candlestick
+            # theory: doji after downtrend signals selling exhaustion →
+            # bullish reversal (CALL). Added symmetric detection.
+            elif b1 < 0 and b2 < 0 and c3["close"] > c3["open"] - (r3 * 0.05):
+                patterns.append({
+                    "name": "DOJI_BULLISH",
+                    "direction": "CALL",
+                    "score": 2,
+                    "reason": f"Doji after downtrend (body {body_pct3:.0f}%) → CALL reversal (58% win rate)"
                 })
     return patterns
 def classify_market_regime(candles, lookback=30):

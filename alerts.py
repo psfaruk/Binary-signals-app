@@ -53,3 +53,50 @@ def feed_recovered() -> None:
 
 def all_streams_stale(stale_count: int, total: int) -> None:
     send(f"🟠 PLYBIT — সব স্ট্রিম স্থবির (stale)\n{stale_count}/{total} স্ট্রিমে কোনো নতুন tick আসছে না। টোকেন মৃত না হলেও কানেকশন সমস্যা থাকতে পারে — /api/token-status চেক করুন।", key="all_stale")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AGENT PERFORMANCE ALERTS (DEEP-FIX-2026-08-07)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def agent_edge_gained(asset: str, auc: float, samples: int) -> None:
+    """Agent earned authority on a pair — this is worth celebrating."""
+    send(f"🟢 AGENT AUTHORITY — {asset}\n"
+         f"AUC: {auc:.3f} over {samples} graded decisions — agent may now "
+         f"override signals on this pair.\n"
+         f"Check /api/agent/status for details.",
+         key=f"agent_edge_{asset}")
+
+
+def agent_auc_drop(asset: str, auc: float, prev_auc: float, samples: int) -> None:
+    """Agent's measured edge dropped significantly."""
+    send(f"🔴 AGENT AUC DROP — {asset}\n"
+         f"AUC fell from {prev_auc:.3f} → {auc:.3f} (n={samples}).\n"
+         f"If below 0.52, authority will be revoked.\n"
+         f"Check /api/agent/models for per-asset details.",
+         key=f"agent_auc_drop_{asset}")
+
+
+def pair_wr_collapse(asset: str, win_rate: float, breakeven: float, samples: int) -> None:
+    """A pair's win rate collapsed below breakeven — auto-disabled by gate."""
+    send(f"🔴 PAIR DISABLED — {asset}\n"
+         f"7-day WR: {win_rate:.1f}% (breakeven: {breakeven:.1f}%, n={samples}).\n"
+         f"Breakeven gate auto-disabled this pair. Check /api/breakeven/report.",
+         key=f"wr_collapse_{asset}")
+
+
+def signal_quality_shift(tier: str, old_wr: float, new_wr: float, samples: int) -> None:
+    """Signal quality tier accuracy shifted — may indicate regime change."""
+    direction = "⬆️ improved" if new_wr > old_wr else "⬇️ declined"
+    send(f"🟡 QUALITY SHIFT — {tier} signals\n"
+         f"{direction}: {old_wr:.1f}% → {new_wr:.1f}% (n={samples}).\n"
+         f"Check /api/quality-analysis for breakdown.",
+         key=f"quality_shift_{tier}")
+
+
+def breakeven_gate_triggered(asset: str, win_rate: float, breakeven: float) -> None:
+    """Breakeven gate blocked a signal for a losing pair."""
+    send(f"⛔ BREAKEVEN GATE — {asset}\n"
+         f"Signal blocked: {win_rate:.1f}% WR < {breakeven:.1f}% breakeven.\n"
+         f"Pair auto-disabled until WR recovers. Check /api/breakeven/report.",
+         key=f"begate_{asset}")

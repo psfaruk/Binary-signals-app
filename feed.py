@@ -18,7 +18,13 @@ def _payout_floor_for(asset: str) -> int:
     return PAYOUT_FLOOR_OTC if asset.endswith("_otc") else PAYOUT_FLOOR_REAL
 ENABLE_LIVE_THEORY   = os.environ.get("ENABLE_LIVE_REEVAL",  "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
-SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
+# FIX (DEEP-FIX-2026-08-07 / SIGNAL-DELAY): default was 3.0s but Railway
+# set 0.0s — agent got 0-2 ticks per evaluation (needs 30+). Now 5.0s
+# minimum so the agent gets ~50 ticks of real data before deciding.
+SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "5.0"))
+# Minimum ticks before the agent's neural network can produce a meaningful
+# evaluation. Below this threshold the feature vector is essentially noise.
+MIN_TICKS_FOR_AGENT = int(os.environ.get("QX_MIN_TICKS_FOR_AGENT", "30"))
 MICRO_RECALC_EVERY = int(os.environ.get("MICRO_RECALC_EVERY", "5"))
 SKIP_REDUNDANT_BROADCAST = os.environ.get("SKIP_REDUNDANT_BROADCAST", "1") == "1"
 STALE_SECS = int(os.environ.get("STALE_SECS", "90"))
@@ -55,8 +61,15 @@ NOISE_CANDLE_ATR_MULT = float(os.environ.get("QX_NOISE_CANDLE_ATR_MULT", "0.40")
 BIG_MOVE_ATR_MULT = float(os.environ.get("QX_BIG_MOVE_ATR_MULT", "0.80"))
 # Buyer/seller pressure threshold (default 62%).
 BUYER_PCT_THRESHOLD = int(os.environ.get("QX_BUYER_PCT_THRESHOLD", "62"))
-DISABLE_LIVE_REEVAL = os.environ.get("QX_DISABLE_LIVE_REEVAL", "1") == "1"
-LIVE_REEVAL_MIN_TICKS = int(os.environ.get("QX_LIVE_REEVAL_MIN_TICKS", "15"))
+# FIX (DEEP-FIX-2026-08-07 / LIVE-REEVAL): previously hard-disabled via
+# QX_DISABLE_LIVE_REEVAL=1 because it was the "#1 accuracy killer" — 88% of
+# signals got demoted to confidence=15 with 43% win rate. The root cause was
+# evaluating with <15 ticks (token starvation from SIGNAL_DELAY_SEC=0).
+# Now: LIVE re-eval is enabled BUT only fires after LIVE_REEVAL_MIN_TICKS
+# ticks have accumulated (default 30 ≈ 3-5s of data). Below that the live
+# tick data is too sparse to distinguish signal from noise.
+DISABLE_LIVE_REEVAL = os.environ.get("QX_DISABLE_LIVE_REEVAL", "0") == "1"
+LIVE_REEVAL_MIN_TICKS = int(os.environ.get("QX_LIVE_REEVAL_MIN_TICKS", "30"))
 LIVE_REEVAL_INTERVAL_CRITICAL = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_CRITICAL", "10"))
 LIVE_REEVAL_INTERVAL_LAST_10S = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_LAST_10S", "15"))
 LIVE_REEVAL_INTERVAL_LAST_30S = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_LAST_30S", "30"))
@@ -1042,8 +1055,20 @@ class QuotexFeed:
         # The alternates take over only when the agent is NOT requested.
         _analyzer = ("agent" if (_use_agent or not (_use_realtime or _use_verifier))
                      else ("realtime" if _use_realtime else "verifier"))
-        # Agent always evaluates (for visibility). Other analyzers only if enabled.
-        _agent_always = True
+        # ── TICK GUARD (DEEP-FIX-2026-08-07) ────────────────────────────────
+        # Agent neural network needs enough ticks to compute meaningful
+        # features. Below MIN_TICKS_FOR_AGENT ticks (default 30 ≈ 3-5s of data)
+        # the feature vector is essentially noise. Skip agent evaluation but
+        # still produce the engine's signal. The agent still learns from
+        # the eventual outcome via the learn() hook in _grade_and_log.
+        _tick_count_for_agent = len(base_ticks) if base_ticks else 0
+        _agent_has_enough_ticks = _tick_count_for_agent >= MIN_TICKS_FOR_AGENT
+        if not _agent_has_enough_ticks:
+            print(f"[feed] agent: skipping {stream.asset}@{stream.period}s eval "
+                  f"— only {_tick_count_for_agent} ticks (need {MIN_TICKS_FOR_AGENT}). "
+                  f"SIGNAL_DELAY_SEC={SIGNAL_DELAY_SEC}s may be too low.")
+        # Agent always evaluates (for visibility) — but only with enough ticks.
+        _agent_always = _agent_has_enough_ticks
         if (_agent_always or _use_agent or _use_realtime or _use_verifier) and \
                 result.get("signal") in ("CALL", "PUT"):
             try:
@@ -1314,6 +1339,14 @@ class QuotexFeed:
                 _was_correct = (accuracy == "correct")
                 agent.learn(asset, sig, _was_correct,
                             period=period, ctime=closed["time"])
+                # ── PAIR HEALTH TRACKING ─────────────────────────────────
+                # Record every graded outcome so pair_health can detect
+                # consecutive loss streaks and trigger auto-cooldown.
+                try:
+                    from core.pair_health import record_trade_outcome
+                    record_trade_outcome(asset, _was_correct)
+                except Exception:
+                    pass
             except Exception as _le:
                 print(f"[agent] learn hook error: {_le}")
         return accuracy
@@ -1563,7 +1596,15 @@ class QuotexFeed:
 
     def _apply_strength_gate(self, stream: _AssetStream,
                              prediction: dict) -> dict:
-        """Method B (2026-07-10, untested) — gate prediction strength using the"""
+        """Method B (2026-07-10) — gate prediction strength using the
+        running candle's tick movement.
+
+        FIX (DEEP-FIX-2026-08-07): STRONG→MEDIUM demotion disabled.
+        When live ticks oppose a STRONG signal, confidence is reduced
+        but the STRONG label is preserved. The pattern module's edge
+        (63.5% WR) is stronger evidence than momentary tick noise.
+        MEDIUM→WEAK and WEAK→NEUTRAL demotions still apply.
+        """
         if not prediction or prediction.get("signal") not in ("CALL", "PUT"):
             return prediction
         conf = self._running_confirmation(stream)
@@ -1571,11 +1612,21 @@ class QuotexFeed:
             return prediction
         tick_count = len(stream.ticks)
         if tick_count < 10:
-            return prediction  # not enough live evidence yet
+            return prediction
         current = prediction.get("strength", "WEAK")
         new_strength = current
         gate_tag = None
         gate_reason = None
+        # STRONG + opposing ticks: reduce confidence but keep STRONG
+        if current == "STRONG" and conf == "OPPOSING":
+            new_pred = dict(prediction)
+            old_conf = new_pred.get("confidence", 0)
+            new_pred["confidence"] = max(30, int(old_conf * 0.7))
+            new_pred["reasons"] = [*prediction.get("reasons", []),
+                f"RUNCONF: STRONG + {tick_count} opposing ticks -> conf {old_conf}→{new_pred['confidence']} (strength kept STRONG)"]
+            new_pred["_runconf_tag"] = "RUNCONF_OPPOSING_SOFT"
+            return new_pred
+        # WEAK + confirming: upgrade to MEDIUM
         if current == "WEAK" and conf == "CONFIRMING":
             new_strength = "MEDIUM"
             gate_tag = "RUNCONF_UP"

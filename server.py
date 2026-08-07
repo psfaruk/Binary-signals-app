@@ -1493,6 +1493,101 @@ async def agent_features(asset: str):
         return {"enabled": False, "error": str(e)}
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# BREAKEVEN GATE ENDPOINTS (DEEP-FIX-2026-08-07)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/breakeven/report")
+async def breakeven_report():
+    """Full breakeven report — which pairs are profitable, which are disabled."""
+    try:
+        from core.breakeven import pair_breakeven_report
+        return await asyncio.to_thread(pair_breakeven_report)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/breakeven/check/{asset}")
+async def breakeven_check(asset: str, period: int = 60, payout: int = None):
+    """Check a single pair against its breakeven threshold."""
+    try:
+        from core.breakeven import is_pair_profitable
+        is_prof, reason, wr, be, n = await asyncio.to_thread(
+            is_pair_profitable, asset, period, payout)
+        return {
+            "asset": asset,
+            "period": period,
+            "profitable": is_prof,
+            "win_rate_pct": wr,
+            "breakeven_pct": be,
+            "sample_count": n,
+            "reason": reason,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PAIR HEALTH ENDPOINTS (DEEP-FIX-2026-08-07)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/pair-health")
+async def pair_health():
+    """Per-pair health report — disabled pairs, consecutive loss tracking."""
+    try:
+        from core.pair_health import get_health_report
+        return await asyncio.to_thread(get_health_report)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/pair-health/reset/{asset}")
+async def pair_health_reset(asset: str, request: Request):
+    """Admin: manually re-enable a pair disabled by health checks."""
+    _check_admin_key(request.headers.get("X-Admin-Key"))
+    try:
+        from core.pair_health import monitor as _ph_monitor
+        _ph_monitor.reset_pair(asset)
+        return {"ok": True, "asset": asset, "message": f"{asset} manually re-enabled"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BACKTEST ENDPOINT (DEEP-FIX-2026-08-07)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/backtest/recent")
+async def backtest_recent(days: int = 7, period: int = 60, payout: int = 85):
+    """Walk-forward backtest on recent signal_log data.
+
+    Uses only past data (no lookahead). Returns per-pair, per-hour,
+    per-quality, and per-strength breakdown with Wilson confidence intervals.
+    """
+    try:
+        from core.backtest import run_backtest
+        days = max(1, min(90, days))  # clamp 1-90 days
+        period = max(15, min(3600, period))
+        return await asyncio.to_thread(run_backtest, days, period, payout)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MONITORING SNAPSHOT ENDPOINT (DEEP-FIX-2026-08-07)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/monitoring/snapshot")
+async def monitoring_snapshot():
+    """Comprehensive monitoring snapshot: algorithm state, quality health,
+    recent changes, and active alerts — all in one call for the dashboard."""
+    try:
+        from core.algorithm_monitor import get_monitoring_snapshot
+        return await asyncio.to_thread(get_monitoring_snapshot)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/api/patterns/refresh")
 async def patterns_refresh(request: Request):
     """Recompute ALL patterns from signal_log. Call after backtest or manually."""

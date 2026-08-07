@@ -351,3 +351,118 @@ def get_current_state(asset: str) -> dict:
         "algorithm_guess": algo,
         "algorithm_description": algo_desc,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MONITORING PIPELINE EXTENSIONS (DEEP-FIX-2026-08-07)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Track degradation of signal quality tiers over time.
+_quality_snapshot: dict = {}  # "HIGH"|"MEDIUM"|"LOW" → {"wr": float, "n": int, "ts": float}
+_quality_lock = threading.Lock()
+
+
+def check_signal_quality_degradation() -> dict:
+    """Compare current signal quality tier win rates against last snapshot.
+    Returns degradation alerts if any tier dropped significantly.
+    """
+    global _quality_snapshot
+    try:
+        import db as _db
+        conn = _db._conn()
+        try:
+            rows = conn.execute("""
+                SELECT COALESCE(signal_quality, 'UNLABELED') as tier,
+                       SUM(CASE WHEN accuracy='correct' THEN 1 ELSE 0 END) as correct,
+                       SUM(CASE WHEN accuracy='wrong' THEN 1 ELSE 0 END) as wrong
+                FROM signal_log
+                WHERE period=60 AND accuracy IN ('correct','wrong')
+                GROUP BY tier
+            """).fetchall()
+        finally:
+            conn.close()
+
+        current = {}
+        for r in rows:
+            total = (r["correct"] or 0) + (r["wrong"] or 0)
+            wr = round(100.0 * r["correct"] / total, 1) if total > 0 else 0.0
+            current[r["tier"]] = {"wr": wr, "n": total, "ts": time.time()}
+
+        alerts = []
+        with _quality_lock:
+            for tier, cur in current.items():
+                prev = _quality_snapshot.get(tier)
+                if prev and prev["n"] >= 30 and cur["n"] >= 30:
+                    delta = cur["wr"] - prev["wr"]
+                    if abs(delta) >= 10:
+                        direction = "⬆️ improved" if delta > 0 else "⬇️ declined"
+                        alerts.append({
+                            "tier": tier,
+                            "old_wr": prev["wr"],
+                            "new_wr": cur["wr"],
+                            "delta_pp": round(delta, 1),
+                            "direction": direction,
+                            "samples": cur["n"],
+                        })
+            _quality_snapshot = current
+
+        return {"alerts": alerts, "current": current, "previous_snapshot_ago_sec":
+                round(time.time() - _quality_snapshot.get(list(_quality_snapshot.keys())[0], {}).get("ts", time.time()), 0)
+                if _quality_snapshot else None}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_monitoring_snapshot() -> dict:
+    """Generate a comprehensive monitoring snapshot for the dashboard.
+
+    Aggregates: algorithm changes, current state per asset, quality tier
+    health, and Quotex trap/boost hour summary.
+    """
+    import time as _time
+    now = _time.time()
+
+    # Algorithm state per asset
+    assets_state = {}
+    for asset in list(_WINDOWS.keys()):
+        assets_state[asset] = get_current_state(asset)
+
+    # Recent algorithm changes (last 24h)
+    changes = get_recent_changes(hours=24, limit=100)
+
+    # Quality tier degradation
+    quality = check_signal_quality_degradation()
+
+    # Active alerts summary
+    active_alerts = []
+    for c in changes[:10]:
+        active_alerts.append({
+            "asset": c["asset"],
+            "type": c["change_type"],
+            "confidence": c["confidence"],
+            "notes": c["notes"],
+            "ago_sec": round(now - c["ts"], 0),
+        })
+
+    # Quotex algo patterns summary
+    try:
+        from core.time_patterns import get_pattern_summary
+        patterns = get_pattern_summary()
+    except Exception:
+        patterns = {}
+
+    return {
+        "timestamp": now,
+        "assets_monitored": len(assets_state),
+        "algorithm_guesses": {
+            asset: s.get("algorithm_guess", "unknown")
+            for asset, s in assets_state.items()
+        },
+        "payout_changes_24h": sum(
+            1 for c in changes if c["change_type"] in ("payout_spike", "payout_drop")),
+        "regime_shifts_24h": sum(
+            1 for c in changes if c["change_type"] == "regime_shift"),
+        "quality_alerts": quality.get("alerts", []),
+        "active_alerts": active_alerts,
+        "pair_patterns_count": len(patterns) if patterns else 0,
+    }

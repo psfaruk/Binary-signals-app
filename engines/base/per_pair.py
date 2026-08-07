@@ -1,4 +1,5 @@
 """engines/base/per_pair.py — Generic per-pair weight adapter."""
+import math
 import os
 import threading
 import time
@@ -17,12 +18,31 @@ _DISABLED_MODULE_WEIGHT = 0.05  # hard-disabled modules get this weight
 _MAX_CACHE_ENTRIES = 512        # 40 assets x ~10 periods; evict oldest if exceeded
 _SQLITE_TIMEOUT = 10
 
+# FIX (DEEP-FIX-2026-08-07): 7-day rolling window for win-rate instead of
+# last N samples (which could span months of stale data).
+_DB_STATS_DAYS_WINDOW = int(os.environ.get("QX_WIN_RATE_WINDOW_DAYS", "7"))
+_SECONDS_PER_DAY = 86400
+
 _VALID_PROFILES = frozenset({
     "mean_reverting", "trending", "volatile", "stable", "default",
     "calibrated",
 })
 
 __all__ = ["PairWeightAdapter"]
+
+
+def _wilson_lo(correct: int, total: int, z: float = 1.96) -> float:
+    """Lower 95% Wilson confidence bound for a win rate. Used for weight
+    adaptation — a module with 8/10 correct (80% point estimate) but only
+    10 samples gets a Wilson lower bound of ~49%, preventing over-weighting
+    on noise."""
+    if total <= 0:
+        return 0.0
+    p = correct / total
+    denom = 1 + z * z / total
+    centre = p + z * z / (2 * total)
+    margin = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total))
+    return max(0.0, min(1.0, (centre - margin) / denom))
 
 
 class PairWeightAdapter:
@@ -58,7 +78,7 @@ class PairWeightAdapter:
                         raise TypeError(
                             f"pair_configs[{asset!r}].weights[{mod!r}] "
                             f"must be a number, got {type(w).__name__}")
-                    if not (0.0 <= float(w) <= 2.0):
+                    if not (0.0 <= float(w) <= 3.0):
                         raise ValueError(
                             f"pair_configs[{asset!r}].weights[{mod!r}]={w} "
                             f"is out of range [0.0, 2.0]")
@@ -98,7 +118,11 @@ class PairWeightAdapter:
         return adapted
 
     def _adapt_from_db(self, static_weights: dict, asset: str, period: int) -> dict:
-        """Blend static weights with DB-learned per-module win rates."""
+        """Blend static weights with DB-learned per-module win rates.
+
+        FIX (DEEP-FIX-2026-08-07): uses 7-day rolling window + Wilson lower
+        bound instead of last N samples (which could span stale data).
+        """
         try:
             import db as _db
         except ImportError:
@@ -120,13 +144,20 @@ class PairWeightAdapter:
                 adapted[module] = static_w
                 continue
 
-            # Hard-disable catastrophically bad modules.
-            if win_rate < _HARD_DISABLE_WIN_RATE and total >= _HARD_DISABLE_SAMPLES:
+            # Use Wilson lower bound for more conservative adaptation.
+            # A module with 8/10 correct (80%) has Wilson lo ~49% — still
+            # treated as neutral until it has enough samples to prove itself.
+            correct_est = int(round(win_rate * total))
+            wilson_lo = _wilson_lo(correct_est, total)
+            effective_wr = max(win_rate * 0.5 + wilson_lo * 0.5, win_rate * 0.7)
+
+            # Hard-disable catastrophically bad modules (using Wilson lo).
+            if effective_wr < _HARD_DISABLE_WIN_RATE and total >= _HARD_DISABLE_SAMPLES:
                 adapted[module] = _DISABLED_MODULE_WEIGHT
                 continue
 
             # Map win_rate to a scaling factor centered at 1.0.
-            deviation = win_rate - _WIN_RATE_BASELINE
+            deviation = effective_wr - _WIN_RATE_BASELINE
             scale = max(-_ADAPT_CAP, min(_ADAPT_CAP, deviation * _DEVIATION_MULTIPLIER))
             learned_w = static_w * (1.0 + scale)
             # Smooth blend: 0% adapted at total=0, 100% adapted at total>=50.

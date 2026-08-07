@@ -126,6 +126,8 @@ MODULE_NAMES = (
     "wickwall",
     "divergence",
     "tickrun",
+    "multi_tf",     # FIX (DEEP-FIX-2026-08-07): HTF confirmation module
+    "momentum",     # FIX (DEEP-FIX-2026-08-07): RSI + MACD oscillators
 )
 
 # Human-readable display names for the UI.
@@ -137,6 +139,8 @@ MODULE_DISPLAY_NAMES = {
     "wickwall":        "Wick Wall",
     "divergence":      "Divergence",
     "tickrun":         "Tick Run (Sweep/Absorb/Flip)",
+    "multi_tf":        "Multi-Timeframe",
+    "momentum":        "RSI + MACD Momentum",
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -232,10 +236,12 @@ CONSENSUS_MIN_GROUPS = int(os.environ.get("CONSENSUS_MIN_GROUPS", "1"))  # singl
 OTC_MODULES = (
     "candle_reaction", "pattern", "key_level",
     "market_state", "wickwall", "divergence", "tickrun",
+    "multi_tf", "momentum",
 )
 REAL_MODULES = (
     "candle_reaction", "pattern", "key_level",
     "market_state", "wickwall", "divergence", "tickrun",
+    "multi_tf", "momentum",
 )
 
 # Allowed candle periods (seconds). Whitelisted to prevent bogus streams

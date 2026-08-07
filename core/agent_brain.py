@@ -114,8 +114,84 @@ GATE_MIN_AUC = float(os.environ.get("QX_AGENT_GATE_MIN_AUC", "0.52"))
 SAVE_EVERY_N_LEARNS = int(os.environ.get("QX_AGENT_SAVE_EVERY", "20"))
 
 # Trap hours (UTC) — historically low win rate
-TRAP_HOURS = {3, 8, 9, 11, 16, 18, 22}
-BOOST_HOURS = {4, 23, 14, 6, 10, 15, 17, 21, 12}
+# FIX (DEEP-FIX-2026-08-07): previously hardcoded sets — now dynamically loaded
+# from pair_hourly_patterns table on first use, per-asset. The static sets below
+# are fallback defaults used only when the DB isn't available yet.
+_TRAP_HOURS_FALLBACK = {3, 8, 9, 11, 16, 18, 22}
+_BOOST_HOURS_FALLBACK = {4, 6, 10, 12, 14, 15, 17, 21, 23}
+
+# Dynamic per-asset hour data (lazy-loaded from DB)
+_hour_data_cache: Dict[str, Dict[int, float]] = {}  # asset -> {hour: win_rate}
+_hour_data_ts = 0.0
+_HOUR_CACHE_TTL = 300.0  # 5 minutes
+
+TRAP_WIN_RATE = 0.35   # hours with WR < 35% → trap
+BOOST_WIN_RATE = 0.60  # hours with WR > 60% → boost
+
+
+def _load_hour_data() -> Dict[str, Dict[int, float]]:
+    """Load per-asset per-hour win rates from pair_hourly_patterns table."""
+    global _hour_data_cache, _hour_data_ts
+    now = time.time()
+    if _hour_data_cache and (now - _hour_data_ts) < _HOUR_CACHE_TTL:
+        return _hour_data_cache
+    try:
+        import sqlite3
+        db_path = os.environ.get("DB_PATH",
+            os.path.join(os.path.dirname(__file__), "..", "signals.db"))
+        if not os.path.exists(db_path):
+            return {}
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT asset, hour_utc, win_pct, total_signals
+            FROM pair_hourly_patterns
+            WHERE total_signals >= 10
+        """).fetchall()
+        conn.close()
+        data: Dict[str, Dict[int, float]] = {}
+        for r in rows:
+            asset = r["asset"]
+            hour = r["hour_utc"]
+            wr = r["win_pct"]
+            if asset not in data:
+                data[asset] = {}
+            data[asset][hour] = float(wr or 50.0)
+        _hour_data_cache = data
+        _hour_data_ts = now
+        return data
+    except Exception as e:
+        print(f"[agent] hour data load failed (non-fatal): {e}")
+        return {}
+
+
+def _get_hour_factor(asset: str, hour_utc: int) -> float:
+    """Return the hour-normalized factor for a specific asset+hour.
+
+    Positive = historically good hour for this pair
+    Negative = historically bad hour (trap)
+    Zero = neutral / no data
+    """
+    hour_data = _load_hour_data()
+    asset_hours = hour_data.get(asset)
+    if asset_hours is not None and hour_utc in asset_hours:
+        wr = asset_hours[hour_utc]
+        if wr <= TRAP_WIN_RATE:
+            return -1.0  # strong trap
+        elif wr < 0.42:
+            return -0.5  # mild trap
+        elif wr >= BOOST_WIN_RATE:
+            return 0.8   # strong boost
+        elif wr >= 0.55:
+            return 0.5   # mild boost
+        else:
+            return 0.0   # neutral
+    # Fallback to static sets when DB not available
+    if hour_utc in _TRAP_HOURS_FALLBACK:
+        return -1.0
+    elif hour_utc in _BOOST_HOURS_FALLBACK:
+        return 0.5
+    return 0.0
 
 FEATURE_NAMES = [
     "tick_mom_30", "tick_mom_10", "tick_accel", "order_flow_30",
@@ -348,16 +424,13 @@ class AssetModel:
             f11 = 0.0
 
         # f12: hour_utc_normalized — trap hours negative, boost hours positive
+        # FIX (DEEP-FIX-2026-08-07): now uses per-asset dynamic hour data
+        # from pair_hourly_patterns DB table instead of hardcoded global sets.
         try:
             hour = int((now_ms / 1000) % 86400 // 3600)
         except:
             hour = 12
-        if hour in TRAP_HOURS:
-            f12 = -1.0
-        elif hour in BOOST_HOURS:
-            f12 = 0.5
-        else:
-            f12 = 0.0
+        f12 = _get_hour_factor(self.asset, hour)
 
         features_raw = [f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12]
         self.last_features_raw = features_raw

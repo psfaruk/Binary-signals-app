@@ -4,14 +4,12 @@ from engines.base.types import ModuleResult, MarketContext
 
 # Active patterns — all are ALWAYS_REVERSAL (structural reversal patterns).
 ALWAYS_REVERSAL = {
-    "TWEEZER_BOTTOM",
-    "PIERCING_LINE",
-    "DARK_CLOUD",
-    "BEAR_HARAMI",
-    "BEAR_PIN_BAR",
-    "BULL_TWO_BAR_REV",
-    "BEAR_TWO_BAR_REV",
-    "DOJI_BEARISH",
+    "TWEEZER_BOTTOM", "TWEEZER_TOP",
+    "PIERCING_LINE", "DARK_CLOUD",
+    "BEAR_HARAMI", "BULL_HARAMI",
+    "BEAR_PIN_BAR", "BULL_PIN_BAR",
+    "BULL_TWO_BAR_REV", "BEAR_TWO_BAR_REV",
+    "DOJI_BEARISH", "DOJI_BULLISH",
 }
 
 

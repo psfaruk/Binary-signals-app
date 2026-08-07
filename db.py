@@ -481,8 +481,8 @@ _THEORY_PATTERNS = {
         (r'Dark Cloud', 'Dark Cloud Cover'),
         (r'Bull Harami|BULL_HARAMI', 'Bull Harami'),
         (r'Bear Harami|BEAR_HARAMI', 'Bear Harami'),
-        (r'Hammer', 'Hammer'),
-        (r'Shooting Star', 'Shooting Star'),
+        (r'Hammer|BULL_PIN_BAR', 'Hammer'),
+        (r'Shooting Star|BEAR_PIN_BAR', 'Shooting Star'),
         (r'Bullish Pin Bar|BULL_PIN_BAR', 'Bullish Pin Bar'),
         (r'Bearish Pin Bar|BEAR_PIN_BAR', 'Bearish Pin Bar'),
         (r'Bullish Two-Bar Reversal|BULL_TWO_BAR_REV', 'Bullish Two-Bar Reversal'),
@@ -526,6 +526,23 @@ _THEORY_PATTERNS = {
         (r'ABSORBWALL.*upper band', 'Absorb wall: upper band'),
         (r'ABSORBWALL.*lower band', 'Absorb wall: lower band'),
         (r'LATEFLIP\s+Control transfer', 'Late flip: control transfer'),
+    ],
+    # FIX (DEEP-FIX-2026-08-07): new modules
+    'multi_tf': [
+        (r'HTF CONFIRM.*strong confirmation', 'HTF strong confirm'),
+        (r'HTF CONFIRM.*moderate confirmation', 'HTF moderate confirm'),
+        (r'HTF COUNTER.*strong counter', 'HTF strong counter'),
+        (r'HTF WEAKEN.*mild counter', 'HTF mild counter'),
+    ],
+    'momentum': [
+        (r'RSI\s+\d+\.?\d*\s*overbought', 'RSI overbought reversal'),
+        (r'RSI\s+\d+\.?\d*\s*oversold', 'RSI oversold reversal'),
+        (r'RSI\s+\d+\.?\d*\s*bullish momentum', 'RSI bullish continuation'),
+        (r'RSI\s+\d+\.?\d*\s*bearish momentum', 'RSI bearish continuation'),
+        (r'MACD bullish crossover', 'MACD bullish crossover'),
+        (r'MACD bearish crossover', 'MACD bearish crossover'),
+        (r'MACD histogram bullish', 'MACD histogram bullish'),
+        (r'MACD histogram bearish', 'MACD histogram bearish'),
     ],
 }
 
@@ -588,6 +605,19 @@ _THEORY_GROUPS = {
     'Absorb wall: upper band': 'TICKRUN_ABSORB',
     'Absorb wall: lower band': 'TICKRUN_ABSORB',
     'Late flip: control transfer': 'TICKRUN_FLIP',
+    # FIX (DEEP-FIX-2026-08-07): new module theory groups
+    'HTF strong confirm': 'MULTI_TF',
+    'HTF moderate confirm': 'MULTI_TF',
+    'HTF strong counter': 'MULTI_TF',
+    'HTF mild counter': 'MULTI_TF',
+    'RSI overbought reversal': 'MOMENTUM_RSI',
+    'RSI oversold reversal': 'MOMENTUM_RSI',
+    'RSI bullish continuation': 'MOMENTUM_RSI',
+    'RSI bearish continuation': 'MOMENTUM_RSI',
+    'MACD bullish crossover': 'MOMENTUM_MACD',
+    'MACD bearish crossover': 'MOMENTUM_MACD',
+    'MACD histogram bullish': 'MOMENTUM_MACD',
+    'MACD histogram bearish': 'MOMENTUM_MACD',
 }
 
 
@@ -619,7 +649,7 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
             continue
 
         # Extract direction
-        dir_match = _re_module.search(r'→\s*(CALL|PUT)\b', reason_str)
+        dir_match = _re_module.search(r'(?:→|->)\s*(CALL|PUT)\b', reason_str)
         if not dir_match:
             continue
         direction = dir_match.group(1)
@@ -765,7 +795,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                     for i in range(1, len(parts), 2):
                         mod = parts[i]
                         content = parts[i+1] if i+1 < len(parts) else ''
-                        dir_match = _re.search(r'→\s*(CALL|PUT)\b', content)
+                        dir_match = _re.search(r'(?:→|->)\s*(CALL|PUT)\b', content)
                         if not dir_match:
                             continue
                         direction = dir_match.group(1)

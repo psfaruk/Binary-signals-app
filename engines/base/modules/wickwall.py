@@ -99,7 +99,8 @@ def analyze(candles, ctx: MarketContext) -> list:
     if sup_walls:
         _best_sup = max(sup_walls, key=lambda x: x[1])
         _sup_lvl, _sup_tch = _best_sup
-        if _sup_tch >= 3 and abs(l - _sup_lvl) <= avg_rng * 0.25:
+        # FIX: reduced from 3.0 to 2.0 — wickwall was too rare
+        if _sup_tch >= 2.0 and abs(l - _sup_lvl) <= avg_rng * 0.30:
             # Confluence bonus: key touches + round level.
             bonus = 0
             lbl = ""
@@ -126,7 +127,7 @@ def analyze(candles, ctx: MarketContext) -> list:
     if res_walls:
         _best_res = max(res_walls, key=lambda x: x[1])
         _res_lvl, _res_tch = _best_res
-        if _res_tch >= 3 and abs(h - _res_lvl) <= avg_rng * 0.25:
+        if _res_tch >= 2.0 and abs(h - _res_lvl) <= avg_rng * 0.30:
             bonus = 0
             lbl = ""
             kt = _key_touches(candles, _res_lvl)
