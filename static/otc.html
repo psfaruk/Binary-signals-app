@@ -262,7 +262,7 @@
               <div class="verifier-status-badge" id="verifier-status-badge">Loading…</div>
             </div>
             <div class="verifier-enable-hint" id="verifier-enable-hint" style="display:none">
-              ⚙️ <b>Agent is DISABLED.</b> To enable: set env var <code>QX_AGENT_BRAIN=1</code> in Railway → Settings → Variables, then redeploy.
+              ⚙️ <b>Agent status unavailable.</b> The dashboard could not read <code>/api/agent/status</code>. The agent runs by default — this hint means the endpoint failed, not that it is switched off.
             </div>
             <!-- Inline key metrics — kept lean: P(win), Uptime, Active Pair + per-pair selector (Ticks/Learned moved to Per-Pair Dashboard) -->
             <div class="agent-hero-metrics" id="agent-hero-metrics">
@@ -356,7 +356,7 @@
                      other. The verifier endpoint may still poll but its
                      renderVerifierRecent() now silently no-ops (no target). -->
                 <div class="verifier-recent-table" id="agent-recent-table">
-                  <div class="verifier-empty">No decisions yet. Enable with QX_AGENT_BRAIN=1 env var.</div>
+                  <div class="verifier-empty">Loading decisions…</div>
                 </div>
               </div>
             </div>
