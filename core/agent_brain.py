@@ -595,8 +595,19 @@ class AssetModel:
                     f"< {GATE_MIN_AUC:.2f} — no measured edge")
         return f"authorised: AUC {a:.3f} (lower bound {lo:.3f}) over n={n}"
 
-    def record_verdict(self, verdict: str) -> None:
-        """Tally one decision against this asset. Caller holds the agent lock."""
+    def record_verdict(self, verdict: str, p_win: Optional[float] = None) -> None:
+        """Tally one decision against this asset. Caller holds the agent lock.
+
+        Also stamps `last_p_win`. That field was only ever written by
+        `forward()`, which reaches production solely via `learn()`'s
+        `p_at_decision is None` fallback — so in practice it sat at its 0.5
+        initial value forever and the UI's per-pair P(win) hero read a
+        constant 50.0%. Decisions come from `_forward_ensemble()`, which
+        computes its own p and never touched the model, so record it here
+        where the chosen p is known.
+        """
+        if p_win is not None:
+            self.last_p_win = float(p_win)
         if verdict == "CONFIRM": self.confirm_count += 1
         elif verdict == "VETO": self.veto_count += 1
         elif verdict == "WEAKEN": self.weaken_count += 1
@@ -869,7 +880,7 @@ class AgentBrain:
                     else: self.total_pass += 1
                     model.record_verdict(
                         "FLIP" if flipped else
-                        ("NEUTRAL" if neutralized else verdict))
+                        ("NEUTRAL" if neutralized else verdict), final_p)
 
                 # Only park a pending entry if an outcome can ever arrive.
                 # A NEUTRALised candle is never graded, so storing one just
@@ -973,7 +984,7 @@ class AgentBrain:
                 elif verdict == "VETO": self.total_veto += 1
                 elif verdict == "WEAKEN": self.total_weaken += 1
                 else: self.total_pass += 1
-                model.record_verdict(verdict)
+                model.record_verdict(verdict, p_win)
 
             model.pending[pkey] = {
                 "signal": signal,
