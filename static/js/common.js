@@ -3238,6 +3238,18 @@ function _verifierLayerBadge(v){
 function updateVerifierStatus(s){
   const $ = (id) => document.getElementById(id);
   if(!$('verifier-status-badge') && !$('vstat-verifier-total')) return;
+  // BUG-FIX (2026-08-07): this function and updateAgentStatus() both write
+  // #verifier-status-badge, #vstat-veto/weaken/confirm/pass and #vstat-uptime,
+  // on independent polls — so whichever landed last won. signal_verifier is
+  // dormant whenever agent_brain is the analyzer (the normal case), and its
+  // payload carries enabled:false with no total_* keys at all. Every time its
+  // poll landed after the agent's it repainted the badge to "○ DISABLED" and
+  // reset the verdict tiles to 0, while the agent was running with real
+  // counts. The badge then cascaded: renderAgentLive() and
+  // renderVerifierRecent() read badge.classList.contains('disabled') and
+  // printed "Enable with QX_AGENT_BRAIN=1", so the whole tab read as off.
+  // A dormant module must not paint shared surfaces.
+  if(s.active_analyzer && s.active_analyzer !== 'signal_verifier') return;
   const badge = $('verifier-status-badge');
   if(badge){
     if(s.enabled){
