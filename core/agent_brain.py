@@ -180,8 +180,21 @@ class AssetModel:
         self.last_p_win = 0.5
         self.last_hidden = [0.0] * HIDDEN_NEURONS
 
-        # Recent predictions for accuracy tracking
+        # Recent predictions for accuracy tracking.
+        # Entries are (p_win, was_correct) TUPLES — not dicts. Anything reading
+        # this deque must unpack, never call .get() on an element.
         self.recent_predictions = deque(maxlen=OOS_WINDOW)
+
+        # Per-asset verdict counters. get_status()'s per_pair block read these
+        # via getattr(..., 0) before they existed, so every per-pair verdict
+        # count in the UI was a hardcoded zero presented as live data.
+        self.veto_count = 0
+        self.confirm_count = 0
+        self.weaken_count = 0
+        self.pass_count = 0
+        self.flip_count = 0
+        self.neutral_count = 0
+        self.last_decision_at = 0.0   # epoch seconds of this asset's last verdict
 
         # Pending signals awaiting their outcome, keyed by (period, ctime).
         # BUG-FIX (AGENT-PENDING-2026-08-06): this used to be a single slot per
@@ -582,6 +595,16 @@ class AssetModel:
                     f"< {GATE_MIN_AUC:.2f} — no measured edge")
         return f"authorised: AUC {a:.3f} (lower bound {lo:.3f}) over n={n}"
 
+    def record_verdict(self, verdict: str) -> None:
+        """Tally one decision against this asset. Caller holds the agent lock."""
+        if verdict == "CONFIRM": self.confirm_count += 1
+        elif verdict == "VETO": self.veto_count += 1
+        elif verdict == "WEAKEN": self.weaken_count += 1
+        elif verdict == "FLIP": self.flip_count += 1
+        elif verdict == "NEUTRAL": self.neutral_count += 1
+        else: self.pass_count += 1
+        self.last_decision_at = time.time()
+
     def avg_loss(self) -> float:
         if self.samples <= MIN_LEARNING_SAMPLES:
             return 0.0
@@ -844,6 +867,9 @@ class AgentBrain:
                     # the dashboard's "✅ CONFIRM" tile silently included every
                     # direction flip.
                     else: self.total_pass += 1
+                    model.record_verdict(
+                        "FLIP" if flipped else
+                        ("NEUTRAL" if neutralized else verdict))
 
                 # Only park a pending entry if an outcome can ever arrive.
                 # A NEUTRALised candle is never graded, so storing one just
@@ -947,6 +973,7 @@ class AgentBrain:
                 elif verdict == "VETO": self.total_veto += 1
                 elif verdict == "WEAKEN": self.total_weaken += 1
                 else: self.total_pass += 1
+                model.record_verdict(verdict)
 
             model.pending[pkey] = {
                 "signal": signal,
@@ -1156,15 +1183,27 @@ class AgentBrain:
                     "samples": len(m.recent_predictions),
                     "edge_auc": round(auc, 4) if auc is not None else None,
                     "has_authority": m.has_authority(),
-                    "veto": getattr(m, "veto_count", 0),
-                    "confirm": getattr(m, "confirm_count", 0),
-                    "weaken": getattr(m, "weaken_count", 0),
-                    "pass_count": getattr(m, "pass_count", 0),
-                    "flips": getattr(m, "flip_count", 0),
-                    "last_pwin": (m.recent_predictions[-1].get("p_win")
-                                  if m.recent_predictions else None),
-                    "last_decision_at": (m.recent_predictions[-1].get("ts")
+                    # BUG-FIX (2026-08-07): these five read getattr(m, ...) for
+                    # attributes AssetModel never defined, so every per-pair
+                    # count was a fake 0. They are real counters now.
+                    "veto": m.veto_count,
+                    "confirm": m.confirm_count,
+                    "weaken": m.weaken_count,
+                    "pass_count": m.pass_count,
+                    "flips": m.flip_count,
+                    "neutralized": m.neutral_count,
+                    # BUG-FIX (2026-08-07): recent_predictions holds
+                    # (p_win, was_correct) tuples, so `.get("p_win")` raised
+                    # AttributeError: 'tuple' object has no attribute 'get'.
+                    # That killed get_status() outright, which is why
+                    # /api/agent/status, /live and /models all returned an
+                    # error payload and the whole Agent tab rendered empty
+                    # while the agent was in fact running and learning.
+                    "last_pwin": round(m.last_p_win, 4),
+                    "last_graded_pwin": (round(m.recent_predictions[-1][0], 4)
                                          if m.recent_predictions else None),
+                    "last_decision_at": (m.last_decision_at
+                                         if m.last_decision_at else None),
                 }
             return {
                 "enabled": self.enabled,
