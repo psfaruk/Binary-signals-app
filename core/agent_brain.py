@@ -60,6 +60,12 @@ from collections import deque, defaultdict
 
 TICK_BUFFER_SIZE = 1000
 THOUGHT_BUFFER_SIZE = 200
+# Decisions get their own buffer. They used to be recovered by filtering
+# `thoughts` for type == "evaluate", but that deque is shared with tick and
+# learn events — one tick thought per 100 ticks still swamps it, so the
+# "Recent Decisions" panel regularly found zero evaluations in the newest 40
+# thoughts and rendered "No evaluations yet" next to a "213 decisions" chip.
+DECISION_BUFFER_SIZE = 100
 # Rolling window of graded decisions used to measure the model's own edge.
 OOS_WINDOW = 300
 LEARNING_RATE = 0.03          # lower = more stable learning
@@ -718,6 +724,7 @@ class AgentBrain:
         self.active_mode = self.final_mode or os.environ.get("QX_AGENT_BRAIN", "0") == "1"
         self.started_at = time.time()
         self.thoughts = deque(maxlen=THOUGHT_BUFFER_SIZE)
+        self.decisions = deque(maxlen=DECISION_BUFFER_SIZE)
         self.total_ticks_processed = 0
         self.total_signals_evaluated = 0
         self.total_signals_learned = 0
@@ -756,6 +763,26 @@ class AgentBrain:
         }
         with self.lock:
             self.thoughts.appendleft(thought)
+
+    def _add_decision(self, asset: str, verdict: str, signal: str,
+                      p_win: float, features: List[float], reason: str,
+                      **extra):
+        """Record one evaluation in the decisions-only ring buffer.
+
+        Kept separate from `thoughts` so tick volume can never starve it.
+        """
+        rec = {
+            "ts": time.time(),
+            "asset": asset,
+            "verdict": verdict,
+            "signal": signal,
+            "p_win": p_win,
+            "features": list(features),
+            "reason": reason[:200],
+        }
+        rec.update(extra)
+        with self.lock:
+            self.decisions.appendleft(rec)
 
     def process_tick(self, asset: str, price: float, ts_ms: float):
         # Always process ticks (even in observe mode) so the agent learns
@@ -912,6 +939,12 @@ class AgentBrain:
                      "engine_signal": signal, "flipped": flipped,
                      "neutralized": neutralized})
 
+                self._add_decision(
+                    asset, verdict, final_signal, final_p, features, reason,
+                    p_call=p_call, p_put=p_put, engine_signal=signal,
+                    flipped=flipped, neutralized=neutralized,
+                    authorised=True, mode="FINAL")
+
                 # Return verdict that feed.py can apply
                 if neutralized:
                     return {
@@ -1012,6 +1045,12 @@ class AgentBrain:
                 f"{verdict} {signal} P(win)={p_win:.1%} (samples={model.samples})",
                 {"verdict": verdict, "p_win": p_win, "features": features,
                  "signal": signal})
+
+            self._add_decision(
+                asset, verdict, signal, p_win, features, reason,
+                engine_signal=signal, flipped=False, neutralized=False,
+                authorised=authorised,
+                mode="ACTIVE" if self.active_mode else "OBSERVE")
 
             return {
                 "verdict": verdict,
@@ -1259,6 +1298,10 @@ class AgentBrain:
     def get_live_feed(self, limit: int = 50) -> List[Dict]:
         with self.lock:
             return list(self.thoughts)[:limit]
+
+    def get_decisions(self, limit: int = 30) -> List[Dict]:
+        with self.lock:
+            return list(self.decisions)[:limit]
 
     def get_models(self) -> List[Dict]:
         with self.lock:

@@ -1434,6 +1434,26 @@ async def agent_status():
                 "hint": "Set QX_AGENT_BRAIN=1 to enable the autonomous agent"}
 
 
+@app.get("/api/agent/decisions")
+async def agent_decisions(limit: int = 30):
+    """Recent agent evaluations, newest first.
+
+    The Agent tab used to rebuild this list client-side by filtering
+    /api/agent/live for type == "evaluate". That feed is a shared 200-slot
+    ring buffer and tick events crowd the evaluations out, so the panel kept
+    showing "No evaluations yet" beside a three-figure decision count. This
+    reads a decisions-only buffer instead.
+    """
+    try:
+        from core.agent_brain import agent
+        limit = max(1, min(100, limit))
+        decisions = agent.get_decisions(limit)
+        return {"count": len(decisions), "decisions": decisions,
+                "total": agent.total_signals_evaluated}
+    except Exception as e:
+        return {"count": 0, "decisions": [], "error": str(e)}
+
+
 @app.get("/api/agent/live")
 async def agent_live(limit: int = 50):
     """Agent Brain live thought stream — recent ticks, evaluations, learning events."""

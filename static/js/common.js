@@ -3661,21 +3661,34 @@ function renderAgentRecent(data){
   // any page that hasn't been updated yet.
   const tbl = $('agent-recent-table') || $('verifier-recent-table');
   if(!tbl) return;
-  if(!data.thoughts || data.thoughts.length === 0){
-    tbl.innerHTML = '<div class="verifier-empty">No decisions yet.</div>';
-    return;
+  // BUG-FIX (2026-08-07): this used to rebuild the list by filtering the
+  // shared thought buffer for type === 'evaluate'. Ticks dominate that buffer
+  // (a live sample of the newest 40 held 31 ticks and 7 evaluations, and the
+  // ratio worsens as tick volume climbs), so whenever the newest thoughts
+  // happened to be all ticks the panel printed "No evaluations yet" directly
+  // under a "213 decisions" chip. /api/agent/decisions is a decisions-only
+  // buffer that tick volume cannot starve. The thoughts path stays as a
+  // fallback so an older server still renders something.
+  let evals;
+  if(data.decisions){
+    evals = data.decisions.slice(0, 30);
+  } else if(data.thoughts){
+    evals = data.thoughts.filter(t => t.type === 'evaluate').slice(0, 30);
+  } else {
+    evals = [];
   }
-  // Filter to evaluate-type thoughts
-  const evals = data.thoughts.filter(t => t.type === 'evaluate').slice(0, 30);
   if(evals.length === 0){
-    tbl.innerHTML = '<div class="verifier-empty">No evaluations yet. Waiting for first signal…</div>';
+    tbl.innerHTML = '<div class="verifier-empty">No decisions yet. ' +
+      'The agent scores a pair only when the engine emits a signal for it.</div>';
     return;
   }
   let html = '<div class="vrow vrow-head">' +
     '<div>Time</div><div>Asset</div><div>Sig</div><div>Verdict</div>' +
     '<div>P(win)</div><div>Features</div><div>Reason</div></div>';
   evals.forEach(v => {
-    const d = v.data || {};
+    // /api/agent/decisions puts the fields at the top level; the thought
+    // fallback nests them under .data. Accept both.
+    const d = v.data || v;
     const sig = d.signal || '?';
     const sigClass = sig === 'CALL' ? 'call' : 'put';
     const verdict = (d.verdict || 'PASS').toUpperCase();
@@ -3686,7 +3699,7 @@ function renderAgentRecent(data){
       .filter(x => Math.abs(x.f) > 0.3)
       .map(x => x.name + (x.f >= 0 ? '+' : '') + x.f.toFixed(1))
       .join(' ') || 'none active';
-    const reason = (v.message || '').slice(0, 60);
+    const reason = (v.message || v.reason || '').slice(0, 60);
     html += '<div class="vrow">' +
       '<div class="v-time">' + fmtAgentTime(v.ts) + '</div>' +
       '<div class="v-asset">' + fmtAgentAsset(v.asset) + '</div>' +
@@ -3715,6 +3728,16 @@ async function fetchAgentLive(){
     if(!r.ok) return;
     const data = await r.json();
     renderAgentLive(data);
+  }catch(e){}
+}
+
+async function fetchAgentDecisions(){
+  const $ = (id) => document.getElementById(id);
+  if(!$('agent-recent-table') && !$('verifier-recent-table')) return;
+  try{
+    const r = await fetch('/api/agent/decisions?limit=30');
+    if(!r.ok) return;
+    const data = await r.json();
     renderAgentRecent(data);
   }catch(e){}
 }
@@ -3758,11 +3781,13 @@ function startAgentPanel(){
   if(!$('vstat-total') && !$('agent-pair-dashboard')) return;
   fetchAgentStatus();
   fetchAgentLive();
+  fetchAgentDecisions();
   fetchAgentModels();
   fetchAgentFeatures();
   _agentPollTimer = setInterval(() => {
     fetchAgentStatus();
     fetchAgentLive();
+    fetchAgentDecisions();
   }, 3000);
   _agentFeatureTimer = setInterval(fetchAgentFeatures, 2000);
   _agentModelTimer = setInterval(fetchAgentModels, 10000);
