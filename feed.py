@@ -1068,9 +1068,14 @@ class QuotexFeed:
                   f"— only {_tick_count_for_agent} ticks (need {MIN_TICKS_FOR_AGENT}). "
                   f"SIGNAL_DELAY_SEC={SIGNAL_DELAY_SEC}s may be too low.")
         # Agent always evaluates (for visibility) — but only with enough ticks.
-        _agent_always = _agent_has_enough_ticks
-        if (_agent_always or _use_agent or _use_realtime or _use_verifier) and \
-                result.get("signal") in ("CALL", "PUT"):
+        # The tick guard must actually gate the agent branch: _use_agent alone
+        # must NOT bypass it, or MIN_TICKS_FOR_AGENT does nothing in exactly
+        # the deployment (QX_AGENT_BRAIN=1) it was added to protect.
+        _should_evaluate = (
+            (_analyzer == "agent" and _agent_has_enough_ticks)
+            or (_analyzer != "agent" and (_use_realtime or _use_verifier))
+        )
+        if _should_evaluate and result.get("signal") in ("CALL", "PUT"):
             try:
                 from datetime import datetime, timezone
                 _verify_hour = datetime.now(timezone.utc).hour
@@ -1637,11 +1642,6 @@ class QuotexFeed:
             gate_tag = "RUNCONF_DOWN"
             gate_reason = (f"RUNCONF: MEDIUM + 10+ opposing ticks "
                           f"({tick_count}) -> demoted to WEAK")
-        elif current == "STRONG" and conf == "OPPOSING":
-            new_strength = "MEDIUM"
-            gate_tag = "RUNCONF_DOWN"
-            gate_reason = (f"RUNCONF: STRONG + 10+ opposing ticks "
-                          f"({tick_count}) -> demoted to MEDIUM")
         elif current == "WEAK" and conf == "OPPOSING":
             new_strength = "WEAK"  # unchanged — triggers Option B suppression
             gate_tag = "RUNCONF_NEUTRAL"

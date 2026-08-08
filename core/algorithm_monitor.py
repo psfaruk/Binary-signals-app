@@ -390,6 +390,11 @@ def check_signal_quality_degradation() -> dict:
 
         alerts = []
         with _quality_lock:
+            # Capture the previous snapshot's age BEFORE it gets overwritten
+            # below — reading it after the overwrite always yields ~0 sec
+            # since it would be reading the just-computed `current` snapshot.
+            prev_ts = (next(iter(_quality_snapshot.values()))["ts"]
+                       if _quality_snapshot else None)
             for tier, cur in current.items():
                 prev = _quality_snapshot.get(tier)
                 if prev and prev["n"] >= 30 and cur["n"] >= 30:
@@ -406,9 +411,9 @@ def check_signal_quality_degradation() -> dict:
                         })
             _quality_snapshot = current
 
-        return {"alerts": alerts, "current": current, "previous_snapshot_ago_sec":
-                round(time.time() - _quality_snapshot.get(list(_quality_snapshot.keys())[0], {}).get("ts", time.time()), 0)
-                if _quality_snapshot else None}
+        return {"alerts": alerts, "current": current,
+                "previous_snapshot_ago_sec":
+                    round(time.time() - prev_ts, 0) if prev_ts else None}
     except Exception as e:
         return {"error": str(e)}
 

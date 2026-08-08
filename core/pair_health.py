@@ -80,12 +80,6 @@ class PairHealthMonitor:
                     f"{MAX_CONSECUTIVE_LOSSES} consecutive losses — "
                     f"{COOLDOWN_MINUTES}min cooldown")
 
-            # Auto re-enable after cooldown expires
-            if s["disabled"] and s["disabled_reason"].startswith(
-                    str(MAX_CONSECUTIVE_LOSSES)):
-                if time.time() - s["disabled_at"] > COOLDOWN_MINUTES * 60:
-                    self._enable(asset, s, "cooldown expired")
-
     def _disable(self, asset: str, state: dict, reason: str) -> None:
         state["disabled"] = True
         state["disabled_at"] = time.time()
@@ -116,10 +110,20 @@ class PairHealthMonitor:
             pass
 
     def is_disabled(self, asset: str) -> Tuple[bool, str]:
-        """Check if a pair is currently disabled. Returns (is_disabled, reason)."""
+        """Check if a pair is currently disabled. Returns (is_disabled, reason).
+
+        Also resolves cooldown expiry here, not just in record_outcome() —
+        a disabled pair short-circuits to NEUTRAL before any outcome is ever
+        recorded, so record_outcome() would otherwise never run again and
+        the pair would stay disabled forever after its cooldown ends.
+        """
         with self._lock:
             s = self._state.get(asset)
             if s and s["disabled"]:
+                if (s["disabled_reason"].startswith(str(MAX_CONSECUTIVE_LOSSES))
+                        and time.time() - s["disabled_at"] > COOLDOWN_MINUTES * 60):
+                    self._enable(asset, s, "cooldown expired")
+                    return False, ""
                 return True, s["disabled_reason"]
             return False, ""
 
