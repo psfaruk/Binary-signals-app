@@ -125,8 +125,8 @@ _hour_data_cache: Dict[str, Dict[int, float]] = {}  # asset -> {hour: win_rate}
 _hour_data_ts = 0.0
 _HOUR_CACHE_TTL = 300.0  # 5 minutes
 
-TRAP_WIN_RATE = 0.35   # hours with WR < 35% → trap
-BOOST_WIN_RATE = 0.60  # hours with WR > 60% → boost
+TRAP_WIN_RATE = 35.0   # hours with WR < 35% → trap (win_pct is stored 0-100)
+BOOST_WIN_RATE = 60.0  # hours with WR > 60% → boost
 
 
 def _load_hour_data() -> Dict[str, Dict[int, float]]:
@@ -178,11 +178,11 @@ def _get_hour_factor(asset: str, hour_utc: int) -> float:
         wr = asset_hours[hour_utc]
         if wr <= TRAP_WIN_RATE:
             return -1.0  # strong trap
-        elif wr < 0.42:
+        elif wr < 42.0:
             return -0.5  # mild trap
         elif wr >= BOOST_WIN_RATE:
             return 0.8   # strong boost
-        elif wr >= 0.55:
+        elif wr >= 55.0:
             return 0.5   # mild boost
         else:
             return 0.0   # neutral

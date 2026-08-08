@@ -81,7 +81,7 @@ class PairWeightAdapter:
                     if not (0.0 <= float(w) <= 3.0):
                         raise ValueError(
                             f"pair_configs[{asset!r}].weights[{mod!r}]={w} "
-                            f"is out of range [0.0, 2.0]")
+                            f"is out of range [0.0, 3.0]")
 
     def get_weights(self, asset: str, period: int = 60, use_db: bool = True) -> dict:
         """Get module weights for a specific asset, blending static + DB-learned."""
