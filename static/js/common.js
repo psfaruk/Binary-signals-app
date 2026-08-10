@@ -1,77 +1,106 @@
+/* ============================================================================
+   common.js — Shared WebSocket + chart + signal rendering logic for both
+   the Real Market and OTC Market pages.
+
+   Exposes a single global function:
+       window.initApp(category)   // category = "real" | "otc"
+
+   FIXES vs. the old single-file index.html:
+     - BUG-1 FIXED: renderPairs(msg) is called with the FULL payload object
+       (which has real_pairs + otc_pairs), not msg.pairs.
+     - Stale UI fields #ms-phase / #ms-structure / #ms-zigzag REMOVED — the
+       new engine doesn't compute them and they were always set to '—'.
+     - One single setCategory(newCat) function replaces the 3 duplicate
+       category-switch handlers (3-dot menu, market badge, cat-tabs).
+       setCategory saves to localStorage AND navigates to the other HTML page.
+     - Redundant client-side WS message filter REMOVED — the server's
+       broadcast() now filters by interested_cids per stream, so each
+       client only receives messages for assets it actually subscribed to.
+     - MODULE_NAMES single source of truth on JS side (7 modules including
+       trend_follow); only the active engine's 6th module is shown.
+     - Responsive chart: chart.applyOptions({width, height}) on window resize.
+     - Mobile-friendly: pinch-to-zoom disabled on chart container via CSS
+       touch-action:none (LightweightCharts handles touch internally).
+   ============================================================================ */
+
 (function(global){
 'use strict';
-const WS_URL = (location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws', RECONNECT_BASE = 1000, RECONNECT_MAX = 30000, TICK_TAPE_MAX = 40, HISTORY_MAX = 100;
-// FIX (MODULE-LIST-2026-08-07 / A-10 P3): frontend module list was 3-behind
-// backend. Backend has 7 modules (candle_reaction, pattern, key_level,
-// market_state, wickwall, divergence, tickrun) but JS only knew about 3.
-// Stats "By Module" subtab never showed 4 of 7 modules. Now synced.
-const MODULE_NAMES = ['candle_reaction','pattern','key_level','market_state','wickwall','divergence','tickrun'];
+
+/* ─── CONFIG ─────────────────────────────────────────────────────────────── */
+const WS_URL = (location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws';
+const RECONNECT_BASE = 1000;
+const RECONNECT_MAX = 30000;
+const TICK_TAPE_MAX = 40;
+// FIX (AUDIT-CRITICAL #002, 2026-07-21): HISTORY_MAX was 30 but server
+// returns 50. Aligned to 100 so users see a longer, accurate history.
+// Also see ISSUE-001: onEoc now always refreshes history (was gated on
+// msg.prediction being truthy, which never happens — feed.py broadcasts
+// prediction=null on EOC and delivers the real prediction via tick a few
+// seconds later). Combined with dedup-by-ctime (ISSUE-009), this fixes
+// the user-reported '48-signal limit' bug where new signals stopped
+// appearing after a fixed count.
+const HISTORY_MAX = 100;
+
+/* ─── MODULE NAMES — single source of truth (mirrors core.constants.MODULE_NAMES) ──
+   7 modules total: 5 shared + 1 OTC-specific (otc_pattern) + 1 Real-specific
+   (trend_follow). Each engine displays only its own 6 modules. */
+const MODULE_NAMES = [
+  'candle_reaction',
+  'running_tick',
+  'pattern',
+  'indicator',
+  'key_level',
+  'otc_pattern',     // OTC engine's 6th module
+  'trend_follow',    // Real engine's 6th module
+];
 const MODULE_DISPLAY = {
   'candle_reaction': 'Candle Reaction',
+  'running_tick':    'Running Tick',
   'pattern':         'Pattern',
+  'indicator':       'Indicator',
   'key_level':       'Key Level',
-  'market_state':    'Market State',
-  'wickwall':        'Wick Wall',
-  'divergence':      'Divergence',
-  'tickrun':         'Tick Run',
+  'otc_pattern':     'OTC Pattern',
+  'trend_follow':    'Trend Follow',
 };
-// Both engines use the same modules now.
-const OTC_MODULES  = MODULE_NAMES;
-const REAL_MODULES = MODULE_NAMES;
-// FIX (PAIR-ALLOWLIST-2026-08-07 / A-14): frontend allowlist mirrors
-// core/constants.py. Used to filter winrate dropdown, history, stats, and
-// agent panels so removed pairs (EURUSD_otc, USDJPY_otc, etc.) never
-// resurface. Backend is the source of truth; this is defence-in-depth.
-const ALLOWED_PAIRS_OTC = [
-  'USDZAR_otc','BRLUSD_otc','USDIDR_otc','NZDUSD_otc','USDCOP_otc',
-  'USDBDT_otc','USDPKR_otc','USDMXN_otc','USDDZD_otc','USDINR_otc','USDPHP_otc',
-];
-const ALLOWED_PAIRS_REAL = ['EURUSD','EURGBP','AUDUSD','USDJPY'];
-const ALLOWED_PAIRS = new Set([...ALLOWED_PAIRS_OTC, ...ALLOWED_PAIRS_REAL]);
-function isAllowedPair(asset, category) {
-  if (!asset) return false;
-  if (!category) return ALLOWED_PAIRS.has(asset);
-  if (category === 'otc')  return ALLOWED_PAIRS_OTC.includes(asset);
-  if (category === 'real') return ALLOWED_PAIRS_REAL.includes(asset);
-  return ALLOWED_PAIRS.has(asset);
-}
+// Active engine's 6-module set (5 shared + engine-specific).
+const OTC_MODULES  = ['candle_reaction','running_tick','pattern','indicator','key_level','otc_pattern'];
+const REAL_MODULES = ['candle_reaction','running_tick','pattern','indicator','key_level','trend_follow'];
+
+/* ─── STATE (reset on every initApp call) ────────────────────────────────── */
 let ws = null, reconnectTimer = null, reconnectAttempts = 0;
 let currentCategory = 'otc';         // set by initApp
 let currentAsset = '';               // set by initApp based on category
-// B-03: separate "Agent tab pair" from the chart pair. The user can inspect
-// any pair's agent dashboard without changing the chart. When null/empty,
-// the Agent tab falls back to the chart pair (currentAsset) — that keeps the
-// default "follow the chart" behaviour unless the user manually picks a pair.
-let agentSelectedPair = '';          // '' → follow currentAsset
-global.currentAsset = '';
-global.currentCategory = 'otc';
-global.agentSelectedPair = '';
-function setAgentSelectedPair(a) {
-  agentSelectedPair = a || '';
-  global.agentSelectedPair = agentSelectedPair;
-}
-function setCurrentAsset(a) {
-  currentAsset = a;
-  global.currentAsset = a;
-  // Notify agent-panel.js (and any other listeners) that the active pair
-  // changed — replaces the 1s poll that wasted 60 CPU wakeups/min.
-  try { global.dispatchEvent?.(new CustomEvent('asset-change', { detail: a })); } catch(_){}
-}
-function setCurrentCategory(c) {
-  currentCategory = c;
-  global.currentCategory = c;
-}
 let currentPeriod = 60;
-let chart = null, candleSeries = null, ghostSeries = null, candleData = [], lastPrediction = null, signalHistory = [];
+let chart = null, candleSeries = null, ghostSeries = null;
+let candleData = [];
+let lastPrediction = null;
+let signalHistory = [];
 let totalCorrect = 0, totalSignals = 0;
 let soundEnabled = false, audioCtx = null;
-let realPairsList = [], otcPairsList = [], pairsList = [];
+let realPairsList = [], otcPairsList = [], alltimeOtcPairsList = [], pairsList = [];
 let currentMicro = null, runningConf = null;
-let tapePrices = [], tapeDir = [], tickTimestamps = [], lastLivePrice = 0;
-let lastTickAt = 0, staleTimeout = null, runningCandleOpenTime = 0, alertedCandleOpenTime = 0, alertedSignalDirection = null, lastMessageAt = 0, chartLoadingTimeout = null, _resizeTimer = null;
-let _countdownInterval = null, _keepaliveInterval = null, _historyRefreshInterval = null;
+let tapePrices = [], tapeDir = [];
+let tickTimestamps = [];
+let lastLivePrice = 0;
+let lastTickAt = 0;
+let staleTimeout = null;
+let runningCandleOpenTime = 0;
+let alertedCandleOpenTime = 0;
+let alertedSignalDirection = null;
+let lastMessageAt = 0;
+let chartLoadingTimeout = null;
+let _resizeTimer = null;
+// FIX (DEEP-AUDIT-2026-07-26 / F-17-14 + F-17-16, HIGH): removed the unused
+// `_tickRateInterval` and `_marketStatusInterval` declarations — the
+// corresponding setInterval blocks were deleted (dead code targeting
+// non-existent HTML elements #market-status-indicator / #tick-rate-val /
+// #stat-active-cat / #stat-signals / #stat-winrate). The pagehide cleanup
+// references were also removed.
+let _countdownInterval = null, _keepaliveInterval = null;
+
 /* Active tab — 'chart' (default) | 'history' | 'accuracy' */
 let currentTab = 'chart';
+
 /* Smooth-candle tween state (easeOutCubic) */
 const TWEEN_MS = 480;
 let _priceLines = [];
@@ -80,16 +109,29 @@ let _fromClose = 0, _fromHigh = 0, _fromLow = 0;
 let _toClose = 0,   _toHigh = 0,   _toLow = 0;
 let _rTime = 0, _rOpen = 0, _rClose = 0, _rHigh = 0, _rLow = 0;
 let _tweenStart = 0, _rafActive = false;
+
 /* DOM refs (filled in initApp so the IIFE can be re-entered if needed) */
 let $ = null;
 let countdownEl = null;
-let detailOverlay = null, detailBody = null, detailTitle = null, _eventsWired = false, _lastInitCategory = null;
+let detailOverlay = null, detailBody = null, detailTitle = null;
+
+// FIX (DEEP-AUDIT-2026-07-26 / F-17-09, CRITICAL): guard flag for wireEvents()
+// so re-entrant initApp calls (e.g. bfcache restore via pageshow) don't
+// register duplicate event listeners. The DOM survives bfcache, so the
+// previous listeners are still attached and functional.
+let _eventsWired = false;
+// FIX (DEEP-AUDIT-2026-07-26 / F-17-03, CRITICAL): track the active category
+// so the bfcache pageshow handler can re-init the right page.
+let _lastInitCategory = null;
+
+/* ─── HELPERS ────────────────────────────────────────────────────────────── */
 function esc(s){
   if(s == null) return '';
   return String(s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
 function fmtPrice(v){
   if(v == null) return '—';
   const n = parseFloat(v);
@@ -101,9 +143,32 @@ function fmtPrice(v){
   if(abs >= 10)   return n.toFixed(4);
   return n.toFixed(5);
 }
-function _setText(id, text){ const el = $(id); if(el) el.textContent = text; return el; }
-function _setClass(id, cls){ const el = $(id); if(el) el.className = cls; return el; }
-function _setStyle(id, prop, val){ const el = $(id); if(el) el.style[prop] = val; return el; }
+
+/* ─── DOM HELPERS ────────────────────────────────────────────────────────── */
+// FIX (UI-P0-2/3/4, 2026-07-21): null-safe DOM setter helpers. Previously
+// renderPending/renderSignal/renderMicro accessed .textContent / .style
+// on raw $(...) results without null checks — if any element was missing
+// (or DOM not ready), the whole tick handler crashed silently. Now these
+// helpers no-op on null and the render functions can't throw.
+function _setText(id, text){
+  const el = $(id);
+  if(el) el.textContent = text;
+  return el;
+}
+// FIX (DEAD-CODE-2026-07-21): removed _setHtml — never called. Render
+// functions use innerHTML directly when needed.
+function _setClass(id, cls){
+  const el = $(id);
+  if(el) el.className = cls;
+  return el;
+}
+function _setStyle(id, prop, val){
+  const el = $(id);
+  if(el) el.style[prop] = val;
+  return el;
+}
+
+/* ─── AUDIO ──────────────────────────────────────────────────────────────── */
 function beep(freq=880, dur=0.12, vol=0.3){
   if(!soundEnabled) return;
   try{
@@ -121,16 +186,26 @@ function signalBeep(){
   beep(1200, 0.08, 0.25);
   setTimeout(()=>beep(1600, 0.1, 0.25), 100);
 }
+
+/* ─── CHART ──────────────────────────────────────────────────────────────── */
 function initChart(){
   const container = $('chart-container');
   if(!container) return;
+  // FIX (CRASH-2026-07-30): if chart already exists (double-init via bfcache
+  // restore or rapid setCategory), remove it first to prevent duplicate chart
+  // instances stacked on the same container (causes visual glitch + memory leak).
   if(chart){
     try{ chart.remove(); }catch(_){}
     chart = null;
     candleSeries = null;
     ghostSeries = null;
   }
-  if(typeof LightweightCharts === 'undefined'){ console.error('[chart] LightweightCharts not loaded'); return; }
+  // FIX (CRASH-2026-07-30): guard against LightweightCharts not loaded yet
+  // (shouldn't happen — safeInit checks — but defensive)
+  if(typeof LightweightCharts === 'undefined'){
+    console.error('[chart] LightweightCharts not loaded');
+    return;
+  }
   chart = LightweightCharts.createChart(container, {
     autoSize: true,
     layout: { background: { color: '#131722' }, textColor: '#8b949e', fontSize: 11 },
@@ -145,6 +220,17 @@ function initChart(){
     },
     rightPriceScale: { borderColor: '#30363d', scaleMargins: { top: 0.1, bottom: 0.1 } },
     timeScale: { borderColor: '#30363d', timeVisible: true, secondsVisible: false, rightOffset: 3 },
+    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-13 + AUDIT-5-14): the vendored
+    // LightweightCharts v4.1.3 default time formatter uses getUTCHours()/
+    // getUTCMinutes() — confirmed by grep on the bundle (5× getUTCDate, 2×
+    // getUTCSeconds, 2× getUTCMinutes, 2× getUTCHours, ZERO getHours/Minutes/
+    // Seconds). So the chart x-axis displayed UTC by default while the
+    // history list (renderHistory) and detail modal (showSignalDetail) used
+    // toLocaleTimeString / toLocaleString → LOCAL time. A UTC+6 user looking
+    // at a 12:00 UTC candle saw "12:00" on the chart but "18:00" in history
+    // for the same signal — impossible to correlate. This timeFormatter
+    // overrides the default to display LOCAL time, matching the history list
+    // and modal. The `time` arg is a UTCTimestamp (UTC seconds).
     localization: {
       timeFormatter: (time) => {
         try {
@@ -157,20 +243,43 @@ function initChart(){
     },
     handleScroll: { vertTouchDrag: false },
   });
-  candleSeries = chart.addCandlestickSeries({ upColor: '#00c853', downColor: '#ff1744', borderUpColor: '#00c853', borderDownColor: '#ff1744', wickUpColor: '#00c853', wickDownColor: '#ff1744', });
-  ghostSeries = chart.addCandlestickSeries({ upColor: 'rgba(0,200,83,0.25)', downColor: 'rgba(255,23,68,0.25)', borderUpColor: 'rgba(0,200,83,0.25)', borderDownColor: 'rgba(255,23,68,0.25)', wickUpColor: 'rgba(0,200,83,0.25)', wickDownColor: 'rgba(255,23,68,0.25)', });
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-27, HIGH): EXPECTS LightweightCharts v4.x.
+  // The vendored library at /static/lightweight-charts.js is v4.1.3 (April 2024).
+  // In v5 (current stable), addCandlestickSeries() is removed in favour of
+  // chart.addSeries(CandlestickSeries, options). If the library is upgraded
+  // to v5, both calls below will throw — breaking the chart entirely. Pin the
+  // library at v4.x explicitly (e.g., via a <script integrity> hash in HTML).
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#00c853', downColor: '#ff1744',
+    borderUpColor: '#00c853', borderDownColor: '#ff1744',
+    wickUpColor: '#00c853', wickDownColor: '#ff1744',
+  });
+  ghostSeries = chart.addCandlestickSeries({
+    upColor: 'rgba(0,200,83,0.25)', downColor: 'rgba(255,23,68,0.25)',
+    borderUpColor: 'rgba(0,200,83,0.25)', borderDownColor: 'rgba(255,23,68,0.25)',
+    wickUpColor: 'rgba(0,200,83,0.25)', wickDownColor: 'rgba(255,23,68,0.25)',
+  });
   chart.timeScale().subscribeVisibleTimeRangeChange(() => { refreshPriceLines(); });
+
+  // Responsive chart — re-apply explicit width/height on window resize so the
+  // chart stays in sync with the container. autoSize:true handles most cases,
+  // but on mobile orientation change / browser chrome show-hide the explicit
+  // resize call gives an immediate repaint (autoSize has a small delay).
   window.addEventListener('resize', () => {
     if(_resizeTimer) clearTimeout(_resizeTimer);
     _resizeTimer = setTimeout(() => {
       if(!chart || !container) return;
       try{
-        chart.applyOptions({ width: container.clientWidth, height: container.clientHeight, });
+        chart.applyOptions({
+          width: container.clientWidth,
+          height: container.clientHeight,
+        });
       }catch(_){}
       refreshPriceLines();
     }, 120);
   });
 }
+
 /* Pick a "nice" round-number step for price lines based on visible range. */
 function pickPriceStep(priceRange){
   if(priceRange <= 0) return 0.00010;
@@ -183,6 +292,7 @@ function pickPriceStep(priceRange){
   if(norm <= 5)      return 5 * mag;
   return 10 * mag;
 }
+
 /* Build / refresh the dense round-number price-level grid on candleSeries.
    Only recreates lines when the visible price range shifts beyond the
    existing grid — avoids leaking price lines on every tick. */
@@ -192,7 +302,10 @@ function refreshPriceLines(){
   let lo = Infinity, hi = -Infinity;
   if(visRange && visRange.from && visRange.to){
     for(const c of candleData){
-      if(c.time >= visRange.from && c.time <= visRange.to){ if(c.low < lo) lo = c.low; if(c.high > hi) hi = c.high; }
+      if(c.time >= visRange.from && c.time <= visRange.to){
+        if(c.low < lo) lo = c.low;
+        if(c.high > hi) hi = c.high;
+      }
     }
   }
   if(!isFinite(lo) || !isFinite(hi)){
@@ -201,25 +314,32 @@ function refreshPriceLines(){
     hi = Math.max(...recent.map(c => c.high));
   }
   if(!isFinite(lo) || !isFinite(hi) || lo <= 0 || hi <= 0) return;
+
   const pad = (hi - lo) * 0.10;
   lo -= pad; hi += pad;
+
   const step = pickPriceStep(hi - lo);
   if(step <= 0) return;
+
   const gridLo = Math.floor(lo / step) * step;
   const gridHi = Math.ceil(hi / step) * step;
+
   if(_priceLinesRange.step === step &&
      _priceLinesRange.lo <= gridLo &&
      _priceLinesRange.hi >= gridHi) return;
+
   for(const pl of _priceLines){
     try{ candleSeries.removePriceLine(pl); }catch(_){}
   }
   _priceLines = [];
+
   let decimals = 5;
   if(step >= 1)        decimals = 2;
   else if(step >= 0.1) decimals = 3;
   else if(step >= 0.01) decimals = 4;
   else if(step >= 0.001) decimals = 5;
   else                 decimals = 6;
+
   for(let p = gridLo; p <= gridHi + step * 0.5; p += step){
     const price = Math.round(p / step) * step;
     if(price <= 0) continue;
@@ -237,7 +357,15 @@ function refreshPriceLines(){
   }
   _priceLinesRange = { lo: gridLo, hi: gridHi, step: step };
 }
+
 function updateChart(candles, predCandle, resetView){
+  // FIX (2026-07-18, chart-crash bug): sanitize incoming candle data to
+  // prevent LightweightCharts from crashing on:
+  //   - Duplicate timestamps (causes "Assertion failed" error)
+  //   - Non-ascending timestamps (causes render corruption)
+  //   - NaN/Infinity values (causes blank chart)
+  //   - high < low or open <= 0 (causes assertion errors)
+  // We de-duplicate by time (keep last), sort ascending, and clamp values.
   const seen = new Map();
   for(const c of (candles || [])){
     if(!c) continue;
@@ -258,7 +386,15 @@ function updateChart(candles, predCandle, resetView){
     console.error('[chart] setData error:', e);
   }
   if(candleData.length) _resetRaf(candleData[candleData.length-1]);
+  // FIX (CRASH-FIX-2026-07-26 / FE-002): hideChartLoading() was only called
+  // when candleData.length > 0. If the server returned an empty snapshot
+  // (broker feed down, asset not configured, period gap, new pair with no
+  // history yet), the chart-loading overlay stayed on "Loading…" forever,
+  // even though the connection was perfectly fine. Now we ALWAYS hide the
+  // loading overlay after setData, regardless of whether the array is empty.
   hideChartLoading();
+  // Surface empty-snapshot state to the user so they know the connection
+  // is fine but no data is available (not the same as "Loading…").
   if(!candleData.length){
     try{
       const _noData = document.getElementById('chart-no-data');
@@ -292,8 +428,10 @@ function updateChart(candles, predCandle, resetView){
   _priceLinesRange = { lo: 0, hi: 0, step: 0 };
   refreshPriceLines();
 }
+
 /* easeOutCubic tween — fast start, smooth deceleration. 60fps. */
 function easeOutCubic(t){ return 1 - Math.pow(1 - t, 3); }
+
 function _rafFrame(ts){
   if(!_rafActive) return;
   if(_rTime > 0 && _rOpen > 0 && candleSeries){
@@ -303,6 +441,7 @@ function _rafFrame(ts){
     _rClose = _fromClose + (_toClose - _fromClose) * eased;
     _rHigh  = _fromHigh  + (_toHigh  - _fromHigh)  * eased;
     _rLow   = _fromLow   + (_toLow   - _fromLow)   * eased;
+    // FIX (2026-07-18): ensure all values are finite before applying.
     if(!isFinite(_rClose) || !isFinite(_rHigh) || !isFinite(_rLow)){
       _rafActive = false;
       return;
@@ -314,6 +453,7 @@ function _rafFrame(ts){
       try{
         candleSeries.update({ time: _rTime, open: _rOpen, high: safeHigh, low: safeLow, close: safeClose });
       }catch(e){
+        // Suppress LightweightCharts assertion errors — they happen when
         // the chart is in a transitional state (e.g. setData + update
         // racing). The next tick will retry.
       }
@@ -325,7 +465,14 @@ function _rafFrame(ts){
   }
   requestAnimationFrame(_rafFrame);
 }
-function _startRaf(){ if(_rafActive) return; _rafActive = true; _tweenStart = performance.now(); requestAnimationFrame(_rafFrame); }
+
+function _startRaf(){
+  if(_rafActive) return;
+  _rafActive = true;
+  _tweenStart = performance.now();
+  requestAnimationFrame(_rafFrame);
+}
+
 function _setTarget(candle, perfNow){
   if(!candle || !candle.open || candle.open <= 0 || !candle.time) return;
   if(_rTime > 0 && candle.time < _rTime) return;
@@ -338,6 +485,7 @@ function _setTarget(candle, perfNow){
   _toClose = candle.close; _toHigh = candle.high; _toLow = candle.low;
   _tweenStart = perfNow || performance.now();
 }
+
 function _resetRaf(candle){
   if(candle){
     _rTime = candle.time; _rOpen = candle.open;
@@ -348,7 +496,13 @@ function _resetRaf(candle){
   } else { _rTime = 0; }
   _tweenStart = performance.now();
 }
+
 function updateLastCandle(candle){
+  // FIX (2026-07-18, chart-crash bug): sanitize the incoming tick candle
+  // before applying it. Reject NaN/Infinity, non-positive prices, and
+  // clamp OHLC to be internally consistent (high >= max(open,close),
+  // low <= min(open,close)). This prevents LightweightCharts.update()
+  // from throwing assertion errors that would silently kill the chart.
   if(!candle) return;
   const t  = typeof candle.time  === 'number' ? Math.floor(candle.time)  : 0;
   const o  = +candle.open, h  = +candle.high, l  = +candle.low, c  = +candle.close;
@@ -358,10 +512,15 @@ function updateLastCandle(candle){
   const hi = Math.max(h, o, c);
   const lo = Math.min(l, o, c);
   const safeCandle = { time: t, open: o, high: hi, low: lo, close: c };
+
   if(!candleData.length){
     candleData.push(safeCandle);
     try{ if(candleSeries) candleSeries.setData(candleData); }catch(e){ console.error('[chart] setData(empty) error:', e); }
     _resetRaf(safeCandle);
+    // FIX (CRASH-FIX-2026-07-26 / FE-003): when the first tick arrives
+    // before any snapshot, the chart-loading overlay was never cleared
+    // because this branch returned before hideChartLoading(). Now we
+    // hide it so the user sees the tick immediately.
     hideChartLoading();
     try{
       const _noData = document.getElementById('chart-no-data');
@@ -377,6 +536,7 @@ function updateLastCandle(candle){
     if(candleData.length > 500) candleData.shift();
     _setTarget(safeCandle);
     _startRaf();
+    // Auto-scroll to show the new candle (only if user is at the right edge)
     try{
       if(chart && chart.timeScale().isVisible()){
         chart.timeScale().scrollToPosition(3, false);
@@ -384,6 +544,7 @@ function updateLastCandle(candle){
     }catch(_){}
     return;
   }
+  // Same candle: backend is the source of truth — take its values directly.
   last.open  = safeCandle.open;
   last.high  = safeCandle.high;
   last.low   = safeCandle.low;
@@ -391,20 +552,52 @@ function updateLastCandle(candle){
   _setTarget(last);
   _startRaf();
 }
+
+/* ─── SIGNAL DISPLAY ─────────────────────────────────────────────────────── */
 function showChartLoading(){
   const overlay = $('chart-loading-overlay');
   if(!overlay) return;
   overlay.classList.add('show');
   clearTimeout(chartLoadingTimeout);
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-28, HIGH): on 20s timeout, surface an
+  // error message instead of silently hiding the overlay. Previously, if the
+  // WS connected but never delivered a snapshot (server bug, network issue),
+  // the overlay disappeared after 20s and the user saw a blank chart with no
+  // explanation. Now: replace the loading text with an error message AND keep
+  // the overlay visible so the user knows something went wrong (the next
+  // snapshot/tick arrival will hideChartLoading() naturally if data resumes).
   chartLoadingTimeout = setTimeout(() => {
     const txt = $('chart-loading-text');
     if(txt) txt.textContent = 'No data received — check connection';
+    // Keep the overlay visible (don't remove 'show') so the message is seen.
   }, 20000);
 }
-function hideChartLoading(){ const overlay = $('chart-loading-overlay'); if(!overlay) return; clearTimeout(chartLoadingTimeout); overlay.classList.remove('show'); }
+function hideChartLoading(){
+  const overlay = $('chart-loading-overlay');
+  if(!overlay) return;
+  clearTimeout(chartLoadingTimeout);
+  overlay.classList.remove('show');
+}
+
 function renderPending(){
-  if(lastPrediction && lastPrediction.signal === 'NEUTRAL'){ renderSignal(lastPrediction); return; }
-  if(lastPrediction){ renderSignal(lastPrediction); return; }
+  // FIX (PENDING-FIX-2026-07-22): if we have a lastPrediction that's NEUTRAL,
+  // show it as NEUTRAL instead of PENDING. The user complaint 'সবসময় পেন্ডিং
+  // দেখায়' was because NEUTRAL predictions (from WEAK→NEUTRAL conversion)
+  // were being overwritten with PENDING on every EOC. Now: if lastPrediction
+  // exists and is NEUTRAL, keep showing it. Only show PENDING if there's
+  // truly no prediction yet (fresh page load).
+  if(lastPrediction && lastPrediction.signal === 'NEUTRAL'){
+    renderSignal(lastPrediction);
+    return;
+  }
+  // FIX (PENDING-FIX-2026-07-22): if we have ANY lastPrediction, keep showing
+  // it instead of flashing to PENDING. The prediction is still valid — it's
+  // just being re-evaluated for the next candle. PENDING should only show
+  // on the very first load before any prediction arrives.
+  if(lastPrediction){
+    renderSignal(lastPrediction);
+    return;
+  }
   // Truly no prediction yet — show PENDING.
   _setClass('signal-box', 'pending signal-pop');
   _setText('signal-label', '⏳ PENDING');
@@ -417,10 +610,13 @@ function renderPending(){
   _setStyle('sig-conf-bar', 'background', '#2196F3');
   _setText('sig-agree', '—');
   _setText('sig-regime', '—');
+
   // Market state panel
   _setText('ms-trend', '—');
   _setText('ms-zone', '—');
   _setText('ms-volatility', '—');
+
+  // FIX (UI-P1-2): reset microstructure fields too.
   _setStyle('bs-buy', 'width', '50%');
   _setStyle('bs-sell', 'width', '50%');
   _setText('bs-buy', '50%');
@@ -443,6 +639,7 @@ function renderPending(){
   _setText('ms-ticks', '0');
   _setText('ms-net', '—');
   _setText('ms-round', '—');
+
   const theoriesList = $('theories-list');
   if(theoriesList){
     theoriesList.innerHTML = '';
@@ -450,15 +647,29 @@ function renderPending(){
     const toggle = $('theories-toggle');
     if(toggle){ toggle.classList.remove('open'); toggle.setAttribute('aria-expanded','false'); }
   }
+
   alertedCandleOpenTime = 0;
   alertedSignalDirection = null;
 }
+
 function renderSignal(pred){
   if(!pred) return;
   const s = pred.signal || 'NEUTRAL';
+
+  // Alert dedup — one beep per candle, plus on direction change.
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-65, MEDIUM): guard for
+  // runningCandleOpenTime === 0. Before the first candle arrives,
+  // runningCandleOpenTime is 0, so `candleKey !== alertedCandleOpenTime`
+  // (0 !== 0 → false initially, but the very first renderSignal call sets
+  // alertedCandleOpenTime = 0, so the second call IS flagged as a new candle
+  // and beeps — even on a NEUTRAL prediction. Now: don't beep if no candle
+  // has arrived yet (runningCandleOpenTime === 0) — wait until we actually
+  // have a candle boundary to dedup against. shouldAlert stays declared at
+  // function scope (referenced later for signal-pop class + signalBeep).
   const candleKey = runningCandleOpenTime || 0;
   let shouldAlert = false;
   if(!candleKey){
+    // No candle yet — still record the signal direction so the first real
     // candle can detect a direction change.
     alertedSignalDirection = s;
     alertedCandleOpenTime = 0;
@@ -466,37 +677,67 @@ function renderSignal(pred){
     const isNewCandle = candleKey !== alertedCandleOpenTime;
     const isDirectionChange = alertedSignalDirection !== s;
     shouldAlert = isNewCandle || isDirectionChange;
-    if(shouldAlert){ alertedCandleOpenTime = candleKey; alertedSignalDirection = s; }
+    if(shouldAlert){
+      alertedCandleOpenTime = candleKey;
+      alertedSignalDirection = s;
+    }
   }
+
+  // FIX (UI-P0-3, 2026-07-21): null-safe setters throughout. Previously
+  // any missing element crashed the entire tick handler.
   const cls = s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral';
   _setClass('signal-box', cls + (shouldAlert ? ' signal-pop' : ''));
   _setText('signal-label', s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT' : '➖ NEUTRAL');
+
   const score = pred.score || 0;
+  // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-18): when score===0 (NEUTRAL
+  // prediction with equal CALL/PUT votes), the old display showed "+0" in
+  // green — green typically implies a CALL/positive bias, but score=0 is
+  // genuinely neutral. Now: no "+" prefix for 0, and neutral color (text-dim)
+  // for score===0 so the score-color matches the "➖ NEUTRAL" label.
   _setText('sig-score', (score > 0 ? '+' : '') + score);
   _setStyle('sig-score', 'color',
     score > 0 ? 'var(--green)' : score < 0 ? 'var(--red)' : 'var(--text-dim)');
+
   const str = (pred.strength || '').toUpperCase();
   const strCls = str === 'STRONG'
     ? (s === 'PUT' ? 'strength-strong-put' : 'strength-strong')
     : str === 'MEDIUM' ? 'strength-medium' : 'strength-weak';
   _setClass('sig-strength', 'value ' + strCls);
   _setText('sig-strength', str || '—');
+
+  // FIX (UI-SIGNAL-ENHANCE, 2026-07-23): prominent strength badge on
+  // the signal box itself. Color-coded by tier (strong=green glow,
+  // medium=blue, neutral=grey). Updated on every tick so it stays in
+  // sync with the strength field above.
   const badgeCls = str === 'STRONG' ? 'strength-badge strong'
                  : str === 'MEDIUM' ? 'strength-badge medium'
                  : 'strength-badge neutral';
   _setClass('signal-strength-badge', badgeCls);
   _setText('signal-strength-badge', str || 'NEUTRAL');
+
   const conf = pred.confidence || 0;
   _setText('sig-conf-val', Math.round(conf) + '%');
   _setStyle('sig-conf-bar', 'width', conf + '%');
   _setStyle('sig-conf-bar', 'background',
             s === 'CALL' ? 'var(--green)' : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)');
+
   _setText('sig-agree', (pred.agree || 0) + '/' + (pred.total || 0) + ' modules');
+
+  // Regime display — clean format (no debug-looking output).
+  // FIX (UI-P1-15/16, 2026-07-21): drop the "(str=0.85)" debug suffix;
+  // the strength number is shown in Market State as a label.
   const reg = pred.regime || {};
   const regStr = (typeof reg === 'object' && reg !== null)
     ? (reg.regime || '—')
     : String(reg || '—');
   _setText('sig-regime', regStr);
+
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-01, CRITICAL): display algorithm strategy
+  // in signal panel. Previously the JS only unhid the inner <span
+  // id="sig-strategy"> but never the parent <div id="sig-strategy-row"
+  // style="display:none">, so the entire feature was invisible. Now we also
+  // unhide the parent row when a non-default strategy is present.
   const stratName = pred.strategy || '';
   const stratReason = pred.strategy_reason || '';
   const stratEl = $('sig-strategy');
@@ -513,6 +754,7 @@ function renderSignal(pred){
       if(stratRow) stratRow.style.display = 'none';
     }
   }
+
   // Market State panel — only 3 live fields.
   const trendVal = reg.regime || '—';
   const zoneVal = reg.is_volatile ? 'VOLATILE'
@@ -522,6 +764,7 @@ function renderSignal(pred){
     ? (reg.volatility_pct > 1.3 ? 'HIGH'
        : reg.volatility_pct < 0.7 ? 'LOW' : 'NORMAL')
     : '—';
+
   const msTrend = $('ms-trend');
   if(msTrend){
     msTrend.textContent = trendVal;
@@ -542,15 +785,35 @@ function renderSignal(pred){
     msVol.style.color = volVal === 'HIGH' ? 'var(--red)'
                       : volVal === 'LOW' ? 'var(--text-dim)' : 'var(--text)';
   }
+
+  // 6-Module Engine breakdown — display only the active engine's 6 modules.
   renderModuleBreakdown(pred);
+
   if(shouldAlert) signalBeep();
+
+  // Active engine badge — shows which engine produced this prediction.
   const engineLabel = $('engine-label');
   if(engineLabel){
+    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-16 + AUDIT-5-20): use
+    // currentCategory as authoritative source for the engine-label decision
+    // instead of pred.category. The engines router (engines/__init__.py)
+    // normalizes category="alltime_otc" to "otc" before routing, so
+    // pred.category is "otc" even for alltime_otc subscriptions — causing
+    // the All-Time OTC page to always show "OTC ENGINE" in yellow instead
+    // of "ALL-OTC ENGINE" in cyan (the alltime_otc accent color). The page's
+    // currentCategory is authoritative for UI labeling. Added a third
+    // branch for alltime_otc with the cyan accent color matching the rest
+    // of the page (per common.js:2260 statActiveCat, alltime_otc.html
+    // router link, etc.).
     const cat = currentCategory;
     if(cat === 'real'){
       engineLabel.textContent = 'REAL ENGINE';
       engineLabel.style.background = 'rgba(0,200,83,.15)';
       engineLabel.style.color = 'var(--green)';
+    } else if(cat === 'alltime_otc'){
+      engineLabel.textContent = 'ALL-OTC ENGINE';
+      engineLabel.style.background = 'rgba(0,229,255,.15)';
+      engineLabel.style.color = '#00e5ff';
     } else {
       engineLabel.textContent = 'OTC ENGINE';
       engineLabel.style.background = 'rgba(255,193,7,.15)';
@@ -558,6 +821,7 @@ function renderSignal(pred){
     }
   }
 }
+
 /* Display the 6-module engine breakdown. Uses the active category's 6-module
    list (5 shared + 1 engine-specific). Falls back to raw reasons if no module
    breakdown was computed. */
@@ -565,10 +829,24 @@ function renderModuleBreakdown(pred){
   const theoriesList = $('theories-list');
   const theoriesToggle = $('theories-toggle');
   if(!theoriesList) return;
+
   theoriesList.innerHTML = '';
   const modules = pred.modules || {};
+
+  // Pick the active category's 6-module set. If the prediction's category
+  // field is set and differs from currentCategory, trust the prediction's
+  // category (it's authoritative — that's the engine that produced it).
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-32, HIGH): document that all-time OTC
+  // uses the OTC engine (intentional — engines/__init__.py routes
+  // category='alltime_otc' through the OTC engine). So OTC_MODULES (with
+  // otc_pattern as the 6th module) is the correct module set for the
+  // alltime_otc page. The predCat fallback to currentCategory doesn't help
+  // because predCat === 'otc' matches first (the engines router normalizes
+  // category='alltime_otc' to 'otc' before routing, so pred.category is
+  // 'otc' even for alltime_otc subscriptions).
   const predCat = pred.category || currentCategory;
   const moduleSet = predCat === 'real' ? REAL_MODULES : OTC_MODULES;
+
   let hasModuleVote = false;
   moduleSet.forEach(mname => {
     const m = modules[mname];
@@ -592,6 +870,7 @@ function renderModuleBreakdown(pred){
       });
     }
   });
+
   if(hasModuleVote){
     theoriesList.classList.add('open');
     theoriesToggle.classList.add('open');
@@ -614,23 +893,32 @@ function renderModuleBreakdown(pred){
     }
   }
 }
+
+/* ─── MICROSTRUCTURE ─────────────────────────────────────────────────────── */
 function renderMicro(micro){
   if(!micro) return;
   currentMicro = micro;
+  // FIX (UI-P0-4, 2026-07-21): null-safe throughout.
   const buyPct = Math.max(0, Math.min(100, Math.round(micro.buy_pct || 50)));
   const sellPct = 100 - buyPct;
   _setStyle('bs-buy',  'width', buyPct + '%');
   _setStyle('bs-sell', 'width', sellPct + '%');
   _setText('bs-buy',  buyPct + '%');
   _setText('bs-sell', sellPct + '%');
+
   const press = (micro.pressure || '—').toUpperCase();
   _setText('ms-pressure', press);
   _setClass('ms-pressure', 'pressure-badge ' + (press === 'BUYER' ? 'buyer' : press === 'SELLER' ? 'seller' : 'fight'));
+
   const react = (micro.reaction || '—').toUpperCase();
   _setText('ms-reaction', react === 'BUYER' ? 'BUYER REACT' : react === 'SELLER' ? 'SELLER REACT' : '—');
   _setClass('ms-reaction', 'react-badge ' + (react === 'BUYER' ? 'recovery' : react === 'SELLER' ? 'exhaust' : 'none'));
+
   const msFight = $('ms-fight');
   if(msFight){
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-13, HIGH): XSS — escape micro.crosses
+    // before interpolation into msFight.innerHTML. The server could send
+    // arbitrary JSON; previously the value was inserted raw.
     const crossesStr = esc(micro.crosses != null ? String(micro.crosses) : '0');
     if(micro.is_fight){
       msFight.innerHTML = '<span style="color:var(--yellow);font-weight:700">⚠ YES</span> <span style="color:var(--text-dim);font-size:10px">(' + crossesStr + ' crosses)</span>';
@@ -638,39 +926,54 @@ function renderMicro(micro){
       msFight.innerHTML = 'No <span style="color:var(--text-dim);font-size:10px">(' + crossesStr + ' crosses)</span>';
     }
   }
+
   const msHold = $('ms-hold');
   if(msHold){
     if(micro.hold_price != null){
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-13, HIGH): XSS — escape micro.hold_visits
+      // (and fmtPrice already produces a finite number string for hold_price).
       const holdVisitsStr = esc(micro.hold_visits != null ? String(micro.hold_visits) : '0');
       msHold.innerHTML = '<span style="color:var(--blue)">' + esc(fmtPrice(micro.hold_price)) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + holdVisitsStr + 'x)</span>';
     } else {
       msHold.textContent = '—';
     }
   }
+
   const phases = micro.phases || [];
   ['early','mid','late'].forEach((p, i) => {
     const el = $('ph-' + p);
     if(!el) return;
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-62, MEDIUM): bounds-check the phases
+    // array. Previously `const ph = phases[i]` assumed phases always had 3
+    // elements — if the server sent `phases: ['UP', 'DOWN']` (only 2),
+    // `phases[2]` was undefined, dir fell back to '—', and the late phase
+    // silently showed '—' instead of an error.
     const ph = (i < phases.length) ? phases[i] : undefined;
     const dir = (typeof ph === 'string' ? ph : (ph && ph.dir ? ph.dir : '—')).toUpperCase();
     const arrows = dir === 'UP' ? '↑↑' : dir === 'DOWN' ? '↓↓' : '→';
     el.textContent = (dir !== '—' ? dir + ' ' : '') + arrows;
     el.className = 'phase-dir ' + (dir === 'UP' ? 'up' : dir === 'DOWN' ? 'down' : 'flat');
   });
+
   const lr = (micro.last_react || '').toUpperCase();
   _setText('ms-last-react', lr || '—');
   _setClass('ms-last-react', 'react-badge ' + (lr === 'EXHAUST' ? 'exhaust' : lr === 'RECOVERY' ? 'recovery' : 'none'));
+
   _setText('ms-running-conf', runningConf === 'CONFIRMING' ? '✅ CONFIRMING'
                           : runningConf === 'OPPOSING' ? '❌ OPPOSING' : '—');
   _setClass('ms-running-conf', 'running-conf ' + (runningConf === 'CONFIRMING' ? 'confirming' : runningConf === 'OPPOSING' ? 'opposing' : 'none'));
+
   _setText('ms-ticks', micro.tick_count || 0);
   const net = micro.net || 0;
   _setText('ms-net', (net >= 0 ? '+' : '') + net.toFixed(5));
   _setStyle('ms-net', 'color', net >= 0 ? 'var(--green)' : 'var(--red)');
+
   const rl = micro.round || {};
   const msRound = $('ms-round');
   if(msRound){
     if(rl.near_level){
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-13, HIGH): XSS — escape rl.near_strength
+      // before interpolation (it could be a non-numeric string from the server).
       const nearStrengthStr = esc(rl.near_strength != null ? String(rl.near_strength) : '—');
       msRound.innerHTML = '<span style="color:var(--yellow)">' + esc(fmtPrice(rl.near_level)) + '</span> <span style="color:var(--text-dim);font-size:10px">(' + nearStrengthStr + ')</span>';
     } else {
@@ -678,17 +981,38 @@ function renderMicro(micro){
     }
   }
 }
+
+/* ─── TICK TAPE ────────────────────────────────────────────────────────────
+   FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): DELETED addTapeTick() and
+   renderTape(). The #tick-tape-inner element was removed from HTML but the
+   JS populating logic wasn't removed. addTapeTick() ran on every tick
+   (pushing to tapePrices[] / tapeDir[] up to TICK_TAPE_MAX=40) and called
+   renderTape() which early-returned via `if(!tickTapeInner) return;` —
+   pure dead code wasting CPU on every tick. Call sites in onSnapshot,
+   onTick, onEoc, and the pair-select change handler also removed below.
+   The tapePrices / tapeDir arrays and TICK_TAPE_MAX constant remain
+   (referenced by reset logic in initApp + pair-select handler) but are
+   no longer populated or read. */
+
+/* ─── SIGNAL HISTORY ─────────────────────────────────────────────────────── */
+// FIX (AUDIT-CRITICAL #009, 2026-07-21): dedup by ctime to prevent the
+// same candle's signal from being added twice (e.g. when a watchdog
+// restart re-broadcasts an EOC). Returns true if added, false if dup.
 function _historyHasCtime(ctime){
   if(!ctime) return false;
   for(let i = signalHistory.length - 1; i >= 0; i--){
     const h = signalHistory[i];
     if(h && h.detail && h.detail.ctime === ctime) return true;
+    // Only scan the most recent 5 — older entries are far enough back.
     if(signalHistory.length - i > 5) break;
   }
   return false;
 }
+
 function addHistory(signal, accuracy, detail){
+  // FIX (AUDIT-CRITICAL #009): skip duplicate ctime entries.
   if(detail && detail.ctime && _historyHasCtime(detail.ctime)){
+    // Update the existing entry's accuracy instead of duplicating.
     for(let i = signalHistory.length - 1; i >= 0; i--){
       const h = signalHistory[i];
       if(h && h.detail && h.detail.ctime === detail.ctime){
@@ -700,25 +1024,36 @@ function addHistory(signal, accuracy, detail){
     }
     return;
   }
-  signalHistory.push({ signal, accuracy: accuracy || 'pending', detail: detail || null, asset: (detail && detail.asset) || currentAsset });
+  signalHistory.push({ signal, accuracy: accuracy || 'pending', detail: detail || null });
   if(signalHistory.length > HISTORY_MAX) signalHistory.shift();
   renderHistory();
   setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
 }
+
 function loadServerHistory(){
   if(!ws || ws.readyState !== WebSocket.OPEN) return;
   send({ type: 'signals', asset: currentAsset, period: currentPeriod });
 }
+
 function onServerSignals(sigs, asset, period){
   if(!sigs) return;
   // Drop stale responses from a previous pair switch.
   if(asset && asset !== currentAsset) return;
   if(period && period !== currentPeriod) return;
   if(!sigs.length){
+    // Empty list — render the empty state but don't wipe locally-added
     // entries that haven't been persisted yet (e.g. just-graded candle).
     if(!signalHistory.length) renderHistory();
     return;
   }
+  // FIX (AUDIT-CRITICAL #007, 2026-07-21): merge instead of wholesale
+  // replace. Previously a fresh server fetch WIPED any locally-added
+  // entries (e.g. a just-graded candle whose row hadn't been written
+  // yet) — causing the newest signal to vanish for ~500ms until the
+  // next refresh. Now we dedupe by ctime and keep newer local data.
+  // FIX (AUDIT-CORE #106, 2026-07-21): also support pagination. If the
+  // server response includes `before_ctime` (from a Load-more request),
+  // the new sigs are PREPENDED to signalHistory instead of replacing.
   const serverByCtime = {};
   const orderedCtimes = [];
   for(const s of sigs){
@@ -730,8 +1065,12 @@ function onServerSignals(sigs, asset, period){
   const incoming = [];
   for(const key of orderedCtimes){
     const s = serverByCtime[key];
-    incoming.push({ signal: s.signal, accuracy: s.accuracy, detail: s, asset: s.asset || asset });
+    incoming.push({ signal: s.signal, accuracy: s.accuracy, detail: s });
   }
+  // Determine if this is a pagination response (server sent before_ctime
+  // in the response — server.py includes it when the request had it).
+  // We detect by checking if the newest incoming ctime is OLDER than the
+  // oldest existing local ctime — if so, this is a Load-more response.
   const isNewestIncomingOlder = (signalHistory.length > 0
     && signalHistory[0] && signalHistory[0].detail
     && signalHistory[0].detail.ctime
@@ -739,8 +1078,10 @@ function onServerSignals(sigs, asset, period){
     && incoming[incoming.length - 1].detail
     && incoming[incoming.length - 1].detail.ctime
     && incoming[incoming.length - 1].detail.ctime < signalHistory[0].detail.ctime);
+
   let merged;
   if(isNewestIncomingOlder){
+    // Pagination response — prepend incoming to existing history.
     // Dedupe by ctime (in case of overlap at the boundary).
     const existingCtimes = new Set(
       signalHistory.filter(h => h && h.detail && h.detail.ctime)
@@ -749,10 +1090,13 @@ function onServerSignals(sigs, asset, period){
       h => !h.detail || !h.detail.ctime || !existingCtimes.has(h.detail.ctime));
     merged = uniqueIncoming.concat(signalHistory);
   } else {
+    // Normal refresh — preserve local entries whose ctime isn't in the
     // server response (they're newer than the server's snapshot).
     const preserved = [];
     for(const h of signalHistory){
-      if(h && h.detail && h.detail.ctime && !serverByCtime[h.detail.ctime]) preserved.push(h);
+      if(h && h.detail && h.detail.ctime && !serverByCtime[h.detail.ctime]){
+        preserved.push(h);
+      }
     }
     merged = incoming.concat(preserved);
   }
@@ -764,64 +1108,35 @@ function onServerSignals(sigs, asset, period){
   totalCorrect = graded.filter(s => s.accuracy === 'correct').length;
   renderHistory();
   renderAccuracy();
+  // FIX (UI-P1-7, 2026-07-21): only reset scroll to top if the user was
+  // already near the top. Previously every refresh forced scrollTop=0,
+  // disrupting users who were browsing older signals (especially after
+  // clicking "Load older signals").
   setTimeout(() => {
     const hl = $('history-list');
     if(hl && hl.scrollTop < 80) hl.scrollTop = 0;
   }, 50);
 }
+
 function renderHistory(){
   const historyList = $('history-list');
   if(!historyList) return;
-  const onHistoryTab = (currentTab === 'history');
+
+  // When the history tab is active, only show signals from the last 1 hour
+  // (3600s). HISTORY_MAX (100) holds more than an hour of 60s candles, so this
+  // filter keeps the view focused on what the user actually wants to see.
+  // When the history tab is NOT active, render the full list (the rendering is
+  // invisible but stays in sync so switching tabs is instant).
+  const filterLastHour = (currentTab === 'history');
   const nowSec = Math.floor(Date.now() / 1000);
-  // Read filter values from the dropdowns
-  const timeFilterEl = $('history-time-filter');
-  const dirFilterEl = $('history-direction-filter');
-  const accFilterEl = $('history-accuracy-filter');
-  const pairFilterEl = $('history-pair-select');
-  const hoursFilter = timeFilterEl ? parseFloat(timeFilterEl.value) : 1;
-  const dirFilter = dirFilterEl ? dirFilterEl.value : '';
-  const accFilter = accFilterEl ? accFilterEl.value : '';
-  const pairFilter = pairFilterEl ? pairFilterEl.value : '';
-  // Compute time cutoff (0 = all time)
-  const cutoff = (hoursFilter && hoursFilter > 0) ? nowSec - (hoursFilter * 3600) : 0;
-  // Apply filters
-  let displayHistory = signalHistory.filter(h => {
-    if(!h || !h.detail) return false;
-    const ct = h.detail.ctime;
-    if(cutoff > 0 && ct && ct < cutoff) return false;
-    if(dirFilter && h.signal !== dirFilter) return false;
-    if(accFilter && h.accuracy !== accFilter) return false;
-    if(pairFilter && h.asset !== pairFilter) return false;
-    return true;
-  });
-  const sig = displayHistory.map(h => (h.detail&&h.detail.ctime)+'|'+h.signal+'|'+h.accuracy+'|'+(h.asset||'')).join('§')
-            + '|' + hoursFilter + '|' + dirFilter + '|' + accFilter + '|' + pairFilter + '|' + onHistoryTab;
-  if(renderHistory._lastSig === sig && historyList.innerHTML){
-    // Nothing changed — just update the count hint and return.
-    const hintEl = $('history-count-hint');
-    if(hintEl){
-      const total = displayHistory.length;
-      const wins = displayHistory.filter(h => h.accuracy === 'correct').length;
-      const losses = displayHistory.filter(h => h.accuracy === 'wrong').length;
-      const pending = displayHistory.filter(h => !h.accuracy || h.accuracy === 'pending').length;
-      hintEl.textContent = `${total} signals · ${wins}W / ${losses}L / ${pending}⏳`;
-    }
-    return;
-  }
-  renderHistory._lastSig = sig;
-  // Update count hint
-  const hintEl = $('history-count-hint');
-  if(hintEl){
-    const total = displayHistory.length;
-    const wins = displayHistory.filter(h => h.accuracy === 'correct').length;
-    const losses = displayHistory.filter(h => h.accuracy === 'wrong').length;
-    const pending = displayHistory.filter(h => !h.accuracy || h.accuracy === 'pending').length;
-    hintEl.textContent = `${total} signals · ${wins}W / ${losses}L / ${pending}⏳`;
-  }
+  const oneHourAgo = nowSec - 3600;
+  const displayHistory = filterLastHour
+    ? signalHistory.filter(h => h && h.detail && h.detail.ctime && h.detail.ctime >= oneHourAgo)
+    : signalHistory;
+
   if(!displayHistory.length){
     historyList.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:8px 4px">'
-      + 'No signals match the current filter'
+      + (filterLastHour ? 'No signals in the last hour' : 'No signals yet')
       + '</div>';
     return;
   }
@@ -830,6 +1145,12 @@ function renderHistory(){
   for(let i = lastIdx; i >= 0; i--){
     const h = displayHistory[i];
     const isRecent = (i === lastIdx);
+    // FIX (2026-07-18): clearer win/loss icons with text labels.
+    //   correct  → ✅ WIN   (green)
+    //   wrong    → ❌ LOSS  (red)
+    //   draw     → ➖ DRAW  (yellow)
+    //   pending  → ⏳ WAIT  (blue)
+    // On phones (<400px) the text label is hidden via CSS — only the emoji shows.
     let iconEmoji, iconLabel;
     if(h.accuracy === 'correct'){
       iconEmoji = '✅'; iconLabel = 'WIN';
@@ -844,6 +1165,10 @@ function renderHistory(){
     const strength = h.detail ? h.detail.strength : '';
     const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
     const strengthLetter = strength ? strength[0] : '·';
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-42, HIGH): add a title attribute so
+    // hovering reveals the full word. Previously the single-letter strength
+    // indicator (S/M/W) was ambiguous — "S" could mean "Strong" or "Sell"
+    // in trading context. Now the tooltip clarifies.
     const strengthTitle = strength ? ('Strength: ' + strength) : 'No strength';
     const scoreVal = h.detail ? h.detail.score : null;
     const score = scoreVal != null ? ((scoreVal >= 0 ? '+' : '') + scoreVal) : '';
@@ -854,20 +1179,29 @@ function renderHistory(){
                  : h.accuracy === 'pending' ? ' pending'
                  : '';
     let recentCls = '';
-    if(isRecent){ recentCls = ' history-row-recent'; if(h.signal === 'CALL') recentCls += ' history-call-tint'; else if(h.signal === 'PUT') recentCls += ' history-put-tint'; }
+    if(isRecent){
+      recentCls = ' history-row-recent';
+      if(h.signal === 'CALL') recentCls += ' history-call-tint';
+      else if(h.signal === 'PUT') recentCls += ' history-put-tint';
+    }
     const time = (h.detail && h.detail.ctime)
       ? new Date(h.detail.ctime * 1000).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false})
       : '--:--';
-    const assetLabel = h.asset ? esc(h.asset) : '';
+    // FIX (AUDIT-CORE #74, 2026-07-21): use ctime as the lookup key (not
+    // the array index) so a click always opens the right signal even if
+    // signalHistory was mutated between render and click. Index-based
+    // lookup was fragile — pair-switch / addHistory / onServerSignals
+    // could all shift indices.
     const clickKey = (h.detail && h.detail.ctime) ? String(h.detail.ctime) : '';
     const clickable = clickKey ? `onclick="window._showSignalDetail('${clickKey}')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._showSignalDetail('${clickKey}')}"` : '';
-    // NEW (ALWAYS-SIGNAL-2026-08-03): per-row delete button
-    const deleteBtn = clickKey
-      ? `<span class="history-delete-btn" onclick="event.stopPropagation();window._deleteSignal('${esc(h.asset)}',${h.detail.period||60},${clickKey})" title="Delete this signal">🗑</span>`
-      : '';
     html += `<div class="history-row${accCls}${recentCls}" ${clickable}>`
          +  `<span class="history-time">${time}</span>`
-         +  `<span class="history-asset" style="font-size:9px;color:var(--text-dim);min-width:70px">${assetLabel}</span>`
+         // FIX (DEEP-AUDIT-2026-07-26 / F-17-11, HIGH): XSS — escape h.signal before
+         // interpolation. The signal field comes from the WS server response
+         // (onServerSignals → s.signal) and could contain arbitrary HTML if the
+         // server were compromised or a buggy payload sent. Previously it was
+         // interpolated raw into historyList.innerHTML, allowing script
+         // injection. esc() already existed but wasn't applied here.
          +  `<span class="history-signal ${sigCls}">${esc(h.signal)}</span>`
          +  `<span class="history-strength ${strengthCls}" title="${esc(strengthTitle)}">${strengthLetter}</span>`
          +  `<span class="history-score ${scoreCls}">${score || '—'}</span>`
@@ -875,11 +1209,26 @@ function renderHistory(){
          +    `<span class="icon-emoji">${iconEmoji}</span>`
          +    `<span class="icon-label">${iconLabel}</span>`
          +  `</span>`
-         +  deleteBtn
          +  `</div>`;
   }
-  // Load-more button (always render on history tab)
-  if(onHistoryTab){
+  // FIX (AUDIT-CORE #106, 2026-07-21): add a "Load more" button at the
+  // bottom so users can page through older signals beyond HISTORY_MAX.
+  // The button uses the oldest visible signal's ctime as the cursor and
+  // requests the next 100 signals from the server via the WS `signals`
+  // message with a `before_ctime` field (newly supported by server.py).
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-02, CRITICAL): the previous logic
+  // rendered the button only when `!filterLastHour` (i.e. NOT on the
+  // History tab). But `#history-list` lives inside `#tab-history`, which
+  // is `display:none` whenever another tab is active — so when the
+  // button WAS rendered (on Chart/Stats tabs) it was invisible, and when
+  // the History tab was actually shown the button was suppressed. The
+  // pagination feature was completely unreachable. The intent of "skip
+  // load-more when filtering to last 1 hour" is wrong — the History tab
+  // is precisely where users want to load OLDER signals (which are
+  // outside the 1-hour window). Now: render the button ONLY on the
+  // History tab (where it's visible) using the full signalHistory (not
+  // the filtered displayHistory) to find the oldest ctime cursor.
+  if(filterLastHour){
     const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
       ? signalHistory[0].detail.ctime : 0;
     if(oldestCtime){
@@ -891,63 +1240,10 @@ function renderHistory(){
   }
   historyList.innerHTML = html;
 }
-window._deleteSignal = async function(asset, period, ctime){
-  if(!confirm(`Delete this signal?\n${asset} @ ${new Date(ctime*1000).toLocaleTimeString()}`)) return;
-  try{
-    const r = await fetch(`/api/signals/${encodeURIComponent(asset)}/${period}/${ctime}`, {method:'DELETE'});
-    if(r.ok){
-      // Remove from local signalHistory
-      signalHistory = signalHistory.filter(h => !(h && h.detail && h.detail.ctime === ctime));
-      renderHistory();
-    } else {
-      alert('Delete failed: ' + r.status);
-    }
-  } catch(e){
-    alert('Delete error: ' + e.message);
-  }
-};
-window._clearFilteredSignals = async function(){
-  const pairFilterEl = $('history-pair-select');
-  const pairFilter = pairFilterEl ? pairFilterEl.value : '';
-  const msg = pairFilter
-    ? `Delete ALL signals for ${pairFilter}? This cannot be undone.`
-    : 'Delete ALL signals? This cannot be undone.';
-  if(!confirm(msg)) return;
-  try{
-    const url = pairFilter
-      ? `/api/signals/clear?asset=${encodeURIComponent(pairFilter)}`
-      : '/api/signals/clear';
-    const r = await fetch(url, {method:'POST'});
-    if(r.ok){
-      const data = await r.json();
-      alert(`Deleted ${data.deleted_count} signals.`);
-      // Clear local history and reload
-      signalHistory = [];
-      loadServerHistory();
-    } else {
-      alert('Clear failed: ' + r.status);
-    }
-  } catch(e){
-    alert('Clear error: ' + e.message);
-  }
-};
-window._clearAllSignals = async function(){
-  if(!confirm('⚠ DELETE ALL SIGNALS FROM DATABASE?\n\nThis will permanently delete EVERY signal for EVERY pair.\nThis cannot be undone.')) return;
-  if(!confirm('Are you absolutely sure? Type-confirm by clicking OK again.')) return;
-  try{
-    const r = await fetch('/api/signals/clear', {method:'POST'});
-    if(r.ok){
-      const data = await r.json();
-      alert(`Deleted ALL ${data.deleted_count} signals from database.`);
-      signalHistory = [];
-      renderHistory();
-    } else {
-      alert('Clear-all failed: ' + r.status);
-    }
-  } catch(e){
-    alert('Clear-all error: ' + e.message);
-  }
-};
+
+// FIX (AUDIT-CORE #74 + #106, 2026-07-21): ctime-based signal detail
+// lookup + Load-more helper. Both are exposed on window so inline
+// onclick handlers can reach them.
 window._showSignalDetail = function(ctimeKey){
   if(ctimeKey == null || ctimeKey === '') return;
   const ctime = parseInt(ctimeKey, 10);
@@ -960,32 +1256,54 @@ window._showSignalDetail = function(ctimeKey){
     }
   }
   if(foundIdx === -1) return;
+  // FIX (UI-P1-10 + P3-5, 2026-07-21): remember the focused row so we
+  // can restore focus when the modal closes (Escape key or close button).
+  // Also mark the background #app as inert so Tab can't escape into it.
   window._lastFocusedRow = document.activeElement;
   showSignalDetail(foundIdx);
   // Mark background as inert (WCAG: modal should trap focus).
   const appEl = document.getElementById('app');
   if(appEl && appEl.setAttribute) appEl.setAttribute('inert','');
+  // Focus the close button so the modal opens with focus inside.
   setTimeout(() => {
     const closeBtn = document.getElementById('detail-close');
     if(closeBtn) closeBtn.focus();
   }, 50);
 };
+
 window._loadMoreHistory = function(){
   if(!ws || ws.readyState !== WebSocket.OPEN) return;
   if(!signalHistory.length || !signalHistory[0] || !signalHistory[0].detail
      || !signalHistory[0].detail.ctime) return;
   const beforeCtime = signalHistory[0].detail.ctime;
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-97, MEDIUM): validate beforeCtime type.
+  // Previously a console user could call window._loadMoreHistory() with a
+  // malformed ctime (e.g., signalHistory[0].detail.ctime = 'malicious') — not
+  // a real attack vector (no public surface) but fragile. Now: bail if it's
+  // not a positive finite number.
   if(typeof beforeCtime !== 'number' || !isFinite(beforeCtime) || beforeCtime <= 0) return;
+  // Send the signals request with before_ctime — server returns the
   // 100 signals older than the cursor. onServerSignals merges them.
   send({ type: 'signals', asset: currentAsset, period: currentPeriod,
          before_ctime: beforeCtime, limit: 100 });
+  // Optimistically disable the load-more button to prevent double-clicks.
   const btn = $('history-load-more');
   if(btn){ btn.textContent = 'Loading…'; btn.style.opacity = '0.6'; }
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-59, MEDIUM): re-enable the load-more
+  // button after 5s if no server response arrived. Previously the button
+  // was optimistically disabled (`btn.textContent = 'Loading…'`) but never
+  // re-enabled if the server failed — the user couldn't retry. If
+  // onServerSignals succeeds, renderHistory() rebuilds the button
+  // (resetting its text); if it fails, this timeout re-enables it.
   setTimeout(() => {
     const btn2 = $('history-load-more');
-    if(btn2){ btn2.textContent = 'Load older signals ↓'; btn2.style.opacity = ''; }
+    if(btn2){
+      btn2.textContent = 'Load older signals ↓';
+      btn2.style.opacity = '';
+    }
   }, 5000);
 };
+
 function showSignalDetail(idx){
   const h = signalHistory[idx];
   if(!h || !h.detail || !detailBody || !detailOverlay) return;
@@ -994,8 +1312,21 @@ function showSignalDetail(idx){
   const acc = d.accuracy || '—';
   const accIcon = acc === 'correct' ? '✅ WIN' : acc === 'wrong' ? '❌ LOSS' : '➖ DRAW';
   const accColor = acc === 'correct' ? 'var(--green)' : acc === 'wrong' ? 'var(--red)' : 'var(--text-dim)';
+
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-12, HIGH): XSS — escape `sig` before
+  // interpolation into detailTitle.innerHTML. `sig = d.signal || '—'` comes
+  // from the WS server response and could contain arbitrary HTML if the
+  // server were compromised. Previously interpolated raw, allowing script
+  // injection into the modal title. accIcon is a static emoji string so
+  // doesn't need escaping, but escape it too for defence-in-depth.
   detailTitle.innerHTML = `<span style="color:${sig==='CALL'?'var(--green)':'var(--red)'}">${esc(sig)}</span> <span style="color:${accColor};font-size:13px;margin-left:8px">${esc(accIcon)}</span>`;
+
   let rows = '';
+  // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-14): toLocaleString() displays
+  // LOCAL time. This was already local — the bug was the CHART (UTC by default).
+  // Once the chart's localization.timeFormatter was set to local (AUDIT-5-13
+  // fix above), chart x-axis, history list, and this detail modal all agree
+  // on LOCAL time. No code change needed here — kept comment for clarity.
   const dateStr = d.ctime ? new Date(d.ctime * 1000).toLocaleString() : '—';
   rows += detailRow('Time', dateStr);
   rows += detailRow('Asset', currentAsset);
@@ -1010,6 +1341,7 @@ function showSignalDetail(idx){
     const movePct = d.a_open ? (move / d.a_open * 100).toFixed(3) + '%' : '—';
     rows += detailRow('Candle Move', move.toFixed(5) + ' (' + movePct + ')');
   }
+
   let tagsHtml = '';
   if(d.tags){
     const tags = d.tags.split(',').filter(t => t.trim());
@@ -1017,6 +1349,7 @@ function showSignalDetail(idx){
       tagsHtml = '<div class="detail-tags">' + tags.map(t => `<span class="detail-tag">${esc(t)}</span>`).join('') + '</div>';
     }
   }
+
   let theoriesHtml = '';
   const rightCodes = (d.right_codes || '').split(',').filter(t => t.trim());
   const wrongCodes = (d.wrong_codes || '').split(',').filter(t => t.trim());
@@ -1030,17 +1363,22 @@ function showSignalDetail(idx){
     });
     theoriesHtml += '</div>';
   }
+
   let pmHtml = '';
   if(d.postmortem){
     pmHtml = '<div style="margin-top:8px"><div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">WIN/LOSS REASON:</div><div class="detail-postmortem">' + esc(d.postmortem) + '</div></div>';
   }
+
   detailBody.innerHTML = rows + tagsHtml + theoriesHtml + pmHtml;
   detailOverlay.classList.add('show');
 }
+
 function detailRow(label, value){
   return `<div class="detail-row"><span class="label">${label}</span><span class="value">${esc(String(value))}</span></div>`;
 }
+
 function renderAccuracy(){
+  // Legacy: update the topbar mini-stat (elements may be gone — null-safe).
   const accPct = $('acc-pct');
   const accDetail = $('acc-detail');
   if(accPct){
@@ -1052,9 +1390,19 @@ function renderAccuracy(){
       accPct.style.color = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
     }
   }
+  // Always refresh the accuracy TAB content too — it's cheap, and the tab
   // may be hidden (no-op visually) but ready for instant display on switch.
   renderAccuracyTab();
 }
+
+/* ─── ACCURACY TAB ─────────────────────────────────────────────────────────
+   Renders the full breakdown into #tab-accuracy:
+     - Hero: overall win rate % (large, colored)
+     - Stat grid: total / wins / losses / draws
+     - Per-strength breakdown: STRONG / MEDIUM / WEAK win rates
+     - Per-regime breakdown: win rate grouped by market regime
+   Uses signalHistory as the source (already kept in sync by addHistory +
+   onServerSignals). Recomputes on every call — cheap for ≤100 entries. */
 function renderAccuracyTab(){
   const graded = signalHistory.filter(h => h && (
     h.accuracy === 'correct' || h.accuracy === 'wrong' || h.accuracy === 'draw'
@@ -1064,6 +1412,7 @@ function renderAccuracyTab(){
   const draws   = graded.filter(h => h.accuracy === 'draw').length;
   const total   = graded.length;
   const pending = signalHistory.filter(h => h && h.accuracy === 'pending').length;
+
   // Hero pct
   const heroPct = $('acc-hero-pct');
   const heroDetail = $('acc-hero-detail');
@@ -1087,20 +1436,24 @@ function renderAccuracyTab(){
         + (pending ? ' · ' + pending + ' pending' : '');
     }
   }
+
   // Stat grid
   _setText('acc-total',  String(total));
   _setText('acc-wins',   String(correct));
   _setText('acc-losses', String(wrong));
   _setText('acc-draws',  String(draws));
+
   // Per-strength + per-regime breakdowns
   _renderStrengthBreakdown();
   _renderRegimeBreakdown();
 }
+
 function _renderStrengthBreakdown(){
   const container = $('acc-strength-breakdown');
   if(!container) return;
   const strengths = ['STRONG', 'MEDIUM', 'WEAK'];
-let html = '', hasAny = false;
+  let html = '';
+  let hasAny = false;
   strengths.forEach(s => {
     const subset = signalHistory.filter(h =>
       h && h.detail && (h.detail.strength || '').toUpperCase() === s
@@ -1120,9 +1473,12 @@ let html = '', hasAny = false;
          +  `</span>`
          +  `</div>`;
   });
-  if(!hasAny) html = '<div class="accuracy-empty">No graded signals yet</div>';
+  if(!hasAny){
+    html = '<div class="accuracy-empty">No graded signals yet</div>';
+  }
   container.innerHTML = html;
 }
+
 function _renderRegimeBreakdown(){
   const container = $('acc-regime-breakdown');
   if(!container) return;
@@ -1143,7 +1499,10 @@ function _renderRegimeBreakdown(){
     if(h.accuracy === 'correct') regimeMap[label].correct++;
   });
   const regimes = Object.keys(regimeMap).sort();
-  if(regimes.length === 0){ container.innerHTML = '<div class="accuracy-empty">No graded signals yet</div>'; return; }
+  if(regimes.length === 0){
+    container.innerHTML = '<div class="accuracy-empty">No graded signals yet</div>';
+    return;
+  }
   let html = '';
   regimes.forEach(r => {
     const stats = regimeMap[r];
@@ -1160,235 +1519,15 @@ function _renderRegimeBreakdown(){
   });
   container.innerHTML = html;
 }
-let _moduleStatsCache = null, _moduleStatsLoading = false;
-async function renderModuleStats(){
-  const container = $('acc-module-breakdown');
-  if(!container) return;
-  if(_moduleStatsLoading) return;
-  const pairSelect = $('stats-pair-select');
-  const selectedPair = pairSelect ? pairSelect.value : '';
-  // Update context labels
-  const ctxHint = $('stats-context-hint');
-  const ctxLabel = $('acc-module-context');
-  const ctxText = selectedPair ? selectedPair : 'App-wide';
-  if(ctxHint) ctxHint.textContent = ctxText;
-  if(ctxLabel) ctxLabel.textContent = ctxText;
-  _moduleStatsLoading = true;
-  if(!container.children.length || container.querySelector('.accuracy-empty')){
-    container.innerHTML = '<div class="accuracy-empty">Loading module stats…</div>';
-  }
-  try{
-    if(!_moduleStatsCache){ const r = await fetch('/api/stats'); if(!r.ok) throw new Error('HTTP ' + r.status); _moduleStatsCache = await r.json(); }
-    const data = _moduleStatsCache;
-    // Determine which module list to render
-    let modules;
-    let heroOverall, heroGraded, heroCorrect, heroWrong;
-    if(selectedPair && data.pairs && data.pairs[selectedPair]){
-      // Per-pair breakdown
-      const pairData = data.pairs[selectedPair];
-      modules = [];
-      for(const [moduleKey, m] of Object.entries(pairData)){
-        modules.push({
-          module: moduleKey,
-          display_name: m.display_name || moduleKey,
-          total: m.total || 0,
-          correct: m.correct || 0,
-          wrong: m.wrong || 0,
-          win_pct: m.win_pct,
-          call_win_pct: null,  // per-pair doesn't have call/put split in pairs dict
-          put_win_pct: null,
-        });
-      }
-      // Compute hero from pair totals
-      heroGraded = modules.reduce((s,m) => s + (m.total||0), 0);
-      heroCorrect = modules.reduce((s,m) => s + (m.correct||0), 0);
-      heroWrong = modules.reduce((s,m) => s + (m.wrong||0), 0);
-      heroOverall = heroGraded > 0 ? (heroCorrect / heroGraded * 100) : 0;
-    } else {
-      // App-wide breakdown
-      modules = data.modules || [];
-      heroOverall = data.overall_win_pct || 0;
-      heroGraded = data.total_graded || 0;
-      heroCorrect = data.total_correct || 0;
-      heroWrong = data.total_wrong || 0;
-    }
-    if(!modules.length){ container.innerHTML = '<div class="accuracy-empty">No graded module votes yet</div>'; return; }
-    let html = '';
-    // Hero summary
-    html += '<div class="module-stats-hero">'
-         +  '<span class="module-stats-overall">'
-         +  heroOverall.toFixed(1) + '% overall'
-         +  '</span>'
-         +  '<span class="module-stats-meta">'
-         +  heroGraded + ' graded · '
-         +  heroCorrect + 'W / '
-         +  heroWrong + 'L'
-         +  '</span>'
-         +  '</div>';
-    // Per-module rows
-    html += '<div class="module-stats-rows">';
-    modules.forEach(m => {
-      const pct = m.win_pct;
-      const pctCls = pct == null ? 'none'
-                   : pct >= 55 ? 'good'
-                   : pct >= 45 ? 'mid' : 'bad';
-      const callPct = m.call_win_pct;
-      const putPct  = m.put_win_pct;
-      const callStr = callPct == null ? '—' : callPct.toFixed(0) + '%';
-      const putStr  = putPct  == null ? '—' : putPct.toFixed(0) + '%';
-      const total   = m.total || 0;
-      const barWidth = pct == null ? 0 : pct;
-      html += '<div class="module-stats-row" '
-           +  'data-module="' + esc(m.module) + '" '
-           +  'onclick="window._showModulePairDetail(\'' + esc(m.module) + '\')" '
-           +  'role="button" tabindex="0" title="Click to see per-pair breakdown">'
-           +  '<span class="module-stats-name">' + esc(m.display_name) + '</span>'
-           +  '<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:' + barWidth + '%"></div></div>'
-           +  '<span class="module-stats-pct ' + pctCls + '">'
-           +  '<span class="pct-num">' + (pct == null ? '—' : pct.toFixed(1) + '%') + '</span>'
-           +  '<span class="breakdown-meta">' + (m.correct || 0) + '/' + total + '</span>'
-           +  '</span>'
-           +  '<span class="module-stats-callput">'
-           +  '<span class="cp-call">CALL ' + callStr + '</span>'
-           +  '<span class="cp-put">PUT ' + putStr + '</span>'
-           +  '</span>'
-           +  '</div>';
-    });
-    html += '</div>';
-    container.innerHTML = html;
-  } catch(e){
-    container.innerHTML = '<div class="accuracy-empty">Failed to load: ' + esc(e.message) + '</div>';
-  } finally {
-    _moduleStatsLoading = false;
-  }
-}
-window._showModulePairDetail = async function(moduleName){
-  const panel = $('acc-module-pair-detail');
-  const rowsContainer = $('acc-module-pair-detail-rows');
-  if(!panel || !rowsContainer) return;
-  // Show panel + loading state
-  panel.style.display = 'block';
-  panel.scrollIntoView({behavior:'smooth', block:'nearest'});
-  rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">Loading per-pair breakdown…</div>';
-  // Update title
-  const titleEl = panel.querySelector('.module-pair-detail-title');
-  if(titleEl) titleEl.textContent = 'Per-pair breakdown — ' + moduleName;
-  try{
-    const r = await fetch('/api/module-analysis?min_samples=30');
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
-    const breakeven = data.breakeven_pct != null ? data.breakeven_pct : 51.8;
-    const rows = (data.pair_modules || []).filter(r => r.module_name === moduleName);
-    if(!rows.length){
-      rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">No pair has '
-        + (data.min_samples || 30) + '+ graded votes for ' + esc(moduleName) + ' yet</div>';
-      return;
-    }
-    rows.sort((a,b) => ((b.wilson_lo ?? b.win_pct ?? 0) - (a.wilson_lo ?? a.win_pct ?? 0)));
-    let html = '<div class="module-pair-detail-rows">';
-    rows.forEach(r => {
-      const pct = r.win_pct;
-      const lo = r.wilson_lo, hi = r.wilson_hi;
-      // render green. Anything whose interval still spans 50% is "unproven".
-      const pctCls = pct == null ? 'none'
-                   : (lo != null && lo > breakeven) ? 'good'
-                   : (hi != null && hi < 50) ? 'bad' : 'mid';
-      const barWidth = pct == null ? 0 : pct;
-      const ciStr = (lo != null && hi != null)
-                  ? ' <span style="color:var(--text-dim)">[' + lo.toFixed(1) + '–' + hi.toFixed(1) + ']</span>'
-                  : '';
-      html += '<div class="module-pair-detail-row">'
-           +  '<span class="mppd-asset">' + esc(r.asset || '?') + '</span>'
-           +  '<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:' + barWidth + '%"></div></div>'
-           +  '<span class="mppd-pct ' + pctCls + '">'
-           +  (pct == null ? '—' : pct.toFixed(0) + '%')
-           +  '</span>'
-           +  '<span class="mppd-meta">' + (r.correct || 0) + '/' + (r.total || 0) + ciStr + '</span>'
-           +  '</div>';
-    });
-    html += '</div>';
-    html += '<div class="accuracy-empty" style="padding:6px 8px;font-size:10px;line-height:1.5">'
-         +  'Sorted by the 95% confidence interval’s lower bound. Green only when that '
-         +  'lower bound clears break-even (' + breakeven + '%); a range spanning 50% means '
-         +  'no evidence of an edge either way.</div>';
-    rowsContainer.innerHTML = html;
-  } catch(e){
-    rowsContainer.innerHTML = '<div class="accuracy-empty" style="padding:8px">Error: ' + esc(e.message) + '</div>';
-  }
-};
-let _theoryStatsCache = null, _theoryStatsLoading = false;
-async function renderTheoryStats(){
-  const container = $('acc-theory-breakdown');
-  if(!container) return;
-  if(_theoryStatsLoading) return;
-  // Read selected pair from Stats tab pair selector
-  const pairSelect = $('stats-pair-select');
-  const selectedPair = pairSelect ? pairSelect.value : '';
-  _theoryStatsLoading = true;
-  if(!container.children.length || container.querySelector('.accuracy-empty')){
-    container.innerHTML = '<div class="accuracy-empty">Loading theory stats…</div>';
-  }
-  try{
-    if(!_theoryStatsCache){
-      const r = await fetch('/api/theory-analysis?min_samples=30');
-      if(!r.ok) throw new Error('HTTP ' + r.status);
-      _theoryStatsCache = await r.json();
-    }
-    const data = _theoryStatsCache;
-    // Determine which theories to show
-    let theories;
-    if(selectedPair){
-      theories = (data.pair_theories || []).filter(t => t.asset === selectedPair);
-    } else {
-      theories = data.global_theories || [];
-    }
-    // Update count hint
-    const hintEl = $('theory-count-hint');
-    if(hintEl){
-      hintEl.textContent = theories.length + ' theories' + (selectedPair ? ' · ' + selectedPair : '');
-    }
-    if(!theories.length){ container.innerHTML = '<div class="accuracy-empty">No theory data yet. Signals will appear after the first graded candle.</div>'; return; }
-    theories.sort((a,b) => ((b.wilson_lo ?? b.win_pct ?? 0) - (a.wilson_lo ?? a.win_pct ?? 0)));
-    let html = '<div class="theory-stats-rows">';
-    theories.forEach(t => {
-      const pct = t.win_pct;
-      const lo = t.wilson_lo, hi = t.wilson_hi;
-      // green off a lucky streak. 51.8% is break-even at a 93% OTC payout.
-      const pctCls = pct == null ? 'none'
-                   : (lo != null && lo > 51.8) ? 'good'
-                   : (hi != null && hi < 50) ? 'bad'
-                   : 'mid';
-      const barWidth = pct == null ? 0 : pct;
-      const total = t.total || 0;
-      const correct = t.correct || 0;
-      const wrong = total - correct;
-      html += '<div class="theory-stats-row">'
-           +  '<div class="theory-row-header">'
-           +  '<span class="theory-name">' + esc(t.theory_name || '?') + '</span>'
-           +  '<span class="theory-module">' + esc(t.module_name || '?') + '</span>'
-           +  '</div>'
-           +  '<div class="breakdown-bar"><div class="breakdown-bar-fill correct" style="width:' + barWidth + '%"></div></div>'
-           +  '<div class="theory-row-stats">'
-           +  '<span class="theory-pct ' + pctCls + '">' + (pct == null ? '—' : pct.toFixed(1) + '%') + '</span>'
-           +  '<span class="theory-meta">' + correct + 'W / ' + wrong + 'L (n=' + total + ')'
-           +  (lo == null ? ''
-               : ' · 95% CI ' + lo.toFixed(1) + '–' + hi.toFixed(1) + '%'
-                 + (t.reliable ? '' : ' · not distinguishable from a coin flip'))
-           +  '</span>'
-           +  '</div>'
-           +  '</div>';
-    });
-    html += '</div>';
-    container.innerHTML = html;
-  } catch(e){
-    container.innerHTML = '<div class="accuracy-empty">Failed to load: ' + esc(e.message) + '</div>';
-  } finally {
-    _theoryStatsLoading = false;
-  }
-}
+
+/* ─── TAB SWITCHING ────────────────────────────────────────────────────────
+   switchTab(name): toggles the .active class on the 3 tab buttons and the
+   3 tab panes. Also fires tab-specific refresh logic so the just-shown
+   pane is up-to-date (cheap re-render from in-memory state). */
 function switchTab(tabName){
-  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'accuracy' && tabName !== 'verifier') return;
+  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'accuracy') return;
   currentTab = tabName;
+
   // Update tab buttons
   const tabBtns = document.querySelectorAll('.tab-btn');
   tabBtns.forEach(btn => {
@@ -1396,67 +1535,65 @@ function switchTab(tabName){
     btn.classList.toggle('active', isActive);
     btn.setAttribute('aria-selected', String(isActive));
   });
+
   // Update tab panes
-  ['chart', 'history', 'accuracy', 'verifier'].forEach(name => {
+  ['chart', 'history', 'accuracy'].forEach(name => {
     const pane = $('tab-' + name);
     if(pane) pane.classList.toggle('active', name === tabName);
   });
-  // B-03: expose active tab on #tab-content-wrap so CSS can apply per-tab
-  // sizing budgets (e.g. tighter rows on History, wider cards on Agent).
-  const wrap = $('tab-content-wrap');
-  if(wrap) wrap.setAttribute('data-active-tab', tabName);
-  // B-03 (A-07 #22): gate Agent polling on the Agent tab. The 3s/2s/10s
-  // intervals used to run forever even if the user never opened the tab —
-  // 3 useless fetches every 10s. Now we start them on entry and stop on
-  // exit. startAgentPanel()/stopAgentPanel() are defined later in this file.
-  if(tabName === 'verifier'){
-    if(typeof startAgentPanel === 'function') startAgentPanel();
-  } else {
-    if(typeof stopAgentPanel === 'function') stopAgentPanel();
-  }
+
+  // Tab-specific refresh — ensures the just-shown pane is current.
   if(tabName === 'history'){
     renderHistoryPairSelect();
+    // Refresh from server (no-op if WS not open) — gives the user fresh
+    // last-1-hour data every time they open the tab.
     loadServerHistory();
     renderHistory();
     setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
   } else if(tabName === 'accuracy'){
     renderAccuracyTab();
-    if(typeof renderModuleStats === 'function') renderModuleStats();
-    if(typeof renderTheoryStats === 'function') renderTheoryStats();
   } else if(tabName === 'chart'){
+    // The chart's autoSize handles hidden→visible resizes, but on some
     // browsers the chart needs an explicit nudge after being display:none.
     if(chart){
       try{
         const container = $('chart-container');
         if(container){
-          chart.applyOptions({ width: container.clientWidth, height: container.clientHeight, });
+          chart.applyOptions({
+            width: container.clientWidth,
+            height: container.clientHeight,
+          });
         }
         if(chart.timeScale) chart.timeScale().fitContent();
       }catch(_){}
     }
-  } else if(tabName === 'verifier'){
-    // Trigger immediate refresh of agent panel when opened.
-    // (Verifier was the old name for this tab — kept for back-compat.)
-    if(typeof fetchAgentStatus === 'function') fetchAgentStatus();
-    if(typeof fetchAgentLive === 'function') fetchAgentLive();
-    if(typeof fetchAgentFeatures === 'function') fetchAgentFeatures();
-    if(typeof fetchAgentModels === 'function') fetchAgentModels();
-    // Also refresh the legacy verifier endpoints (still polled in case the
-    // backend hasn't fully migrated to /api/agent/*).
-    if(typeof fetchVerifierStatus === 'function') fetchVerifierStatus();
-    if(typeof fetchVerifierRecent === 'function') fetchVerifierRecent();
   }
 }
+
+/* renderHistoryPairSelect(): mirrors the topbar #pair-select into the
+   history tab's #history-pair-select dropdown. Called from renderPairs()
+   (so the dropdown stays in sync) and from switchTab('history') (so the
+   dropdown is populated on first tab open even before pairs arrive). */
 function renderHistoryPairSelect(){
   const histPairSelect = $('history-pair-select');
   if(!histPairSelect) return;
   let activeList;
-  if(currentCategory === 'real') activeList = realPairsList;
-  else                             activeList = otcPairsList;
+  if(currentCategory === 'real')              activeList = realPairsList;
+  else if(currentCategory === 'alltime_otc')  activeList = alltimeOtcPairsList;
+  else                                        activeList = otcPairsList;
+
+  // Build new options only if the set actually changed — avoids clobbering
+  // the user's in-progress dropdown interaction on every renderPairs call.
   const newOptions = [];
   activeList.forEach(p => {
-    newOptions.push({ value: p.asset, text: p.display + (p.payout ? ' (' + p.payout + '%)' : ''), locked: !!p.locked, selected: p.asset === currentAsset, });
+    newOptions.push({
+      value: p.asset,
+      text: p.display + (p.payout ? ' (' + p.payout + '%)' : ''),
+      locked: !!p.locked,
+      selected: p.asset === currentAsset,
+    });
   });
+  // Quick diff: if same length + same values + same selected, skip rebuild.
   const sameCount = histPairSelect.options.length === newOptions.length;
   let sameContent = sameCount;
   if(sameCount){
@@ -1492,62 +1629,16 @@ function renderHistoryPairSelect(){
     if(o.selected) opt.selected = true;
     histPairSelect.appendChild(opt);
   });
-  renderStatsPairSelect();
 }
-function renderStatsPairSelect(){
-  const sel = $('stats-pair-select');
-  if(!sel) return;
-  let activeList;
-  if(currentCategory === 'real') activeList = realPairsList;
-  else                           activeList = otcPairsList;
-  // Preserve current selection
-  const prevVal = sel.value;
-  sel.innerHTML = '<option value="">All pairs (app-wide)</option>';
-  activeList.forEach(p => {
-    const opt = document.createElement('option');
-    opt.value = p.asset;
-    opt.textContent = p.display + (p.payout ? ' (' + p.payout + '%)' : '');
-    sel.appendChild(opt);
-  });
-  // Restore selection if still valid
-  if(prevVal && Array.from(sel.options).some(o => o.value === prevVal)){
-    sel.value = prevVal;
-  }
-}
-// B-03: populate the per-pair dropdown in the Agent tab. Mirrors #pair-select
-// filtered to the current category. The first option ("(active)") means
-// "follow the chart pair" — selecting it clears agentSelectedPair so the
-// dashboard tracks currentAsset instead of a fixed pair.
-function populateAgentPairSelect(){
-  const sel = $('agent-pair-select');
-  if(!sel) return;
-  let activeList;
-  if(currentCategory === 'real') activeList = realPairsList;
-  else                           activeList = otcPairsList;
-  // Preserve current selection (or fall back to "(active)")
-  const prevVal = sel.value;
-  sel.innerHTML = '';
-  const activeOpt = document.createElement('option');
-  activeOpt.value = '';
-  activeOpt.textContent = '(active pair)';
-  sel.appendChild(activeOpt);
-  activeList.forEach(p => {
-    const opt = document.createElement('option');
-    opt.value = p.asset;
-    opt.textContent = p.display + (p.payout ? ' (' + p.payout + '%)' : '');
-    if(p.locked){
-      opt.disabled = true;
-      opt.textContent += ' 🔒';
-    }
-    sel.appendChild(opt);
-  });
-  // Restore selection if still valid; otherwise reset to "(active)"
-  if(prevVal && Array.from(sel.options).some(o => o.value === prevVal)){
-    sel.value = prevVal;
-  } else {
-    sel.value = agentSelectedPair || '';
-  }
-}
+
+/* ─── PAIRS ────────────────────────────────────────────────────────────────
+   FIX BUG-1: renderPairs now accepts the FULL server payload
+   `{type:"pairs", real_pairs:[...], otc_pairs:[...], ...}` directly —
+   the caller must pass `msg`, NOT `msg.pairs`. The function reads
+   msg.real_pairs / msg.otc_pairs directly. The OLD code called
+   `renderPairs(msg.pairs)` which discarded the structured split and pushed
+   ALL pairs (real + OTC) into the OTC list.
+   Backward-compat: still accepts a legacy flat array. */
 function renderPairs(payload){
   if(Array.isArray(payload)){
     realPairsList = [];
@@ -1556,23 +1647,43 @@ function renderPairs(payload){
     realPairsList = payload.real_pairs || [];
     otcPairsList  = payload.otc_pairs  || [];
   }
-  pairsList = realPairsList.concat(otcPairsList);
+  // FIX (DATA-FLOW-2026-07-22): support alltime_otc category.
+  alltimeOtcPairsList = payload.alltime_otc_pairs || [];
+  pairsList = realPairsList.concat(otcPairsList).concat(alltimeOtcPairsList);
+
   const pairSelect = $('pair-select');
+
   // Render only the active category's pairs in the dropdown.
   let activeList;
-  if(currentCategory === 'real') activeList = realPairsList;
-  else                           activeList = otcPairsList;
+  if(currentCategory === 'real')         activeList = realPairsList;
+  else if(currentCategory === 'alltime_otc') activeList = alltimeOtcPairsList;
+  else                                   activeList = otcPairsList;
+
   pairSelect.innerHTML = '';
   if(activeList.length === 0){
     const opt = document.createElement('option');
     opt.value = '';
     if(currentCategory === 'real'){
       opt.textContent = '⚠ Real Market closed (weekend/bank holiday)';
+    } else if(currentCategory === 'alltime_otc'){
+      opt.textContent = 'No All-Time OTC pairs available';
     } else {
       opt.textContent = 'No OTC pairs available';
     }
     opt.disabled = true;
     pairSelect.appendChild(opt);
+    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-17): when the active list is
+    // empty (e.g., Real market on weekend, or alltime_otc list temporarily
+    // empty), update the chart-loading-overlay with a clear market-closed
+    // message instead of leaving it stuck on "Loading…" indefinitely. The
+    // initial onopen subscribe already fired for currentAsset (which has no
+    // stream), so we can't get a snapshot to dismiss the overlay naturally.
+    // This is the "graceful empty-list handler" the audit proposed — we
+    // keep the onopen subscribe (it's harmless — the server doesn't
+    // validate against the pair list) but surface the closed state to the
+    // user. The dead-connection keepalive check at 45s will eventually
+    // close the WS and reconnect, but the user sees a clear message
+    // immediately instead of an infinite spinner.
     const overlay = $('chart-loading-overlay');
     if(overlay){
       overlay.classList.add('show');
@@ -1580,6 +1691,8 @@ function renderPairs(payload){
       if(txt){
         if(currentCategory === 'real'){
           txt.textContent = 'Real market closed (weekend). Switch to OTC for 24/7 signals.';
+        } else if(currentCategory === 'alltime_otc'){
+          txt.textContent = 'No All-Time OTC pairs available right now.';
         } else {
           txt.textContent = 'No OTC pairs available right now.';
         }
@@ -1598,36 +1711,81 @@ function renderPairs(payload){
       pairSelect.appendChild(opt);
     });
   }
+
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-17, HIGH): removed the dead `pairsCount`
+  // block. The #pairs-count element doesn't exist in any HTML file — the
+  // block `if(pairsCount){ pairsCount.textContent = label + activeList.length; }`
+  // was a no-op on every renderPairs() call (frequent — runs on every pair-list
+  // refresh and after every category switch).
+
+  // If the currently-selected asset is NOT in the active category's list,
   // auto-switch to the first available pair.
+  // FIX (ALLTIME-OTC-FIX 2026-07-30): on alltime_otc page, don't auto-switch
+  // away if the current pair is locked or temporarily missing — the user
+  // explicitly selected it. Only auto-switch on real/otc pages where a
+  // missing pair means the market closed.
   const stillThere = activeList.find(p => p.asset === currentAsset && !p.locked);
   if(!stillThere && activeList.length > 0){
-    const firstOk = activeList.find(p => !p.locked) || activeList[0];
-    if(firstOk){
-      setCurrentAsset(firstOk.asset);
-      pairSelect.value = currentAsset;
-      if(ws && ws.readyState === WebSocket.OPEN){
-        send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
-               category: currentCategory });
-        loadServerHistory();
+    // On alltime_otc: if the pair IS in the list (even if locked), keep it.
+    // Only switch if the pair is completely absent from the list.
+    if(currentCategory === 'alltime_otc'){
+      const pairExists = activeList.find(p => p.asset === currentAsset);
+      if(pairExists){
+        // Pair exists but is locked — keep selection, don't auto-switch.
+        // The user will see the locked indicator and can pick another.
+      } else {
+        // Pair completely absent — switch to first available.
+        const firstOk = activeList.find(p => !p.locked) || activeList[0];
+        if(firstOk){
+          currentAsset = firstOk.asset;
+          pairSelect.value = currentAsset;
+          if(ws && ws.readyState === WebSocket.OPEN){
+            send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+                   category: currentCategory });
+            loadServerHistory();
+          }
+        }
+      }
+    } else {
+      // Real/OTC page: original behavior — auto-switch to first available.
+      const firstOk = activeList.find(p => !p.locked) || activeList[0];
+      if(firstOk){
+        currentAsset = firstOk.asset;
+        pairSelect.value = currentAsset;
+        if(ws && ws.readyState === WebSocket.OPEN){
+          send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+                 category: currentCategory });
+          loadServerHistory();
+        }
       }
     }
   }
+
   // Update payout label for the currently-selected pair.
   const payoutLabel = $('payout-label');
   const cur = pairsList.find(p => p.asset === currentAsset);
-  if(cur && payoutLabel) payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
+  if(cur && payoutLabel){
+    payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
+  }
+
+  // FIX (DATA-FLOW-2026-07-22): update the switch button label to show
+  // which market the user will switch to next.
   _updateSwitchButtonLabel();
+
+  // TAB BAR: keep the history tab's pair dropdown in sync with the topbar's.
   renderHistoryPairSelect();
-  // B-03: keep the Agent tab's per-pair dropdown in sync with the pairs list.
-  populateAgentPairSelect();
 }
+
+// FIX (DATA-FLOW-2026-07-22): update the switch button's label/title
+// based on what the NEXT market is.
 function _updateSwitchButtonLabel(){
   const btn = $('market-switch-btn');
   if(!btn) return;
   const next = _nextCategory(currentCategory);
   const labels = {
-    'real':  { text: 'Switch to Real',  title: 'Real Market (live forex, weekdays only)' },
-    'otc':   { text: 'Switch to OTC',   title: 'OTC Market (24/7, all kept pairs always-on)' },
+    'real':         { text: 'Switch to Real',  title: 'Real Market (live forex, weekdays only)' },
+    'otc':          { text: 'Switch to OTC',   title: 'OTC Market (standard OTC pairs, 24/7)' },
+    'alltime_otc':  { text: 'Switch to All-OTC', title: 'All-Time OTC (exotic pairs, 24/7, no payout floor)' },
   };
   const lbl = labels[next] || labels.otc;
   const textEl = btn.querySelector('.switch-text');
@@ -1635,12 +1793,50 @@ function _updateSwitchButtonLabel(){
   btn.setAttribute('aria-label', lbl.text);
   btn.title = lbl.title;
 }
+
+/* ─── MARKET STATUS INDICATOR ──────────────────────────────────────────────
+   FIX (DEEP-AUDIT-2026-07-26 / F-17-14, HIGH): DELETED. The entire
+   updateMarketStatusIndicator() function and its 30s setInterval were
+   dead code — the #market-status-indicator element was removed from
+   all HTML files during the "CLEAN LAYOUT OVERRIDES" CSS refactor but the
+   JS function and interval were never deleted. The function early-returned
+   via `if(!el) return;` every 30s, wasting CPU and leaking interval
+   handles on each initApp re-entry. Call site (initApp) and pagehide
+   cleanup also removed. */
+
+/* ─── setCategory(newCat) ──────────────────────────────────────────────────
+   THE single category-switch function. Replaces the 3 duplicate handlers
+   (3-dot menu / market badge / cat-tabs) from the old index.html.
+
+   - Validates the new category ("real" or "otc").
+   - Saves it to localStorage as 'marketCategory'.
+   - Navigates to the other HTML file (real.html / otc.html).
+
+   Because each market lives on its own HTML page, switching category =
+   switching page. There's no in-page category swap anymore — that
+   eliminates the BUG-1 class of issues entirely (each page only ever
+   subscribes to pairs of its own category). */
 function setCategory(newCat){
-  if(newCat !== 'real' && newCat !== 'otc') return;
+  // FIX (DATA-FLOW-2026-07-22): added 'alltime_otc' as a 3rd category.
+  // Cycle: real → otc → alltime_otc → real.
+  if(newCat !== 'real' && newCat !== 'otc' && newCat !== 'alltime_otc') return;
   if(newCat === currentCategory) return;
+
+  // FIX (CRASH-2026-07-30): prevent crash when switching markets rapidly.
+  // User complaint: "Otc মার্কেট, real market and all time OTC সুইচ করলে
+  // অ্যাপ ক্র্যাশ করে". Root cause: setCategory navigates to a new page
+  // via window.location.href, but the OLD page's safeInit() may still be
+  // polling (setTimeout retry loop waiting for LightweightCharts). When the
+  // new page loads, the old page's pending timers fire on a torn-down DOM,
+  // causing errors. Also, initChart() on the new page may run before the
+  // old page's chart.remove() completes, causing "Cannot read property of
+  // null" crashes. Fix: run full cleanup (same as onPageHide) BEFORE
+  // navigation, and mark a global flag so safeInit's retry loop aborts.
   try{
     // Abort any pending safeInit retries on this page
-    if(typeof safeInit !== 'undefined' && safeInit._retries) safeInit._retries = 999;  // force it to bail on next tick;
+    if(typeof safeInit !== 'undefined' && safeInit._retries){
+      safeInit._retries = 999;  // force it to bail on next tick
+    }
     // Clear all intervals/timeouts
     if(typeof _countdownInterval !== 'undefined' && _countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
     if(typeof _keepaliveInterval !== 'undefined' && _keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
@@ -1659,16 +1855,42 @@ function setCategory(newCat){
       chart = null;
     }
   }catch(_){}
+
   try{ localStorage.setItem('marketCategory', newCat); }catch(_){}
-  const targets = { 'real': '/static/real.html', 'otc':  '/static/otc.html', };
+  const targets = {
+    'real':         '/static/real.html',
+    'otc':          '/static/otc.html',
+    'alltime_otc':  '/static/alltime_otc.html',
+  };
   const target = targets[newCat] || '/static/otc.html';
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-46, HIGH): use location.href instead of
+  // location.replace(). Previously `replace()` removed the current page from
+  // browser history, breaking the back button — user on Real clicks "Switch
+  // to OTC", lands on OTC, presses back, and goes to whatever page was BEFORE
+  // Real (not back to Real as expected). Now: `href` pushes a new history
+  // entry so back returns to the previous market page. The original "bouncing
+  // between market pages" concern is moot — the cycle real→otc→alltime_otc→real
+  // is exactly what users want when navigating between markets.
   window.location.href = target;
 }
-// Cycle through the 2 markets on switch click.
+
+// FIX (DATA-FLOW-2026-07-22): cycle through the 3 markets on switch click.
 // The switch button's label is updated by renderPairs() based on the
 // current category — see _updateSwitchButtonLabel().
-function _nextCategory(cat){ if(cat === 'real') return 'otc'; return 'real'; }
+function _nextCategory(cat){
+  if(cat === 'real') return 'otc';
+  if(cat === 'otc')  return 'alltime_otc';
+  return 'real';  // alltime_otc → real
+}
+
+/* ─── WEBSOCKET ──────────────────────────────────────────────────────────── */
 function connect(){
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-21, HIGH): also bail if ws is in CLOSING
+  // state. Previously the guard only checked OPEN + CONNECTING, so calling
+  // connect() while ws.readyState === CLOSING created a NEW WebSocket — and
+  // the old socket's onclose fired later, calling scheduleReconnect() while
+  // a new socket was already connecting. The reconnect timer may fire later
+  // and create a THIRD socket. Now: only proceed if ws is null or fully CLOSED.
   if(ws && ws.readyState !== WebSocket.CLOSED) return;
   setStatus('connecting');
   try { ws = new WebSocket(WS_URL); } catch(e){ scheduleReconnect(); return; }
@@ -1683,15 +1905,36 @@ function connect(){
   ws.onmessage = e => {
     lastMessageAt = Date.now();
     let msg;
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-04, CRITICAL): surface malformed WS
+    // frames to the user via showError() instead of just console.error.
+    // Previously a malformed frame was logged and silently dropped — users
+    // on a flaky connection saw a frozen chart with no indication of why.
+    // Still return after showing the error (one bad frame shouldn't kill
+    // the whole connection — the next frame may be valid).
     try { msg = JSON.parse(e.data); } catch(err){
       console.error('msg parse error', err);
       showError('Decoding feed error — retrying');
       return;
     }
+    // FIX (UI-P3-18, 2026-07-21): wrap handleMsg in try/catch so a throw
+    // inside any render function (renderSignal/renderMicro/renderHistory)
+    // doesn't kill the WS message handler and break all subsequent messages.
     try { handleMsg(msg); }
     catch(err){ console.error('[ws] handleMsg error', err, msg); }
   };
   ws.onclose = (event) => {
+    // FIX (CRASH-FIX-2026-07-26 / FE-001): onclose ignored event.code /
+    // event.reason, so the user never knew WHY the connection dropped.
+    // On Railway, the most common close codes are:
+    //   1008  → Policy Violation (origin rejected by ALLOWED_WS_ORIGINS)
+    //   1011  → Internal server error (feed task crashed)
+    //   1013  → Try Again Later (server at capacity / starting up)
+    // For 1008 specifically, retrying forever won't help — the origin
+    // is blocked server-side. Surface the cause to the user with a
+    // persistent error overlay so they can fix the env var or contact
+    // the operator. For 1011 (feed crashed), the server auto-restarts
+    // the feed task, so retrying is fine but should be visible.
+    // For 1013, immediate retry is appropriate.
     let _permError = '';
     if(event && event.code === 1008){
       _permError = 'Connection rejected by server (code 1008). ' +
@@ -1711,42 +1954,71 @@ function connect(){
     setStatus('disconnected');
     scheduleReconnect();
   };
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-20, HIGH): call scheduleReconnect()
+  // directly in onerror. Previously the comment assumed onclose would fire
+  // after ws.close(), but if ws.close() throws (already closed) or onclose
+  // is somehow not invoked (DNS failure, immediate close before onclose
+  // reliably fires), no reconnect was scheduled and the page was permanently
+  // stuck on "Connecting". scheduleReconnect() is idempotent (guarded by
+  // `if(reconnectTimer) return;`), so calling it directly is safe.
   ws.onerror = () => {
     try{ ws.close(); }catch(_){}
     scheduleReconnect();
   };
 }
+
 function send(obj){
   if(ws && ws.readyState === WebSocket.OPEN){
     try{ ws.send(JSON.stringify(obj)); }catch(_){}
   }
 }
+
 function scheduleReconnect(){
   if(reconnectTimer) return;
   const delay = Math.min(RECONNECT_BASE * Math.pow(2, reconnectAttempts), RECONNECT_MAX);
   reconnectAttempts++;
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
 }
-function setStatus(s){ const connDot = $('conn-dot'); const connLabel = $('conn-label'); if(connDot) connDot.className = s; if(connLabel) connLabel.textContent = s.charAt(0).toUpperCase() + s.slice(1); }
+
+function setStatus(s){
+  const connDot = $('conn-dot');
+  const connLabel = $('conn-label');
+  if(connDot) connDot.className = s;
+  if(connLabel) connLabel.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function handleMsg(msg){
+  // The server's broadcast() now filters by interested_cids per stream —
+  // each client only receives messages for assets it actually subscribed
+  // to. The old redundant client-side filter (drop msg if msg.asset !==
+  // currentAsset) has been REMOVED. This eliminates the bug where a
+  // momentarily-stale currentAsset (during a pair switch) would silently
+  // drop the very first snapshot for the new pair.
+
+  // Only clear stale overlay for data-carrying messages — pairs/status
   // pings arrive even when the feed is dead, so they must NOT clear it.
   if(['snapshot','tick','eoc'].includes(msg.type)) clearStale();
+
   switch(msg.type){
     case 'snapshot': onSnapshot(msg); break;
     case 'tick':     onTick(msg); break;
     case 'eoc':      onEoc(msg); break;
     case 'signals':  onServerSignals(msg.signals, msg.asset, msg.period); break;
-    case 'pairs':    renderPairs(msg); break;
+    case 'pairs':    renderPairs(msg); break;             // ← BUG-1 FIX: pass msg, not msg.pairs
     case 'stale':    onStale(msg); break;
     case 'status':   break;   // keepalive pong — silently consume
     case 'error':
       showError(msg.error || 'Unknown error');
       break;
     default:
+      // subscribe_result with ok:false — surface the error to the user.
       if(msg.ok === false && msg.status){
         let statusText = msg.status.toUpperCase();
         let reasonText = msg.reason || '';
-        if(statusText === 'COOLDOWN'){ statusText = 'RECONNECTING'; reasonText = 'Reconnecting to broker (' + Math.round(msg.retry_after || 30) + 's)'; }
+        if(statusText === 'COOLDOWN'){
+          statusText = 'RECONNECTING';
+          reasonText = 'Reconnecting to broker (' + Math.round(msg.retry_after || 30) + 's)';
+        }
         showChartLoading();
         const staleOverlay = $('stale-overlay');
         const staleMsg = $('stale-msg');
@@ -1758,24 +2030,41 @@ function handleMsg(msg){
       break;
   }
 }
+
 function showError(text){
   const staleOverlay = $('stale-overlay');
   const staleMsg = $('stale-msg');
-  if(staleOverlay && staleMsg){ staleOverlay.classList.add('show'); staleMsg.textContent = '⚠ ' + text; }
+  if(staleOverlay && staleMsg){
+    staleOverlay.classList.add('show');
+    staleMsg.textContent = '⚠ ' + text;
+  }
   console.error('[ws error]', text);
 }
+
 function onSnapshot(msg){
   const c = msg.candles || [];
   updateChart(c, (msg.prediction && msg.prediction.candle) || null, true);
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed addTapeTick(c[c.length-1].close) — dead code.
   if(c.length){
     runningCandleOpenTime = c[c.length-1].time;
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-07, CRITICAL): initialise lastLivePrice
+    // from the snapshot's last close. Previously the live-price colour stayed
+    // 'flat' (grey) on the very first tick because `if(lastLivePrice > 0)`
+    // guarded the class-update branch — lastLivePrice was 0 until the first
+    // tick ran, so the up/down arrow didn't render until the SECOND tick.
+    // Now: seed lastLivePrice from the snapshot so the first tick compares
+    // against the last snapshot close (the correct "previous price").
     const lastClose = c[c.length-1].close;
     if(typeof lastClose === 'number' && isFinite(lastClose) && lastClose > 0){
       lastLivePrice = lastClose;
     }
   }
-  if(msg.prediction){ lastPrediction = msg.prediction; renderSignal(msg.prediction); }
+  if(msg.prediction){
+    lastPrediction = msg.prediction;
+    renderSignal(msg.prediction);
+  }
 }
+
 function onTick(msg){
   const c = msg.candle;
   if(c){
@@ -1787,9 +2076,19 @@ function onTick(msg){
       const livePriceEl = $('live-price');
       const livePriceArrow = $('live-price-arrow');
       if(livePriceEl){
+        // FIX (DEEP-AUDIT-2026-07-26 / F-17-24, HIGH): use fmtPrice() for
+        // decimal consistency. Previously the live-price used ad-hoc logic
+        // (3 decimals for >100, 5 for ≤100) which didn't match the tick tape,
+        // market-state #ms-net, or signal-detail modal — all of which used
+        // fmtPrice()'s 4-tier magnitude-based formatting. The same asset's
+        // price displayed differently in different parts of the UI.
         livePriceEl.textContent = (typeof newPrice === 'number')
           ? fmtPrice(newPrice)
           : '—';
+        // FIX (DEEP-AUDIT-2026-07-26 / F-17-66, MEDIUM): move lastLivePrice
+        // update OUTSIDE the `if(livePriceEl)` block. Previously it was set
+        // inside, so if livePriceEl was missing (DOM not ready) the value
+        // stayed stale and subsequent ticks compared against the old value.
         if(lastLivePrice > 0){
           if(newPrice > lastLivePrice){
             livePriceEl.className = 'live-price-val up';
@@ -1803,6 +2102,7 @@ function onTick(msg){
           }
         }
       }
+      // FIX (F-17-66): state update must happen regardless of DOM presence.
       if(typeof newPrice === 'number' && isFinite(newPrice)) lastLivePrice = newPrice;
     }
     // Tick rate tracking.
@@ -1812,6 +2112,19 @@ function onTick(msg){
     while(tickTimestamps.length > 0 && nowMs - tickTimestamps[0] > 1000){
       tickTimestamps.shift();
     }
+    // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-19): proactive stale detection.
+    // The variable `staleTimeout` was declared (line 86) and cleared in
+    // clearStale() (line ~1869) but NEVER SET anywhere — confirmed by the
+    // comment at the keepalive block ("previously the proactive stale-
+    // detection (staleTimeout) was scheduled but never set"). The only
+    // stale-detection path was the 45s dead-connection check inside the
+    // 15s keepalive interval (45-60s actual latency). Now schedule a 10s
+    // staleTimeout on every tick — cleared by the next tick (or by
+    // clearStale() on snapshot/eoc/tick). If no tick arrives in 10s,
+    // show the stale overlay immediately so the user knows the feed is
+    // frozen (broker disconnect, network hiccup, etc.) instead of waiting
+    // 45-60s for the keepalive to fire. The keepalive check remains as a
+    // backstop (it closes the WS for reconnect).
     if(staleTimeout) clearTimeout(staleTimeout);
     staleTimeout = setTimeout(() => {
       const staleOverlay = $('stale-overlay');
@@ -1820,37 +2133,75 @@ function onTick(msg){
       if(staleMsg) staleMsg.textContent = '⚠ No ticks for 10s — feed may be stale';
     }, 10000);
   }
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed addTapeTick(c.close) call — dead code (#tick-tape-inner doesn't exist).
   if(msg.micro) renderMicro(msg.micro);
-  if(msg.running_conf){ runningConf = msg.running_conf; if(currentMicro) renderMicro(currentMicro); }
-  if(msg.prediction){ lastPrediction = msg.prediction; renderSignal(msg.prediction); }
+  if(msg.running_conf){
+    runningConf = msg.running_conf;
+    if(currentMicro) renderMicro(currentMicro);
+  }
+  // Delayed prediction arrives on a tick message once the gate opens.
+  if(msg.prediction){
+    lastPrediction = msg.prediction;
+    renderSignal(msg.prediction);
+  }
 }
+
 function onEoc(msg){
   const c = msg.candles || [];
   updateChart(c, (msg.prediction && msg.prediction.candle) || null);
-  if(c.length) runningCandleOpenTime = c[c.length-1].time;
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed addTapeTick(c[c.length-1].close) — dead code.
+  if(c.length){
+    runningCandleOpenTime = c[c.length-1].time;
+  }
+  // FIX (AUDIT-CRITICAL #001, 2026-07-21): the previous block ONLY called
+  // addHistory and loadServerHistory when msg.prediction was truthy. But
+  // feed.py ALWAYS broadcasts prediction=null on EOC (the real prediction
+  // arrives 3s later via tick). So this code was DEAD — the frontend's
+  // signalHistory never updated from EOC, freezing the display at whatever
+  // was loaded at pair-switch. This is the ROOT CAUSE of the user-reported
+  // '48-signal limit' bug.
+  //
+  // Now: ALWAYS trigger a server history refresh on EOC. Use the previous
+  // prediction (lastPrediction) for the optimistic local add so the user
+  // sees the entry immediately; the server refresh corrects it 500ms later.
+  // Don't null-out lastPrediction on EOC (the prediction is still valid —
+  // it's just being re-evaluated; nulling it causes the signal panel to
+  // flash to PENDING confusingly).
   const accuracyForHistory = msg.accuracy || 'pending';
   if(msg.prediction){
     lastPrediction = msg.prediction;
     renderSignal(msg.prediction);
     addHistory(lastPrediction.signal || 'NEUTRAL', accuracyForHistory, msg.prediction);
   } else if(lastPrediction){
+    // EOC grades the PREVIOUS candle's prediction against the just-closed
     // candle. Update the existing history entry's accuracy in place.
     addHistory(lastPrediction.signal || 'NEUTRAL', accuracyForHistory, lastPrediction);
+    // Don't renderSignal — keep showing the previous prediction until the
     // new one arrives via tick (prevents PENDING flash).
   } else {
     renderPending();
   }
+  // ALWAYS refresh from server — the DB has the authoritative graded row
   // with postmortem, tags, regime, etc. that the live optimistic add lacks.
   setTimeout(loadServerHistory, 500);
   currentMicro = null;
   runningConf = null;
 }
-function onStale(msg){ const staleOverlay = $('stale-overlay'); const staleMsg = $('stale-msg'); if(staleOverlay) staleOverlay.classList.add('show'); if(staleMsg) staleMsg.textContent = '⚠ ' + (msg.asset || '') + ' FEED STALE'; }
+
+function onStale(msg){
+  const staleOverlay = $('stale-overlay');
+  const staleMsg = $('stale-msg');
+  if(staleOverlay) staleOverlay.classList.add('show');
+  if(staleMsg) staleMsg.textContent = '⚠ ' + (msg.asset || '') + ' FEED STALE';
+}
+
 function clearStale(){
   const staleOverlay = $('stale-overlay');
   if(staleOverlay) staleOverlay.classList.remove('show');
   if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
 }
+
+/* ─── CANDLE COUNTDOWN ───────────────────────────────────────────────────── */
 function updateCandleCountdown(){
   if(!countdownEl) return;
   if(!runningCandleOpenTime || !currentPeriod){
@@ -1861,7 +2212,12 @@ function updateCandleCountdown(){
   }
   const closeAt = (runningCandleOpenTime + currentPeriod) * 1000;
   const remainingMs = closeAt - Date.now();
-  if(remainingMs <= 0){ countdownEl.textContent = '⏱ 00:00'; countdownEl.className = 'critical'; updateNextSignalTimer(0, false); return; }
+  if(remainingMs <= 0){
+    countdownEl.textContent = '⏱ 00:00';
+    countdownEl.className = 'critical';
+    updateNextSignalTimer(0, false);
+    return;
+  }
   const totalSec = Math.ceil(remainingMs / 1000);
   const mm = Math.floor(totalSec / 60);
   const ss = totalSec % 60;
@@ -1869,12 +2225,27 @@ function updateCandleCountdown(){
   if(totalSec <= 5)       countdownEl.className = 'critical';
   else if(totalSec <= 10) countdownEl.className = 'warn';
   else                    countdownEl.className = '';
+
+  // FIX (UI-SIGNAL-ENHANCE, 2026-07-23): update the next-signal timer
+  // in the signal panel at the same time. The "next signal" arrives at
+  // the next candle close, which is the same time as the countdown ends.
+  // We show it as "next: MM:SS" in the signal box so the user knows
+  // when a new prediction will be produced.
   updateNextSignalTimer(totalSec, false);
 }
+
+/* ─── NEXT SIGNAL TIMER ─────────────────────────────────────────────────── */
+/* FIX (UI-SIGNAL-ENHANCE, 2026-07-23): a dedicated "next signal" timer
+   shown directly inside the signal box. Tells the user when the next
+   prediction will arrive (at the next candle close). */
 function updateNextSignalTimer(totalSec, idle){
   const el = $('next-signal-timer');
   if(!el) return;
-  if(idle || totalSec <= 0){ el.textContent = '⏭ next: --:--'; el.className = 'next-signal-timer'; return; }
+  if(idle || totalSec <= 0){
+    el.textContent = '⏭ next: --:--';
+    el.className = 'next-signal-timer';
+    return;
+  }
   const mm = Math.floor(totalSec / 60);
   const ss = totalSec % 60;
   const formatted = String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
@@ -1884,24 +2255,58 @@ function updateNextSignalTimer(totalSec, idle){
     ? 'next-signal-timer critical'
     : 'next-signal-timer';
 }
+
+/* ─── EVENT WIRING ───────────────────────────────────────────────────────── */
 function wireEvents(){
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-09, CRITICAL): guard against duplicate
+  // listener registration on re-entrant initApp calls. Previously, calling
+  // initApp more than once (e.g. via the pageshow bfcache handler, or via
+  // console) registered ANOTHER listener for every addEventListener call —
+  // pair-select change fired twice, sound button toggled twice per click,
+  // modal close fired twice, etc. Only the Escape-key listener was guarded
+  // (by the _escapeWired flag). Now: skip the whole wiring block on re-entry;
+  // the DOM survives bfcache so the previous listeners are still attached.
   if(_eventsWired) return;
   _eventsWired = true;
   // Pair selector change → re-subscribe.
   const pairSelect = $('pair-select');
   if(pairSelect){
     pairSelect.addEventListener('change', () => {
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-22, HIGH): bail early if the user
+      // re-selected the SAME pair (Chrome doesn't fire change on re-select,
+      // but Safari does). Previously the heavy reset (wipe signalHistory,
+      // candleData, etc.) ran unnecessarily — wiping the chart and history.
       if(pairSelect.value === currentAsset) return;
-      setCurrentAsset(pairSelect.value);
+      currentAsset = pairSelect.value;
       const cur = pairsList.find(p => p.asset === currentAsset);
       const payoutLabel = $('payout-label');
-      if(cur && payoutLabel) payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
+      if(cur && payoutLabel){
+        payoutLabel.textContent = 'Payout: ' + (cur.payout || '—');
+      }
+      // Sanity check: the selected asset must belong to the current page's
+      // category. (Server enforces this too — better to bail out client-side
+      // than hit a category/asset mismatch error.)
+      // FIX (ALLTIME-OTC-FIX 2026-07-30): user complaint — "All time OTC তে
+      // পেয়ার চেঞ্জ করলে OTC তে পাঠিয়ে দেয়"। Root cause: when a pair from
+      // alltime_otc was selected, the lookup in pairsList sometimes failed
+      // (pair not yet loaded), and the fallback logic at the bottom used the
+      // _otc suffix heuristic which redirected to 'otc' page.
+      // Now: ALL alltime_otc pairs STAY on the alltime_otc page — no redirect.
+      // Only redirect if a REAL pair is selected on an OTC page, or vice versa.
       const isOtcAsset = currentAsset.endsWith('_otc');
-      if(currentCategory === 'real'){
+
+      // FIX (ALLTIME-OTC-FIX): if we're on alltime_otc page, NEVER redirect.
+      // All alltime_otc pairs end with _otc and belong on this page.
+      if(currentCategory === 'alltime_otc'){
+        // All pairs on this page are OTC-type — stay here, no redirect needed.
+        // Just proceed to re-subscribe.
+      } else if(currentCategory === 'real'){
+        // On Real page: if user selected an _otc pair, redirect to OTC page
         if(isOtcAsset){
           setCategory('otc'); return;
         }
       } else {
+        // On OTC page: if user selected a non-_otc pair, redirect to Real
         if(!isOtcAsset){
           setCategory('real'); return;
         }
@@ -1918,12 +2323,18 @@ function wireEvents(){
       alertedCandleOpenTime = 0;
       alertedSignalDirection = null;
       renderPending();
+      // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed dead tick-tape
+      // reset (`const tickTapeInner = $('tick-tape-inner'); if(tickTapeInner)
+      // tickTapeInner.innerHTML = '...'`) — #tick-tape-inner doesn't exist in HTML.
       send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
              category: currentCategory });
       setTimeout(loadServerHistory, 500);
     });
   }
+
+  // ── TAB BAR: switch between Live Chart / Signal History / Accuracy Stats
   // The 3 buttons live in #tab-bar; clicking one calls switchTab() which
+  // toggles the .active class on both the button and the matching pane.
   const tabBtns = document.querySelectorAll('.tab-btn');
   tabBtns.forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1936,60 +2347,33 @@ function wireEvents(){
       }
     });
   });
+
+  // ── History tab pair-select — mirrors the topbar #pair-select. When the
+  // user picks a different pair here, we sync the topbar select and dispatch
+  // its change event so the existing re-subscribe logic runs unchanged.
   const histPairSelect = $('history-pair-select');
   if(histPairSelect){
     histPairSelect.addEventListener('change', () => {
-      renderHistory();
       const topbarSelect = $('pair-select');
       if(!topbarSelect) return;
       if(topbarSelect.value !== histPairSelect.value){
         topbarSelect.value = histPairSelect.value;
+        // Dispatch a change event so the existing handler re-subscribes.
         try{
           topbarSelect.dispatchEvent(new Event('change', { bubbles: true }));
         }catch(_){
+          // Fallback for older browsers — invoke the change handler directly.
           if(topbarSelect.onchange) topbarSelect.onchange();
         }
       }
     });
   }
-  // B-03: per-pair Agent selector — let the user inspect agent data for any
-  // pair without switching the chart. Empty value = "follow chart pair".
-  const agentPairSelect = $('agent-pair-select');
-  if(agentPairSelect){
-    agentPairSelect.addEventListener('change', () => {
-      setAgentSelectedPair(agentPairSelect.value);
-      // Refresh features immediately for the chosen pair (or chart pair).
-      if(typeof fetchAgentFeatures === 'function') fetchAgentFeatures();
-      // Also refresh status so the per-pair dashboard updates right away
-      // instead of waiting up to 3s for the next poll.
-      if(typeof fetchAgentStatus === 'function') fetchAgentStatus();
-    });
-  }
-  ['history-time-filter','history-direction-filter','history-accuracy-filter'].forEach(id => {
-    const el = $(id);
-    if(el) el.addEventListener('change', renderHistory);
-  });
-  const clearBtn = $('history-clear-btn');
-  if(clearBtn) clearBtn.addEventListener('click', () => window._clearFilteredSignals());
-  const clearAllBtn = $('history-clear-all-btn');
-  if(clearAllBtn) clearAllBtn.addEventListener('click', () => window._clearAllSignals());
-  const moduleRefreshBtn = $('acc-module-refresh');
-  if(moduleRefreshBtn){
-    moduleRefreshBtn.addEventListener('click', () => {
-      _moduleStatsCache = null;  // force refetch
-      renderModuleStats();
-    });
-  }
-  const statsPairSelect = $('stats-pair-select');
-  if(statsPairSelect){
-    statsPairSelect.addEventListener('change', () => {
-      renderModuleStats();
-      _theoryStatsCache = null;  // force refetch for new pair
-      renderTheoryStats();
-      if(_currentStatsSubtab === "pairs" && typeof renderPairDeepStats === "function") renderPairDeepStats();
-      if(_currentStatsSubtab === "time" && typeof renderTimePatterns === "function") renderTimePatterns();
-  });
-  }
+
+  // Sound toggle.
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): update aria-label dynamically
+  // so screen readers announce "Unmute sounds" / "Mute sounds" based on state.
+  // Previously aria-label was static "Sound" — screen reader users had no
+  // audible cue whether sound was on or off (only the emoji changed visually).
   const soundBtn = $('sound-btn');
   if(soundBtn){
     soundBtn.addEventListener('click', () => {
@@ -2006,6 +2390,7 @@ function wireEvents(){
       }
     });
   }
+
   // 6-Module Engine toggle (collapse/expand).
   const theoriesToggle = $('theories-toggle');
   if(theoriesToggle){
@@ -2022,11 +2407,13 @@ function wireEvents(){
       }
     });
   }
+
   // Signal detail modal — close button + click-outside.
   const detailClose = $('detail-close');
   if(detailClose){
     detailClose.addEventListener('click', () => {
       if(detailOverlay) detailOverlay.classList.remove('show');
+      // FIX (UI-P3-5, 2026-07-21): remove inert from background + restore focus.
       const appEl = document.getElementById('app');
       if(appEl && appEl.removeAttribute) appEl.removeAttribute('inert');
       if(window._lastFocusedRow){
@@ -2048,27 +2435,63 @@ function wireEvents(){
       }
     });
   }
+
+  // Market switch button → cycle to the NEXT market.
+  // FIX (DATA-FLOW-2026-07-22): cycle real → otc → alltime_otc → real.
   const switchBtn = $('market-switch-btn');
   if(switchBtn){
-    switchBtn.addEventListener('click', () => setCategory(_nextCategory(currentCategory)));
+    switchBtn.addEventListener('click', () => {
+      setCategory(_nextCategory(currentCategory));
+    });
   }
+
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-18 + F-17-19, HIGH): DELETED the
+  // entire drawerToggle (#history-drawer-toggle) mobile-history-drawer
+  // wiring block (~18 lines). The mobile history drawer feature was
+  // removed (history is now a tab pane, not a bottom panel) — both
+  // #history-drawer-toggle and #history-panel no longer exist in any HTML
+  // file, so the whole `if(drawerToggle){...}` block was dead code that
+  // ran on every initApp call without effect. Also deleted the
+  // desktop-collapsed-removal branch.
+
+  // FIX (UI-P1-3, 2026-07-21): Microstructure section collapse toggle.
+  // On mobile it's collapsed by default (saves ~200px vertical space);
+  // tap the section title to expand.
   const microSection = document.querySelector('.panel-section--micro');
   if(microSection){
     const microTitle = microSection.querySelector('.section-title');
     if(microTitle){
       microTitle.style.cursor = 'pointer';
       microTitle.addEventListener('click', (e) => {
+        // FIX (DEEP-AUDIT-2026-07-26 / F-17-36, HIGH): use contains() instead
+        // of strict !== so clicks on child elements (icons, badges) still
+        // toggle collapse. Previously `if(e.target !== microTitle) return;`
+        // silently ignored clicks on any future child element of the title.
         if(!microTitle.contains(e.target)) return;
         microSection.classList.toggle('collapsed');
       });
     }
   }
-  if(!window._showSignalDetail) window._showSignalDetail = showSignalDetail;
+
+  // FIX (UI-P0-1, 2026-07-21): previously this line OVERWROTE the
+  // ctime-aware `window._showSignalDetail` defined earlier (line ~929)
+  // with the raw `showSignalDetail(idx)` function. History rows render
+  // with `onclick="window._showSignalDetail('1721817600')"` (a ctime
+  // STRING), but the overridden function expected an integer INDEX —
+  // so signalHistory["1721817600"] was undefined and the modal never
+  // opened. The ctime-aware version is the correct one; we now SKIP
+  // the override entirely (only set it if not already defined).
+  if(!window._showSignalDetail){
+    window._showSignalDetail = showSignalDetail;
+  }
+
+  // FIX (UI-P1-10, 2026-07-21): Escape key closes the modal + focus trap.
   if(!window._escapeWired){
     window._escapeWired = true;
     document.addEventListener('keydown', (e) => {
       if(e.key === 'Escape' && detailOverlay && detailOverlay.classList.contains('show')){
         detailOverlay.classList.remove('show');
+        // FIX (UI-P3-5): remove inert + restore focus.
         const appEl = document.getElementById('app');
         if(appEl && appEl.removeAttribute) appEl.removeAttribute('inert');
         if(window._lastFocusedRow){
@@ -2078,49 +2501,38 @@ function wireEvents(){
       }
     });
   }
-  // ── UI-V2 (2026-08-05): wire new components ──
-  if(typeof wireWinRateButton === "function") wireWinRateButton();
-  if(typeof wireStatsSubtabs === "function") wireStatsSubtabs();
-  if(typeof wireHistoryFilterToggle === "function") wireHistoryFilterToggle();
-  if(typeof wireHistoryExtraControls === "function") wireHistoryExtraControls();
-  if(typeof initTooltipSystem === "function") initTooltipSystem();
-  // B-03: mobile panel toggle — peek/expand the bottom-sheet #panel on ≤768px.
-  // Persists to sessionStorage so a dismissed panel stays dismissed across
-  // page navigations (matches user expectation on mobile).
-  const panelToggleBtn = $('panel-toggle-btn');
-  if(panelToggleBtn && !panelToggleBtn._wired){
-    panelToggleBtn._wired = true;
-    const applyPanelState = (expanded) => {
-      const panel = $('panel');
-      if(!panel) return;
-      panel.classList.toggle('expanded', expanded);
-      panelToggleBtn.setAttribute('aria-expanded', String(expanded));
-      try{ sessionStorage.setItem('panelExpanded', expanded ? '1' : '0'); }catch(_){}
-    };
-    panelToggleBtn.addEventListener('click', () => {
-      const panel = $('panel');
-      const isExpanded = panel ? panel.classList.contains('expanded') : false;
-      applyPanelState(!isExpanded);
-    });
-    panelToggleBtn.addEventListener('keydown', (e) => {
-      if(e.key === 'Enter' || e.key === ' '){
-        e.preventDefault();
-        panelToggleBtn.click();
-      }
-    });
-    // Restore saved state (default: collapsed/peek on mobile).
-    let _initialExpanded = false;
-    try{ _initialExpanded = sessionStorage.getItem('panelExpanded') === '1'; }catch(_){}
-    applyPanelState(_initialExpanded);
-  }
 }
+
+/* ─── INIT ───────────────────────────────────────────────────────────────── */
 function safeInit(){
-  if(safeInit._retries && safeInit._retries > 100) return;
+  // FIX (CRASH-2026-07-30): abort if retries exceeded (set by setCategory
+  // cleanup before navigation). Prevents pending safeInit retries from
+  // running on a torn-down DOM after the user switched to another market.
+  if(safeInit._retries && safeInit._retries > 100){
+    return;
+  }
   if(typeof LightweightCharts === 'undefined'){
     if(!safeInit._retries) safeInit._retries = 0;
     safeInit._retries++;
-    if(safeInit._retries === 1){ const overlay = $('chart-loading-overlay'); const txt = $('chart-loading-text'); if(overlay) overlay.classList.add('show'); if(txt) txt.textContent = 'Loading chart library…'; }
-    if(safeInit._retries > 50){ console.error('LightweightCharts failed to load after 5s'); const el = $('chart-container'); if(el) el.innerHTML = '<div style="color:#ff1744;padding:20px;font-size:13px">Chart library failed to load. Check your network connection.</div>'; return; }
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-33, HIGH): show chart-loading overlay
+    // with a "Loading chart library…" message during retries. Previously
+    // the 5-second retry window was invisible to the user — the chart
+    // container showed nothing while safeInit polled every 100ms. Now:
+    // surface a loading message so the user knows the chart is loading
+    // (not broken). The overlay is dismissed by hideChartLoading() once a
+    // snapshot arrives, or by the 20s timeout in showChartLoading().
+    if(safeInit._retries === 1){
+      const overlay = $('chart-loading-overlay');
+      const txt = $('chart-loading-text');
+      if(overlay) overlay.classList.add('show');
+      if(txt) txt.textContent = 'Loading chart library…';
+    }
+    if(safeInit._retries > 50){
+      console.error('LightweightCharts failed to load after 5s');
+      const el = $('chart-container');
+      if(el) el.innerHTML = '<div style="color:#ff1744;padding:20px;font-size:13px">Chart library failed to load. Check your network connection.</div>';
+      return;
+    }
     setTimeout(safeInit, 100);
     return;
   }
@@ -2130,12 +2542,27 @@ function safeInit(){
   showChartLoading();
   connect();
 }
+
 /* initApp(category) — entry point called by real.js / otc.js on DOMContentLoaded.
    Resets all module state (so the IIFE can be re-entered safely), wires up
    DOM events, starts the chart + WebSocket. */
 function initApp(category){
-  if(category === 'alltime_otc') category = 'otc';
-  if(category !== 'real' && category !== 'otc'){ console.error('initApp: invalid category', category); return; }
+  // FIX (P0-ISSUE-001, 2026-07-22): was `category !== 'real' && category !== 'otc'`
+  // — rejected 'alltime_otc', so the All-Time OTC page's initApp() returned
+  // immediately without setting up WS / chart / pairs. THE root cause of
+  // "All-time OTC দেখায় কিন্তু ডেটা আসে না". Now accepts all 3 categories.
+  if(category !== 'real' && category !== 'otc' && category !== 'alltime_otc'){
+    console.error('initApp: invalid category', category);
+    return;
+  }
+  // Reset module state — prevents cross-page leakage if initApp is somehow
+  // called twice (it shouldn't be, but defensive programming is cheap).
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-31, HIGH): detach ws handlers BEFORE
+  // null-out. Previously, if a reconnect timer was already scheduled from
+  // a previous pagehide lifecycle, the timer fires connect() which
+  // re-creates ws — but the new ws had stale onclose/onerror handlers from
+  // the previous closure that referenced outdated currentAsset. Now we
+  // explicitly detach handlers and close any in-flight WS before reset.
   if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
   if(ws){
     try{ ws.onclose = null; ws.onerror = null; ws.onopen = null; ws.onmessage = null; ws.close(); }catch(_){}
@@ -2145,7 +2572,7 @@ function initApp(category){
   chart = null; candleSeries = null; ghostSeries = null;
   candleData = []; lastPrediction = null;
   signalHistory = []; totalCorrect = 0; totalSignals = 0;
-  realPairsList = []; otcPairsList = []; pairsList = [];
+  realPairsList = []; otcPairsList = []; alltimeOtcPairsList = []; pairsList = [];
   currentMicro = null; runningConf = null;
   tapePrices = []; tapeDir = [];
   tickTimestamps = []; lastLivePrice = 0; lastTickAt = 0;
@@ -2155,42 +2582,96 @@ function initApp(category){
   _rafActive = false; _rTime = 0;
   // Reset tab state — always start on the Live Chart tab.
   currentTab = 'chart';
+  // Force the DOM back to the chart tab in case bfcache left another tab active.
   // (Use document.getElementById directly — the local $ helper isn't bound yet.)
   document.querySelectorAll('.tab-btn').forEach(btn => {
     const isActive = btn.dataset.tab === 'chart';
     btn.classList.toggle('active', isActive);
     btn.setAttribute('aria-selected', String(isActive));
   });
-  ['chart', 'history', 'accuracy', 'verifier'].forEach(name => {
+  ['chart', 'history', 'accuracy'].forEach(name => {
     const pane = document.getElementById('tab-' + name);
     if(pane) pane.classList.toggle('active', name === 'chart');
   });
-  setCurrentCategory(category);
-  // FIX (PAIR-ALLOWLIST-2026-08-07): default to first allowed pair per
-  // category, not hardcoded EURUSD/EURUSD_otc (EURUSD_otc is NOT in the
-  // OTC allowlist — was causing "undefined" agent model creation).
-  if(category === 'real')  setCurrentAsset(ALLOWED_PAIRS_REAL[0] || 'EURUSD');
-  else                     setCurrentAsset(ALLOWED_PAIRS_OTC[0]  || 'USDZAR_otc');
+
+  currentCategory = category;
+  // Default asset depends on the page's category.
+  // FIX (DATA-FLOW-2026-07-22): alltime_otc defaults to USDBDT_otc
+  // (first of the 6 exotic pairs the user requested).
+  // NOTE: USD/BRL is listed as BRLUSD_otc on Quotex — using the Quotex
+  // symbol so the stream actually subscribes correctly.
+  if(category === 'real')               currentAsset = 'EURUSD';
+  else if(category === 'alltime_otc')   currentAsset = 'USDBDT_otc';
+  else                                  currentAsset = 'EURUSD_otc';
+
+  // Persist the user's choice so the router index.html picks the right
+  // page on next visit.
   try{ localStorage.setItem('marketCategory', category); }catch(_){}
+
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-03, CRITICAL): remember the active
+  // category so the pageshow bfcache-restore handler can re-init the right
+  // page (the IIFE preserves module state across bfcache, so we must track
+  // it ourselves — DOMContentLoaded + bootstrap only fires on the initial
+  // load, not on bfcache restore).
   _lastInitCategory = category;
+
   // Local $ helper bound to document.
   $ = id => document.getElementById(id);
+
   // Cache countdown + modal refs.
   countdownEl = $('candle-countdown');
   detailOverlay = $('signal-detail-overlay');
   detailBody    = $('detail-body');
   detailTitle   = $('detail-title');
+
   // Wire up DOM events.
   wireEvents();
+
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-14, HIGH): removed updateMarketStatusIndicator()
+  // call and the 30s _marketStatusInterval. The #market-status-indicator
+  // element was removed from HTML during the "CLEAN LAYOUT OVERRIDES" CSS
+  // refactor but the JS function and interval were never deleted — wasted
+  // CPU every 30s and leaked interval handles on each initApp re-entry.
+
   // Boot.
   safeInit();
-  setTimeout(() => { if(typeof refreshWinRate === "function") refreshWinRate(); }, 800);
+
+  // Periodic intervals — countdown + keepalive.
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-23, HIGH): countdown interval widened
+  // from 200ms (5Hz) to 500ms (2Hz) — the MM:SS display only changes once
+  // per second, and 500ms gives smooth color transitions in the critical /
+  // warn zones without 5x wasted CPU. Also FIX (F-17-16): the entire
+  // _tickRateInterval (250ms loop updating #tick-rate-val / #stat-active-cat
+  // / #stat-signals / #stat-winrate — none of which exist in HTML) is dead
+  // code; removed below. tickTimestamps array is still maintained by onTick
+  // (for future use) but no interval polls it.
   _countdownInterval = setInterval(updateCandleCountdown, 500);
+
+  // FIX (BROKER-TIME 2026-07-30): broker time clock — updates every 1 second.
+  // Shows UTC HH:MM:SS so user can verify candles update at exact broker
+  // time boundaries. User requirement: "প্রত্যেকটি পেয়ার এর সাথে টাইম সেকেন্ড
+  // যোগ করতে হবে, এবং ব্রোকার টাইম অনুযায়ী ক্যান্ডেল গুলো আপডেট হবে।
+  // মিলি সেকেন্ড ও কম বেশি থাকবে না।"
+  _brokerTimeInterval = setInterval(() => {
+    const el = $('broker-time');
+    if(!el) return;
+    const now = new Date();
+    const h = String(now.getUTCHours()).padStart(2, '0');
+    const m = String(now.getUTCMinutes()).padStart(2, '0');
+    const s = String(now.getUTCSeconds()).padStart(2, '0');
+    el.textContent = `🕐 ${h}:${m}:${s}`;
+  }, 1000);
+
   _keepaliveInterval = setInterval(() => {
     if(ws && ws.readyState === WebSocket.OPEN){
       send({ type: 'status' });
+      // Dead-connection check — if no message in 45s, force-close.
       if(Date.now() - lastMessageAt > 45000){
         console.warn('[ws] no message in 45s — force-closing dead connection');
+        // FIX (AUDIT-FRONTEND #1, 2026-07-19): show the stale overlay
+        // BEFORE closing — previously the proactive stale-detection
+        // (staleTimeout) was scheduled but never set, so users saw a
+        // frozen chart with no indication of staleness until reconnect.
         const staleOverlay = $('stale-overlay');
         const staleMsg = $('stale-msg');
         if(staleOverlay) staleOverlay.classList.add('show');
@@ -2199,57 +2680,42 @@ function initApp(category){
       }
     }
   }, 15000);
-  if(_historyRefreshInterval){ clearInterval(_historyRefreshInterval); }
-  _historyRefreshInterval = setInterval(() => {
-    if(ws && ws.readyState === WebSocket.OPEN){
-      loadServerHistory();
-      // Refresh stats tab if visible
-      if(currentTab === 'accuracy') if(typeof renderModuleStats === 'function') renderModuleStats();
-      // Update last-refresh label
-      const lbl = $('last-refresh-label');
-      if(lbl){
-        lbl.textContent = '↻ ' + new Date().toLocaleTimeString('en-US',
-          {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
-      }
-    }
-  }, 30000);
-  // button label (always) + the dropdown list (only if visible).
-  if(_winRateRefreshInterval){ clearInterval(_winRateRefreshInterval); }
-  _winRateRefreshInterval = setInterval(() => refreshWinRate(), 15000);
-  const refreshBtn = $('refresh-btn');
-  if(refreshBtn){
-    refreshBtn.addEventListener('click', () => {
-      refreshBtn.classList.add('spin');
-      if(ws && ws.readyState === WebSocket.OPEN){
-        // Re-subscribe for fresh candle snapshot + prediction
-        send({ type: 'subscribe', asset: currentAsset, period: currentPeriod, category: currentCategory });
-        // Reload signal history from DB
-        loadServerHistory();
-        send({ type: 'pairs' });
-        // Refresh module stats if on accuracy tab
-        if(currentTab === 'accuracy' && typeof renderModuleStats === 'function') renderModuleStats();
-      }
-      // Update label
-      const lbl = $('last-refresh-label');
-      if(lbl){
-        lbl.textContent = '↻ ' + new Date().toLocaleTimeString('en-US',
-          {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
-      }
-      // Remove spin animation after 1s
-      setTimeout(() => refreshBtn.classList.remove('spin'), 1000);
-    });
+
+  // Clean up on page hide — clear intervals + close WS + dispose chart.
+  // FIX (DEEP-AUDIT-2026-07-26 / F-17-14 + F-17-16): removed cleanup for
+  // the deleted _marketStatusInterval and _tickRateInterval.
+  // FIX (F-17-03): named + guarded so initApp re-entry doesn't stack
+  // duplicate pagehide/pageshow listeners on window.
+  if(!_pageLifecycleWired){
+    _pageLifecycleWired = true;
+    window.addEventListener('pagehide', onPageHide);
+
+    // FIX (DEEP-AUDIT-2026-07-26 / F-17-03, CRITICAL): bfcache restore handler.
+    // On mobile Safari/Chrome, switching tabs and returning via back-forward
+    // cache (bfcache) leaves the page frozen — pagehide cleared all intervals,
+    // nullified timers, closed the WS, and disposed the chart. Without this
+    // pageshow handler, the page stayed frozen until hard-refresh because
+    // initApp is only called once via boot() on the initial DOMContentLoaded.
+    // Now: on persisted bfcache restore, re-run initApp(category) which
+    // re-establishes the WS, recreates the chart, and restarts intervals.
+    // wireEvents() is guarded by _eventsWired so it skips re-registering
+    // listeners (the DOM survives bfcache, so the previous listeners are
+    // still attached and functional).
+    window.addEventListener('pageshow', onPageShow);
   }
-  if(!_pageLifecycleWired){ _pageLifecycleWired = true; window.addEventListener('pagehide', onPageHide); window.addEventListener('pageshow', onPageShow); }
 }
+
+// FIX (DEEP-AUDIT-2026-07-26 / F-17-03, CRITICAL): named pagehide/pageshow
+// handlers so we can guard against duplicate registration on initApp
+// re-entry. Previously the pagehide listener was an anonymous arrow added
+// on every initApp call — stacking listeners.
 let _pageLifecycleWired = false;
+let _brokerTimeInterval = null;
 function onPageHide(){
   try{
     if(_countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
+    if(_brokerTimeInterval){ clearInterval(_brokerTimeInterval); _brokerTimeInterval = null; }
     if(_keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
-    if(_historyRefreshInterval){ clearInterval(_historyRefreshInterval); _historyRefreshInterval = null; }
-    if(_winRateRefreshInterval){ clearInterval(_winRateRefreshInterval); _winRateRefreshInterval = null; }
-    // B-03: also stop agent polling on page hide (A-07 #22).
-    if(typeof stopAgentPanel === 'function') stopAgentPanel();
     if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
     if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
     if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -2260,1553 +2726,18 @@ function onPageHide(){
   }catch(_){}
 }
 function onPageShow(e){
+  // e.persisted === true means the page was restored from the bfcache
   // (back-forward cache). The pagehide handler ran cleanup — we need to
+  // re-establish the WS, chart, and intervals. The DOM is intact.
   if(!e.persisted) return;
   if(_lastInitCategory){
     try{ initApp(_lastInitCategory); }catch(err){ console.error('[pageshow] initApp error', err); }
   }
 }
+
+// Expose initApp + setCategory globally so the page-specific bootstrap
 // (real.js / otc.js) can call it.
 global.initApp = initApp;
 global.setCategory = setCategory;
-let _winRateCache = null;
-let _winRateSortMode = 'rate';  // 'rate' or 'name'
-let _winRateSearchQ = '', _winRateRefreshInterval = null;
-async function fetchWinRateStats(){
-  try{
-    const r = await fetch('/api/stats?_t=' + Date.now());
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    return await r.json();
-  }catch(e){
-    console.warn('[winrate] fetch failed:', e.message);
-    return null;
-  }
-}
-function computePairWinRates(statsData){
-  // FIX (STATS-MATH-2026-08-06): this used to sum statsData.pairs, which is a
-  // per-MODULE-VOTE breakdown — every signal contributes one row per voting
-  // module, so a pair with 100 signals reported ~150 "signals" and a win rate
-  // that could never be reconciled with the Stats tab's overall_win_pct.
-  // `pair_signals` is the signal-level count from signal_log.
-  //
-  // FIX (PAIR-ALLOWLIST-2026-08-07 / A-15 #1): previously filtered by
-  // `_otc` SUFFIX ONLY — any _otc-suffixed row from signal_log appeared,
-  // including 9 removed OTC pairs (EURUSD_otc, USDCHF_otc, USDJPY_otc,
-  // USDARS_otc, USDBRL_otc, USDSGD_otc, USDCNH_otc, USDTHB_otc, USDRUB_otc).
-  // Now filters to the 15-pair allowlist. Backend also filters (defence in
-  // depth), but this guards against stale DB rows / cached responses.
-  if(!statsData) return [];
-  const src = statsData.pair_signals || null;
-  const result = [];
-  if(src){
-    for(const asset in src){
-      if(!Object.prototype.hasOwnProperty.call(src, asset)) continue;
-      // ALLOWLIST filter (defence-in-depth — backend already filters)
-      if(!isAllowedPair(asset, currentCategory)) continue;
-      const s = src[asset] || {};
-      result.push({
-        asset: asset,
-        display: prettyPairName(asset),
-        total: s.total || 0,
-        correct: s.correct || 0,
-        wrong: s.wrong || 0,
-        draws: s.draws || 0,
-        graded: s.graded || 0,
-        win_pct: (s.win_pct != null) ? Math.round(s.win_pct) : null,
-        last_ts: s.last_ts || 0,
-      });
-    }
-    // FIX (A-15): also include allowed pairs with ZERO signals so the user
-    // sees all 11 OTC (or 4 real) pairs, not just the ones with history.
-    // Renders as "—" until signals come in. Previously a pair with 0 signals
-    // just vanished, making the dropdown look incomplete.
-    const present = new Set(result.map(r => r.asset));
-    const allowList = currentCategory === 'real' ? ALLOWED_PAIRS_REAL : ALLOWED_PAIRS_OTC;
-    for(const asset of allowList){
-      if(!present.has(asset)){
-        result.push({
-          asset: asset,
-          display: prettyPairName(asset),
-          total: 0, correct: 0, wrong: 0, draws: 0, graded: 0,
-          win_pct: null, last_ts: 0,
-        });
-      }
-    }
-    // Sort: pairs with data first (by win_pct desc), then empty pairs (alpha)
-    result.sort((a, b) => {
-      if(a.graded === 0 && b.graded === 0) return a.asset.localeCompare(b.asset);
-      if(a.graded === 0) return 1;
-      if(b.graded === 0) return -1;
-      return (b.win_pct || 0) - (a.win_pct || 0);
-    });
-    return result;
-  }
-  // Backend predates pair_signals — show nothing rather than a wrong number.
-  console.warn('[winrate] /api/stats has no pair_signals; per-pair win rates unavailable');
-  return result;
-}
-function prettyPairName(asset){
-  if(!asset) return '—';
-  // FIX (USER REPORT 2026-08-06): keep the OTC marker in the label. Stripping
-  // it made EURUSD and EURUSD_otc render as the identical string "EUR/USD",
-  // so anywhere the two categories met the user saw the same pair listed
-  // twice with no way to tell which row was broker-synthetic OTC and which
-  // was real-market. Callers are all label/heading text — nothing compares
-  // this string against an asset id — so the suffix is safe to keep.
-  // FIX (2026-08-06): `isOtc` was computed here and then never used, so the
-  // documented behaviour above was never actually implemented — EURUSD and
-  // EURUSD_otc both rendered as "EUR/USD". Now the marker is really appended.
-  const isOtc = /_otc$/i.test(asset);
-  let s = String(asset).replace(/_(otc|real)$/i, '');
-  // EURUSD → EUR/USD
-  if(s.length === 6 && /^[A-Z]{6}$/.test(s)){
-    s = s.slice(0,3) + '/' + s.slice(3);
-  }
-  return isOtc ? s + ' OTC' : s;
-}
-function classifyPct(pct){ if(pct == null) return 'none'; if(pct >= 55) return 'good'; if(pct >= 45) return 'mid'; return 'bad'; }
-function renderWinRateButton(statsData){
-  /* Update the header button label with overall win rate.
-     Computes the category-filtered aggregate (real-only on Live page,
-     OTC-only on OTC page) so the header pill matches the dropdown rows. */
-  const btnEl = $('winrate-pct');
-  if(!btnEl) return;
-  let overallPct = null;
-  // Category-filtered aggregate, computed from SIGNAL-level counts so the
-  // header pill agrees with the Stats tab and with the dropdown rows.
-  // (It previously summed per-module-vote rows — see computePairWinRates.)
-  if(statsData && statsData.pair_signals){
-    let catCorrect = 0, catGraded = 0;
-    const src = statsData.pair_signals;
-    for(const asset in src){
-      if(!Object.prototype.hasOwnProperty.call(src, asset)) continue;
-      // FIX (PAIR-ALLOWLIST-2026-08-07): filter to allowlist, not just suffix
-      if(!isAllowedPair(asset, currentCategory)) continue;
-      const s = src[asset];
-      if(!s) continue;
-      catCorrect += (s.correct || 0);
-      catGraded  += (s.graded  || 0);
-    }
-    if(catGraded > 0){
-      overallPct = Math.round((catCorrect / catGraded) * 100);
-    }
-  }
-  // Fallback to app-wide overall if category calc failed
-  if(overallPct == null && statsData && statsData.overall_win_pct != null){
-    overallPct = Math.round(statsData.overall_win_pct);
-  }
-  if(overallPct == null){
-    btnEl.textContent = '—%';
-    btnEl.className = 'winrate-pct';
-  } else {
-    btnEl.textContent = overallPct + '%';
-    btnEl.className = 'winrate-pct ' + classifyPct(overallPct);
-  }
-  // Trend indicator
-  const trendEl = $('winrate-trend');
-  if(trendEl){
-    if(overallPct != null && overallPct >= 55) trendEl.textContent = '▲';
-    else if(overallPct != null && overallPct < 45) trendEl.textContent = '▼';
-    else trendEl.textContent = '';
-  }
-}
-function renderWinRateDropdown(statsData){
-  const listEl = $('winrate-list');
-  if(!listEl) return;
-  const pairs = computePairWinRates(statsData);
-  /* Summary pills — use category-filtered aggregate */
-  const overallEl = $('winrate-overall');
-  const signalsEl = $('winrate-signals');
-  const bestEl = $('winrate-best');
-  const worstEl = $('winrate-worst');
-  // Category-filtered overall win rate
-  let catCorrect = 0, catGraded = 0;
-  pairs.forEach(p => { catCorrect += (p.correct || 0); catGraded += (p.graded || 0); });
-  const overallPct = catGraded > 0 ? Math.round((catCorrect / catGraded) * 100) : null;
-  if(overallEl){
-    if(overallPct == null){ overallEl.textContent = '—'; overallEl.className = 'pill-value'; }
-    else { overallEl.textContent = overallPct + '%'; overallEl.className = 'pill-value ' + classifyPct(overallPct); }
-  }
-  if(signalsEl) signalsEl.textContent = catGraded;
-  const MIN_GRADED_FOR_RANK = 30;
-  const gradedPairs = pairs.filter(p => (p.graded || 0) >= MIN_GRADED_FOR_RANK);
-  if(gradedPairs.length > 0){
-    const best = gradedPairs.slice().sort((a,b) => (b.win_pct||0) - (a.win_pct||0))[0];
-    const worst = gradedPairs.slice().sort((a,b) => (a.win_pct||0) - (b.win_pct||0))[0];
-    if(bestEl){
-      bestEl.textContent = best.display + ' ' + (best.win_pct != null ? best.win_pct + '%' : '—');
-      bestEl.className = 'pill-value ' + classifyPct(best.win_pct);
-    }
-    if(worstEl){
-      worstEl.textContent = worst.display + ' ' + (worst.win_pct != null ? worst.win_pct + '%' : '—');
-      worstEl.className = 'pill-value ' + classifyPct(worst.win_pct);
-    }
-  } else {
-    const note = 'need ' + MIN_GRADED_FOR_RANK + '+ graded';
-    if(bestEl){ bestEl.textContent = note; bestEl.className = 'pill-value'; }
-    if(worstEl){ worstEl.textContent = note; worstEl.className = 'pill-value'; }
-  }
-  /* Filter by search query */
-  let filtered = pairs;
-  if(_winRateSearchQ){
-    const q = _winRateSearchQ.toLowerCase();
-    filtered = filtered.filter(p =>
-      p.asset.toLowerCase().indexOf(q) !== -1 ||
-      p.display.toLowerCase().indexOf(q) !== -1
-    );
-  }
-  /* Sort */
-  if(_winRateSortMode === 'name'){
-    filtered.sort((a,b) => a.display.localeCompare(b.display));
-  } else {
-    /* rate: by win_pct desc, but pairs with no graded data go to bottom */
-    filtered.sort((a,b) => {
-      if(a.win_pct == null && b.win_pct == null) return 0;
-      if(a.win_pct == null) return 1;
-      if(b.win_pct == null) return -1;
-      return b.win_pct - a.win_pct;
-    });
-  }
-  /* Render list */
-  if(filtered.length === 0){ listEl.innerHTML = '<div class="winrate-empty">No pairs match.</div>'; return; }
-  let html = '';
-  for(const p of filtered){
-    const cls = classifyPct(p.win_pct);
-    const pctText = p.win_pct != null ? p.win_pct + '%' : '—';
-    const barWidth = p.win_pct != null ? p.win_pct : 0;
-    const isCurrent = (p.asset === currentAsset);
-    const metaText = p.graded > 0
-      ? (p.correct + 'W / ' + p.wrong + 'L · ' + p.graded + ' graded')
-      : (p.total > 0 ? p.total + ' ungraded' : 'no data');
-    // B-03: new diverging-bar markup. Outer .wr-pair-bar carries data-pct for
-    // CSS hooks; .wr-bar-fill is the new class for the colored fill (per the
-    // B-02 #wr-pair-bar-tmpl template); .wr-bar-center is the 50% reference
-    // tick. We also keep .wr-pair-bar-fill (the legacy class) on the same
-    // element so the existing CSS rules (color + absolute positioning) keep
-    // applying until the CSS task catches up with .wr-bar-fill — avoids a
-    // visual regression where bars would otherwise be unstyled.
-    html += '<div class="winrate-row' + (isCurrent ? ' current' : '') + '" '
-         +  'data-asset="' + esc(p.asset) + '" role="listitem" '
-         +  'tabindex="0" '
-         +  'title="' + esc(p.display) + ' — ' + metaText + '">'
-         +  '<div>'
-         +    '<div class="wr-pair-name">' + esc(p.display) + (isCurrent ? ' ●' : '') + '</div>'
-         +    '<div class="wr-pair-meta">' + metaText + '</div>'
-         +  '</div>'
-         +  '<div class="wr-pair-bar" data-pct="' + (p.win_pct != null ? p.win_pct : 0) + '">'
-         +    '<div class="wr-bar-fill wr-pair-bar-fill ' + cls + '" style="width:' + barWidth + '%"></div>'
-         +    '<div class="wr-bar-center"></div>'
-         +  '</div>'
-         +  '<div class="wr-pair-pct ' + cls + '">' + pctText + '</div>'
-         +  '</div>';
-  }
-  listEl.innerHTML = html;
-  /* Wire click on each row */
-  listEl.querySelectorAll('.winrate-row').forEach(row => {
-    const handler = (e) => {
-      e.stopPropagation();
-      const asset = row.getAttribute('data-asset');
-      if(!asset) return;
-      /* Switch to this pair via the topbar #pair-select */
-      const topbarSelect = $('pair-select');
-      if(topbarSelect){
-        topbarSelect.value = asset;
-        try{ topbarSelect.dispatchEvent(new Event('change', {bubbles:true})); }catch(_){}
-      }
-      /* Close dropdown after switch */
-      toggleWinRateDropdown(false);
-    };
-    row.addEventListener('click', handler);
-    row.addEventListener('keydown', (e) => {
-      if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); handler(e); }
-    });
-  });
-  /* Updated-at footer */
-  const updEl = $('winrate-updated');
-  if(updEl){
-    updEl.textContent = 'updated ' + new Date().toLocaleTimeString('en-US',
-      {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
-  }
-}
-function toggleWinRateDropdown(forceState){
-  const dd = $('winrate-dropdown');
-  const btn = $('winrate-btn');
-  if(!dd || !btn) return;
-  const willShow = (typeof forceState === 'boolean')
-    ? forceState
-    : dd.hasAttribute('hidden');
-  if(willShow){
-    dd.removeAttribute('hidden');
-    btn.setAttribute('aria-expanded', 'true');
-    /* Focus the search input for quick filtering */
-    setTimeout(() => {
-      const searchEl = $('winrate-search');
-      if(searchEl){ try{ searchEl.focus(); }catch(_){} }
-    }, 50);
-    /* Trigger an immediate refresh */
-    refreshWinRate();
-  } else {
-    dd.setAttribute('hidden', '');
-    btn.setAttribute('aria-expanded', 'false');
-  }
-}
-async function refreshWinRate(){
-  const statsData = await fetchWinRateStats();
-  if(!statsData){ const listEl = $('winrate-list'); if(listEl) listEl.innerHTML = '<div class="winrate-empty">Failed to load. Will retry in 30s.</div>'; return; }
-  _winRateCache = statsData;
-  renderWinRateButton(statsData);
-  renderWinRateDropdown(statsData);
-}
-function wireWinRateButton(){
-  const btn = $('winrate-btn');
-  if(!btn) return;
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    toggleWinRateDropdown();
-  });
-  /* Close button */
-  const closeBtn = $('winrate-close');
-  if(closeBtn){
-    closeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleWinRateDropdown(false);
-    });
-  }
-  /* Refresh button */
-  const refreshBtn = $('winrate-refresh');
-  if(refreshBtn){
-    refreshBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      refreshBtn.classList.add('spin');
-      refreshWinRate().finally(() => {
-        setTimeout(() => refreshBtn.classList.remove('spin'), 600);
-      });
-    });
-  }
-  /* Sort toggle */
-  const sortBtn = $('winrate-sort-btn');
-  if(sortBtn){
-    sortBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      _winRateSortMode = (_winRateSortMode === 'rate') ? 'name' : 'rate';
-      if(_winRateCache) renderWinRateDropdown(_winRateCache);
-    });
-  }
-  /* Search input */
-  const searchEl = $('winrate-search');
-  if(searchEl){
-    let _wrSearchTimer = null;
-    searchEl.addEventListener('input', (e) => {
-      clearTimeout(_wrSearchTimer);
-      _wrSearchTimer = setTimeout(() => {
-        _winRateSearchQ = e.target.value || '';
-        if(_winRateCache) renderWinRateDropdown(_winRateCache);
-      }, 150);
-    });
-    /* Prevent clicks on search from closing the dropdown */
-    searchEl.addEventListener('click', (e) => e.stopPropagation());
-  }
-  /* Click-outside closes dropdown */
-  document.addEventListener('click', (e) => {
-    const dd = $('winrate-dropdown');
-    const wrap = $('winrate-wrap');
-    if(dd && !dd.hasAttribute('hidden')){
-      if(wrap && !wrap.contains(e.target)){
-        toggleWinRateDropdown(false);
-      }
-    }
-  });
-  /* Escape closes dropdown */
-  document.addEventListener('keydown', (e) => {
-    if(e.key === 'Escape'){
-      const dd = $('winrate-dropdown');
-      if(dd && !dd.hasAttribute('hidden')){
-        toggleWinRateDropdown(false);
-      }
-    }
-  });
-}
-/* ═══════════════════════════════════════════════════════════════════════════
-   UI-V2: Tooltip System
-   ═══════════════════════════════════════════════════════════════════════════ */
-let _tooltipEl = null, _tooltipShowTimer = null, _tooltipHideTimer = null;
-function initTooltipSystem(){
-  if(_tooltipEl) return;
-  _tooltipEl = document.createElement('div');
-  _tooltipEl.id = 'ui-tooltip';
-  _tooltipEl.setAttribute('role', 'tooltip');
-  _tooltipEl.setAttribute('aria-hidden', 'true');
-  document.body.appendChild(_tooltipEl);
-  /* Delegate mouseover/mouseout/focus/blur on document */
-  document.addEventListener('mouseover', (e) => {
-    const target = e.target.closest('[data-tooltip]');
-    if(!target) return;
-    const text = target.getAttribute('data-tooltip');
-    if(!text) return;
-    clearTimeout(_tooltipHideTimer);
-    clearTimeout(_tooltipShowTimer);
-    _tooltipShowTimer = setTimeout(() => showTooltip(target, text), 350);
-  });
-  document.addEventListener('mouseout', (e) => {
-    const target = e.target.closest && e.target.closest('[data-tooltip]');
-    if(!target) return;
-    clearTimeout(_tooltipShowTimer);
-    _tooltipHideTimer = setTimeout(() => hideTooltip(), 120);
-  });
-  document.addEventListener('focusin', (e) => {
-    const target = e.target.closest && e.target.closest('[data-tooltip]');
-    if(!target) return;
-    const text = target.getAttribute('data-tooltip');
-    if(!text) return;
-    clearTimeout(_tooltipHideTimer);
-    showTooltip(target, text);
-  });
-  document.addEventListener('focusout', (e) => {
-    const target = e.target.closest && e.target.closest('[data-tooltip]');
-    if(!target) return;
-    _tooltipHideTimer = setTimeout(() => hideTooltip(), 120);
-  });
-  /* Hide on scroll — tooltip position would be wrong otherwise */
-  window.addEventListener('scroll', () => hideTooltip(), {passive:true, capture:true});
-}
-function showTooltip(target, text){
-  if(!_tooltipEl) return;
-  _tooltipEl.textContent = text;
-  _tooltipEl.classList.add('show');
-  _tooltipEl.setAttribute('aria-hidden', 'false');
-  /* Position: prefer above-right of target; flip if no room */
-  const r = target.getBoundingClientRect();
-  const tw = _tooltipEl.offsetWidth;
-  const th = _tooltipEl.offsetHeight;
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  let left = r.left + (r.width / 2) - (tw / 2);
-  let top = r.top - th - 6;
-  if(top < 8){ top = r.bottom + 6; }  /* flip below */
-  if(left < 8) left = 8;
-  if(left + tw > vw - 8) left = vw - tw - 8;
-  _tooltipEl.style.left = left + 'px';
-  _tooltipEl.style.top = top + 'px';
-}
-function hideTooltip(){ if(!_tooltipEl) return; _tooltipEl.classList.remove('show'); _tooltipEl.setAttribute('aria-hidden', 'true'); }
-/* ═══════════════════════════════════════════════════════════════════════════
-   UI-V2: History Summary Cards + Sort/Group/Search
-   ═══════════════════════════════════════════════════════════════════════════ */
-function renderHistorySummary(filtered){
-  /* filtered = already-filtered array of signalHistory entries */
-  const total = filtered.length;
-  const wins = filtered.filter(h => h.accuracy === 'correct').length;
-  const losses = filtered.filter(h => h.accuracy === 'wrong').length;
-  const draws = filtered.filter(h => h.accuracy === 'draw').length;
-  const pending = filtered.filter(h => !h.accuracy || h.accuracy === 'pending').length;
-  const graded = wins + losses;
-  const rate = graded > 0 ? Math.round((wins / graded) * 100) : null;
-  /* Streak: walk from newest, count consecutive same-result */
-let streak = 0, streakType = '';
-  for(let i = filtered.length - 1; i >= 0; i--){
-    const a = filtered[i].accuracy;
-    if(a === 'correct' || a === 'wrong'){
-      if(!streakType) streakType = a;
-      if(a === streakType) streak++;
-      else break;
-    } else {
-      break;
-    }
-  }
-  _setText('hist-sum-total',   String(total));
-  _setText('hist-sum-wins',    String(wins));
-  _setText('hist-sum-losses',  String(losses));
-  _setText('hist-sum-pending', String(pending));
-  const rateEl = $('hist-sum-rate');
-  if(rateEl){
-    if(rate == null){
-      rateEl.textContent = '—';
-      rateEl.className = 'summary-value';
-    } else {
-      rateEl.textContent = rate + '%';
-      rateEl.className = 'summary-value ' + classifyPct(rate);
-    }
-  }
-  const streakEl = $('hist-sum-streak');
-  if(streakEl){
-    if(streak === 0){
-      streakEl.textContent = '—';
-      streakEl.className = 'summary-value';
-    } else {
-      streakEl.textContent = (streakType === 'correct' ? 'W' : 'L') + streak;
-      streakEl.className = 'summary-value ' + (streakType === 'correct' ? 'good' : 'bad');
-    }
-  }
-}
-function applyHistorySortAndGroup(displayHistory){
-  /* Read sort + group */
-  const sortEl = $('history-sort-filter');
-  const groupEl = $('history-group-filter');
-  const sortMode = sortEl ? sortEl.value : 'newest';
-  const groupMode = groupEl ? groupEl.value : '';
-  /* Sort */
-  let sorted = displayHistory.slice();
-  if(sortMode === 'newest'){
-    sorted.sort((a,b) => ((b.detail && b.detail.ctime) || 0) - ((a.detail && a.detail.ctime) || 0));
-  } else if(sortMode === 'oldest'){
-    sorted.sort((a,b) => ((a.detail && a.detail.ctime) || 0) - ((b.detail && b.detail.ctime) || 0));
-  } else if(sortMode === 'best'){
-    sorted.sort((a,b) => {
-      const av = (a.accuracy === 'correct') ? 1 : (a.accuracy === 'wrong') ? -1 : 0;
-      const bv = (b.accuracy === 'correct') ? 1 : (b.accuracy === 'wrong') ? -1 : 0;
-      return bv - av;
-    });
-  } else if(sortMode === 'worst'){
-    sorted.sort((a,b) => {
-      const av = (a.accuracy === 'correct') ? 1 : (a.accuracy === 'wrong') ? -1 : 0;
-      const bv = (b.accuracy === 'correct') ? 1 : (b.accuracy === 'wrong') ? -1 : 0;
-      return av - bv;
-    });
-  } else if(sortMode === 'strong'){
-    const rank = {STRONG:3, MEDIUM:2, WEAK:1};
-    sorted.sort((a,b) => {
-      const av = rank[(a.detail && a.detail.strength) || ''] || 0;
-      const bv = rank[(b.detail && b.detail.strength) || ''] || 0;
-      return bv - av;
-    });
-  }
-  /* Group */
-  if(!groupMode){
-    return [{name:'', items:sorted}];
-  }
-  const groups = {};
-  for(const h of sorted){
-    let key = '';
-    if(groupMode === 'pair'){
-      key = h.asset || '(unknown)';
-    } else if(groupMode === 'direction'){
-      key = h.signal || '(none)';
-    } else if(groupMode === 'result'){
-      key = h.accuracy || 'pending';
-    } else if(groupMode === 'hour'){
-      const ct = h.detail && h.detail.ctime;
-      key = ct ? String(new Date(ct * 1000).getHours()) + ':00' : '??';
-    }
-    if(!groups[key]) groups[key] = [];
-    groups[key].push(h);
-  }
-  /* Convert to array, sort groups by name (or by hour for hour mode) */
-  let groupArr = Object.keys(groups).map(k => ({name:k, items:groups[k]}));
-  if(groupMode === 'hour'){
-    groupArr.sort((a,b) => a.name.localeCompare(b.name));
-  } else {
-    groupArr.sort((a,b) => a.name.localeCompare(b.name));
-  }
-  return groupArr;
-}
-/* Override renderHistory to add summary + sort + group + search */
-const _origRenderHistory = renderHistory;
-renderHistory = function(){
-  const historyList = $('history-list');
-  if(!historyList) return;
-  const onHistoryTab = (currentTab === 'history');
-  const nowSec = Math.floor(Date.now() / 1000);
-  /* Read all filters */
-  const timeFilterEl  = $('history-time-filter');
-  const dirFilterEl   = $('history-direction-filter');
-  const accFilterEl   = $('history-accuracy-filter');
-  const pairFilterEl  = $('history-pair-select');
-  const searchEl      = $('history-search');
-  const hoursFilter = timeFilterEl ? parseFloat(timeFilterEl.value) : 1;
-  const dirFilter   = dirFilterEl ? dirFilterEl.value : '';
-  const accFilter   = accFilterEl ? accFilterEl.value : '';
-  const pairFilter  = pairFilterEl ? pairFilterEl.value : '';
-  const searchQ     = (searchEl ? searchEl.value : '').toLowerCase().trim();
-  const cutoff = (hoursFilter && hoursFilter > 0) ? nowSec - (hoursFilter * 3600) : 0;
-  /* Apply filters */
-  let displayHistory = signalHistory.filter(h => {
-    if(!h || !h.detail) return false;
-    const ct = h.detail.ctime;
-    if(cutoff > 0 && ct && ct < cutoff) return false;
-    if(dirFilter && h.signal !== dirFilter) return false;
-    if(accFilter && h.accuracy !== accFilter) return false;
-    if(pairFilter && h.asset !== pairFilter) return false;
-    if(searchQ){
-      const hay = ((h.asset || '') + ' ' + (h.signal || '') + ' ' + (h.accuracy || '') + ' '
-        + (h.detail && h.detail.strength ? h.detail.strength : '') + ' '
-        + (ct ? new Date(ct * 1000).toLocaleTimeString() : '')).toLowerCase();
-      if(hay.indexOf(searchQ) === -1) return false;
-    }
-    return true;
-  });
-  /* Update summary cards */
-  renderHistorySummary(displayHistory);
-  /* Update count hint */
-  const hintEl = $('history-count-hint');
-  if(hintEl){
-    const total = displayHistory.length;
-    const wins = displayHistory.filter(h => h.accuracy === 'correct').length;
-    const losses = displayHistory.filter(h => h.accuracy === 'wrong').length;
-    const pending = displayHistory.filter(h => !h.accuracy || h.accuracy === 'pending').length;
-    hintEl.textContent = total + ' signals · ' + wins + 'W / ' + losses + 'L / ' + pending + '⏳';
-  }
-  if(!displayHistory.length){
-    historyList.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:16px;text-align:center">'
-      + 'No signals match the current filter'
-      + '</div>';
-    return;
-  }
-  /* Apply sort + group */
-  const groups = applyHistorySortAndGroup(displayHistory);
-  /* Render */
-  let html = '';
-  for(const grp of groups){
-    if(grp.name){
-      const wins = grp.items.filter(h => h.accuracy === 'correct').length;
-      const losses = grp.items.filter(h => h.accuracy === 'wrong').length;
-      const graded = wins + losses;
-      const pct = graded > 0 ? Math.round((wins / graded) * 100) + '%' : '—';
-      html += '<div class="history-group-header">'
-           +  '<span>' + esc(grp.name) + '</span>'
-           +  '<span class="grp-count">' + grp.items.length + ' signals · ' + wins + 'W / ' + losses + 'L · ' + pct + '</span>'
-           +  '</div>';
-    }
-    /* Render rows in this group — newest-first within group (already sorted) */
-    for(let i = grp.items.length - 1; i >= 0; i--){
-      const h = grp.items[i];
-      let iconEmoji, iconLabel;
-      if(h.accuracy === 'correct'){ iconEmoji = '✅'; iconLabel = 'WIN'; }
-      else if(h.accuracy === 'wrong'){ iconEmoji = '❌'; iconLabel = 'LOSS'; }
-      else if(h.accuracy === 'draw'){ iconEmoji = '➖'; iconLabel = 'DRAW'; }
-      else { iconEmoji = '⏳'; iconLabel = 'WAIT'; }
-      const sigCls = h.signal === 'CALL' ? 'call' : h.signal === 'PUT' ? 'put' : 'neutral';
-      const strength = h.detail ? h.detail.strength : '';
-      const strengthCls = strength === 'STRONG' ? 'STRONG' : strength === 'MEDIUM' ? 'MEDIUM' : 'WEAK';
-      const strengthLetter = strength ? strength[0] : '·';
-      const strengthTitle = strength ? ('Strength: ' + strength) : 'No strength';
-      const scoreVal = h.detail ? h.detail.score : null;
-      const score = scoreVal != null ? ((scoreVal >= 0 ? '+' : '') + scoreVal) : '';
-      const scoreCls = scoreVal != null ? (scoreVal >= 0 ? 'pos' : 'neg') : '';
-      const accCls = h.accuracy === 'correct' ? ' correct'
-                   : h.accuracy === 'wrong'   ? ' wrong'
-                   : h.accuracy === 'draw'    ? ' draw'
-                   : h.accuracy === 'pending' ? ' pending'
-                   : '';
-      const time = (h.detail && h.detail.ctime)
-        ? new Date(h.detail.ctime * 1000).toLocaleTimeString('en-US', {hour:'2-digit',minute:'2-digit',hour12:false})
-        : '--:--';
-      const assetLabel = h.asset ? esc(h.asset) : '';
-      const clickKey = (h.detail && h.detail.ctime) ? String(h.detail.ctime) : '';
-      const clickable = clickKey ? 'onclick="window._showSignalDetail(\'' + clickKey + '\')" role="button" tabindex="0" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();window._showSignalDetail(\'' + clickKey + '\')}"' : '';
-      const deleteBtn = clickKey
-        ? '<span class="history-delete-btn" onclick="event.stopPropagation();window._deleteSignal(\'' + esc(h.asset) + '\',' + (h.detail.period||60) + ',' + clickKey + ')" title="Delete this signal">🗑</span>'
-        : '';
-      /* Tooltip preview */
-      const tipText = esc((h.asset || '') + ' · ' + (h.signal || '') + ' · ' + (strength || '') + ' · ' + (h.accuracy || 'pending') + ' · score ' + (score || '—'));
-      html += '<div class="history-row' + accCls + '" ' + clickable + ' data-tooltip="' + tipText + '">'
-           +  '<span class="history-time">' + time + '</span>'
-           +  '<span class="history-asset" style="font-size:9px;color:var(--text-dim);min-width:70px">' + assetLabel + '</span>'
-           +  '<span class="history-signal ' + sigCls + '">' + esc(h.signal) + '</span>'
-           +  '<span class="history-strength ' + strengthCls + '" title="' + esc(strengthTitle) + '">' + strengthLetter + '</span>'
-           +  '<span class="history-score ' + scoreCls + '">' + (score || '—') + '</span>'
-           +  '<span class="history-icon">'
-           +    '<span class="icon-emoji">' + iconEmoji + '</span>'
-           +    '<span class="icon-label">' + iconLabel + '</span>'
-           +  '</span>'
-           +  deleteBtn
-           +  '</div>';
-    }
-  }
-  /* Load-more button (always render on history tab) */
-  if(onHistoryTab){
-    const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
-      ? signalHistory[0].detail.ctime : 0;
-    if(oldestCtime){
-      html += '<div id="history-load-more" class="history-load-more" '
-           +  'onclick="window._loadMoreHistory()" role="button" tabindex="0" '
-           +  'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();window._loadMoreHistory()}">'
-           +  'Load older signals ↓</div>';
-    }
-  }
-  historyList.innerHTML = html;
-};
-/* ═══════════════════════════════════════════════════════════════════════════
-   UI-V2: Stats Sub-tab Navigation
-   ═══════════════════════════════════════════════════════════════════════════ */
-let _currentStatsSubtab = 'overview';
-function switchStatsSubtab(name){
-  _currentStatsSubtab = name;
-  /* Update buttons */
-  document.querySelectorAll('.stats-subtab').forEach(btn => {
-    const isActive = btn.dataset.subtab === name;
-    btn.classList.toggle('active', isActive);
-    btn.setAttribute('aria-selected', String(isActive));
-  });
-  /* Update panes */
-  document.querySelectorAll('.stats-subpane').forEach(pane => {
-    pane.classList.toggle('active', pane.dataset.subpane === name);
-  });
-  /* Lazy-load content for sub-tabs that need fetching */
-  if(name === 'pairs'){
-    renderPairDeepStats();
-  } else if(name === 'time'){
-    renderTimePatterns();
-  } else if(name === 'modules'){
-    if(typeof renderModuleStats === 'function') renderModuleStats();
-  } else if(name === 'theories'){
-    if(typeof renderTheoryStats === 'function') renderTheoryStats();
-  } else if(name === 'overview') if(typeof renderAccuracyTab === 'function') renderAccuracyTab();
-}
-function wireStatsSubtabs(){
-  document.querySelectorAll('.stats-subtab').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const name = btn.dataset.subtab;
-      if(name) switchStatsSubtab(name);
-    });
-    btn.addEventListener('keydown', (e) => {
-      if(e.key === 'Enter' || e.key === ' '){
-        e.preventDefault(); btn.click();
-      }
-    });
-  });
-}
-/* ═══════════════════════════════════════════════════════════════════════════
-   UI-V2: Per-Pair Deep Stats (uses /api/pair-deep-stats/{asset})
-   ═══════════════════════════════════════════════════════════════════════════ */
-let _pairDeepStatsCache = null;
-async function fetchPairDeepStats(asset){
-  if(!asset) return null;
-  try{
-    const r = await fetch('/api/pair-deep-stats/' + encodeURIComponent(asset) + '?_t=' + Date.now());
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    return await r.json();
-  }catch(e){
-    console.warn('[pair-deep-stats] fetch failed:', e.message);
-    return null;
-  }
-}
-async function renderPairDeepStats(){
-  const container = $('pair-deep-stats-container');
-  const hintEl = $('pair-deep-hint');
-  if(!container) return;
-  const pairSelect = $('stats-pair-select');
-  const asset = pairSelect ? pairSelect.value : '';
-  if(!asset){ container.innerHTML = '<div class="accuracy-empty">Pick a pair from the dropdown above to see deep stats — overall win rate, regime distribution, strength distribution, hourly patterns, and more.</div>'; if(hintEl) hintEl.textContent = 'Select a pair above'; return; }
-  if(hintEl) hintEl.textContent = 'Loading ' + prettyPairName(asset) + '…';
-  container.innerHTML = '<div class="accuracy-empty">Loading deep stats for ' + esc(prettyPairName(asset)) + '…</div>';
-  const data = await fetchPairDeepStats(asset);
-  if(!data){ container.innerHTML = '<div class="accuracy-empty">Failed to load deep stats. Will retry on next refresh.</div>'; if(hintEl) hintEl.textContent = 'Failed'; return; }
-  _pairDeepStatsCache = data;
-  const winPct = data.win_pct != null ? Math.round(data.win_pct) : null;
-  const cls = classifyPct(winPct);
-  let html = '';
-  /* Hero block */
-  html += '<div class="deep-stat-block">'
-       +  '<div class="deep-stat-block-title">Overall — ' + esc(prettyPairName(asset)) + '</div>'
-       +  '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:6px 0">'
-       +    '<div style="font-size:28px;font-weight:800;font-family:var(--mono);color:' + (winPct == null ? 'var(--text-dim)' : (cls === 'good' ? '#4caf50' : cls === 'mid' ? '#ffc107' : '#f44336')) + '">' + (winPct == null ? '—' : winPct + '%') + '</div>'
-       +    '<div style="font-size:11px;color:var(--text-dim)">' + (data.correct || 0) + 'W / ' + (data.wrong || 0) + 'L · ' + (data.total_signals || 0) + ' signals</div>'
-       +  '</div></div>';
-  /* Module breakdown */
-  if(Array.isArray(data.module_votes) && data.module_votes.length){
-    html += '<div class="deep-stat-block">'
-         +  '<div class="deep-stat-block-title">Module Votes (per direction)</div>';
-    const grouped = {};
-    for(const v of data.module_votes){
-      const key = v.module_name + ' · ' + (v.direction || '?');
-      grouped[key] = v;
-    }
-    Object.keys(grouped).sort().forEach(k => {
-      const v = grouped[k];
-      const pct = v.win_pct != null ? Math.round(v.win_pct) : null;
-      const cls2 = classifyPct(pct);
-      const barW = pct != null ? pct : 0;
-      html += '<div class="deep-stat-row" data-tooltip="' + esc(k) + ' — ' + (v.correct || 0) + 'W / ' + (v.wrong || 0) + 'L">'
-           +  '<span class="ds-label">' + esc(k) + '</span>'
-           +  '<span class="ds-bar"><span class="ds-bar-fill ' + (cls2 === 'good' ? 'good' : cls2 === 'mid' ? 'mid' : cls2 === 'bad' ? 'bad' : 'none') + '" style="width:' + barW + '%"></span></span>'
-           +  '<span class="ds-value ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
-           +  '</div>';
-    });
-    html += '</div>';
-  }
-  /* Regime distribution */
-  if(Array.isArray(data.regime_distribution) && data.regime_distribution.length){
-    html += '<div class="deep-stat-block"><div class="deep-stat-block-title">Regime Distribution</div>';
-    const grouped = {};
-    for(const r of data.regime_distribution){
-      const key = r.regime || '(none)';
-      if(!grouped[key]) grouped[key] = {correct:0, wrong:0, draw:0};
-      if(r.accuracy === 'correct') grouped[key].correct += (r.count || 0);
-      else if(r.accuracy === 'wrong') grouped[key].wrong += (r.count || 0);
-      else grouped[key].draw += (r.count || 0);
-    }
-    Object.keys(grouped).sort().forEach(k => {
-      const g = grouped[k];
-      const total = g.correct + g.wrong;
-      const pct = total > 0 ? Math.round((g.correct / total) * 100) : null;
-      const cls2 = classifyPct(pct);
-      const barW = pct != null ? pct : 0;
-      html += '<div class="deep-stat-row" data-tooltip="' + esc(k) + ': ' + g.correct + 'W / ' + g.wrong + 'L / ' + g.draw + 'D">'
-           +  '<span class="ds-label">' + esc(k) + '</span>'
-           +  '<span class="ds-bar"><span class="ds-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
-           +  '<span class="ds-value ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
-           +  '</div>';
-    });
-    html += '</div>';
-  }
-  /* Strength distribution */
-  if(Array.isArray(data.strength_distribution) && data.strength_distribution.length){
-    html += '<div class="deep-stat-block"><div class="deep-stat-block-title">Strength Distribution</div>';
-    const grouped = {};
-    for(const s of data.strength_distribution){
-      const key = s.strength || '(none)';
-      if(!grouped[key]) grouped[key] = {correct:0, wrong:0};
-      if(s.accuracy === 'correct') grouped[key].correct += (s.count || 0);
-      else if(s.accuracy === 'wrong') grouped[key].wrong += (s.count || 0);
-    }
-    ['STRONG','MEDIUM','WEAK'].forEach(k => {
-      if(!grouped[k]) return;
-      const g = grouped[k];
-      const total = g.correct + g.wrong;
-      const pct = total > 0 ? Math.round((g.correct / total) * 100) : null;
-      const cls2 = classifyPct(pct);
-      const barW = pct != null ? pct : 0;
-      html += '<div class="deep-stat-row" data-tooltip="' + esc(k) + ': ' + g.correct + 'W / ' + g.wrong + 'L">'
-           +  '<span class="ds-label">' + esc(k) + '</span>'
-           +  '<span class="ds-bar"><span class="ds-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
-           +  '<span class="ds-value ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
-           +  '</div>';
-    });
-    html += '</div>';
-  }
-  /* Hourly patterns */
-  if(Array.isArray(data.hourly_patterns) && data.hourly_patterns.length){
-    html += '<div class="deep-stat-block"><div class="deep-stat-block-title">Hourly Patterns (UTC)</div>';
-    const sorted = data.hourly_patterns.slice().sort((a,b) => (a.hour_utc||0) - (b.hour_utc||0));
-    for(const h of sorted){
-      const pct = h.win_pct != null ? Math.round(h.win_pct) : (h.correct != null && h.total_signals > 0 ? Math.round((h.correct / h.total_signals) * 100) : null);
-      const cls2 = classifyPct(pct);
-      const barW = pct != null ? pct : 0;
-      const hr = String(h.hour_utc).padStart(2, '0') + ':00';
-      html += '<div class="time-pattern-row" data-tooltip="' + esc(hr) + ' UTC — ' + (h.correct||0) + 'W / ' + (h.wrong||0) + 'L">'
-           +  '<span class="tp-hour">' + hr + '</span>'
-           +  '<span class="tp-bar"><span class="tp-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
-           +  '<span class="tp-pct ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
-           +  '<span class="tp-count">' + (h.total_signals || 0) + '</span>'
-           +  '</div>';
-    }
-    html += '</div>';
-  }
-  container.innerHTML = html || '<div class="accuracy-empty">No deep stats available for this pair yet.</div>';
-  if(hintEl) hintEl.textContent = prettyPairName(asset) + ' · ' + (data.total_signals || 0) + ' signals';
-}
-/* ═══════════════════════════════════════════════════════════════════════════
-   UI-V2: Time Patterns (uses /api/time-patterns)
-   ═══════════════════════════════════════════════════════════════════════════ */
-let _timePatternsCache = null, _timePatternsLoading = false;
-async function fetchTimePatterns(asset){
-  try{
-    const url = asset
-      ? '/api/time-patterns/' + encodeURIComponent(asset) + '?_t=' + Date.now()
-      : '/api/time-patterns?_t=' + Date.now();
-    const r = await fetch(url);
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    return await r.json();
-  }catch(e){
-    console.warn('[time-patterns] fetch failed:', e.message);
-    return null;
-  }
-}
-async function renderTimePatterns(){
-  const container = $('time-patterns-container');
-  const hintEl = $('time-patterns-hint');
-  if(!container) return;
-  if(_timePatternsLoading) return;
-  _timePatternsLoading = true;
-  const pairSelect = $('stats-pair-select');
-  const asset = pairSelect ? pairSelect.value : '';
-  if(hintEl) hintEl.textContent = asset ? prettyPairName(asset) : 'All pairs';
-  container.innerHTML = '<div class="accuracy-empty">Loading time patterns…</div>';
-  const data = await fetchTimePatterns(asset);
-  _timePatternsLoading = false;
-  if(!data){ container.innerHTML = '<div class="accuracy-empty">Failed to load time patterns.</div>'; return; }
-  _timePatternsCache = data;
-  /* The shape varies — handle both array-of-hours and {patterns:[...]} */
-  let rows = [];
-  if(Array.isArray(data)) rows = data;
-  else if(Array.isArray(data.patterns)) rows = data.patterns;
-  else if(Array.isArray(data.hourly_patterns)) rows = data.hourly_patterns;
-  else if(data.hours && Array.isArray(data.hours)) rows = data.hours;
-  else if(data.pairs){
-    /* Per-pair aggregate — show each pair's best hour */
-    const pairsArr = Object.keys(data.pairs).map(k => ({pair:k, hours:data.pairs[k]}));
-    if(pairsArr.length === 0){ container.innerHTML = '<div class="accuracy-empty">No time-pattern data yet.</div>'; return; }
-    let html = '';
-    for(const p of pairsArr){
-      html += '<div class="deep-stat-block"><div class="deep-stat-block-title">' + esc(prettyPairName(p.pair)) + '</div>';
-      const hours = Array.isArray(p.hours) ? p.hours : (p.hours && p.hours.patterns ? p.hours.patterns : []);
-      const sorted = hours.slice().sort((a,b) => (a.hour_utc||0) - (b.hour_utc||0));
-      for(const h of sorted){
-        const pct = h.win_pct != null ? Math.round(h.win_pct) : (h.correct != null && h.total_signals > 0 ? Math.round((h.correct / h.total_signals) * 100) : null);
-        const cls2 = classifyPct(pct);
-        const barW = pct != null ? pct : 0;
-        const hr = String(h.hour_utc).padStart(2, '0') + ':00';
-        html += '<div class="time-pattern-row" data-tooltip="' + esc(hr) + ' UTC — ' + (h.correct||0) + 'W / ' + (h.wrong||0) + 'L">'
-             +  '<span class="tp-hour">' + hr + '</span>'
-             +  '<span class="tp-bar"><span class="tp-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
-             +  '<span class="tp-pct ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
-             +  '<span class="tp-count">' + (h.total_signals || 0) + '</span>'
-             +  '</div>';
-      }
-      html += '</div>';
-    }
-    container.innerHTML = html || '<div class="accuracy-empty">No time-pattern data yet.</div>';
-    return;
-  }
-  if(rows.length === 0){ container.innerHTML = '<div class="accuracy-empty">No time-pattern data yet.</div>'; return; }
-  /* Sort by hour */
-  const sorted = rows.slice().sort((a,b) => (a.hour_utc||0) - (b.hour_utc||0));
-  let html = '<div class="deep-stat-block"><div class="deep-stat-block-title">Hourly Win Rate (UTC)</div>';
-  for(const h of sorted){
-    const pct = h.win_pct != null ? Math.round(h.win_pct) : (h.correct != null && h.total_signals > 0 ? Math.round((h.correct / h.total_signals) * 100) : null);
-    const cls2 = classifyPct(pct);
-    const barW = pct != null ? pct : 0;
-    const hr = String(h.hour_utc).padStart(2, '0') + ':00';
-    html += '<div class="time-pattern-row" data-tooltip="' + esc(hr) + ' UTC — ' + (h.correct||0) + 'W / ' + (h.wrong||0) + 'L">'
-         +  '<span class="tp-hour">' + hr + '</span>'
-         +  '<span class="tp-bar"><span class="tp-bar-fill ' + cls2 + '" style="width:' + barW + '%"></span></span>'
-         +  '<span class="tp-pct ' + cls2 + '">' + (pct == null ? '—' : pct + '%') + '</span>'
-         +  '<span class="tp-count">' + (h.total_signals || 0) + '</span>'
-         +  '</div>';
-  }
-  html += '</div>';
-  container.innerHTML = html;
-}
-/* ═══════════════════════════════════════════════════════════════════════════
-   UI-V2: History filter toggle (collapse/expand)
-   ═══════════════════════════════════════════════════════════════════════════ */
-function wireHistoryFilterToggle(){
-  const toggleBtn = $('history-filter-toggle');
-  const controls = $('history-controls');
-  if(!toggleBtn || !controls) return;
-  /* Default: expanded on desktop, collapsed on mobile */
-  const isMobile = window.matchMedia('(max-width:768px)').matches;
-  if(isMobile){ toggleBtn.setAttribute('aria-expanded', 'false'); controls.setAttribute('hidden', ''); }
-  toggleBtn.addEventListener('click', () => {
-    const expanded = toggleBtn.getAttribute('aria-expanded') === 'true';
-    const newState = !expanded;
-    toggleBtn.setAttribute('aria-expanded', String(newState));
-    if(newState) controls.removeAttribute('hidden');
-    else controls.setAttribute('hidden', '');
-  });
-}
-/* Wire new search/sort/group dropdowns */
-function wireHistoryExtraControls(){
-  ['history-sort-filter','history-group-filter'].forEach(id => {
-    const el = $(id);
-    if(el) el.addEventListener('change', renderHistory);
-  });
-  const searchEl = $('history-search');
-  if(searchEl){
-    let _t = null;
-    searchEl.addEventListener('input', () => {
-      clearTimeout(_t);
-      _t = setTimeout(renderHistory, 150);
-    });
-  }
-}
+
 })(window);
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SIGNAL VERIFIER AGENT PANEL (PROD-2026-08-06)
-// Polls /api/verifier/status + /api/verifier/recent every 5s and renders
-// live verdict counts + recent verdict table.
-// ═══════════════════════════════════════════════════════════════════════════
-let _verifierPollTimer = null;
-let _verifierRecentTimer = null;
-let _verifierLastTotal = -1;
-
-function fmtVerifierTime(ts){
-  const d = new Date(ts * 1000);
-  return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-}
-function fmtVerifierAsset(a){
-  return prettyPairName(a);   // keeps the OTC marker; was stripping it
-}
-function _verifierLayerBadge(v){
-  if(v === 'VETO') return '<span style="color:#ff1744">V</span>';
-  if(v === 'WEAKEN') return '<span style="color:#ffc107">W</span>';
-  if(v === 'CONFIRM') return '<span style="color:#00c853">C</span>';
-  return '<span style="color:#8b949e">·</span>';
-}
-
-function updateVerifierStatus(s){
-  const $ = (id) => document.getElementById(id);
-  if(!$('verifier-status-badge') && !$('vstat-verifier-total')) return;
-  // BUG-FIX (2026-08-07): this function and updateAgentStatus() both write
-  // #verifier-status-badge, #vstat-veto/weaken/confirm/pass and #vstat-uptime,
-  // on independent polls — so whichever landed last won. signal_verifier is
-  // dormant whenever agent_brain is the analyzer (the normal case), and its
-  // payload carries enabled:false with no total_* keys at all. Every time its
-  // poll landed after the agent's it repainted the badge to "○ DISABLED" and
-  // reset the verdict tiles to 0, while the agent was running with real
-  // counts. The badge then cascaded: renderAgentLive() and
-  // renderVerifierRecent() read badge.classList.contains('disabled') and
-  // printed "Enable with QX_AGENT_BRAIN=1", so the whole tab read as off.
-  // A dormant module must not paint shared surfaces.
-  if(s.active_analyzer && s.active_analyzer !== 'signal_verifier') return;
-  const badge = $('verifier-status-badge');
-  if(badge){
-    if(s.enabled){
-      badge.textContent = '● LIVE';
-      badge.className = 'verifier-status-badge enabled';
-    } else {
-      badge.textContent = '○ DISABLED';
-      badge.className = 'verifier-status-badge disabled';
-    }
-  }
-  // B-03 (A-03 #2): #vstat-total and #vstat-killed were moved into the
-  // Per-Pair Dashboard by B-02 — they now show PER-PAIR ticks/learned, owned
-  // exclusively by updateAgentStatus(). The verifier must NOT clobber them.
-  // Write to dedicated #vstat-verifier-* targets instead; if those don't
-  // exist (B-02 doesn't render them), the writes silently no-op.
-  if($('vstat-verifier-total'))  $('vstat-verifier-total').textContent = s.total_verified || 0;
-  if($('vstat-verifier-killed')) $('vstat-verifier-killed').textContent = s.total_killed || 0;
-  // Global verdict summary grid (top of Agent tab) — shared with agent poll.
-  if($('vstat-veto'))          $('vstat-veto').textContent = s.total_veto || 0;
-  if($('vstat-veto-rate'))     $('vstat-veto-rate').textContent = (s.veto_rate || 0) + '%';
-  if($('vstat-weaken'))        $('vstat-weaken').textContent = s.total_weaken || 0;
-  if($('vstat-weaken-rate'))   $('vstat-weaken-rate').textContent = (s.weaken_rate || 0) + '%';
-  if($('vstat-confirm'))       $('vstat-confirm').textContent = s.total_confirm || 0;
-  if($('vstat-confirm-rate'))  $('vstat-confirm-rate').textContent = (s.confirm_rate || 0) + '%';
-  if($('vstat-pass'))          $('vstat-pass').textContent = s.total_pass || 0;
-  if($('vstat-pass-rate'))     $('vstat-pass-rate').textContent = (s.pass_rate || 0) + '%';
-  if($('vstat-uptime'))        $('vstat-uptime').textContent = s.uptime_human || '—';
-  if(s.total_verified !== _verifierLastTotal && _verifierLastTotal !== -1){
-    fetchVerifierRecent();
-  }
-  _verifierLastTotal = s.total_verified;
-}
-
-function renderVerifierRecent(data){
-  const $ = (id) => document.getElementById(id);
-  const tbl = $('verifier-recent-table');
-  if(!tbl) return;
-  if(!data.verdicts || data.verdicts.length === 0){
-    const badge = $('verifier-status-badge');
-    const isDisabled = badge && badge.classList.contains('disabled');
-    tbl.innerHTML = '<div class="verifier-empty">No verdicts yet. ' +
-      (isDisabled ? 'Enable with QX_SIGNAL_VERIFIER=1 env var.'
-                  : 'Waiting for first signal…') + '</div>';
-    return;
-  }
-  let html = '<div class="vrow vrow-head">' +
-    '<div>Time</div><div>Asset</div><div>Sig</div><div>Verdict</div>' +
-    '<div>Conf</div><div>Layers</div><div>Reason</div></div>';
-  data.verdicts.slice(0, 30).forEach(v => {
-    const sigClass = v.signal === 'CALL' ? 'call' : 'put';
-    const layers = v.layers || {};
-    // Support both old verifier layer names (L1_price_action...) and
-    // new realtime analyzer names (L1_pre_candle_momentum...)
-    const layerStr = 'L1'+_verifierLayerBadge(layers.L1_pre_candle_momentum || layers.L1_price_action)+' ' +
-                     'L2'+_verifierLayerBadge(layers.L2_opening_behavior || layers.L2_wick_rejection)+' ' +
-                     'L3'+_verifierLayerBadge(layers.L3_tick_arrival_rate || layers.L3_tick_momentum)+' ' +
-                     'L4'+_verifierLayerBadge(layers.L4_micro_volatility || layers.L4_key_level)+' ' +
-                     'L5'+_verifierLayerBadge(layers.L5_order_flow || layers.L5_historical) +
-                     (layers.L6_htf_alignment ? ' L6'+_verifierLayerBadge(layers.L6_htf_alignment) : '');
-    const confStr = v.original_conf + '→' + v.final_conf +
-      (v.final_signal === 'NEUTRAL' ? ' ✗' : '');
-    const reason = (v.reason || '').split('|').slice(-1)[0].trim().slice(0, 80);
-    html += '<div class="vrow' + (v.killed ? ' killed' : '') + '">' +
-      '<div class="v-time">' + fmtVerifierTime(v.ts) + '</div>' +
-      '<div class="v-asset">' + fmtVerifierAsset(v.asset) + '</div>' +
-      '<div class="v-signal ' + sigClass + '">' + v.signal + '</div>' +
-      '<div class="v-verdict ' + (v.verdict || '').toLowerCase() + '">' + v.verdict + '</div>' +
-      '<div class="v-conf">' + confStr + '</div>' +
-      '<div class="v-layers">' + layerStr + '</div>' +
-      '<div class="v-conf" style="font-size:10px;color:#8b949e">' + reason + '</div>' +
-      '</div>';
-  });
-  tbl.innerHTML = html;
-}
-
-async function fetchVerifierStatus(){
-  try{
-    const r = await fetch('/api/verifier/status');
-    if(!r.ok) return;
-    const data = await r.json();
-    updateVerifierStatus(data);
-  }catch(e){ /* silent */ }
-}
-
-async function fetchVerifierRecent(){
-  try{
-    const r = await fetch('/api/verifier/recent?limit=30');
-    if(!r.ok) return;
-    const data = await r.json();
-    renderVerifierRecent(data);
-  }catch(e){ /* silent */ }
-}
-
-function startVerifierPanel(){
-  if(_verifierPollTimer) return;
-  const $ = (id) => document.getElementById(id);
-  if(!$('vstat-total')) return;
-  fetchVerifierStatus();
-  fetchVerifierRecent();
-  _verifierPollTimer = setInterval(fetchVerifierStatus, 5000);
-  _verifierRecentTimer = setInterval(fetchVerifierRecent, 15000);
-}
-
-if(document.readyState === 'loading'){
-  document.addEventListener('DOMContentLoaded', startVerifierPanel);
-} else {
-  startVerifierPanel();
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// AUTONOMOUS AI AGENT PANEL (PROD-AGENT-2026-08-06)
-// Polls /api/agent/* endpoints and renders:
-//   - Live thought stream (ticks + evaluations + learning events)
-//   - Live features for current asset
-//   - Per-asset learned models (weights, accuracy, samples)
-//   - Recent decisions
-// ═══════════════════════════════════════════════════════════════════════════
-let _agentPollTimer = null;
-let _agentFeatureTimer = null;
-let _agentModelTimer = null;
-let _agentLastTickCount = -1;
-
-function fmtAgentTime(ts){
-  const d = new Date(ts * 1000);
-  return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-}
-function fmtAgentAsset(a){
-  return prettyPairName(a);   // keeps the OTC marker; was stripping it
-}
-
-function updateAgentStatus(s){
-  const $ = (id) => document.getElementById(id);
-  if(!$('vstat-total')) return;
-  const badge = $('verifier-status-badge');
-  const hint = $('verifier-enable-hint');
-  if(badge){
-    const _n = (s.authority && s.authority.assets_authorised) || 0;
-    if((s.final_mode || s.active_mode) && _n === 0){
-      // Mode was requested but the edge gate is holding it at OBSERVE.
-      badge.textContent = '● OBSERVE (gated)';
-      badge.className = 'verifier-status-badge enabled';
-      badge.style.background = 'rgba(255,193,7,0.15)';
-      badge.style.color = '#ffc107';
-      badge.style.borderColor = 'rgba(255,193,7,0.4)';
-    } else if(s.final_mode){
-      badge.textContent = '● FINAL ×' + _n;
-      badge.className = 'verifier-status-badge enabled';
-      badge.style.background = 'rgba(255,23,68,0.15)';
-      badge.style.color = '#ff1744';
-      badge.style.borderColor = 'rgba(255,23,68,0.4)';
-    } else if(s.active_mode){
-      badge.textContent = '● ACTIVE';
-      badge.className = 'verifier-status-badge enabled';
-      badge.style.background = '';
-      badge.style.color = '';
-      badge.style.borderColor = '';
-    } else if(s.enabled){
-      badge.textContent = '● OBSERVE';
-      badge.className = 'verifier-status-badge enabled';
-      badge.style.background = '';
-      badge.style.color = '';
-      badge.style.borderColor = '';
-    } else {
-      badge.textContent = '○ DISABLED';
-      badge.className = 'verifier-status-badge disabled';
-    }
-  }
-  // Show hint based on mode
-  if(hint){
-    const _auth = s.authority || {};
-    const _nAuth = _auth.assets_authorised || 0;
-    if(s.final_mode && _nAuth === 0){
-      // Requested FINAL, but no asset has earned authority — say so plainly
-      // rather than implying the agent is in control of the signals.
-      hint.style.display = 'block';
-      hint.innerHTML = '🛡️ <b>FINAL requested — gate holding.</b> No asset has passed the edge gate yet ('
-        + 'needs ≥' + (_auth.gate_min_samples || '?') + ' graded decisions at AUC ≥'
-        + (_auth.gate_min_auc || '?') + '), so the agent is observing and learning only. '
-        + 'Signals are the engine\'s. Set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_GATE=0</code> to override (not recommended — backtested AUC ≈ 0.50).';
-      hint.style.background = 'rgba(255,193,7,0.05)';
-      hint.style.borderColor = 'rgba(255,193,7,0.3)';
-      hint.style.color = '#ffc107';
-    } else if(s.final_mode){
-      hint.style.display = 'block';
-      hint.innerHTML = '🔄 <b>FINAL mode active on ' + _nAuth + ' asset(s).</b> On those pairs the agent makes the FINAL decision — can FLIP CALL→PUT or PUT→CALL, or NEUTRALIZE. All other pairs stay engine-driven until they pass the edge gate. Set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_FINAL=0</code> to disable.';
-      hint.style.background = 'rgba(255,23,68,0.05)';
-      hint.style.borderColor = 'rgba(255,23,68,0.3)';
-      hint.style.color = '#ff1744';
-    } else if(s.active_mode){
-      hint.style.display = 'none';
-    } else if(s.enabled){
-      hint.style.display = 'block';
-      hint.innerHTML = '👁️ <b>OBSERVE mode.</b> Agent is learning but NOT modifying signals. To make it actively filter signals, set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_BRAIN=1</code>. To let agent make FINAL decisions (can flip signals), set <code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:3px;">QX_AGENT_FINAL=1</code>.';
-      hint.style.background = 'rgba(0,200,83,0.05)';
-      hint.style.borderColor = 'rgba(0,200,83,0.3)';
-      hint.style.color = '#00c853';
-    } else {
-      hint.style.display = 'block';
-    }
-  }
-  // B-03 (A-13 #1): the Per-Pair Dashboard (added in B-02) shows agent state
-  // for the currently-selected pair — NOT global aggregates. The chart's
-  // #vstat-total/#vstat-killed are now per-pair ticks/learned. We fall back
-  // to global values if per_pair is missing or the chosen pair isn't tracked
-  // yet (e.g. brand-new asset the agent has never seen).
-  const _pair = agentSelectedPair || currentAsset || '';
-  const _pp = (s.per_pair && _pair && s.per_pair[_pair]) ? s.per_pair[_pair] : null;
-  // Per-pair dashboard: ticks + learned (was: global ticks + global learned).
-  if($('vstat-total')){
-    $('vstat-total').textContent = _pp ? (_pp.ticks_processed || 0)
-                                       : (s.total_ticks_processed || 0);
-  }
-  if($('vstat-total-sub')){
-    // Sub-label context — samples for this pair, or global decisions.
-    $('vstat-total-sub').textContent = _pp
-      ? ((_pp.samples || 0) + ' samples')
-      : ((s.total_signals_evaluated || 0) + ' decisions');
-  }
-  // Per-pair Samples/learned card (B-02 reuses #vstat-killed for this slot).
-  // We no longer swap the label to "Flipped" in final mode here — the
-  // per-pair dashboard has its own labels in B-02 markup. Keep it simple.
-  if($('vstat-killed')){
-    if(_pp){
-      $('vstat-killed').textContent = _pp.samples || 0;
-    } else if(s.final_mode){
-      $('vstat-killed').textContent = s.total_flips || 0;
-    } else {
-      $('vstat-killed').textContent = s.total_signals_learned || 0;
-    }
-  }
-  // Per-pair dashboard hero: P(win), authority badge, edge AUC.
-  if($('pair-dash-pwin')){
-    const _pwin = _pp ? _pp.last_pwin : null;
-    $('pair-dash-pwin').textContent = (_pwin != null)
-      ? ((_pwin * 100).toFixed(1) + '%')
-      : '—';
-  }
-  if($('pair-dash-authority-badge')){
-    const _badge = $('pair-dash-authority-badge');
-    if(_pp && _pp.has_authority){
-      _badge.textContent = 'authorised';
-      _badge.className = 'authority-badge authority-badge--authorised';
-    } else if(_pp){
-      _badge.textContent = 'learning';
-      _badge.className = 'authority-badge authority-badge--learning';
-    } else {
-      _badge.textContent = '—';
-      _badge.className = 'authority-badge authority-badge--learning';
-    }
-  }
-  if($('pair-dash-auc')){
-    const _auc = _pp ? _pp.edge_auc : null;
-    $('pair-dash-auc').textContent = (_auc != null) ? _auc.toFixed(3) : '—';
-  }
-  // Per-pair verdict breakdown (separate from the global verdict grid above).
-  // Backend per_pair uses pass_count (avoid clashing with JS keyword `pass`).
-  const _ppV = {
-    veto:    _pp ? (_pp.veto    || 0) : 0,
-    weaken:  _pp ? (_pp.weaken  || 0) : 0,
-    confirm: _pp ? (_pp.confirm || 0) : 0,
-    pass:    _pp ? (_pp.pass_count || 0) : 0,
-  };
-  const _ppTotal = _ppV.veto + _ppV.weaken + _ppV.confirm + _ppV.pass;
-  const _ppRate = (v) => _ppTotal ? Math.round(v / _ppTotal * 100) + '%' : '—';
-  if($('pair-vd-veto'))         $('pair-vd-veto').textContent       = _ppV.veto;
-  if($('pair-vd-veto-rate'))    $('pair-vd-veto-rate').textContent  = _ppRate(_ppV.veto);
-  if($('pair-vd-weaken'))       $('pair-vd-weaken').textContent     = _ppV.weaken;
-  if($('pair-vd-weaken-rate'))  $('pair-vd-weaken-rate').textContent= _ppRate(_ppV.weaken);
-  if($('pair-vd-confirm'))      $('pair-vd-confirm').textContent    = _ppV.confirm;
-  if($('pair-vd-confirm-rate')) $('pair-vd-confirm-rate').textContent = _ppRate(_ppV.confirm);
-  if($('pair-vd-pass'))         $('pair-vd-pass').textContent       = _ppV.pass;
-  if($('pair-vd-pass-rate'))    $('pair-vd-pass-rate').textContent  = _ppRate(_ppV.pass);
-  // Show "no data for this pair" placeholder when the agent hasn't seen it.
-  if($('pair-dash-empty')){
-    $('pair-dash-empty').hidden = !!_pp;
-  }
-  // Accordion meta — which pair the dashboard is showing.
-  if($('acc-dashboard-meta')){
-    $('acc-dashboard-meta').textContent = _pair
-      ? (prettyPairName(_pair) + (_pp ? '' : ' (no data)'))
-      : 'no pair selected';
-  }
-  // Global verdict summary grid (top of Agent tab) — these stay GLOBAL.
-  if($('vstat-veto'))          $('vstat-veto').textContent = s.total_veto || 0;
-  if($('vstat-weaken'))        $('vstat-weaken').textContent = s.total_weaken || 0;
-  if($('vstat-confirm'))       $('vstat-confirm').textContent = s.total_confirm || 0;
-  if($('vstat-pass'))          $('vstat-pass').textContent = s.total_pass || 0;
-  // FIX (2026-08-06): the four "%" sub-labels under VETO/WEAKEN/CONFIRM/PASS
-  // were markup-only — nothing ever wrote to them, so they read "0%" forever
-  // no matter what the agent did. Rates are a share of decisions, not ticks.
-  const _dec = s.total_signals_evaluated || 0;
-  const _rate = (v) => _dec ? Math.round((v || 0) / _dec * 100) + '%' : '—';
-  if($('vstat-veto-rate'))    $('vstat-veto-rate').textContent    = _rate(s.total_veto);
-  if($('vstat-weaken-rate'))  $('vstat-weaken-rate').textContent  = _rate(s.total_weaken);
-  if($('vstat-confirm-rate')) $('vstat-confirm-rate').textContent = _rate(s.total_confirm);
-  if($('vstat-pass-rate'))    $('vstat-pass-rate').textContent    = _rate(s.total_pass);
-  // Authority gate summary — shows how much of the requested mode is actually
-  // in force. Without it "● FINAL" implied full control it may not have.
-  const auth = s.authority || null;
-  if(auth && $('agent-hero-subtitle')){
-    $('agent-hero-subtitle').textContent =
-      'Neural net 12→8→1 · ' + auth.assets_authorised + '/' + auth.assets_total +
-      ' assets passed the edge gate' +
-      (auth.median_edge_auc != null ? ' · median AUC ' + auth.median_edge_auc : '');
-  }
-  // Hero uptime (B-02 moved uptime from #vstat-uptime to #ahm-uptime).
-  if($('ahm-uptime')) $('ahm-uptime').textContent = s.uptime_human || '—';
-  if($('vstat-uptime')) $('vstat-uptime').textContent = s.uptime_human || '—';
-  // Refresh live stream when new ticks arrive
-  if(s.total_ticks_processed !== _agentLastTickCount && _agentLastTickCount !== -1){
-    fetchAgentLive();
-  }
-  _agentLastTickCount = s.total_ticks_processed;
-}
-
-function renderAgentLive(data){
-  const $ = (id) => document.getElementById(id);
-  const stream = $('agent-live-stream');
-  if(!stream) return;
-  if(!data.thoughts || data.thoughts.length === 0){
-    const badge = $('verifier-status-badge');
-    const isDisabled = badge && badge.classList.contains('disabled');
-    stream.innerHTML = '<div class="verifier-empty">' +
-      (isDisabled ? 'Enable with QX_AGENT_BRAIN=1 env var.'
-                  : 'Waiting for ticks…') + '</div>';
-    return;
-  }
-  let html = '';
-  data.thoughts.slice(0, 40).forEach(t => {
-    const typeClass = (t.type || 'tick').toLowerCase();
-    html += '<div class="agent-thought">' +
-      '<span class="at-time">' + fmtAgentTime(t.ts) + '</span>' +
-      '<span class="at-type ' + typeClass + '">' + t.type + '</span>' +
-      '<span class="at-msg">' + (t.message || '').replace(/</g,'&lt;') + '</span>' +
-      '</div>';
-  });
-  stream.innerHTML = html;
-}
-
-function renderAgentFeatures(data){
-  const $ = (id) => document.getElementById(id);
-  const grid = $('agent-features-grid');
-  if(!grid) return;
-  if(!data.enabled){
-    grid.innerHTML = '<div class="verifier-empty">Agent disabled. Set QX_AGENT_BRAIN=1.</div>';
-    return;
-  }
-  if(!data.features || data.features.length === 0){
-    grid.innerHTML = '<div class="verifier-empty">Waiting for ticks on ' +
-      (data.asset || 'this asset') + '… (' + (data.tick_count || 0) + ' ticks buffered)</div>';
-    return;
-  }
-  let html = '';
-  data.features.forEach(f => {
-    const valPct = Math.abs(f.value) * 50; // -1..1 → 0..50%
-    const dir = f.value >= 0 ? 1 : -1;
-    const barStyle = 'width:' + valPct + '%; transform: translateX(' + (dir > 0 ? 0 : -100) + '%)';
-    html += '<div class="agent-feature-card' + (f.active ? ' active' : '') + '">' +
-      '<div class="af-name">' + f.name + '</div>' +
-      '<div class="af-value">' + (f.value >= 0 ? '+' : '') + f.value.toFixed(3) + '</div>' +
-      '<div class="af-bar"><div class="af-bar-fill" style="' + barStyle + '"></div></div>' +
-      '</div>';
-  });
-  // Add P(win) + accuracy summary card
-  if(data.last_p_win != null){
-    html += '<div class="agent-feature-card" style="border-color:rgba(0,200,83,0.4);background:rgba(0,200,83,0.05)">' +
-      '<div class="af-name">P(win) estimate</div>' +
-      '<div class="af-value" style="color:#00c853">' + (data.last_p_win * 100).toFixed(1) + '%</div>' +
-      '<div class="af-bar"><div class="af-bar-fill" style="width:' + (data.last_p_win * 100) + '%;left:0;transform:none;background:#00c853"></div></div>' +
-      '</div>';
-    html += '<div class="agent-feature-card">' +
-      '<div class="af-name">Model accuracy</div>' +
-      '<div class="af-value">' + (data.accuracy * 100).toFixed(1) + '%</div>' +
-      '<div style="font-size:10px;color:#8b949e">' + (data.samples || 0) + ' samples</div>' +
-      '</div>';
-  }
-  grid.innerHTML = html;
-}
-
-function renderAgentModels(data){
-  const $ = (id) => document.getElementById(id);
-  const tbl = $('agent-models-table');
-  if(!tbl) return;
-  if(!data.models || data.models.length === 0){
-    tbl.innerHTML = '<div class="verifier-empty">No models yet. Agent starts learning after first signal.</div>';
-    return;
-  }
-  let html = '<div class="am-row am-head">' +
-    '<div>Asset</div><div>Samples</div><div>Accuracy</div><div>Loss</div><div>Weights (f1-f8)</div></div>';
-  data.models.forEach(m => {
-    const accCls = m.accuracy >= 0.55 ? 'good' : (m.accuracy < 0.45 && m.samples > 5 ? 'bad' : '');
-    const weightsStr = (m.weights || []).map(w => (w >= 0 ? '+' : '') + w.toFixed(2)).join(' ');
-    html += '<div class="am-row">' +
-      '<div class="am-asset">' + fmtAgentAsset(m.asset) + '</div>' +
-      '<div class="am-samples">' + m.samples + '</div>' +
-      '<div class="am-acc ' + accCls + '">' + (m.accuracy * 100).toFixed(1) + '%</div>' +
-      '<div class="am-samples">' + m.avg_loss.toFixed(3) + '</div>' +
-      '<div class="am-weights" title="' + weightsStr + '">' + weightsStr + '</div>' +
-      '</div>';
-  });
-  tbl.innerHTML = html;
-}
-
-function renderAgentRecent(data){
-  const $ = (id) => document.getElementById(id);
-  // B-03 (A-03 #3): write to #agent-recent-table (renamed in B-02 HTML) so
-  // the 3s agent poll and the 15s verifier poll no longer fight over the
-  // same DOM node. Fall back to #verifier-recent-table for back-compat with
-  // any page that hasn't been updated yet.
-  const tbl = $('agent-recent-table') || $('verifier-recent-table');
-  if(!tbl) return;
-  // BUG-FIX (2026-08-07): this used to rebuild the list by filtering the
-  // shared thought buffer for type === 'evaluate'. Ticks dominate that buffer
-  // (a live sample of the newest 40 held 31 ticks and 7 evaluations, and the
-  // ratio worsens as tick volume climbs), so whenever the newest thoughts
-  // happened to be all ticks the panel printed "No evaluations yet" directly
-  // under a "213 decisions" chip. /api/agent/decisions is a decisions-only
-  // buffer that tick volume cannot starve. The thoughts path stays as a
-  // fallback so an older server still renders something.
-  let evals;
-  if(data.decisions){
-    evals = data.decisions.slice(0, 30);
-  } else if(data.thoughts){
-    evals = data.thoughts.filter(t => t.type === 'evaluate').slice(0, 30);
-  } else {
-    evals = [];
-  }
-  if(evals.length === 0){
-    tbl.innerHTML = '<div class="verifier-empty">No decisions yet. ' +
-      'The agent scores a pair only when the engine emits a signal for it.</div>';
-    return;
-  }
-  let html = '<div class="vrow vrow-head">' +
-    '<div>Time</div><div>Asset</div><div>Sig</div><div>Verdict</div>' +
-    '<div>P(win)</div><div>Features</div><div>Reason</div></div>';
-  evals.forEach(v => {
-    // /api/agent/decisions puts the fields at the top level; the thought
-    // fallback nests them under .data. Accept both.
-    const d = v.data || v;
-    const sig = d.signal || '?';
-    const sigClass = sig === 'CALL' ? 'call' : 'put';
-    const verdict = (d.verdict || 'PASS').toUpperCase();
-    const pWin = d.p_win != null ? (d.p_win * 100).toFixed(0) + '%' : '—';
-    const features = d.features || [];
-    const activeFeatures = features
-      .map((f, i) => ({f, i, name: ['f1','f2','f3','f4','f5','f6','f7','f8','f9','f10','f11','f12'][i] || ('f'+(i+1))}))
-      .filter(x => Math.abs(x.f) > 0.3)
-      .map(x => x.name + (x.f >= 0 ? '+' : '') + x.f.toFixed(1))
-      .join(' ') || 'none active';
-    const reason = (v.message || v.reason || '').slice(0, 60);
-    html += '<div class="vrow">' +
-      '<div class="v-time">' + fmtAgentTime(v.ts) + '</div>' +
-      '<div class="v-asset">' + fmtAgentAsset(v.asset) + '</div>' +
-      '<div class="v-signal ' + sigClass + '">' + sig + '</div>' +
-      '<div class="v-verdict ' + verdict.toLowerCase() + '">' + verdict + '</div>' +
-      '<div class="v-conf">' + pWin + '</div>' +
-      '<div class="v-layers" style="font-size:9px">' + activeFeatures + '</div>' +
-      '<div class="v-conf" style="font-size:10px;color:#8b949e">' + reason + '</div>' +
-      '</div>';
-  });
-  tbl.innerHTML = html;
-}
-
-async function fetchAgentStatus(){
-  try{
-    const r = await fetch('/api/agent/status');
-    if(!r.ok) return;
-    const data = await r.json();
-    updateAgentStatus(data);
-  }catch(e){}
-}
-
-async function fetchAgentLive(){
-  try{
-    const r = await fetch('/api/agent/live?limit=40');
-    if(!r.ok) return;
-    const data = await r.json();
-    renderAgentLive(data);
-  }catch(e){}
-}
-
-async function fetchAgentDecisions(){
-  const $ = (id) => document.getElementById(id);
-  if(!$('agent-recent-table') && !$('verifier-recent-table')) return;
-  try{
-    const r = await fetch('/api/agent/decisions?limit=30');
-    if(!r.ok) return;
-    const data = await r.json();
-    renderAgentRecent(data);
-  }catch(e){}
-}
-
-async function fetchAgentFeatures(){
-  const $ = (id) => document.getElementById(id);
-  if(!$('agent-features-grid')) return;
-  // B-03: prefer the user's Agent-tab pair selection; fall back to the chart
-  // pair. Previously this hard-coded window.currentAsset, so opening the
-  // Agent tab always showed features for the chart pair — useless when the
-  // user picked a different pair in #agent-pair-select.
-  const _asset = agentSelectedPair || window.currentAsset || '';
-  if(!_asset) return;
-  try{
-    const r = await fetch('/api/agent/features/' + encodeURIComponent(_asset));
-    if(!r.ok) return;
-    const data = await r.json();
-    renderAgentFeatures(data);
-  }catch(e){}
-}
-
-async function fetchAgentModels(){
-  const $ = (id) => document.getElementById(id);
-  if(!$('agent-models-table')) return;
-  try{
-    const r = await fetch('/api/agent/models');
-    if(!r.ok) return;
-    const data = await r.json();
-    renderAgentModels(data);
-  }catch(e){}
-}
-
-function startAgentPanel(){
-  // B-03 (A-07 #22): only start when the Agent tab is active. switchTab()
-  // calls this on entry. The old code auto-started on DOMContentLoaded,
-  // so 3 intervals (3s/2s/10s) ran forever even if the user never opened
-  // the tab — 6 fetches/min of /api/agent/* for nothing.
-  if(_agentPollTimer) return;  // already running
-  const $ = (id) => document.getElementById(id);
-  // Bail if the Agent tab markup isn't on this page.
-  if(!$('vstat-total') && !$('agent-pair-dashboard')) return;
-  fetchAgentStatus();
-  fetchAgentLive();
-  fetchAgentDecisions();
-  fetchAgentModels();
-  fetchAgentFeatures();
-  _agentPollTimer = setInterval(() => {
-    fetchAgentStatus();
-    fetchAgentLive();
-    fetchAgentDecisions();
-  }, 3000);
-  _agentFeatureTimer = setInterval(fetchAgentFeatures, 2000);
-  _agentModelTimer = setInterval(fetchAgentModels, 10000);
-}
-
-function stopAgentPanel(){
-  // B-03 (A-07 #22): clear all 3 agent intervals when leaving the Agent tab.
-  // Without this, the panel kept polling in the background after the user
-  // switched to Chart/History/Stats.
-  if(_agentPollTimer){    clearInterval(_agentPollTimer);    _agentPollTimer = null; }
-  if(_agentFeatureTimer){ clearInterval(_agentFeatureTimer); _agentFeatureTimer = null; }
-  if(_agentModelTimer){   clearInterval(_agentModelTimer);   _agentModelTimer = null; }
-  // Reset tick counter so the next startAgentPanel() does an immediate
-  // live-stream refresh instead of skipping it (the "new ticks arrived"
-  // heuristic compares against the last seen count).
-  _agentLastTickCount = -1;
-}
-
-// B-03: do NOT auto-start on DOMContentLoaded. The Agent tab is lazy-loaded
-// by switchTab('verifier') → startAgentPanel(). This saves 3 intervals worth
-// of polling for users who never open the Agent tab.
-// (The old auto-start block is intentionally removed — see A-07 #22.)
