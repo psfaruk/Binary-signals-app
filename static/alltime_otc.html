@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117">
+  <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-52, MEDIUM): removed the 3 cache-control
+       meta tags (Cache-Control / Pragma / Expires). These are widely ignored by
+       modern browsers — cache headers must be set by the server in HTTP response
+       headers, not HTML meta. The server (server.py) should send
+       `Cache-Control: no-store` instead. -->
+  <title>All-Time OTC — Binary Signal Terminal</title>
+  <link rel="stylesheet" href="/static/css/common.css">
+  <link rel="stylesheet" href="/static/css/alltime_otc.css">
+</head>
+<body>
+<a href="#main" class="skip-link">Skip to content</a>
+<div id="app">
+
+  <!-- ══ HEADER: single row, compact ══ -->
+  <header id="topbar">
+    <div id="topbar-row1">
+      <div class="brand" aria-label="All-Time OTC Market">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <span class="brand-name">ALL-OTC</span>
+      </div>
+      <div class="pair-wrap">
+        <select id="pair-select" aria-label="Select trading pair"><option value="">Loading...</option></select>
+        <span class="pair-arrow" aria-hidden="true">▼</span>
+      </div>
+      <div class="live-price-wrap">
+        <span class="live-price-val flat" id="live-price">—</span>
+        <span class="live-price-arrow flat" id="live-price-arrow" aria-hidden="true">▲</span>
+      </div>
+      <span class="payout" id="payout-label">—</span>
+      <!-- FIX (UI-TIMER-MOVE, 2026-07-23): candle countdown moved OUT of
+           the chart and INTO the header for clearer visibility. -->
+      <div id="candle-countdown" class="idle" title="Time to candle close">⏱ --:--</div>
+      <div id="broker-time" class="broker-time" title="Broker time (UTC)">🕐 --:--:--</div>
+      <div class="conn-group">
+        <span id="conn-dot" class="disconnected"></span>
+        <span id="conn-label">—</span>
+      </div>
+      <span class="spacer"></span>
+      <button id="sound-btn" type="button" aria-pressed="false" aria-label="Unmute sounds">🔇</button>
+      <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): initial aria-label is
+           'Unmute sounds' to match the initial sound-enabled=false state.
+           common.js updates this dynamically on toggle. -->
+      <button id="market-switch-btn" type="button" aria-label="Switch market">
+        <!-- FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-21): set the correct
+             initial switch-button label per page. The All-Time OTC page's
+             next market is real (per _nextCategory in common.js cycle
+             real→otc→alltime_otc→real), so the initial label "Real" is
+             already correct here — no change needed beyond this comment. -->
+        <span class="switch-icon">⇄</span><span class="switch-text">Real</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ══ TAB BAR ══ -->
+  <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-91, MEDIUM): added id attributes to
+       tab buttons so tabpanels can reference them via aria-labelledby. -->
+  <nav id="tab-bar" role="tablist">
+    <button class="tab-btn active" data-tab="chart" role="tab" id="tab-chart-btn" aria-selected="true" aria-controls="tab-chart">📈 Chart</button>
+    <button class="tab-btn" data-tab="history" role="tab" id="tab-history-btn" aria-selected="false" aria-controls="tab-history">📜 History</button>
+    <button class="tab-btn" data-tab="accuracy" role="tab" id="tab-accuracy-btn" aria-selected="false" aria-controls="tab-accuracy">📊 Stats</button>
+  </nav>
+
+  <!-- ══ MAIN: tab content + side panel ══ -->
+  <!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-90, MEDIUM): added tabindex="-1" so the
+       skip-link target (#main) is focusable. Without it, clicking "Skip to
+       content" moves focus to the document body, not #main — keyboard users
+       couldn't tab into the content from #main. -->
+  <main id="main" tabindex="-1">
+    <div id="tab-content-wrap">
+
+      <!-- TAB: Chart -->
+      <!-- FIX (F-17-91): aria-labelledby references the tab button id. -->
+      <div id="tab-chart" class="tab-pane active" role="tabpanel" aria-labelledby="tab-chart-btn">
+        <section id="chart-wrap">
+          <div id="chart-container"></div>
+          <!-- FIX (UI-TIMER-MOVE, 2026-07-23): countdown removed from chart,
+               now lives in the header. -->
+          <div id="stale-overlay"><span id="stale-msg">⚠ STALE</span></div>
+          <div id="chart-loading-overlay" class="show">
+            <div id="chart-loading-spinner"></div>
+            <span id="chart-loading-text">Loading…</span>
+          </div>
+        </section>
+      </div>
+
+      <!-- TAB: History -->
+      <!-- FIX (F-17-91): aria-labelledby + default option for #history-pair-select. -->
+      <div id="tab-history" class="tab-pane" role="tabpanel" aria-labelledby="tab-history-btn">
+        <div class="tab-history-header">
+          <select id="history-pair-select" aria-label="Select pair"><option value="">Loading...</option></select>
+          <span class="hint">Last 1 hour · click for detail</span>
+        </div>
+        <div id="history-list"></div>
+      </div>
+
+      <!-- TAB: Accuracy -->
+      <div id="tab-accuracy" class="tab-pane" role="tabpanel" aria-labelledby="tab-accuracy-btn">
+        <div class="accuracy-hero">
+          <div class="accuracy-hero-pct" id="acc-hero-pct">—</div>
+          <div class="accuracy-hero-detail" id="acc-hero-detail">No data</div>
+        </div>
+        <div class="accuracy-stats-grid">
+          <div class="accuracy-stat"><div class="stat-label">Total</div><div class="stat-value" id="acc-total">0</div></div>
+          <div class="accuracy-stat correct"><div class="stat-label">Wins</div><div class="stat-value" id="acc-wins">0</div></div>
+          <div class="accuracy-stat wrong"><div class="stat-label">Loss</div><div class="stat-value" id="acc-losses">0</div></div>
+          <div class="accuracy-stat draw"><div class="stat-label">Draw</div><div class="stat-value" id="acc-draws">0</div></div>
+        </div>
+        <div class="accuracy-section">
+          <div class="accuracy-section-title">By Strength</div>
+          <div id="acc-strength-breakdown"><div class="accuracy-empty">No data</div></div>
+        </div>
+        <div class="accuracy-section">
+          <div class="accuracy-section-title">By Regime</div>
+          <div id="acc-regime-breakdown"><div class="accuracy-empty">No data</div></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ══ SIDE PANEL: Signal → Market → Micro (always visible) ══ -->
+    <aside id="panel">
+
+      <!-- 1. SIGNAL — the answer -->
+      <div class="panel-section panel-signal">
+        <div id="signal-box" class="neutral">
+          <div id="signal-label">—</div>
+          <!-- FIX (UI-SIGNAL-ENHANCE, 2026-07-23): prominent strength
+               badge + next signal timer shown directly on the signal box. -->
+          <div id="signal-strength-badge" class="strength-badge">—</div>
+          <div id="next-signal-timer" class="next-signal-timer" title="Time to next signal">
+            ⏭ next: --:--
+          </div>
+        </div>
+        <div class="signal-meta">
+          <div class="signal-row"><span>Score</span><span id="sig-score">—</span></div>
+          <div class="signal-row"><span>Strength</span><span id="sig-strength">—</span></div>
+          <div class="signal-row"><span>Confidence</span><span id="sig-conf-val">—</span></div>
+          <div class="conf-bar-wrap"><div class="conf-bar" id="sig-conf-bar" style="width:0%"></div></div>
+          <div class="signal-row"><span>Agree</span><span id="sig-agree">—</span></div>
+          <div class="signal-row"><span>Regime</span><span id="sig-regime">—</span></div>
+          <div class="signal-row" id="sig-strategy-row" style="display:none"><span>Strategy</span><span id="sig-strategy" style="font-weight:700;color:var(--accent)">—</span></div>
+        </div>
+        <!-- 6-Module Engine — collapsible inside Signal section -->
+        <div class="engine-block">
+          <button id="theories-toggle" type="button" aria-expanded="false" aria-controls="theories-list">
+            <span class="section-title section-title--inline">6-Module Engine</span>
+            <span class="arrow">▶</span>
+          </button>
+          <div class="engine-active-row"><span>Engine:</span><span id="engine-label" class="engine-label">—</span></div>
+          <div id="theories-list"></div>
+        </div>
+      </div>
+
+      <!-- 2. MARKET STATE — context -->
+      <div class="panel-section">
+        <div class="section-title">Market State</div>
+        <div class="micro-grid">
+          <div class="micro-item"><span class="micro-label">Trend</span><span class="micro-value" id="ms-trend">—</span></div>
+          <div class="micro-item"><span class="micro-label">Zone</span><span class="micro-value" id="ms-zone">—</span></div>
+          <div class="micro-item micro-item--full"><span class="micro-label">Volatility</span><span class="micro-value" id="ms-volatility">—</span></div>
+        </div>
+      </div>
+
+      <!-- 3. MICROSTRUCTURE — live confirmation (collapsible) -->
+      <div class="panel-section panel-section--micro collapsed">
+        <div class="section-title">Microstructure</div>
+        <div class="micro-grid">
+          <div class="bs-bar-wrap">
+            <div class="bs-bar-labels"><span>BUY</span><span>SELL</span></div>
+            <div class="bs-bars">
+              <div class="bs-buy" id="bs-buy" style="width:50%">50%</div>
+              <div class="bs-sell" id="bs-sell" style="width:50%">50%</div>
+            </div>
+          </div>
+          <div class="micro-item"><span class="micro-label">Pressure</span><span class="pressure-badge buyer" id="ms-pressure">—</span></div>
+          <div class="micro-item"><span class="micro-label">Reaction</span><span class="react-badge none" id="ms-reaction">—</span></div>
+          <div class="micro-item"><span class="micro-label">Fight</span><span class="micro-value" id="ms-fight">—</span></div>
+          <div class="micro-item"><span class="micro-label">Hold</span><span class="micro-value" id="ms-hold">—</span></div>
+          <div class="phase-box">
+            <div class="phase-card"><div class="phase-name">E</div><div class="phase-dir flat" id="ph-early">—</div></div>
+            <div class="phase-card"><div class="phase-name">M</div><div class="phase-dir flat" id="ph-mid">—</div></div>
+            <div class="phase-card"><div class="phase-name">L</div><div class="phase-dir flat" id="ph-late">—</div></div>
+          </div>
+          <div class="micro-item"><span class="micro-label">Last React</span><span class="react-badge none" id="ms-last-react">—</span></div>
+          <div class="micro-item"><span class="micro-label">Run Conf</span><span class="running-conf none" id="ms-running-conf">—</span></div>
+          <div class="micro-item"><span class="micro-label">Ticks</span><span class="micro-value" id="ms-ticks">0</span></div>
+          <div class="micro-item"><span class="micro-label">Net</span><span class="micro-value" id="ms-net">—</span></div>
+          <div class="micro-item micro-item--full"><span class="micro-label">Round</span><span class="micro-value" id="ms-round">—</span></div>
+        </div>
+      </div>
+
+    </aside>
+  </main>
+</div>
+
+<!-- Signal detail modal -->
+<!-- FIX (DEEP-AUDIT-2026-07-26 / F-17-35, HIGH): added tabindex="-1" to modal
+     container so it can receive focus programmatically; the JS already moves
+     focus to #detail-close on open. A full focus-trap (Tab/Shift+Tab cycling
+     between sentinel elements) is TODO — the #app `inert` attribute (set by
+     JS on modal open) prevents Tab from escaping into the background, which
+     is the most important part of the trap. -->
+<!-- FIX (F-17-92, MEDIUM): added aria-describedby="detail-body" so screen
+     readers announce the dialog's body content as well as the title. -->
+<div id="signal-detail-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-title" aria-describedby="detail-body" tabindex="-1">
+  <div id="signal-detail-modal">
+    <h3><span id="detail-title">Signal Detail</span><button type="button" class="detail-close" id="detail-close" aria-label="Close">×</button></h3>
+    <div id="detail-body"></div>
+  </div>
+</div>
+
+<!--
+FIX (DEEP-AUDIT-2026-07-26 / F-17-88, MEDIUM): DRY refactor TODO.
+real.html / otc.html / alltime_otc.html are ~95% identical (only title, brand
+name, CSS/JS file refs differ). A server-side template (e.g. Jinja2 with a
+{{category}} variable) or a client-side build step (handlebars / lit-html)
+would consolidate these 3 × 200-line files into 1 template + 3 stubs.
+Not done in this batch to avoid breaking the static-file server.
+-->
+<!--
+FIX (DEEP-AUDIT-2026-07-26 / F-17-53, MEDIUM): SRI (Subresource Integrity) TODO.
+Add `integrity="sha384-..."` and `crossorigin="anonymous"` to the script
+tags below to prevent tampering if the static file server is compromised.
+Requires computing the hash of each file at build time. Not done here because
+the hashes must be regenerated after every code change.
+-->
+<script defer src="/static/lightweight-charts.js"></script>
+<script defer src="/static/js/common.js"></script>
+<script defer src="/static/js/alltime_otc.js"></script>
+</body>
+</html>
