@@ -2718,15 +2718,277 @@ class QuotexFeed:
             print("[feed]   Set QX_EMAIL + QX_PASSWORD in Railway Variables")
 
     async def _auto_relogin(self) -> bool:
-        """Re-login after connection failure."""
-        if os.environ.get("QX_TOKEN"):
-            print("[feed] auto-relogin: keeping QX_TOKEN (manual-token mode) "
-                  "— backoff will retry; push a fresh token via /api/set-token "
-                  "if the current one is dead.")
+        """Deep auto-relogin — multiple strategies to keep the app alive forever.
+
+        Strategies tried in order (returns True on first success):
+          1. REUSE: Re-use the existing QX_TOKEN (maybe transient reject)
+          2. SESSION_JSON: Reload token from session.json (may have been refreshed
+             by another process or by Railway's persistent volume)
+          3. RELOGIN: If QX_EMAIL + QX_PASSWORD are set, call pyquotex's full
+             email/password login flow (gets a fresh SSID from Quotex's HTTP API)
+          4. WAIT_FOR_SET_TOKEN: If no email/password, sleep 30s waiting for an
+             external /api/set-token call (Railway Variables update triggers this)
+
+        Returns True only if a fresh working token was obtained and the client
+        successfully reconnected. Returns False if all strategies fail — the
+        caller will continue the backoff retry loop.
+        """
+        print("[feed] ── auto-relogin: starting multi-strategy recovery ─────")
+
+        # ─── Strategy 1: REUSE existing QX_TOKEN ──────────────────────────
+        # Maybe the reject was transient (server hiccup, rate-limit). Clear
+        # the dead-token marker and retry with the same token.
+        current_token = os.environ.get("QX_TOKEN", "").strip()
+        if current_token:
+            print(f"[feed] auto-relogin [1/4] REUSE: retrying with current "
+                  f"QX_TOKEN …{current_token[-4:]}")
+            # Reset the dead-token markers so _connect() will try again
+            self._consecutive_rejects = 0
+            self._token_dead_at = 0
+            # Don't clear the token from env — give it one more chance.
+            # Close any lingering client first.
+            if self._client:
+                await self._close_client(self._client)
+                self._client = None
+            try:
+                ok = await self._connect()
+                if ok:
+                    print("[feed] auto-relogin [1/4] REUSE: ✅ SUCCESS — "
+                          "existing token still works (transient reject)")
+                    return True
+                print("[feed] auto-relogin [1/4] REUSE: ❌ token rejected")
+            except Exception as exc:
+                print(f"[feed] auto-relogin [1/4] REUSE: ❌ error: {exc}")
         else:
-            print("[feed] auto-relogin: no QX_TOKEN set — waiting for one via "
-                  "Railway Variables or POST /api/set-token {\"token\":\"...\"}.")
+            print("[feed] auto-relogin [1/4] REUSE: skipped (no QX_TOKEN in env)")
+
+        # ─── Strategy 2: SESSION.JSON reload ──────────────────────────────
+        # session.json may have been refreshed by another worker, or by a
+        # Railway volume mount from a previous deploy. Try to reload it.
+        print("[feed] auto-relogin [2/4] SESSION_JSON: scanning for fresh token")
+        fresh_token = await self._scan_session_json_for_token()
+        if fresh_token and fresh_token != current_token:
+            print(f"[feed] auto-relogin [2/4] SESSION_JSON: found fresh token "
+                  f"…{fresh_token[-4:]} (different from current) — trying it")
+            os.environ["QX_TOKEN"] = fresh_token
+            self._consecutive_rejects = 0
+            self._token_dead_at = 0
+            if self._client:
+                await self._close_client(self._client)
+                self._client = None
+            try:
+                ok = await self._connect()
+                if ok:
+                    print("[feed] auto-relogin [2/4] SESSION_JSON: ✅ SUCCESS — "
+                          "recovered from session.json")
+                    return True
+                print("[feed] auto-relogin [2/4] SESSION_JSON: ❌ token rejected")
+            except Exception as exc:
+                print(f"[feed] auto-relogin [2/4] SESSION_JSON: ❌ error: {exc}")
+        else:
+            print("[feed] auto-relogin [2/4] SESSION_JSON: no fresh token found "
+                  "(or same as current)")
+
+        # ─── Strategy 3: EMAIL/PASSWORD relogin ───────────────────────────
+        # Full HTTP login flow via pyquotex. Gets a brand-new SSID from
+        # Quotex's web sign-in endpoint. Will fail on Railway datacenter IPs
+        # due to Cloudflare blocking, but works on residential IPs.
+        email = os.environ.get("QX_EMAIL", "").strip()
+        password = os.environ.get("QX_PASSWORD", "").strip()
+        if email and password:
+            print(f"[feed] auto-relogin [3/4] RELOGIN: attempting email/password "
+                  f"login for {email[:3]}***@{email.split('@')[-1]}")
+            try:
+                new_token = await self._full_email_password_login(email, password)
+                if new_token:
+                    print(f"[feed] auto-relogin [3/4] RELOGIN: ✅ got fresh SSID "
+                          f"…{new_token[-4:]}")
+                    os.environ["QX_TOKEN"] = new_token
+                    self._consecutive_rejects = 0
+                    self._token_dead_at = 0
+                    # Persist to session.json so future restarts reuse it
+                    self._save_token_to_session_json(new_token)
+                    if self._client:
+                        await self._close_client(self._client)
+                        self._client = None
+                    ok = await self._connect()
+                    if ok:
+                        print("[feed] auto-relogin [3/4] RELOGIN: ✅ SUCCESS — "
+                              "fresh login established")
+                        return True
+                    print("[feed] auto-relogin [3/4] RELOGIN: ❌ got token but "
+                          "WS connect failed")
+                else:
+                    print("[feed] auto-relogin [3/4] RELOGIN: ❌ login returned "
+                          "no token (Cloudflare block? bad credentials?)")
+            except Exception as exc:
+                print(f"[feed] auto-relogin [3/4] RELOGIN: ❌ error: {exc}")
+        else:
+            print("[feed] auto-relogin [3/4] RELOGIN: skipped (no QX_EMAIL/"
+                  "QX_PASSWORD set)")
+
+        # ─── Strategy 4: WAIT for /api/set-token ─────────────────────────
+        # Last resort: sleep 60s, hoping the operator pushes a fresh token
+        # via Railway Variables or POST /api/set-token during that window.
+        # We check every 5s for a NEW token (different from current_token).
+        print("[feed] auto-relogin [4/4] WAIT: polling 60s for external token "
+              "refresh via /api/set-token or Railway Variables")
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            await asyncio.sleep(5)
+            latest_token = os.environ.get("QX_TOKEN", "").strip()
+            if latest_token and latest_token != current_token:
+                print(f"[feed] auto-relogin [4/4] WAIT: detected new QX_TOKEN "
+                      f"…{latest_token[-4:]} — attempting reconnect")
+                self._consecutive_rejects = 0
+                self._token_dead_at = 0
+                if self._client:
+                    await self._close_client(self._client)
+                    self._client = None
+                try:
+                    ok = await self._connect()
+                    if ok:
+                        print("[feed] auto-relogin [4/4] WAIT: ✅ SUCCESS — "
+                              "external token refresh worked")
+                        return True
+                except Exception as exc:
+                    print(f"[feed] auto-relogin [4/4] WAIT: ❌ error: {exc}")
+                break
+        print("[feed] auto-relogin [4/4] WAIT: ❌ no external token detected "
+              "in 60s window")
+        print("[feed] ── auto-relogin: all strategies failed, returning to "
+              "backoff retry loop ─────────────────────────────────────")
         return False
+
+    async def _scan_session_json_for_token(self) -> str | None:
+        """Scan session.json (all known locations) for a non-empty token.
+
+        Looks in:
+          - $QX_ROOT/session.json
+          - $RAILWAY_VOLUME_MOUNT_PATH/session.json
+          - ./session.json (cwd)
+          - $QX_SESSION_PATH (if set)
+
+        Returns the first non-empty token found, or None.
+        """
+        import json as _json
+        candidates: list[str] = []
+        env_path = os.environ.get("QX_SESSION_PATH")
+        if env_path:
+            candidates.append(env_path)
+        root = os.environ.get("QX_ROOT", "")
+        if root:
+            candidates.append(os.path.join(root, "session.json"))
+        railway_vol = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+        if railway_vol:
+            candidates.append(os.path.join(railway_vol, "session.json"))
+        candidates.append(os.path.join(os.getcwd(), "session.json"))
+
+        for path in candidates:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                # session.json is keyed by email (or "default"); each value
+                # is a dict with "token" field.
+                if isinstance(data, dict):
+                    for acct_key, acct in data.items():
+                        if isinstance(acct, dict):
+                            tok = acct.get("token")
+                            if tok and isinstance(tok, str) and len(tok) >= 20:
+                                print(f"[feed] session.json: found token in "
+                                      f"{path} (account={acct_key[:8]}…)")
+                                return tok
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        return None
+
+    def _save_token_to_session_json(self, token: str) -> None:
+        """Persist a freshly-obtained token to session.json so future
+        restarts (and parallel workers) can reuse it."""
+        import json as _json
+        target = None
+        root = os.environ.get("QX_ROOT", "")
+        if root:
+            target = os.path.join(root, "session.json")
+        else:
+            railway_vol = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+            if railway_vol:
+                target = os.path.join(railway_vol, "session.json")
+        if not target:
+            target = os.path.join(os.getcwd(), "session.json")
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+        except Exception:
+            pass
+        try:
+            data: dict = {}
+            try:
+                with open(target, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+            except (FileNotFoundError, Exception):
+                pass
+            email = os.environ.get("QX_EMAIL", "") or "default"
+            data[email] = {
+                "token": token,
+                "cookies": None,
+                "user_agent": os.environ.get("QX_UA", ""),
+            }
+            _tmp = target + ".tmp"
+            with open(_tmp, "w", encoding="utf-8") as f:
+                _json.dump(data, f)
+            os.replace(_tmp, target)
+            print(f"[feed] saved fresh token to {target}")
+        except Exception as exc:
+            print(f"[feed] could not save token to {target}: {exc}")
+
+    async def _full_email_password_login(self, email: str, password: str) -> str | None:
+        """Perform a full email/password HTTP login via pyquotex.
+
+        Returns the fresh SSID token on success, or None on failure.
+        This performs:
+          1. GET /sign-in page (gets cookies + CSRF _token)
+          2. POST /sign-in/ with email+password (gets session cookies)
+          3. GET /trade page (parses window.settings.token from HTML)
+          4. Fallback: GET /api/v1/cabinets/digest (returns JSON token)
+
+        On Railway datacenter IPs, step 1 will likely fail with Cloudflare
+        blocking. On residential IPs, it should work.
+        """
+        try:
+            # Build a fresh client with email/password
+            ua = os.environ.get("QX_UA", "").strip() or (
+                "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) "
+                "Gecko/20100101 Firefox/119.0")
+            import tempfile
+            root = os.environ.get(
+                "QX_ROOT", os.path.join(tempfile.gettempdir(), "plybit_cache"))
+            client = self._make_client(ua, root)
+            # Don't set_session — we want a fresh HTTP login, not WS-with-token
+            # Trigger pyquotex's authenticate() which calls Login.__call__
+            try:
+                ok, msg = await asyncio.wait_for(
+                    client.api.authenticate(), timeout=30)
+                if not ok:
+                    print(f"[feed] email/password login failed: {msg}")
+                    return None
+                token = (client.session_data or {}).get("token")
+                if token and isinstance(token, str) and len(token) >= 20:
+                    return token
+                print("[feed] email/password login succeeded but no token returned")
+                return None
+            finally:
+                try:
+                    await self._close_client(client)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"[feed] _full_email_password_login error: {exc}")
+            return None
+
 
     async def run(self, broadcast) -> None:
         _orig_broadcast = broadcast
@@ -2780,12 +3042,15 @@ class QuotexFeed:
                     print("[feed] connecting...")
                     self._connected = await self._connect()
                     if not self._connected:
-                        if self._reconnect_attempts % 3 == 2:  # every 3rd fail
-                            print("[feed] ── auto-relogin attempt ────────────────")
-                            relogin_ok = await self._auto_relogin()
-                            if relogin_ok:
-                                self._reconnect_attempts = 0
-                                continue
+                        # DEEP-AUTO-RELOGIN: try multi-strategy recovery on
+                        # EVERY failure (the function itself handles backoff
+                        # internally — Strategy 1 is a quick retry, Strategy 4
+                        # waits 60s for external token refresh).
+                        print("[feed] ── auto-relogin attempt ────────────────")
+                        relogin_ok = await self._auto_relogin()
+                        if relogin_ok:
+                            self._reconnect_attempts = 0
+                            continue
                         self._reconnect_attempts += 1
                         delay = min(60 * (2 ** min(self._reconnect_attempts - 1, 2)), 120)
                         print(f"[feed] reconnect attempt {self._reconnect_attempts} "
