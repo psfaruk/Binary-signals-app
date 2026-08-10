@@ -1611,3 +1611,89 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   #signal-box{font-size:16px;padding:8px}
   .tab-btn{padding:6px 4px}
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   SHARE SIGNAL TABLE (2026-07-30)
+   User requirement: "একটি টেবিল সেকশন বানাতে হবে। যার নাম থাকবে শেয়ার
+   সিগন্যাল। Pair name - otc or real - time - close candle data buyer
+   Sellar - prediction signal call put"
+   ═══════════════════════════════════════════════════════════════════════ */
+#share-signal-section{
+  margin:0;padding:0;
+  border-top:1px solid rgba(48,54,61,.5);
+  background:var(--bg-dark,#0d1117);
+}
+.share-signal-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:8px 12px;
+  background:rgba(33,150,243,.08);
+  border-bottom:1px solid rgba(33,150,243,.2);
+}
+.share-signal-title{
+  margin:0;font-size:14px;font-weight:700;letter-spacing:.5px;
+  color:var(--blue,#2196f3);text-transform:uppercase;
+}
+.share-signal-actions{display:flex;align-items:center;gap:6px;}
+.share-signal-count{
+  font-size:11px;color:var(--text-dim,#8b949e);font-weight:600;
+  font-variant-numeric:tabular-nums;
+}
+.share-signal-btn{
+  background:rgba(48,54,61,.6);border:1px solid rgba(48,54,61,.8);
+  color:var(--text,#e6edf3);font-size:14px;cursor:pointer;
+  padding:4px 8px;border-radius:4px;transition:background .15s;
+}
+.share-signal-btn:hover{background:rgba(33,150,243,.2);}
+.share-signal-save-btn{background:rgba(0,200,83,.12);border-color:rgba(0,200,83,.3);}
+.share-signal-save-btn:hover{background:rgba(0,200,83,.25);}
+
+.share-signal-table-wrap{
+  max-height:400px;overflow-y:auto;overflow-x:auto;
+  scrollbar-width:thin;scrollbar-color:rgba(48,54,61,.5) transparent;
+}
+.share-signal-table{
+  width:100%;border-collapse:collapse;font-size:12px;
+  font-variant-numeric:tabular-nums;
+}
+.share-signal-table thead{
+  position:sticky;top:0;z-index:1;
+  background:rgba(13,17,23,.98);
+}
+.share-signal-table th{
+  padding:6px 8px;text-align:left;font-weight:600;
+  color:var(--text-dim,#8b949e);font-size:11px;
+  text-transform:uppercase;letter-spacing:.5px;
+  border-bottom:1px solid rgba(48,54,61,.5);
+  white-space:nowrap;
+}
+.share-signal-table td{
+  padding:4px 8px;
+  border-bottom:1px solid rgba(48,54,61,.2);
+  white-space:nowrap;
+}
+.share-signal-table tr:hover td{background:rgba(33,150,243,.05);}
+.share-signal-table .ss-pair{font-weight:600;color:var(--text,#e6edf3);}
+.share-signal-table .ss-type-otc{color:var(--yellow,#ffc107);font-size:10px;font-weight:700;}
+.share-signal-table .ss-type-real{color:var(--green,#00c853);font-size:10px;font-weight:700;}
+.share-signal-table .ss-time{color:var(--text-dim,#8b949e);}
+.share-signal-table .ss-buyer{color:var(--green,#00c853);font-weight:600;}
+.share-signal-table .ss-seller{color:var(--red,#ff1744);font-weight:600;}
+.share-signal-table .ss-signal-call{
+  color:var(--green,#00c853);font-weight:700;
+  background:rgba(0,200,83,.1);padding:2px 6px;border-radius:3px;
+}
+.share-signal-table .ss-signal-put{
+  color:var(--red,#ff1744);font-weight:700;
+  background:rgba(255,23,68,.1);padding:2px 6px;border-radius:3px;
+}
+.share-signal-table .ss-signal-neutral{color:var(--text-dim,#8b949e);}
+.share-signal-table .ss-conf{color:var(--text-dim,#8b949e);font-size:11px;}
+.share-signal-table .ss-str-weak{color:var(--red,#ff1744);font-size:10px;}
+.share-signal-table .ss-str-medium{color:var(--yellow,#ffc107);font-size:10px;}
+.share-signal-table .ss-str-strong{color:var(--green,#00c853);font-size:10px;font-weight:700;}
+.share-signal-table .ss-update-live{color:var(--green,#00c853);font-size:10px;}
+.share-signal-table .ss-update-stale{color:var(--text-dim,#8b949e);font-size:10px;}
+.share-signal-table .ss-update-offline{color:var(--red,#ff1744);font-size:10px;}
+.share-signal-loading{
+  text-align:center;padding:20px;color:var(--text-dim,#8b949e);
+}

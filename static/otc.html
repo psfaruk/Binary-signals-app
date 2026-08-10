@@ -511,6 +511,44 @@
     </aside>
 
   </main>
+
+  <!-- ════════════════════════════════════════════════════════════════════
+       SHARE SIGNAL TABLE — All pairs latest update
+       User requirement: "একটি টেবিল সেকশন বানাতে হবে। যার নাম থাকবে শেয়ার
+       সিগন্যাল। Pair name - otc or real - time - close candle data buyer
+       Sellar - prediction signal call put"
+       ════════════════════════════════════════════════════════════════════ -->
+  <section id="share-signal-section">
+    <div class="share-signal-header">
+      <h2 class="share-signal-title">📋 Share Signal</h2>
+      <div class="share-signal-actions">
+        <span id="share-signal-count" class="share-signal-count">— / — live</span>
+        <button id="share-signal-refresh" type="button" class="share-signal-btn" title="Refresh">🔄</button>
+        <button id="share-signal-save" type="button" class="share-signal-btn share-signal-save-btn" title="Save to History">💾</button>
+        <button id="share-signal-history" type="button" class="share-signal-btn" title="View History">📜</button>
+      </div>
+    </div>
+    <div class="share-signal-table-wrap">
+      <table id="share-signal-table" class="share-signal-table">
+        <thead>
+          <tr>
+            <th>Pair</th>
+            <th>Type</th>
+            <th>Time</th>
+            <th>Buyer %</th>
+            <th>Seller %</th>
+            <th>Signal</th>
+            <th>Conf</th>
+            <th>Str</th>
+            <th>Update</th>
+          </tr>
+        </thead>
+        <tbody id="share-signal-tbody">
+          <tr><td colspan="9" class="share-signal-loading">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
 </div>
 
 <!-- Signal detail modal -->
