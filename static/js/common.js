@@ -2740,4 +2740,145 @@ function onPageShow(e){
 global.initApp = initApp;
 global.setCategory = setCategory;
 
+/* ═══════════════════════════════════════════════════════════════════════
+   SHARE SIGNAL TABLE (2026-07-30)
+   User requirement: "একটি টেবিল সেকশন বানাতে হবে। যার নাম থাকবে শেয়ার
+   সিগন্যাল। Pair name - otc or real - time - close candle data buyer
+   Sellar - prediction signal call put. সব গুলো পেয়ার এর লাস্ট এর
+   আপডেট থাকবে। তারপর এই গুলো হিস্টোরিতে গিয়ে সেভ হবে।"
+   ═══════════════════════════════════════════════════════════════════════ */
+let _shareSignalInterval = null;
+
+async function fetchShareSignals(){
+  try{
+    const resp = await fetch('/api/share-signals');
+    if(!resp.ok) return null;
+    return await resp.json();
+  }catch(e){ return null; }
+}
+
+function renderShareSignalTable(data){
+  const tbody = document.getElementById('share-signal-tbody');
+  const countEl = document.getElementById('share-signal-count');
+  if(!tbody) return;
+
+  if(!data || !data.rows || data.rows.length === 0){
+    tbody.innerHTML = '<tr><td colspan="9" class="share-signal-loading">No data</td></tr>';
+    return;
+  }
+
+  if(countEl){
+    countEl.textContent = `${data.live_pairs} / ${data.total_pairs} live`;
+  }
+
+  let html = '';
+  for(const row of data.rows){
+    const typeClass = row.type === 'OTC' ? 'ss-type-otc' : 'ss-type-real';
+    const signalClass = row.signal === 'CALL' ? 'ss-signal-call'
+      : row.signal === 'PUT' ? 'ss-signal-put' : 'ss-signal-neutral';
+    const strClass = row.strength === 'STRONG' ? 'ss-str-strong'
+      : row.strength === 'MEDIUM' ? 'ss-str-medium'
+      : 'ss-str-weak';
+
+    let updateClass = 'ss-update-offline';
+    let updateText = '—';
+    if(row.live && row.last_update !== null){
+      updateClass = 'ss-update-live';
+      updateText = `${row.last_update.toFixed(0)}s ago`;
+    } else if(row.last_update !== null){
+      updateClass = 'ss-update-stale';
+      updateText = `${(row.last_update/60).toFixed(0)}m ago`;
+    }
+
+    const buyer = row.buyer_pct !== null ? row.buyer_pct.toFixed(1) + '%' : '—';
+    const seller = row.seller_pct !== null ? row.seller_pct.toFixed(1) + '%' : '—';
+    const conf = row.confidence > 0 ? row.confidence.toFixed(0) : '—';
+
+    // Highlight buyer/seller dominance
+    let buyerHtml = `<span class="ss-buyer">${buyer}</span>`;
+    let sellerHtml = `<span class="ss-seller">${seller}</span>`;
+    if(row.buyer_pct !== null && row.seller_pct !== null){
+      if(row.buyer_pct > row.seller_pct + 10){
+        buyerHtml = `<span class="ss-buyer" style="font-weight:700;text-shadow:0 0 4px rgba(0,200,83,.4)">${buyer}</span>`;
+      } else if(row.seller_pct > row.buyer_pct + 10){
+        sellerHtml = `<span class="ss-seller" style="font-weight:700;text-shadow:0 0 4px rgba(255,23,68,.4)">${seller}</span>`;
+      }
+    }
+
+    html += `<tr>
+      <td class="ss-pair">${row.pair}</td>
+      <td class="${typeClass}">${row.type}</td>
+      <td class="ss-time">${row.time}</td>
+      <td>${buyerHtml}</td>
+      <td>${sellerHtml}</td>
+      <td><span class="${signalClass}">${row.signal}</span></td>
+      <td class="ss-conf">${conf}</td>
+      <td class="${strClass}">${row.strength || '—'}</td>
+      <td class="${updateClass}">${updateText}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
+}
+
+async function refreshShareSignals(){
+  const data = await fetchShareSignals();
+  if(data) renderShareSignalTable(data);
+}
+
+async function saveShareSignals(){
+  try{
+    const resp = await fetch('/api/share-signals/save', {method:'POST'});
+    const result = await resp.json();
+    if(result.ok){
+      const btn = document.getElementById('share-signal-save');
+      if(btn){
+        const orig = btn.textContent;
+        btn.textContent = '✅';
+        setTimeout(() => { btn.textContent = orig; }, 2000);
+      }
+    }
+  }catch(e){ console.error('save share signals error', e); }
+}
+
+async function viewShareSignalHistory(){
+  try{
+    const resp = await fetch('/api/share-signals/history?limit=20');
+    const data = await resp.json();
+    if(data.history && data.history.length > 0){
+      // Show most recent snapshot in the table
+      const latest = data.history[0];
+      if(latest.rows && latest.rows.length > 0){
+        renderShareSignalTable({rows: latest.rows, live_pairs: latest.live_pairs, total_pairs: latest.total_pairs});
+      }
+    }
+  }catch(e){ console.error('view history error', e); }
+}
+
+function initShareSignalTable(){
+  // Initial fetch
+  refreshShareSignals();
+  // Auto-refresh every 10 seconds
+  if(_shareSignalInterval) clearInterval(_shareSignalInterval);
+  _shareSignalInterval = setInterval(refreshShareSignals, 10000);
+
+  // Wire buttons
+  const refreshBtn = document.getElementById('share-signal-refresh');
+  if(refreshBtn) refreshBtn.addEventListener('click', refreshShareSignals);
+
+  const saveBtn = document.getElementById('share-signal-save');
+  if(saveBtn) saveBtn.addEventListener('click', saveShareSignals);
+
+  const histBtn = document.getElementById('share-signal-history');
+  if(histBtn) histBtn.addEventListener('click', viewShareSignalHistory);
+}
+
+// Auto-init after DOM ready (runs on every page load)
+if(document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(initShareSignalTable, 1500); // wait for other init
+  });
+} else {
+  setTimeout(initShareSignalTable, 1500);
+}
+
 })(window);

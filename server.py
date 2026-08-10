@@ -1942,6 +1942,175 @@ async def get_allowlist():
     }
 
 
+@app.get("/api/share-signals")
+async def share_signals():
+    """Latest signal data for ALL pairs — for the Share Signal table.
+
+    User requirement: 'একটি টেবিল সেকশন বানাতে হবে। যার নাম থাকবে শেয়ার
+    সিগন্যাল। সেখানে এই ভাবে থাকবে। Pair name - otc or real - time-
+    close candle data buyer Sellar - prediction signal call put'
+
+    Returns a table row per pair:
+    - pair: asset name
+    - type: 'OTC' or 'Real'
+    - time: last candle close time (HH:MM UTC)
+    - buyer_pct: buyer percentage from microstructure
+    - seller_pct: seller percentage
+    - signal: CALL / PUT / NEUTRAL
+    - confidence: 0-100
+    - strength: WEAK / MEDIUM / STRONG
+    - last_update: seconds ago
+    """
+    import time as _time
+    from core.constants import ALLOWED_PAIRS
+
+    now = _time.time()
+    rows = []
+
+    for asset in sorted(ALLOWED_PAIRS):
+        pair_type = "OTC" if asset.endswith("_otc") else "Real"
+        stream = getattr(feed, '_streams', {}).get((asset, 60))
+
+        if not stream:
+            rows.append({
+                "pair": asset,
+                "type": pair_type,
+                "time": "—",
+                "buyer_pct": None,
+                "seller_pct": None,
+                "signal": "—",
+                "confidence": 0,
+                "strength": "—",
+                "last_update": None,
+                "live": False,
+            })
+            continue
+
+        # Last candle close time
+        candles = getattr(stream, 'candles', [])
+        last_candle = candles[-1] if candles else None
+        if last_candle and last_candle.get("time"):
+            ct = last_candle["time"]
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(int(ct), tz=timezone.utc)
+            time_str = dt.strftime("%H:%M")
+        else:
+            time_str = "—"
+
+        # Buyer/seller from last prediction's microstructure
+        pred = getattr(stream, 'prediction', None) or {}
+        micro = getattr(stream, '_last_micro', None) or {}
+        buyer_pct = micro.get("buy_pct")
+        seller_pct = micro.get("sell_pct")
+
+        # Signal
+        signal = pred.get("signal", "—")
+        confidence = pred.get("confidence", 0)
+        strength = pred.get("strength", "—")
+
+        # Last update
+        last_tick = getattr(stream, 'last_real_tick_wall', 0)
+        last_update = round(now - last_tick, 0) if last_tick > 0 else None
+
+        rows.append({
+            "pair": asset,
+            "type": pair_type,
+            "time": time_str,
+            "buyer_pct": round(buyer_pct, 1) if buyer_pct is not None else None,
+            "seller_pct": round(seller_pct, 1) if seller_pct is not None else None,
+            "signal": signal,
+            "confidence": round(confidence, 1) if confidence else 0,
+            "strength": strength,
+            "last_update": last_update,
+            "live": last_tick > 0 and (now - last_tick) < 120,
+        })
+
+    return {
+        "total_pairs": len(rows),
+        "live_pairs": sum(1 for r in rows if r["live"]),
+        "timestamp": now,
+        "rows": rows,
+    }
+
+
+@app.post("/api/share-signals/save")
+async def share_signals_save(request: Request):
+    """Save current Share Signal table snapshot to history.
+
+    User requirement: 'তারপর এই গুলো হিস্টোরিতে গিয়ে সেভ হবে।'
+    """
+    try:
+        # Get current snapshot
+        snapshot = await share_signals()
+
+        # Save to DB
+        import json as _json
+        import time as _time
+        with _db._write_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS share_signal_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    snapshot_json TEXT,
+                    total_pairs INT,
+                    live_pairs INT,
+                    ts REAL
+                )
+            """)
+            cur.execute("""
+                INSERT INTO share_signal_history
+                    (snapshot_json, total_pairs, live_pairs, ts)
+                VALUES (?, ?, ?, ?)
+            """, (
+                _json.dumps(snapshot),
+                snapshot["total_pairs"],
+                snapshot["live_pairs"],
+                _time.time(),
+            ))
+
+        return {
+            "ok": True,
+            "message": f"Saved snapshot with {snapshot['total_pairs']} pairs "
+                       f"({snapshot['live_pairs']} live)",
+            "timestamp": snapshot["timestamp"],
+        }
+    except Exception as e:
+        _logger.exception("share signals save failed")
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/share-signals/history")
+async def share_signals_history(limit: int = 50):
+    """Get saved Share Signal snapshots from history."""
+    try:
+        with _db._read_cursor() as cur:
+            cur.execute("""
+                SELECT id, snapshot_json, total_pairs, live_pairs, ts
+                FROM share_signal_history
+                ORDER BY ts DESC
+                LIMIT ?
+            """, (limit,))
+            rows = [dict(r) for r in cur.fetchall()]
+
+        import json as _json
+        from datetime import datetime, timezone
+        results = []
+        for r in rows:
+            snapshot = _json.loads(r["snapshot_json"]) if r["snapshot_json"] else {}
+            dt = datetime.fromtimestamp(r["ts"], tz=timezone.utc)
+            results.append({
+                "id": r["id"],
+                "time": dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "total_pairs": r["total_pairs"],
+                "live_pairs": r["live_pairs"],
+                "rows": snapshot.get("rows", []),
+            })
+
+        return {"history": results, "count": len(results)}
+    except Exception as e:
+        _logger.exception("share signals history failed")
+        return {"error": str(e)}
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
