@@ -355,10 +355,29 @@ async def token_status():
             message = f"QX_TOKEN is set ({preview}) — connected + authorized. Live data flowing."
         elif connection_status == "token_dead_backoff":
             status = "token_dead"
-            message = (f"⛔ Quotex REJECTED the token {consecutive_rejects}x consecutively. " f"Token is likely EXPIRED or REVOKED by Quotex. Refresh the SSID and " f"set it via /api/set-token to restore live data.")
+            message = (f"⛔ Quotex REJECTED the token {consecutive_rejects}x consecutively. "
+                       f"Token is likely EXPIRED or REVOKED by Quotex. Refresh the SSID and "
+                       f"set it via /api/set-token to restore live data.")
         elif connection_status in ("connected_unauth", "disconnected"):
-            status = "token_set_but_connecting"
-            message = (f"QX_TOKEN is set ({preview}) but Quotex connection is " f"'{connection_status}'. Will retry shortly.")
+            # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-10): distinguish
+            # "transient_disconnect" (some rejects but below threshold —
+            # auto-retry will fix it) from "token_dead" (3+ consecutive
+            # rejects — operator must refresh). Previously ANY disconnected
+            # state with rejects > 0 was reported with the misleading
+            # "token_set_but_connecting" message — but the operator's
+            # logs showed "authorization rejected" and they assumed the
+            # token was expired even when it wasn't.
+            if consecutive_rejects > 0 and not token_dead:
+                status = "transient_disconnect"
+                message = (f"QX_TOKEN is set ({preview}). Connection dropped "
+                           f"({consecutive_rejects} transient auth-reject(s)) — "
+                           f"NOT necessarily token expiry. Auto-retry in progress; "
+                           f"live data should resume within 1-2 minutes. "
+                           f"Only refresh the token if this persists >5 min.")
+            else:
+                status = "token_set_but_connecting"
+                message = (f"QX_TOKEN is set ({preview}) but Quotex connection is "
+                           f"'{connection_status}'. Will retry shortly.")
         else:
             status = "live_token"
             message = f"QX_TOKEN is set ({preview}) — connection state: {connection_status}"
@@ -369,7 +388,20 @@ async def token_status():
     else:
         status = "no_credentials"
         message = ("❌ No Quotex credentials — sim mode is permanently disabled. " "Set QX_TOKEN via Railway Variables or visit " "/api/set-token?token=YOUR_TOKEN to provision at runtime.")
-    return {"status": status, "has_token": has_token, "has_email": has_email, "connection_status": connection_status, "consecutive_rejects": consecutive_rejects, "token_dead": token_dead, "sim_mode_disabled": True, "message": message, "action": "refresh_token" if token_dead else ("set_token" if status == "no_credentials" else None)}
+    # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-11): only suggest
+    # "refresh_token" action when token_dead=True. Transient disconnects
+    # should NOT trigger a refresh-token action — the operator would
+    # needlessly re-extract a token from the browser when the existing
+    # one is still valid.
+    if token_dead:
+        action = "refresh_token"
+    elif status == "no_credentials":
+        action = "set_token"
+    elif status == "transient_disconnect":
+        action = "wait"           # auto-retry in progress, just wait
+    else:
+        action = None
+    return {"status": status, "has_token": has_token, "has_email": has_email, "connection_status": connection_status, "consecutive_rejects": consecutive_rejects, "token_dead": token_dead, "sim_mode_disabled": True, "message": message, "action": action}
 
 @app.get("/")
 async def index():
@@ -409,6 +441,14 @@ async def _apply_token(token: str):
     feed._last_error = None
     feed._last_error_time = 0
     feed._token_update_pending = True
+    # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-08): a freshly-pushed token
+    # resets the dead-flag so /api/token-status immediately reports
+    # "connecting" instead of lingering "token_dead" until the next connect
+    # cycle syncs. Also reset _last_alert_state so a fresh "live" alert can
+    # fire as soon as auth succeeds.
+    feed._token_dead_at = 0.0
+    feed._consecutive_rejects = 0
+    feed._last_alert_state = None
 
     for s in getattr(feed, '_streams', {}).values():
         try:
@@ -440,6 +480,14 @@ async def force_reconnect():
         feed._last_error = None
         feed._last_error_time = 0
         feed._token_update_pending = True
+        # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-09): reset reject state
+        # on manual reconnect — gives the existing token a fresh chance
+        # without operator having to re-push it.
+        feed._token_dead_at = 0.0
+        feed._consecutive_rejects = 0
+        # Don't reset _last_alert_state here — only auth success should
+        # clear the "dead" alert state, otherwise we'd miss firing a
+        # "recovered" alert if the reconnect succeeds.
 
         # Close any stale client
         if hasattr(feed, '_client') and feed._client:
