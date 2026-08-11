@@ -82,15 +82,33 @@ class AccountMixin:
             # hard to diagnose. Now: keep the specific reason and only fall
             # back to the generic string if none was captured.
             _specific = reason or getattr(self.api.state, "websocket_error_reason", None)
-            # FIX (DISCONNECT-2026-07-30): when reason="Connected" but
-            # check_connect() returns False, it means the WS briefly reached
-            # CONNECTED status but immediately dropped back to DISCONNECTED.
-            # This is almost always an AUTH REJECT (token expired/invalid).
-            # Surface this clearly so the operator knows to refresh the token.
+            # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-04): the previous
+            # code unconditionally assumed "Connected-then-disconnected"
+            # meant "AUTH REJECT (token expired or invalid)" — which is
+            # WRONG. A WS can briefly connect then drop for many reasons:
+            #   - Cloudflare idle-close (~100s timeout)
+            #   - Quotex server-side rebalance
+            #   - network blip
+            #   - Engine.IO ping timeout
+            # Only blame the token if we have an EXPLICIT signal: either
+            # `reason` text contains "authorization rejected" (from the
+            # dedicated reject handler in api.py) OR the reject counter
+            # has reached threshold. Otherwise treat as transient.
             if _specific == "Connected":
-                _specific = ("Connected-then-disconnected — likely AUTH REJECT "
-                           "(token expired or invalid). Refresh QX_TOKEN via "
-                           "/api/set-token")
+                _rejects = getattr(self.api, "_consecutive_rejects", 0)
+                _threshold = getattr(self.api, "_reject_threshold", 3)
+                if _rejects >= _threshold:
+                    _specific = (
+                        f"Connected-then-disconnected — AUTH REJECT confirmed "
+                        f"({_rejects}x consecutive rejects). Token is expired/"
+                        f"invalid. Refresh QX_TOKEN via /api/set-token"
+                    )
+                else:
+                    _specific = (
+                        f"Connected-then-disconnected — transient WS drop "
+                        f"(rejects={_rejects}/{_threshold}). NOT necessarily "
+                        f"token expiry — will auto-retry"
+                    )
             logger.error(
                 "Websocket failed to connect or connection was rejected: %s",
                 _specific or "no reason captured",

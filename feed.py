@@ -731,6 +731,18 @@ class QuotexFeed:
         self._last_error          = None     # set by _record_stream_error for /api/debug
         self._last_error_time     = 0        # wall time of last error
 
+        # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-05): mirror the pyquotex
+        # reject counter onto the feed object so server.py /api/token-status
+        # can read it without reaching into `feed._client.api.*` (which is
+        # fragile — the client gets rebuilt on every reconnect). These are
+        # updated by `_sync_reject_state()` after every connect attempt.
+        # `_token_dead_at` > 0 means "3+ consecutive auth-rejects — operator
+        # really needs to push a new token". `_consecutive_rejects` < threshold
+        # means "transient — auto-retry will fix it".
+        self._consecutive_rejects = 0
+        self._token_dead_at       = 0.0
+        self._last_alert_state    = None     # "live" | "transient" | "dead" — for debouncing alerts
+
         # ── Multi-asset stream management (replaces the old singleton
         # asset/candles/ticks/... fields) ───────────────────────────────────
         self._streams: dict[tuple[str, int], _AssetStream] = {}
@@ -1837,8 +1849,19 @@ class QuotexFeed:
                 if ok:
                     self._remember_token()
                     print(f"[feed] connect -> ok=True  reason={reason}")
+                    # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-07): on
+                    # successful connect, sync the reject state (counter
+                    # resets to 0 in pyquotex/api.py `_h_auth_ok`) and fire
+                    # a "feed recovered" Telegram alert if we were previously
+                    # in a bad state.
+                    self._sync_reject_state()
                     return True
                 print(f"[feed] connect -> ok=False  reason={reason}")
+                # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-07): sync the
+                # reject counter so /api/token-status reflects the actual
+                # state — was the rejection a transient blip (counter < 3)
+                # or a real dead-token situation (counter >= 3)?
+                self._sync_reject_state()
                 # Don't pop the token on failure — operator pushed it,
                 # they may re-push the SAME token after refreshing in
                 # their browser. Popping it would force them to re-push
@@ -1848,6 +1871,12 @@ class QuotexFeed:
             except Exception as _te:
                 print(f"[feed] token attempt error: {_te}")
                 ok = False
+                # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-07): sync state
+                # even on exception — useful for debugging.
+                try:
+                    self._sync_reject_state()
+                except Exception:
+                    pass
             finally:
                 # FIX (2026-07-27 / connect-cleanup-gap): the previous fix
                 # (commit 3fd1b04) only closed the leaked client inside the
@@ -1877,6 +1906,61 @@ class QuotexFeed:
             self._last_error = err_msg[:500]
             self._last_error_time = time.time()
             return False
+
+    def _sync_reject_state(self) -> None:
+        """FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-06): mirror the pyquotex
+        reject counter from the live client onto the feed object, and fire
+        Telegram alerts on state transitions.
+
+        Without this, server.py /api/token-status can only read
+        `feed._consecutive_rejects` and `feed._token_dead_at`, which were
+        only ever set on the raw-WS backend (quotex_ws.py). With pyquotex
+        (the default), these stayed 0/False forever — so the operator
+        never saw an accurate "token dead" status, and Telegram alerts
+        (alerts.token_dead / alerts.feed_recovered) were never fired.
+
+        Call this AFTER every connect attempt (success or failure) so the
+        feed-level state stays in sync with what pyquotex actually saw.
+        """
+        client = getattr(self, "_client", None)
+        api = getattr(client, "api", None)
+        if api is None:
+            # No client (yet) — leave feed-level state at last known value
+            return
+        self._consecutive_rejects = int(getattr(api, "_consecutive_rejects", 0))
+        self._token_dead_at       = float(getattr(api, "_token_dead_at", 0.0))
+
+        # ── Telegram alerting on state transitions ──────────────────────────
+        # Three states: "live" (auth ok), "transient" (some rejects but below
+        # threshold), "dead" (3+ consecutive rejects). Only fire an alert
+        # when the state CHANGES — no spam.
+        try:
+            if self._consecutive_rejects == 0 and self._connected:
+                _new_state = "live"
+            elif self._token_dead_at > 0:
+                _new_state = "dead"
+            else:
+                _new_state = "transient"
+            if _new_state != self._last_alert_state:
+                if _new_state == "dead":
+                    print(f"[feed] ⛔ token DEAD — firing Telegram alert "
+                          f"({self._consecutive_rejects}x consecutive rejects)")
+                    try:
+                        import alerts as _alerts
+                        _alerts.token_dead(self._consecutive_rejects)
+                    except Exception as _e:
+                        print(f"[feed] alerts.token_dead failed: {_e}")
+                elif _new_state == "live" and self._last_alert_state in ("dead", "transient"):
+                    print(f"[feed] ✅ feed recovered — firing Telegram alert")
+                    try:
+                        import alerts as _alerts
+                        _alerts.feed_recovered()
+                    except Exception as _e:
+                        print(f"[feed] alerts.feed_recovered failed: {_e}")
+                self._last_alert_state = _new_state
+        except Exception as _e:
+            # Alerting must NEVER break the feed loop
+            print(f"[feed] _sync_reject_state alert logic failed: {_e}")
 
     async def _load_history(self, asset: str, period: int) -> list[dict]:
         """Fetch candle history with adaptive candle count per timeframe."""
@@ -4974,13 +5058,40 @@ class QuotexFeed:
                         # ডিসকানেক্ট করে" — 5 min backoff too long for production.
                         # 120s cap still prevents anti-abuse (max 1 attempt/2min)
                         # but recovers 2.5x faster.
+                        # FIX (FALSE-TOKEN-EXPIRED-2026-08-11 / FT-12): use a
+                        # much gentler backoff for TRANSIENT disconnects (rejects
+                        # below threshold — token is fine, just a WS blip). The
+                        # previous 60s→120s→120s backoff was tuned for a truly
+                        # dead token (prevents anti-abuse). But for transient
+                        # drops (Cloudflare idle-close, server hiccup), waiting
+                        # up to 2 minutes meant the chart went blank for that
+                        # whole window — which looked exactly like "token
+                        # expired" to the operator. Now: 10s→20s→30s for
+                        # transient (auto-recovery in <1 min), keep the
+                        # aggressive 60s→120s→120s for actually-dead tokens.
                         self._reconnect_attempts += 1
-                        delay = min(60 * (2 ** min(self._reconnect_attempts - 1, 2)), 120)
+                        _is_transient = (
+                            self._consecutive_rejects > 0
+                            and self._token_dead_at == 0
+                        )
+                        if _is_transient:
+                            # Transient blip — token is fine, reconnect fast.
+                            delay = min(10 * self._reconnect_attempts, 30)
+                            _label = "transient"
+                        else:
+                            # Real failure (token dead, network down, etc.) —
+                            # keep the gentle-on-Quotex backoff to avoid bans.
+                            delay = min(60 * (2 ** min(self._reconnect_attempts - 1, 2)), 120)
+                            _label = "dead-token/anti-abuse"
                         print(f"[feed] reconnect attempt {self._reconnect_attempts} "
-                              f"failed — retrying in {delay}s "
+                              f"failed ({_label}) — retrying in {delay}s "
                               f"(gentle backoff — Quotex blocks aggressive retries)")
-                        print(f"[feed]   to push a fresh token NOW without waiting, "
-                              f"call: POST /api/set-token {{\"token\":\"...\"}}")
+                        if _is_transient:
+                            print(f"[feed]   transient drop — token is still valid, "
+                                  f"auto-retry will recover shortly (no action needed)")
+                        else:
+                            print(f"[feed]   to push a fresh token NOW without waiting, "
+                                  f"call: POST /api/set-token {{\"token\":\"...\"}}")
                         self._record_stream_error()
                         await asyncio.sleep(delay)
                         continue
