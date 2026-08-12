@@ -7,6 +7,7 @@
   <title>OTC Market — Binary Signal Terminal</title>
   <link rel="stylesheet" href="/static/css/common.css">
   <link rel="stylesheet" href="/static/css/otc.css">
+  <link rel="stylesheet" href="/static/css/token-panel.css">
 </head>
 <body>
 <a href="#main" class="skip-link">Skip to content</a>
@@ -520,7 +521,10 @@
        ════════════════════════════════════════════════════════════════════ -->
   <section id="share-signal-section">
     <div class="share-signal-header">
-      <h2 class="share-signal-title">📋 Share Signal</h2>
+      <div class="share-signal-titlewrap">
+        <button id="share-signal-toggle" type="button" class="share-signal-toggle" aria-expanded="false" aria-controls="share-signal-table" title="Show / hide the table (keeps the chart full-height)">▼</button>
+        <h2 class="share-signal-title">📋 Share Signal</h2>
+      </div>
       <div class="share-signal-actions">
         <span id="share-signal-count" class="share-signal-count">— / — live</span>
         <button id="share-signal-refresh" type="button" class="share-signal-btn" title="Refresh">🔄</button>
@@ -563,5 +567,6 @@
 <script defer src="/static/js/common.js"></script>
 <script defer src="/static/js/agent-panel.js"></script>
 <script defer src="/static/js/otc.js"></script>
+<script defer src="/static/js/token-panel.js"></script>
 </body>
 </html>

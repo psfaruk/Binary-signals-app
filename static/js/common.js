@@ -2854,6 +2854,46 @@ async function viewShareSignalHistory(){
   }catch(e){ console.error('view history error', e); }
 }
 
+/* ── Share Signal collapse ──────────────────────────────────────────────────
+   The table sits in its own #app grid row underneath the chart, so every pixel
+   it occupies is a pixel the chart loses. Collapsed by default on first visit
+   (chart-first layout); the choice is remembered per browser. Toggling
+   dispatches a resize so LightweightCharts re-fits to the new height. */
+const SHARE_COLLAPSE_KEY = 'shareSignalCollapsed';
+
+function setShareSignalCollapsed(collapsed, persist){
+  const sec = document.getElementById('share-signal-section');
+  if(!sec) return;
+  sec.classList.toggle('is-collapsed', !!collapsed);
+  const btn = document.getElementById('share-signal-toggle');
+  if(btn){
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    btn.title = collapsed ? 'Show the Share Signal table'
+                          : 'Hide the table — gives the chart the full height';
+  }
+  if(persist){ try{ localStorage.setItem(SHARE_COLLAPSE_KEY, collapsed ? '1' : '0'); }catch(_){} }
+  // Chart height changed — let the resize handler re-apply width/height.
+  try{ window.dispatchEvent(new Event('resize')); }catch(_){}
+}
+
+function initShareSignalCollapse(){
+  const sec = document.getElementById('share-signal-section');
+  if(!sec) return;
+  let stored = null;
+  try{ stored = localStorage.getItem(SHARE_COLLAPSE_KEY); }catch(_){}
+  setShareSignalCollapsed(stored === null ? true : stored === '1', false);
+
+  // One listener on the header — the toggle button lives inside it, so its
+  // clicks bubble here (binding both would flip twice and cancel out).
+  const header = sec.querySelector('.share-signal-header');
+  if(header) header.addEventListener('click', (ev) => {
+    // Don't hijack the refresh / save / history buttons in the same bar.
+    if(ev.target.closest('.share-signal-btn')) return;
+    ev.preventDefault();
+    setShareSignalCollapsed(!sec.classList.contains('is-collapsed'), true);
+  });
+}
+
 function initShareSignalTable(){
   // Initial fetch
   refreshShareSignals();
@@ -2872,12 +2912,16 @@ function initShareSignalTable(){
   if(histBtn) histBtn.addEventListener('click', viewShareSignalHistory);
 }
 
-// Auto-init after DOM ready (runs on every page load)
+// Auto-init after DOM ready (runs on every page load).
+// The collapse state is applied immediately (not on the 1.5s timer) so the
+// table never flashes open and shoves the chart around on load.
 if(document.readyState === 'loading'){
   document.addEventListener('DOMContentLoaded', () => {
+    initShareSignalCollapse();
     setTimeout(initShareSignalTable, 1500); // wait for other init
   });
 } else {
+  initShareSignalCollapse();
   setTimeout(initShareSignalTable, 1500);
 }
 

@@ -753,6 +753,10 @@ class QuotexFeed:
         # asyncio.sleep(0.5)` in _run_stream (line 3850) that polled every
         # 0.5s × 60 always-on streams = 120 wakeups/sec.
         self._connected_event = asyncio.Event()
+        # Set by server._apply_token() when a fresh token arrives from the UI.
+        # run()'s reconnect backoff waits on this instead of a bare sleep, so
+        # a pasted token is used immediately rather than up to 120s later.
+        self._token_pushed_event = asyncio.Event()
         # Held across a stream's whole start sequence (start_candles_stream +
         # history fetch) — staggers concurrent starts AND serializes history
         # fetches, closing a real race in pyquotex's Strategy-2 history
@@ -1683,6 +1687,39 @@ class QuotexFeed:
                 continue
         if not cleared_any and last_err is not None:
             print(f"[feed] could not clear stale token (all paths failed): {last_err}")
+
+    # ── Runtime token push (frontend 🔑 Token panel) ──────────────────────
+    def notify_token_pushed(self) -> bool:
+        """Wake the reconnect backoff — a fresh QX_TOKEN just arrived.
+
+        Without this, run()'s failure path sits in `await asyncio.sleep(delay)`
+        for up to 120s, so a token pasted in the UI looked "not working" for
+        two minutes. Returns True if a waiter was signalled.
+        """
+        ev = getattr(self, "_token_pushed_event", None)
+        if ev is None:
+            ev = asyncio.Event()
+            self._token_pushed_event = ev
+        self._reconnect_attempts = 0
+        self._last_no_token_warn = 0
+        ev.set()
+        return True
+
+    async def _sleep_or_token_push(self, delay: float) -> bool:
+        """Sleep `delay` seconds, cut short if a new token is pushed."""
+        ev = getattr(self, "_token_pushed_event", None)
+        if ev is None:
+            ev = asyncio.Event()
+            self._token_pushed_event = ev
+        ev.clear()
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            return False
+        ev.clear()
+        self._reconnect_attempts = 0
+        print("[feed] ⚡ backoff cut short — new token pushed, reconnecting now")
+        return True
 
     def _make_client(self, ua: str, root: str):
         """
@@ -4980,9 +5017,12 @@ class QuotexFeed:
                               f"failed — retrying in {delay}s "
                               f"(gentle backoff — Quotex blocks aggressive retries)")
                         print(f"[feed]   to push a fresh token NOW without waiting, "
-                              f"call: POST /api/set-token {{\"token\":\"...\"}}")
+                              f"open the 🔑 Token panel in the app "
+                              f"(or POST /api/set-token {{\"token\":\"...\"}})")
                         self._record_stream_error()
-                        await asyncio.sleep(delay)
+                        # Interruptible: a token pushed from the UI wakes this
+                        # immediately instead of waiting out the full backoff.
+                        await self._sleep_or_token_push(delay)
                         continue
                     self._reconnect_attempts = 0          # reset on success
                     print("[feed] connected OK")

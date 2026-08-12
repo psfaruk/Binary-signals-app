@@ -1,0 +1,141 @@
+/* ============================================================================
+   token-panel.css — 🔑 Token import panel.
+
+   Lets the operator paste a fresh Quotex session token straight into the app
+   instead of editing Railway Variables and waiting out a redeploy.
+   Uses the same tokens as common.css so it looks native on both pages.
+   ============================================================================ */
+
+/* ─── Topbar trigger button ─────────────────────────────────────────────── */
+#token-btn{
+  display:inline-flex;align-items:center;gap:5px;
+  min-height:30px;padding:4px 9px;
+  background:var(--card);color:var(--text);
+  border:1px solid var(--border);border-radius:var(--radius);
+  font-family:var(--sans);font-size:11px;font-weight:700;
+  letter-spacing:.4px;text-transform:uppercase;
+  cursor:pointer;transition:background .15s,border-color .15s,color .15s;
+  white-space:nowrap;
+}
+#token-btn:hover{background:var(--bg-elev);border-color:var(--text-faint)}
+#token-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#token-btn .tk-dot{
+  width:8px;height:8px;border-radius:50%;background:var(--text-faint);
+  flex:0 0 auto;
+}
+#token-btn.state-live   .tk-dot{background:var(--green);box-shadow:0 0 6px var(--green);animation:tk-pulse 2.4s ease-in-out infinite}
+#token-btn.state-wait   .tk-dot{background:var(--yellow);box-shadow:0 0 6px var(--yellow);animation:tk-pulse 1s ease-in-out infinite}
+#token-btn.state-dead   .tk-dot{background:var(--red);box-shadow:0 0 6px var(--red);animation:tk-pulse .8s ease-in-out infinite}
+#token-btn.state-live{border-color:rgba(0,200,83,.45);color:var(--green)}
+#token-btn.state-wait{border-color:rgba(255,193,7,.45);color:var(--yellow)}
+#token-btn.state-dead{border-color:rgba(255,23,68,.5);color:var(--red);background:var(--red-bg)}
+@keyframes tk-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* Floating fallback when the page has no topbar to host the button. */
+#token-btn.tk-floating{position:fixed;top:10px;right:10px;z-index:9000}
+
+/* ─── Modal shell ───────────────────────────────────────────────────────── */
+#token-modal{
+  position:fixed;inset:0;z-index:9500;
+  display:flex;align-items:center;justify-content:center;padding:16px;
+  background:rgba(1,4,9,.78);backdrop-filter:blur(3px);
+}
+#token-modal[hidden]{display:none}
+.tk-dialog{
+  width:min(560px,100%);max-height:min(88vh,760px);overflow-y:auto;
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius-lg);box-shadow:0 18px 50px rgba(0,0,0,.6);
+}
+.tk-head{
+  display:flex;align-items:center;gap:10px;
+  padding:14px 16px;border-bottom:1px solid var(--border-soft);
+  position:sticky;top:0;background:var(--card);border-radius:var(--radius-lg) var(--radius-lg) 0 0;
+}
+.tk-title{font-size:14px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
+.tk-head .tk-spacer{flex:1}
+.tk-close{
+  background:transparent;border:1px solid var(--border);border-radius:var(--radius);
+  color:var(--text-dim);width:30px;height:30px;font-size:14px;cursor:pointer;
+}
+.tk-close:hover{color:var(--text);border-color:var(--text-faint)}
+.tk-body{padding:14px 16px;display:flex;flex-direction:column;gap:14px}
+
+/* ─── Live status block ─────────────────────────────────────────────────── */
+.tk-status{
+  display:flex;flex-direction:column;gap:6px;
+  padding:10px 12px;border-radius:var(--radius);
+  border:1px solid var(--border);background:var(--bg-elev);
+}
+.tk-status.is-live{border-color:rgba(0,200,83,.4);background:var(--green-bg)}
+.tk-status.is-wait{border-color:rgba(255,193,7,.4);background:var(--yellow-bg)}
+.tk-status.is-dead{border-color:rgba(255,23,68,.4);background:var(--red-bg)}
+.tk-status-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tk-badge{
+  font-size:10px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;
+  padding:3px 8px;border-radius:20px;border:1px solid currentColor;
+}
+.tk-badge.is-live{color:var(--green)}
+.tk-badge.is-wait{color:var(--yellow)}
+.tk-badge.is-dead{color:var(--red)}
+.tk-status-msg{font-size:12px;color:var(--text);line-height:1.5}
+.tk-meta{font-size:11px;color:var(--text-dim);font-family:var(--mono);word-break:break-all}
+
+/* ─── Form ──────────────────────────────────────────────────────────────── */
+.tk-field{display:flex;flex-direction:column;gap:6px}
+.tk-label{font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text-dim)}
+.tk-label .tk-req{color:var(--red)}
+.tk-input,.tk-textarea{
+  width:100%;background:var(--bg);color:var(--text);
+  border:1px solid var(--border);border-radius:var(--radius);
+  padding:9px 10px;font-family:var(--mono);font-size:12px;line-height:1.5;
+}
+.tk-textarea{min-height:88px;resize:vertical;word-break:break-all}
+.tk-input:focus,.tk-textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg)}
+.tk-hint{font-size:11px;color:var(--text-dim);line-height:1.5}
+.tk-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tk-row .tk-input{flex:1 1 160px;min-width:0}
+.tk-check{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim);cursor:pointer}
+.tk-check input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+
+.tk-btn{
+  min-height:38px;padding:0 16px;border-radius:var(--radius);cursor:pointer;
+  font-family:var(--sans);font-size:12px;font-weight:700;letter-spacing:.5px;
+  text-transform:uppercase;border:1px solid var(--border);
+  background:var(--bg-elev);color:var(--text);
+  transition:filter .15s,background .15s;
+}
+.tk-btn:hover:not(:disabled){filter:brightness(1.25)}
+.tk-btn:disabled{opacity:.5;cursor:not-allowed}
+.tk-btn-primary{background:var(--accent);border-color:var(--accent);color:#0d1117}
+.tk-btn-ghost{background:transparent;color:var(--text-dim)}
+.tk-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.tk-actions .tk-spacer{flex:1}
+
+/* ─── Result / progress feedback ────────────────────────────────────────── */
+.tk-result{
+  font-size:12px;line-height:1.55;padding:9px 11px;border-radius:var(--radius);
+  border:1px solid var(--border);background:var(--bg-elev);white-space:pre-wrap;
+}
+.tk-result[hidden]{display:none}
+.tk-result.ok{border-color:rgba(0,200,83,.45);background:var(--green-bg);color:var(--green)}
+.tk-result.err{border-color:rgba(255,23,68,.45);background:var(--red-bg);color:var(--red)}
+.tk-result.busy{border-color:rgba(255,193,7,.45);background:var(--yellow-bg);color:var(--yellow)}
+
+.tk-section{
+  border:1px dashed var(--border);border-radius:var(--radius);
+  padding:10px 12px;display:flex;flex-direction:column;gap:8px;
+}
+.tk-section[hidden]{display:none}
+.tk-section-title{font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--accent)}
+
+.tk-help{border-top:1px solid var(--border-soft);padding-top:10px}
+.tk-help summary{cursor:pointer;font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text-dim)}
+.tk-help summary:hover{color:var(--text)}
+.tk-help ol{margin:8px 0 0 18px;display:flex;flex-direction:column;gap:5px}
+.tk-help li{font-size:11.5px;color:var(--text-dim);line-height:1.55}
+.tk-help code{font-family:var(--mono);font-size:11px;color:var(--accent);word-break:break-all}
+
+@media (max-width:576px){
+  .tk-dialog{width:100%;max-height:94vh}
+  #token-btn .tk-text{display:none}
+}

@@ -58,8 +58,15 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 
 #app{
   display:grid;
-  /* Row 1: topbar (auto), Row 2: tab bar (auto), Row 3: main content (1fr) */
-  grid-template-rows:auto auto 1fr;
+  /* Row 1: topbar (auto), Row 2: tab bar (auto), Row 3: main content (1fr),
+     Row 4: Share Signal section (auto).
+     FIX (CHART-HEIGHT-2026-08-12): row 4 used to be missing. #share-signal-
+     section was added as a 4th child but the template only declared 3 rows,
+     so it landed in an IMPLICIT auto row that sized itself to its content
+     (~445px on a 1080p screen) and stole that height from the 1fr chart row —
+     the chart collapsed to ~533px of a 1080px viewport. Declaring the row and
+     bounding the table (see .share-signal-table-wrap) keeps the chart tall. */
+  grid-template-rows:auto auto minmax(0,1fr) auto;
   height:100vh;
   height:100dvh;            /* mobile-safe viewport (excludes URL bar) */
   gap:0;
@@ -1628,7 +1635,22 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   padding:8px 12px;
   background:rgba(33,150,243,.08);
   border-bottom:1px solid rgba(33,150,243,.2);
+  cursor:pointer;                 /* whole bar toggles the table */
+  -webkit-user-select:none;user-select:none;
 }
+.share-signal-header:hover{background:rgba(33,150,243,.14)}
+.share-signal-titlewrap{display:flex;align-items:center;gap:8px;min-width:0}
+.share-signal-toggle{
+  background:transparent;border:1px solid rgba(33,150,243,.35);
+  color:var(--blue,#2196f3);border-radius:4px;cursor:pointer;
+  width:24px;height:24px;line-height:1;font-size:11px;flex:0 0 auto;
+  display:inline-flex;align-items:center;justify-content:center;
+  transition:transform .18s ease,background .15s;
+}
+.share-signal-toggle:hover{background:rgba(33,150,243,.2)}
+#share-signal-section.is-collapsed .share-signal-toggle{transform:rotate(-90deg)}
+#share-signal-section.is-collapsed .share-signal-table-wrap{display:none}
+#share-signal-section.is-collapsed .share-signal-header{border-bottom:none}
 .share-signal-title{
   margin:0;font-size:14px;font-weight:700;letter-spacing:.5px;
   color:var(--blue,#2196f3);text-transform:uppercase;
@@ -1648,7 +1670,10 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
 .share-signal-save-btn:hover{background:rgba(0,200,83,.25);}
 
 .share-signal-table-wrap{
-  max-height:400px;overflow-y:auto;overflow-x:auto;
+  /* Bounded by viewport share, not a flat 400px: on a 1080p desktop the old
+     cap let this table take ~40% of the screen away from the chart. 34vh
+     keeps the chart the dominant element even when the table is expanded. */
+  max-height:min(400px,34vh);overflow-y:auto;overflow-x:auto;
   scrollbar-width:thin;scrollbar-color:rgba(48,54,61,.5) transparent;
 }
 .share-signal-table{

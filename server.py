@@ -22,7 +22,9 @@ from fastapi.responses import FileResponse, StreamingResponse, Response, JSONRes
 # Load .env from project root (if it exists — Railway uses env vars directly)
 from dotenv import load_dotenv
 _env_path = Path(__file__).parent / ".env"
-if _env_path.exists():
+# QX_SKIP_DOTENV=1 keeps a test/verification run from picking up the operator's
+# real .env credentials (scripts/verify_token_import.py relies on this).
+if _env_path.exists() and os.environ.get("QX_SKIP_DOTENV", "0") != "1":
     load_dotenv(_env_path)
     print("[server] .env ফাইল loaded")
 else:
@@ -44,6 +46,45 @@ else:
 import feed as _feed_mod
 from feed import QuotexFeed as _Feed
 print("[server] ✅ using REAL Quotex feed (live data only — sim mode disabled)")
+
+# ── Persisted-token bootstrap ────────────────────────────────────────────────
+# A token pushed from the frontend UI is written to the Railway volume by
+# core.token_store. Load it BEFORE the token check below (and before the feed
+# ever connects) so a redeploy comes back live on its own instead of waiting
+# for the operator to paste the token again. An explicit QX_TOKEN env var
+# always wins — that is the operator's deliberate override.
+from core import token_store as _token_store
+
+def _bootstrap_persisted_token() -> None:
+    try:
+        token, reason = _token_store.resolve_boot_token()
+    except Exception as exc:
+        print(f"[server] stored-token bootstrap failed: {exc}")
+        return
+    if not token:
+        print(f"[server] no token in env and none stored in "
+              f"{_token_store.state_dir()} — waiting for one from the UI "
+              f"(🔑 Token button)")
+        return
+    os.environ["QX_TOKEN"] = token
+    preview = _token_store.mask(token)
+    if reason == "stored-newer":
+        print(f"[server] ✅ restored stored token {preview} — it was imported "
+              f"from the UI after the current QX_TOKEN variable appeared, so "
+              f"it wins over the (older) Railway Variable")
+    elif reason == "stored":
+        rec = _token_store.load_token() or {}
+        age_min = (time.time() - float(rec.get("saved_at") or 0)) / 60.0
+        print(f"[server] ✅ restored stored token {preview} "
+              f"(saved {age_min:.0f} min ago via {rec.get('source', '?')}) "
+              f"from {_token_store.state_dir()}")
+    elif reason == "env-new":
+        print(f"[server] using QX_TOKEN env var {preview} (new value — "
+              f"takes precedence over any stored token)")
+    else:
+        print(f"[server] using QX_TOKEN env var {preview}")
+
+_bootstrap_persisted_token()
 
 # Token status check — log a clear, actionable error if missing.
 _QX_TOKEN = os.environ.get("QX_TOKEN", "").strip()
@@ -326,8 +367,13 @@ async def token_status():
     has_email = bool(qx_email)
 
     connection_status = "disconnected"
-    consecutive_rejects = int(getattr(feed, "_consecutive_rejects", 0))
-    token_dead = bool(getattr(feed, "_token_dead_at", 0))
+    # FIX: _consecutive_rejects / _token_dead_at live on the Quotex client
+    # (quotex_ws.QuotexWSClient), never on the feed — reading them off `feed`
+    # meant this endpoint reported token_dead=False forever, so the UI could
+    # never tell "expired token" from "still connecting".
+    _client_now = getattr(feed, "_client", None)
+    consecutive_rejects = int(getattr(_client_now, "_consecutive_rejects", 0) or 0)
+    token_dead = bool(getattr(_client_now, "_token_dead_at", 0))
     try:
         client = getattr(feed, "_client", None)
         if hasattr(client, "_authorized") or hasattr(client, "_connected"):
@@ -368,8 +414,90 @@ async def token_status():
                    "and Quotex may ban the account for repeated failures). " "Push a Quotex token via /api/set-token to get live data.")
     else:
         status = "no_credentials"
-        message = ("❌ No Quotex credentials — sim mode is permanently disabled. " "Set QX_TOKEN via Railway Variables or visit " "/api/set-token?token=YOUR_TOKEN to provision at runtime.")
-    return {"status": status, "has_token": has_token, "has_email": has_email, "connection_status": connection_status, "consecutive_rejects": consecutive_rejects, "token_dead": token_dead, "sim_mode_disabled": True, "message": message, "action": "refresh_token" if token_dead else ("set_token" if status == "no_credentials" else None)}
+        message = ("❌ No Quotex credentials — open the 🔑 Token panel in the app "
+                   "and paste a fresh Quotex session token to go live.")
+    try:
+        stored = _token_store.token_meta()
+        auth = _token_store.auth_state()
+    except Exception as exc:
+        stored, auth = {"stored": False, "error": str(exc)}, {"claimed": False}
+    live_streams = 0
+    try:
+        live_streams = len(getattr(feed, "_streams", {}) or {})
+    except Exception:
+        pass
+    return {"status": status, "has_token": has_token, "has_email": has_email, "connection_status": connection_status, "consecutive_rejects": consecutive_rejects, "token_dead": token_dead, "sim_mode_disabled": True, "message": message, "action": "refresh_token" if token_dead else ("set_token" if status == "no_credentials" else None),
+            "active_token": _token_store.mask(qx_token),
+            "live": connection_status == "live_authorized",
+            "streams": live_streams,
+            "stored_token": stored,
+            "auth": auth}
+
+
+# ── Frontend token import: access control ────────────────────────────────────
+# The UI needs a way to push a token without a Railway redeploy. Leaving
+# /api/set-token open on a public Railway domain would let anyone swap the
+# feed's credentials, so it is gated by a PIN the operator claims on first
+# use (or by ADMIN_KEY when that env var is set). See core/token_store.py.
+
+def _request_secrets(body: dict, request: Request) -> tuple[str, str]:
+    """Pull (pin, admin_key) from headers or JSON body."""
+    body = body if isinstance(body, dict) else {}
+    pin = (request.headers.get("X-App-Pin") or body.get("pin") or "").strip()
+    admin_key = (request.headers.get("X-Admin-Key")
+                 or body.get("x_admin_key")
+                 or body.get("admin_key") or "").strip()
+    return pin, admin_key
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+        return body if isinstance(body, dict) else {}
+    except Exception:
+        return {}
+
+
+@app.get("/api/auth/state")
+async def auth_state():
+    """Does this deployment already have an access PIN? (no secrets returned)"""
+    return _token_store.auth_state()
+
+
+@app.post("/api/auth/claim")
+async def auth_claim(request: Request):
+    """First-run claim of the access PIN from the UI."""
+    body = await _json_body(request)
+    pin = (body.get("pin") or "").strip()
+    result = _token_store.claim_pin(pin)
+    if not result.get("ok"):
+        return JSONResponse(status_code=400, content=result)
+    return {"ok": True, "message": "PIN set — keep it, you need it to import "
+                                   "tokens from now on.", **_token_store.auth_state()}
+
+
+@app.post("/api/auth/change-pin")
+async def auth_change_pin(request: Request):
+    """Rotate the PIN (needs the old PIN, or ADMIN_KEY as master key)."""
+    body = await _json_body(request)
+    old_pin, admin_key = _request_secrets(body, request)
+    result = _token_store.change_pin((body.get("new_pin") or "").strip(),
+                                     old_pin=old_pin, admin_key=admin_key)
+    if not result.get("ok"):
+        return JSONResponse(status_code=403, content=result)
+    return {"ok": True, "message": "PIN updated."}
+
+
+@app.post("/api/auth/verify")
+async def auth_verify(request: Request):
+    """Check a PIN without doing anything — lets the UI unlock its form."""
+    body = await _json_body(request)
+    pin, admin_key = _request_secrets(body, request)
+    allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
+    if not allowed:
+        return JSONResponse(status_code=403,
+                            content={"ok": False, "error": reason})
+    return {"ok": True, "via": reason}
 
 @app.get("/")
 async def index():
@@ -377,31 +505,60 @@ async def index():
                         headers={"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate"})
 
 @app.get("/api/set-token")
-async def set_token_get(token: str, x_admin_key: Optional[str] = None):
-    """Set Quotex token at runtime — no restart needed."""
-    _check_admin_key(x_admin_key)
-    return await _apply_token(token)
+async def set_token_get(token: str, x_admin_key: Optional[str] = None,
+                        pin: Optional[str] = None):
+    """Set Quotex token at runtime — no restart needed (browser-friendly)."""
+    allowed, reason = _token_store.authorize(pin=pin or "",
+                                             admin_key=x_admin_key or "")
+    if not allowed:
+        raise HTTPException(status_code=403, detail=_auth_error(reason))
+    return await _apply_token(token, source="api-get")
 
 @app.post("/api/set-token")
 async def set_token_post(request: Request):
-    """Set Quotex token via POST (for programmatic updates)."""
-    try:
-        body = await request.json()
-        token = body.get("token", "").strip()
-        body_admin_key = body.get("x_admin_key", "").strip() if isinstance(body, dict) else ""
-    except Exception:
-        return {"ok": False, "error": "invalid JSON body"}
-    header_admin_key = (request.headers.get("X-Admin-Key") or "").strip()
-    _check_admin_key(body_admin_key or header_admin_key)
-    return await _apply_token(token)
+    """Set Quotex token via POST — used by the 🔑 Token panel in the UI."""
+    body = await _json_body(request)
+    if not body:
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": "invalid JSON body"})
+    pin, admin_key = _request_secrets(body, request)
+    allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
+    if not allowed:
+        return JSONResponse(status_code=403,
+                            content={"ok": False, "error": _auth_error(reason),
+                                     "reason": reason,
+                                     "auth": _token_store.auth_state()})
+    return await _apply_token(body.get("token", ""), source=body.get("source") or "ui")
 
-async def _apply_token(token: str):
-    """Apply a new Quotex token at runtime."""
-    if not token or len(token) < 20:
-        return {"ok": False, "error": f"token too short ({len(token) if token else 0} chars) " "(real Quotex tokens are 40+ chars)"}
+
+def _auth_error(reason: str) -> str:
+    if reason == "unclaimed":
+        return ("This app has no access PIN yet. Set one first "
+                "(POST /api/auth/claim {\"pin\":\"…\"} — the 🔑 Token panel "
+                "does it for you), then import the token with that PIN.")
+    return reason
+
+
+async def _apply_token(token: str, source: str = "api"):
+    """Apply a new Quotex token at runtime — and persist it across redeploys."""
+    raw_len = len(token or "")
+    token, norm_meta = _token_store.normalize_token(token)
+    err = _token_store.validate_token(token)
+    if err:
+        return {"ok": False, "error": err, "input_chars": raw_len}
 
     # Set the token in the environment so _connect() picks it up
     os.environ["QX_TOKEN"] = token
+
+    # Persist to the Railway volume so the NEXT deploy boots live without
+    # anyone re-pasting it. This is the whole point of the UI import — the
+    # old flow only touched os.environ, which dies with the container.
+    persist_ok, persist_err = True, None
+    try:
+        _token_store.save_token(token, source=source)
+    except Exception as exc:
+        persist_ok, persist_err = False, str(exc)
+        print(f"[server] ⚠️  token persist failed: {exc}")
 
     feed._connected = False
     feed._abandoned = False
@@ -409,6 +566,22 @@ async def _apply_token(token: str):
     feed._last_error = None
     feed._last_error_time = 0
     feed._token_update_pending = True
+
+    # Drop the client that was authorized with the OLD token, and clear any
+    # "token is dead" backoff it recorded — otherwise a freshly pasted token
+    # sits behind a 60s penalty earned by the expired one.
+    old_client = getattr(feed, "_client", None)
+    if old_client is not None:
+        try:
+            old_client._token_dead_at = 0
+            old_client._consecutive_rejects = 0
+        except Exception:
+            pass
+        try:
+            await old_client.close()
+        except Exception as exc:
+            print(f"[server] old client close failed (non-fatal): {exc}")
+        feed._client = None
 
     for s in getattr(feed, '_streams', {}).values():
         try:
@@ -424,11 +597,31 @@ async def _apply_token(token: str):
     except Exception as e:
         print(f"[server] session.json save error: {e}")
 
-    token_preview = token[:8] + "..." + token[-4:] if len(token) > 12 else token
-    print(f"[server] ✅ token updated at runtime: {token_preview}")
-    print(f"[server]    real feed will reconnect within 5s...")
+    # Wake the feed's reconnect backoff immediately (it can be sleeping for
+    # up to 120s), so "paste token → live" takes seconds, not minutes.
+    woke = False
+    try:
+        woke = bool(feed.notify_token_pushed())
+    except Exception as exc:
+        print(f"[server] token wake-up failed (non-fatal): {exc}")
 
-    return {"ok": True, "message": f"Token set ({token_preview}). Real feed reconnecting...", "timestamp": time.time(), "sim_mode_disabled_permanently": True, "next_step": "Wait 5-10 seconds, then check /api/debug to confirm connected:true"}
+    token_preview = _token_store.mask(token)
+    print(f"[server] ✅ token updated at runtime: {token_preview} "
+          f"(source={source}, format={norm_meta.get('input_format')}, "
+          f"persisted={persist_ok})")
+
+    return {"ok": True,
+            "message": f"Token set ({token_preview}). Reconnecting to Quotex…",
+            "preview": token_preview,
+            "timestamp": time.time(),
+            "normalized": norm_meta,
+            "persisted": persist_ok,
+            "persistent_storage": _token_store.is_persistent(),
+            "persist_error": persist_err,
+            "reconnect_wakeup": woke,
+            "sim_mode_disabled_permanently": True,
+            "next_step": "Watch /api/token-status — it flips to "
+                         "connection_status='live_authorized' within ~10s."}
 
 @app.post("/api/reconnect")
 async def force_reconnect():
