@@ -155,20 +155,27 @@ def password_login_allowed() -> bool:
 def proxy() -> Optional[str]:
     """Outbound proxy for the refresh, e.g. http://user:pass@host:port.
 
-    MEASURED 2026-08-13, and the reason this option exists: replaying the
-    cookies from Railway's own IP (152.55.176.179, Cloudflare colo SJC)
-    FAILS. Every Quotex host either serves a Cloudflare JS challenge
-    ("Just a moment…", HTTP 403) or returns the logged-out page with
-    HTTP 200 and no token — tested with the complete, known-good jar
-    (recaller + laravel_session + __vid_l3) that had authenticated from
-    the operator's own IP minutes earlier. The session simply is not
-    honoured from a foreign datacenter IP, and `cf_clearance` cannot help
-    because Cloudflare binds it to the IP that solved the challenge.
+    ⚠ A PROXY PROBABLY WILL NOT HELP, AND TRYING COSTS YOU THE SESSION.
+    Measured 2026-08-13 across three vantage points with the same jar:
 
-    So on Railway the mint needs an exit node in the operator's region.
-    Point QX_PROXY at one and everything else in this module works
-    unchanged. Without it, use scripts/token_agent.py, which mints from
-    the operator's own machine and pushes the token in.
+        operator's home IP    → mints a token, every time
+        Railway us-west       → "Quotex is currently not available in your
+                                 region. (United States)" — geo-blocked
+                                 before auth is even reached
+        Railway southeast-asia→ NOT geo-blocked, page serves normally, and
+                                 STILL returns the signed-out page for every
+                                 cookie subset including recaller-only
+
+    So the binding is to the IP/network the session was created from, not
+    to the country — which is why a proxy in the right country is not
+    enough. Worse: within ~15 minutes of the southeast-asia attempts the
+    jar stopped authenticating from the operator's own machine too. The
+    most likely reading is that Quotex saw the same session used from
+    another country and revoked it as a hijack.
+
+    Treat replaying a session from anywhere but its home network as
+    something that can destroy the session. The supported path is
+    scripts/token_agent.py running on the operator's own network.
     """
     return _env("QX_PROXY") or None
 
@@ -487,10 +494,26 @@ async def _try_trade_page(client, host: str) -> tuple[Optional[str], str]:
 
     settings = extract_settings(resp.text)
     if not settings:
-        if "sign-in" in resp.text or 'name="_token"' in resp.text:
-            return None, (f"{host}: served the signed-out page — the "
-                          f"remember_web cookie is expired or was revoked. "
-                          f"Import a fresh cookie blob from your browser.")
+        # Three very different failures all look like "no token" unless you
+        # read the page, and telling them apart is the difference between
+        # "paste new cookies" (fixable) and "this machine can never do it"
+        # (not fixable, stop trying). All three were observed on 2026-08-13.
+        body = resp.text
+        geo = re.search(r"not ava[il]+ble in your region[^<]*", body, re.I)
+        if geo:
+            return None, (f"{host}: Quotex does not serve this server's "
+                          f"region — \"{geo.group(0).strip()}\". Fresh "
+                          f"cookies cannot fix this; mint from a served "
+                          f"region instead.")
+        if "sign-in" in body or 'name="_token"' in body:
+            return None, (
+                f"{host}: served the signed-out page. Quotex ties a session "
+                f"to the IP it was created from, so cookies copied out of "
+                f"your browser only authenticate from THAT network — "
+                f"measured 2026-08-13: the same jar works at home and is "
+                f"refused from both us-west and southeast-asia. Either the "
+                f"cookies really did expire (log in again and re-import), or "
+                f"this host simply is not the network you logged in from.")
         return None, f"{host}: no window.settings token in the response"
 
     token = str(settings.get("token") or "").strip()
