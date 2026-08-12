@@ -152,6 +152,27 @@ def password_login_allowed() -> bool:
             and bool(_env("QX_EMAIL")) and bool(_env("QX_PASSWORD")))
 
 
+def proxy() -> Optional[str]:
+    """Outbound proxy for the refresh, e.g. http://user:pass@host:port.
+
+    MEASURED 2026-08-13, and the reason this option exists: replaying the
+    cookies from Railway's own IP (152.55.176.179, Cloudflare colo SJC)
+    FAILS. Every Quotex host either serves a Cloudflare JS challenge
+    ("Just a moment…", HTTP 403) or returns the logged-out page with
+    HTTP 200 and no token — tested with the complete, known-good jar
+    (recaller + laravel_session + __vid_l3) that had authenticated from
+    the operator's own IP minutes earlier. The session simply is not
+    honoured from a foreign datacenter IP, and `cf_clearance` cannot help
+    because Cloudflare binds it to the IP that solved the challenge.
+
+    So on Railway the mint needs an exit node in the operator's region.
+    Point QX_PROXY at one and everything else in this module works
+    unchanged. Without it, use scripts/token_agent.py, which mints from
+    the operator's own machine and pushes the token in.
+    """
+    return _env("QX_PROXY") or None
+
+
 # ── cookie parsing ────────────────────────────────────────────────────────
 
 def parse_cookie_blob(raw: str) -> dict[str, str]:
@@ -592,10 +613,16 @@ async def _do_refresh(reason: str) -> tuple[Optional[str], str]:
     ctx = _ssl_context()
     cookies = _seed_jar(httpx, jar)
     errors: list[str] = []
+    client_kwargs = {}
+    prox = proxy()
+    if prox:
+        client_kwargs["proxy"] = prox
+        print(f"[qx_session] routing the refresh through QX_PROXY "
+              f"({prox.split('@')[-1]})")
 
     async with httpx.AsyncClient(verify=ctx, timeout=_HTTP_TIMEOUT,
                                  follow_redirects=True,
-                                 cookies=cookies) as client:
+                                 cookies=cookies, **client_kwargs) as client:
         # ── strategy 1: replay the browser session (preferred) ──────────
         if have_recaller:
             for host in web_hosts():
