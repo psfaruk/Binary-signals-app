@@ -23,6 +23,13 @@ dist/
 .env
 .env.backup
 session.json
+# core/token_store.py + core/qx_session.py state. On Railway these live on
+# the mounted volume; locally they land next to the app and hold the live
+# Quotex session (cookies = account access), so they must never be committed.
+qx_token.json
+qx_session.json
+qx_env_seen.json
+app_auth.json
 
 # ─── SQLite DBs (WAL mode generates -shm + -wal siblings) ───────────
 *.db

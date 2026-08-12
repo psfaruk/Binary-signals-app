@@ -1608,6 +1608,9 @@ class QuotexFeed:
         _rt = getattr(self, '_reconnect_task', None)
         if _rt is not None and not _rt.done():
             _rt.cancel()
+        _sk = getattr(self, '_session_keeper_task', None)
+        if _sk is not None and not _sk.done():
+            _sk.cancel()
 
     # ── Connection (shared across all streams) ──────────────────────────────
 
@@ -1851,16 +1854,34 @@ class QuotexFeed:
             # or Railway Variables.
             env_token = os.environ.get("QX_TOKEN", "").strip()
             if not env_token:
+                # AUTO-SESSION (2026-08-13): before giving up, try to mint one
+                # from the stored browser cookies. This is what makes a cold
+                # boot with no token (fresh volume, cleared token, first
+                # deploy) come up live on its own instead of sitting in the
+                # backoff until someone pastes a token.
+                try:
+                    from core import qx_session
+                    if qx_session.enabled() and qx_session.configured():
+                        minted, detail = await qx_session.refresh_token(
+                            reason="connect-no-token")
+                        if minted:
+                            env_token = minted
+                            print(f"[feed] 🔄 no QX_TOKEN — minted one from the "
+                                  f"stored session ({detail})")
+                except Exception as exc:
+                    print(f"[feed] session auto-mint failed: {exc}")
+
+            if not env_token:
                 # No token set. Print ONCE per ~5 min to avoid log spam.
                 # Don't attempt email/password — that path is blocked on
                 # Railway and risks account ban.
                 now = time.time()
                 last_warn = getattr(self, "_last_no_token_warn", 0)
                 if now - last_warn > 300:
-                    print("[feed] ⚠️  QX_TOKEN not set — please push a token "
-                          "via Railway Variables or POST /api/set-token "
-                          "{\"token\":\"...\"}. Email/password login is "
-                          "disabled (Cloudflare blocks Railway IPs).")
+                    print("[feed] ⚠️  QX_TOKEN not set — push a token via the "
+                          "🔑 Token panel, or import your Quotex session "
+                          "cookies there once and the app will mint its own "
+                          "tokens from then on.")
                     self._last_no_token_warn = now
                 return False
 
@@ -4837,39 +4858,103 @@ class QuotexFeed:
     async def _auto_relogin(self) -> bool:
         """Re-login after connection failure.
 
-        FIX (2026-07-26 / MANUAL-TOKEN-MODE): in manual-token mode, we
-        do NOT clear the QX_TOKEN env var on failure — the operator
-        pushed it deliberately and may re-push the SAME token after
-        refreshing their browser. Clearing it forces them to re-push
-        every time, increasing manual workload. The backoff in run()
-        handles pacing.
+        AUTO-SESSION (2026-08-13): the app no longer waits for a human.
+        `core.qx_session` replays the operator's stored browser cookies
+        against the Quotex web front-end and mints a brand-new SSID, so an
+        expired token heals itself within one backoff cycle. The refresher
+        persists the token (volume + session.json) and updates QX_TOKEN
+        before returning, so all this method has to do is report success —
+        run() then retries the connection immediately.
 
-        Previously: cleared stale token + session.json → caused the
-        "token cleared after auth rejection" loop seen in logs (63
-        occurrences in 20 min). Now: NEVER clear on failure. Operator
-        pushes a new token via /api/set-token when they have one.
+        The pre-2026-08-13 behaviour (never clear QX_TOKEN, wait for the
+        operator to paste a new one) is still the fallback whenever no
+        session cookies are stored: clearing a token the operator pushed
+        deliberately just forces them to push it again, and hammering
+        Quotex's login is what got the account blocked in the first place.
 
-        Returns False always — no reason to retry immediately. Let
-        the backoff pacing apply.
+        Returns True only when a NEW token was obtained.
         """
-        # Intentionally do NOT clear QX_TOKEN. The operator set it; we
-        # trust their judgment. If it's actually dead, they'll push a
-        # new one via /api/set-token, which sets _token_update_pending
-        # and triggers immediate retry via _apply_token() in server.py.
-        # FIX (2026-07-27 / contradictory-log): this used to always print
-        # "keeping QX_TOKEN" even when QX_TOKEN was never set in the first
-        # place — right after a "QX_TOKEN not set" warning a few lines
-        # earlier, which reads as self-contradictory in the logs and made
-        # it look like the app had a token when it didn't. Say what's
-        # actually true.
+        try:
+            from core import qx_session
+        except Exception as exc:
+            print(f"[feed] auto-relogin: qx_session unavailable: {exc}")
+            qx_session = None
+
+        if qx_session is not None and qx_session.enabled() and qx_session.configured():
+            token, detail = await qx_session.refresh_token(reason="feed-relogin")
+            if token:
+                print(f"[feed] 🔄 auto-relogin: minted a fresh SSID "
+                      f"(…{token[-4:]}) via {detail} — reconnecting now")
+                # The refresher already wrote QX_TOKEN + both stores. Drop
+                # the client that was authorised with the dead token so the
+                # next _connect() builds a clean one.
+                self._reconnect_attempts = 0
+                return True
+            print(f"[feed] auto-relogin: could not mint a token — {detail}")
+            return False
+
+        # No stored cookies — manual-token mode, unchanged.
         if os.environ.get("QX_TOKEN"):
             print("[feed] auto-relogin: keeping QX_TOKEN (manual-token mode) "
-                  "— backoff will retry; push a fresh token via /api/set-token "
-                  "if the current one is dead.")
+                  "— backoff will retry; import session cookies in the 🔑 Token "
+                  "panel to make this automatic.")
         else:
             print("[feed] auto-relogin: no QX_TOKEN set — waiting for one via "
                   "Railway Variables or POST /api/set-token {\"token\":\"...\"}.")
         return False
+
+    async def _session_keeper(self) -> None:
+        """Keep a fresh SSID warm so expiry never costs a minute of downtime.
+
+        The reactive path (`_auto_relogin`) already heals a dead token, but
+        only AFTER the connection has failed — that is one backoff cycle of
+        missing candles, every single day, forever. This task mints a
+        replacement *before* the current token dies.
+
+        It deliberately does NOT force a reconnect: `refresh_token()` writes
+        the new SSID to QX_TOKEN and both stores, and `_connect()` reads
+        QX_TOKEN only when it is (re)connecting. So a live connection is
+        left completely alone and simply picks up the newer token whenever
+        it next needs one.
+        """
+        try:
+            from core import qx_session
+        except Exception as exc:
+            print(f"[feed] session keeper disabled — qx_session import "
+                  f"failed: {exc}")
+            return
+        if not qx_session.enabled():
+            print("[feed] session keeper disabled (QX_AUTO_REFRESH=0)")
+            return
+
+        period = max(600.0, float(os.environ.get(
+            "QX_REFRESH_PERIOD_HOURS", "6")) * 3600.0)
+        # Quotex tokens live ~24h; a 6h cadence means at least three chances
+        # to roll over before one dies.
+        print(f"[feed] 🔄 session keeper on — refreshing the Quotex SSID "
+              f"every {period / 3600:.1f}h")
+        # Stagger the first run: boot already has a token (or _connect just
+        # minted one), so an immediate refresh would be wasted work.
+        await asyncio.sleep(min(period, 300.0))
+        while True:
+            try:
+                if qx_session.configured():
+                    token, detail = await qx_session.refresh_token(
+                        reason="keeper")
+                    if token:
+                        print(f"[feed] 🔄 keeper refreshed the SSID "
+                              f"(…{token[-4:]}) — {detail}")
+                    else:
+                        print(f"[feed] keeper refresh skipped/failed: {detail}")
+                else:
+                    print("[feed] keeper: no session cookies stored — import "
+                          "them in the 🔑 Token panel to enable auto-refresh")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[feed] session keeper error (non-fatal): "
+                      f"{type(exc).__name__}: {exc}")
+            await asyncio.sleep(period)
 
     async def run(self, broadcast) -> None:
         # FIX (2026-07-28 / BROADCAST-GUARD): wrap the broadcast callable
@@ -4923,6 +5008,9 @@ class QuotexFeed:
         # shutdown() can cancel it. Previously this was fire-and-forget,
         # orphaning the task on run() exit.
         self._reconnect_task = asyncio.create_task(self._aggressive_reconnect())
+
+        # AUTO-SESSION (2026-08-13): keep a fresh SSID warm ahead of expiry.
+        self._session_keeper_task = asyncio.create_task(self._session_keeper())
 
         # ── Auto-login on startup ──────────────────────────────────────────
         # FIX (2026-07-26 / MANUAL-TOKEN-MODE): _auto_login_startup used to
@@ -4988,7 +5076,20 @@ class QuotexFeed:
                         # Cloudflare blocks HTTP login, this loop runs forever
                         # until the user updates QX_TOKEN in Variables OR
                         # Cloudflare temporarily allows the request.
-                        if self._reconnect_attempts % 3 == 2:  # every 3rd fail
+                        # With stored session cookies the refresh is a single
+                        # cheap authenticated GET and it FIXES the failure, so
+                        # gating it to "every 3rd attempt" only bought extra
+                        # dead minutes. qx_session enforces its own minimum
+                        # interval, so trying every cycle cannot hammer Quotex.
+                        # Without cookies it falls back to the old cadence,
+                        # where the call is just a log line anyway.
+                        _auto_sess = False
+                        try:
+                            from core import qx_session as _qs
+                            _auto_sess = _qs.enabled() and _qs.configured()
+                        except Exception:
+                            _auto_sess = False
+                        if _auto_sess or self._reconnect_attempts % 3 == 2:
                             print("[feed] ── auto-relogin attempt ────────────────")
                             relogin_ok = await self._auto_relogin()
                             if relogin_ok:

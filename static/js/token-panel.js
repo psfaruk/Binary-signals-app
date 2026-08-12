@@ -169,6 +169,34 @@
           h('span', { class: 'tk-spacer' }),
           h('button', { class: 'tk-btn tk-btn-ghost', id: 'tk-dismiss', type: 'button', text: 'Close' })
         ]),
+
+        /* ── Auto-refresh: the whole point is never needing the box above ── */
+        h('details', { class: 'tk-help tk-auto', id: 'tk-auto' }, [
+          h('summary', { id: 'tk-auto-summary', text: '🔁 Auto-refresh — checking…' }),
+          h('div', { class: 'tk-hint', id: 'tk-auto-detail', text: '' }),
+          h('div', { class: 'tk-field' }, [
+            h('label', { class: 'tk-label', for: 'tk-cookies', text: 'Session cookies' }),
+            h('textarea', {
+              class: 'tk-textarea', id: 'tk-cookies', spellcheck: 'false',
+              autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off',
+              placeholder: 'Paste document.cookie here — must include remember_web_…'
+            }),
+            h('div', {
+              class: 'tk-hint',
+              html: 'Log in to Quotex in your browser → <code>F12</code> → ' +
+                    '<code>Console</code> → run <code>copy(document.cookie)</code> → ' +
+                    'paste here. The app then mints its own token every time the ' +
+                    'old one expires, so you never have to touch this again ' +
+                    'until you log out of that browser.'
+            })
+          ]),
+          h('div', { class: 'tk-actions' }, [
+            h('button', { class: 'tk-btn tk-btn-primary', id: 'tk-cookies-save',
+                          type: 'button', text: 'Save cookies & verify' }),
+            h('button', { class: 'tk-btn', id: 'tk-refresh-now', type: 'button',
+                          text: 'Refresh token now' })
+          ])
+        ]),
         h('details', { class: 'tk-help' }, [
           h('summary', { text: 'How do I get the token?' }),
           h('ol', {}, [
@@ -236,6 +264,41 @@
     var claimed = state.auth && state.auth.claimed;
     el.claim.hidden = !!claimed;
     el.pinField.hidden = !claimed;
+
+    renderAuto((s && s.auto_session) || null);
+  }
+
+  function renderAuto(a) {
+    if (!el.autoSummary) return;
+    if (!a) {
+      el.autoSummary.textContent = '🔁 Auto-refresh — checking…';
+      el.autoDetail.textContent = '';
+      return;
+    }
+    var head, detail;
+    if (!a.enabled) {
+      head = '🔁 Auto-refresh — OFF';
+      detail = 'Disabled by QX_AUTO_REFRESH=0. Tokens must be pasted by hand.';
+    } else if (!a.configured) {
+      head = '🔁 Auto-refresh — not set up';
+      detail = 'No session cookies stored, so an expired token still needs a ' +
+               'manual paste. Add the cookies below once to fix that for good.';
+    } else if (a.consecutive_failures >= 3) {
+      head = '🔁 Auto-refresh — FAILING (' + a.consecutive_failures + 'x)';
+      detail = 'The stored cookies stopped working: ' + (a.last_error || 'unknown error') +
+               '\nLog in to Quotex in your browser again and paste fresh cookies below.';
+    } else {
+      head = '🔁 Auto-refresh — ARMED';
+      detail = 'The app mints its own token when the current one expires' +
+               (a.account_email ? ' (account ' + a.account_email + ')' : '') + '. ' +
+               (a.refresh_count ? a.refresh_count + ' refresh(es) so far, last ' +
+                                  ago(a.last_success) + '. ' : '') +
+               (a.persistent ? 'Cookies survive redeploys ✓' :
+                               '⚠ Cookies are NOT on a persistent volume.');
+      if (a.last_error) detail += '\nLast error: ' + a.last_error;
+    }
+    el.autoSummary.textContent = head;
+    el.autoDetail.textContent = detail;
   }
 
   function result(kind, text) {
@@ -321,6 +384,77 @@
     });
   }
 
+  function requirePin() {
+    var pin = (el.pin.value || '').trim();
+    if (state.auth && !state.auth.claimed) {
+      result('err', 'Set an access PIN first (step ① above).');
+      return null;
+    }
+    if (!pin) { result('err', 'Enter your access PIN.'); el.pin.focus(); return null; }
+    return pin;
+  }
+
+  function saveCookies() {
+    var cookies = (el.cookies.value || '').trim();
+    if (!cookies) {
+      result('err', 'Paste your Quotex cookies first (document.cookie).');
+      el.cookies.focus();
+      return;
+    }
+    var pin = requirePin();
+    if (!pin) return;
+
+    el.cookiesSave.disabled = true;
+    result('busy', 'Saving cookies and minting a test token…');
+    fetchJSON('/api/session/cookies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-App-Pin': pin },
+      body: JSON.stringify({ cookies: cookies, pin: pin, source: 'ui' })
+    }).then(function (r) {
+      el.cookiesSave.disabled = false;
+      var body = r.body || {};
+      if (!r.ok || !body.ok) {
+        result('err', '❌ ' + (body.error || body.detail || ('HTTP ' + r.status)) +
+                      (body.hint ? '\n' + body.hint : ''));
+        return;
+      }
+      setPin(pin, el.remember.checked);
+      el.cookies.value = '';
+      renderAuto(body.status);
+      result('busy', '✅ ' + body.message + '\nWaiting for Quotex to authorize…');
+      watchUntilLive();
+    }).catch(function (e) {
+      el.cookiesSave.disabled = false;
+      result('err', 'Network error: ' + e);
+    });
+  }
+
+  function refreshNow() {
+    var pin = requirePin();
+    if (!pin) return;
+    el.refreshNow.disabled = true;
+    result('busy', 'Minting a fresh token from the stored cookies…');
+    fetchJSON('/api/session/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-App-Pin': pin },
+      body: JSON.stringify({ pin: pin })
+    }).then(function (r) {
+      el.refreshNow.disabled = false;
+      var body = r.body || {};
+      if (!r.ok || !body.ok) {
+        result('err', '❌ ' + (body.error || ('HTTP ' + r.status)));
+        renderAuto(body.status);
+        return;
+      }
+      renderAuto(body.status);
+      result('busy', '✅ ' + body.message);
+      watchUntilLive();
+    }).catch(function (e) {
+      el.refreshNow.disabled = false;
+      result('err', 'Network error: ' + e);
+    });
+  }
+
   function watchUntilLive() {
     if (state.watching) return;
     state.watching = true;
@@ -396,9 +530,17 @@
     el.token = document.getElementById('tk-token');
     el.result = document.getElementById('tk-result');
     el.importBtn = document.getElementById('tk-import');
+    el.auto = document.getElementById('tk-auto');
+    el.autoSummary = document.getElementById('tk-auto-summary');
+    el.autoDetail = document.getElementById('tk-auto-detail');
+    el.cookies = document.getElementById('tk-cookies');
+    el.cookiesSave = document.getElementById('tk-cookies-save');
+    el.refreshNow = document.getElementById('tk-refresh-now');
 
     el.claimBtn.addEventListener('click', claim);
     el.importBtn.addEventListener('click', importToken);
+    el.cookiesSave.addEventListener('click', saveCookies);
+    el.refreshNow.addEventListener('click', refreshNow);
     document.getElementById('tk-recheck').addEventListener('click', function () {
       result('busy', 'Re-checking…');
       refresh().then(function (s) {
@@ -425,13 +567,20 @@
       setTimeout(function () {
         refresh().then(function (s2) {
           if (s2 && s2.live) return;
+          // Auto-refresh armed = the app is already fixing this by itself.
+          // Popping a "paste a token" dialog at the operator would be asking
+          // for work that is about to happen without them.
+          var auto = s2 && s2.auto_session;
+          if (auto && auto.enabled && auto.configured &&
+              auto.consecutive_failures < 3) return;
           var seen;
           try { seen = sessionStorage.getItem(SEEN_KEY); } catch (_) { seen = null; }
           if (seen) return;
           try { sessionStorage.setItem(SEEN_KEY, '1'); } catch (_) {}
           open();
           result('err', 'No live Quotex data right now — paste a fresh token ' +
-                        'below to start receiving signals again.');
+                        'below, or set up auto-refresh (🔁 section) so this ' +
+                        'never happens again.');
         });
       }, NAG_DELAY_MS);
     });

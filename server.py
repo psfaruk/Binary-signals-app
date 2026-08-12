@@ -86,6 +86,37 @@ def _bootstrap_persisted_token() -> None:
 
 _bootstrap_persisted_token()
 
+# ── Auto-session bootstrap ───────────────────────────────────────────────────
+# core/qx_session.py can mint a brand-new SSID from the operator's stored
+# Quotex cookies, so an expired token is no longer an outage that waits for a
+# human. Report at boot whether that safety net is actually armed — silently
+# missing cookies is exactly how this app used to spend a night offline.
+def _report_auto_session() -> None:
+    try:
+        from core import qx_session
+    except Exception as exc:
+        print(f"[server] ⚠️  auto-session unavailable: {exc}")
+        return
+    if not qx_session.enabled():
+        print("[server] auto-session DISABLED (QX_AUTO_REFRESH=0) — tokens "
+              "must be pushed by hand")
+        return
+    if qx_session.configured():
+        st = qx_session.status()
+        print(f"[server] 🔄 auto-session ARMED — cookies "
+              f"({len(st.get('cookie_names') or [])} stored, "
+              f"cf_clearance={'yes' if st.get('has_cf_clearance') else 'no'}) "
+              f"→ will mint fresh tokens from {st.get('web_hosts')}")
+        if not st.get("persistent"):
+            print("[server] ⚠️  cookie store is NOT on a persistent volume — "
+                  "it will be lost on redeploy")
+    else:
+        print("[server] ⚠️  auto-session NOT configured — no session cookies "
+              "stored. Import them once in the 🔑 Token panel and the app "
+              "will never need a manual token again.")
+
+_report_auto_session()
+
 # Token status check — log a clear, actionable error if missing.
 _QX_TOKEN = os.environ.get("QX_TOKEN", "").strip()
 _QX_EMAIL = os.environ.get("QX_EMAIL", "").strip()
@@ -426,11 +457,35 @@ async def token_status():
         live_streams = len(getattr(feed, "_streams", {}) or {})
     except Exception:
         pass
+
+    # Auto-session changes what the operator should DO about a dead token:
+    # with cookies stored the app heals itself, so the panel must not keep
+    # demanding a manual paste.
+    try:
+        from core import qx_session
+        auto_session = qx_session.status()
+    except Exception as exc:
+        auto_session = {"enabled": False, "configured": False, "error": str(exc)}
+    if auto_session.get("configured") and auto_session.get("enabled"):
+        if status == "no_credentials":
+            status = "auto_session_pending"
+            message = ("No token yet — but session cookies are stored, so the "
+                       "app is minting one itself. This takes a few seconds.")
+        elif token_dead:
+            message += (" Auto-refresh is armed and will replace it "
+                        "automatically — no action needed.")
+    elif status == "no_credentials":
+        message = ("❌ No Quotex credentials — open the 🔑 Token panel and "
+                   "either paste a session token, or paste your Quotex "
+                   "cookies once so the app can refresh its own tokens "
+                   "forever.")
+
     return {"status": status, "has_token": has_token, "has_email": has_email, "connection_status": connection_status, "consecutive_rejects": consecutive_rejects, "token_dead": token_dead, "sim_mode_disabled": True, "message": message, "action": "refresh_token" if token_dead else ("set_token" if status == "no_credentials" else None),
             "active_token": _token_store.mask(qx_token),
             "live": connection_status == "live_authorized",
             "streams": live_streams,
             "stored_token": stored,
+            "auto_session": auto_session,
             "auth": auth}
 
 
@@ -661,6 +716,90 @@ async def force_reconnect():
 async def force_reconnect_get():
     """GET version of /api/reconnect for browser-friendly access."""
     return await force_reconnect()
+
+
+# ── Auto-session: mint our own tokens instead of asking a human ─────────────
+# core/qx_session.py replays the operator's stored Quotex browser cookies to
+# mint a fresh SSID whenever the current one expires. These endpoints let the
+# UI see how that is going and re-seed the cookies when they finally die —
+# both without a redeploy. Cookie import is gated by the same PIN as token
+# import: the cookies ARE the account session, so they are at least as
+# sensitive as the token they produce.
+
+@app.get("/api/session/status")
+async def session_status():
+    """How the automatic token refresh is doing. No secrets in the response."""
+    try:
+        from core import qx_session
+        return qx_session.status()
+    except Exception as exc:
+        return {"enabled": False, "configured": False, "error": str(exc)}
+
+
+@app.post("/api/session/cookies")
+async def session_set_cookies(request: Request):
+    """Import a fresh Quotex cookie blob (document.cookie or JSON export)."""
+    body = await _json_body(request)
+    pin, admin_key = _request_secrets(body, request)
+    allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
+    if not allowed:
+        return JSONResponse(status_code=403,
+                            content={"ok": False, "error": _auth_error(reason),
+                                     "auth": _token_store.auth_state()})
+    raw = body.get("cookies") or body.get("cookie") or ""
+    if not raw.strip():
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "error": "no cookies supplied"})
+    from core import qx_session
+    result = qx_session.import_cookies(raw, source=body.get("source") or "ui")
+    if not result.get("ok"):
+        return JSONResponse(status_code=400, content=result)
+
+    # An import is only meaningful if it can actually mint a token — prove it
+    # right now rather than letting the operator find out at 3am when the
+    # current token dies.
+    token, detail = await qx_session.refresh_token(reason="cookie-import",
+                                                   force=True)
+    if not token:
+        return JSONResponse(status_code=400, content={
+            "ok": False,
+            "error": f"cookies saved, but they did not produce a token: {detail}",
+            "cookies": result.get("cookies"),
+            "hint": "Log in to Quotex in your browser, then copy document.cookie "
+                    "again — the remember_web cookie must be from a live session.",
+        })
+    await _apply_token(token, source="auto-session")
+    return {"ok": True,
+            "message": f"Cookies saved and verified — minted {_token_store.mask(token)}. "
+                       f"The app will now refresh its own token from here on.",
+            "cookies": result.get("cookies"),
+            "detail": detail,
+            "status": qx_session.status()}
+
+
+@app.post("/api/session/refresh")
+async def session_refresh(request: Request):
+    """Force an immediate token refresh from the stored cookies."""
+    body = await _json_body(request)
+    pin, admin_key = _request_secrets(body, request)
+    allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
+    if not allowed:
+        return JSONResponse(status_code=403,
+                            content={"ok": False, "error": _auth_error(reason)})
+    from core import qx_session
+    if not qx_session.configured():
+        return JSONResponse(status_code=400, content={
+            "ok": False,
+            "error": "no session cookies stored — paste them in the "
+                     "'Session cookies' box first"})
+    token, detail = await qx_session.refresh_token(reason="manual", force=True)
+    if not token:
+        return JSONResponse(status_code=502,
+                            content={"ok": False, "error": detail,
+                                     "status": qx_session.status()})
+    await _apply_token(token, source="auto-session")
+    return {"ok": True, "message": f"Minted {_token_store.mask(token)} — reconnecting…",
+            "detail": detail, "status": qx_session.status()}
 
 @app.get("/api/pairs")
 async def get_pairs():
