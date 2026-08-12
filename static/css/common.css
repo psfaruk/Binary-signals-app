@@ -92,7 +92,13 @@ body{ overflow:hidden }   /* desktop: app fills viewport, internal regions scrol
   gap:10px;
   padding:8px 14px;
   min-height:52px;
-  flex-wrap:nowrap;
+  /* FIX (TOPBAR-CLIP-2026-08-12): was `nowrap`, and the wrap rule only kicked
+     in at ≤768px. Between ~769px and ~1200px the row overflowed the viewport
+     and — because body has overflow:hidden — the controls at its end (market
+     switch, 🔑 Token) were clipped off-screen with no way to scroll to them.
+     Wrapping keeps every control reachable at any width. */
+  flex-wrap:wrap;
+  row-gap:6px;
 }
 
 /* Brand block — market title + colored dot */

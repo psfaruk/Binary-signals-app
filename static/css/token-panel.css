@@ -28,8 +28,19 @@
 #token-btn.state-dead   .tk-dot{background:var(--red);box-shadow:0 0 6px var(--red);animation:tk-pulse .8s ease-in-out infinite}
 #token-btn.state-live{border-color:rgba(0,200,83,.45);color:var(--green)}
 #token-btn.state-wait{border-color:rgba(255,193,7,.45);color:var(--yellow)}
-#token-btn.state-dead{border-color:rgba(255,23,68,.5);color:var(--red);background:var(--red-bg)}
+/* No live data — this button is the fix, so it stops looking like a status
+   chip and starts looking like the thing to press. */
+#token-btn.state-dead{
+  border-color:var(--red);color:#fff;background:var(--red);
+  animation:tk-attention 1.6s ease-in-out infinite;
+}
+#token-btn.state-dead .tk-dot{background:#fff;box-shadow:0 0 6px #fff}
+#token-btn.state-dead:hover{background:#ff4569;border-color:#ff4569}
 @keyframes tk-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes tk-attention{
+  0%,100%{box-shadow:0 0 0 0 rgba(255,23,68,.55)}
+  50%{box-shadow:0 0 0 6px rgba(255,23,68,0)}
+}
 
 /* Floating fallback when the page has no topbar to host the button. */
 #token-btn.tk-floating{position:fixed;top:10px;right:10px;z-index:9000}
@@ -38,7 +49,8 @@
 #token-modal{
   position:fixed;inset:0;z-index:9500;
   display:flex;align-items:center;justify-content:center;padding:16px;
-  background:rgba(1,4,9,.78);backdrop-filter:blur(3px);
+  background:rgba(1,4,9,.78);
+  -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);
 }
 #token-modal[hidden]{display:none}
 .tk-dialog{
@@ -137,5 +149,7 @@
 
 @media (max-width:576px){
   .tk-dialog{width:100%;max-height:94vh}
+  /* Icon-only to save room — except when it is the call to action. */
   #token-btn .tk-text{display:none}
+  #token-btn.state-dead .tk-text{display:inline}
 }

@@ -28,6 +28,7 @@
   var PIN_KEY = 'qxTokenPin';        // localStorage: remembered PIN
   var SEEN_KEY = 'qxTokenPanelSeen'; // sessionStorage: auto-open once per tab
   var POLL_MS = 20000;               // idle status refresh
+  var NAG_DELAY_MS = 12000;          // grace period before "no live data" nag
   var WATCH_MS = 2000;               // post-import status polling
   var WATCH_TIMEOUT_MS = 75000;
 
@@ -89,11 +90,14 @@
     ]);
     btn.addEventListener('click', function () { open(); });
 
-    var anchor = document.getElementById('market-switch-btn');
-    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(btn, anchor);
+    // Sit right next to the connection indicator — it reports the same thing
+    // (are we live?) and, unlike the end of the row, that spot is never the
+    // first thing pushed out of view when the topbar runs out of width.
+    var conn = document.querySelector('#topbar-row1 .conn-group');
+    if (conn && conn.parentNode) conn.parentNode.insertBefore(btn, conn.nextSibling);
     else {
       var row = document.getElementById('topbar-row1');
-      if (row) row.appendChild(btn);
+      if (row) row.insertBefore(btn, row.firstChild);
       else { btn.classList.add('tk-floating'); document.body.appendChild(btn); }
     }
     return btn;
@@ -190,7 +194,10 @@
   function stateClass(s) {
     if (!s) return 'wait';
     if (s.live) return 'live';
-    if (s.token_dead || s.status === 'no_credentials') return 'dead';
+    // No credentials, a token Quotex rejected, or a token that simply is not
+    // connecting — from the user's side these are one thing: no live data.
+    if (s.token_dead || s.status === 'no_credentials' ||
+        s.connection_status === 'disconnected') return 'dead';
     return 'wait';
   }
 
@@ -203,7 +210,9 @@
       var floating = el.btn.classList.contains('tk-floating');
       el.btn.className = 'state-' + cls + (floating ? ' tk-floating' : '');
       var txt = el.btn.querySelector('.tk-text');
-      if (txt) txt.textContent = label === 'Live' ? 'Live' : 'Token';
+      // Not live = the button IS the call to action, so it says what to do.
+      if (txt) txt.textContent = cls === 'live' ? 'Live'
+                              : cls === 'dead' ? 'Set Token' : 'Token';
       el.btn.title = s ? (s.message || label) : 'Quotex token status';
     }
     if (!el.modal) return;
@@ -406,17 +415,25 @@
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) importToken();
     });
 
+    // Direct link support: .../otc.html#token opens the panel straight away.
+    if (location.hash === '#token') { refresh().then(open); return; }
+
     refresh().then(function (s) {
-      // Nag exactly once per tab when there is nothing to trade on.
-      var broken = s && (s.status === 'no_credentials' || s.token_dead ||
-                         (state.auth && !state.auth.claimed && !s.has_token));
-      var seen;
-      try { seen = sessionStorage.getItem(SEEN_KEY); } catch (_) { seen = null; }
-      if (broken && !seen) {
-        try { sessionStorage.setItem(SEEN_KEY, '1'); } catch (_) {}
-        open();
-        result('err', 'No live Quotex data — import a token to start receiving signals.');
-      }
+      if (s && s.live) return;
+      // Not live. Could just be the few seconds after a container boot, so
+      // re-check before nagging — then open exactly once per tab.
+      setTimeout(function () {
+        refresh().then(function (s2) {
+          if (s2 && s2.live) return;
+          var seen;
+          try { seen = sessionStorage.getItem(SEEN_KEY); } catch (_) { seen = null; }
+          if (seen) return;
+          try { sessionStorage.setItem(SEEN_KEY, '1'); } catch (_) {}
+          open();
+          result('err', 'No live Quotex data right now — paste a fresh token ' +
+                        'below to start receiving signals again.');
+        });
+      }, NAG_DELAY_MS);
     });
     state.pollTimer = setInterval(function () { if (!state.watching) refresh(); }, POLL_MS);
   }
