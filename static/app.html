@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0e1a">
+    <title>Binary Signal Terminal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/common.css">
+    <link rel="stylesheet" href="/static/css/token-panel.css">
+    <link rel="stylesheet" href="/static/css/app-nav.css">
+    <!-- PHASE-4-FIX (2026-08-13): consolidated single-page app replaces
+         otc.html / real.html / alltime_otc.html. Category param switches
+         OTC/Real/All-OTC. Bottom nav on mobile, left sidebar on desktop. -->
+</head>
+<body data-category="otc" data-tab="home">
+
+<!-- Skip link for a11y -->
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<!-- ============ APP SHELL ============ -->
+<div class="app-shell">
+
+    <!-- ============ SIDEBAR (desktop ≥1024px) ============ -->
+    <aside class="app-sidebar" id="app-sidebar" aria-label="Main navigation">
+        <div class="sidebar-brand">
+            <div class="brand-icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M3 12h4l3-9 4 18 3-9h4"/>
+                </svg>
+            </div>
+            <div class="brand-text">
+                <h1>Binary Signal</h1>
+                <span class="brand-version">Terminal v2</span>
+            </div>
+        </div>
+
+        <nav class="sidebar-nav">
+            <button class="nav-item active" data-tab="home" aria-label="Home">
+                <span class="nav-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                </span>
+                <span class="nav-label">Home</span>
+            </button>
+            <button class="nav-item" data-tab="chart" aria-label="Chart Signal">
+                <span class="nav-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                </span>
+                <span class="nav-label">Chart Signal</span>
+            </button>
+            <button class="nav-item" data-tab="history" aria-label="History">
+                <span class="nav-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15.5 13.5"/></svg>
+                </span>
+                <span class="nav-label">History</span>
+            </button>
+            <button class="nav-item" data-tab="setting" aria-label="Setting">
+                <span class="nav-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                </span>
+                <span class="nav-label">Setting</span>
+            </button>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="market-switcher">
+                <label class="switcher-label">Market</label>
+                <div class="switcher-buttons">
+                    <button class="mkt-btn" data-mkt="otc">OTC</button>
+                    <button class="mkt-btn" data-mkt="real">Real</button>
+                    <button class="mkt-btn" data-mkt="alltime_otc">All-OTC</button>
+                </div>
+            </div>
+            <div class="sidebar-status">
+                <div class="status-dot" id="sidebar-conn-dot"></div>
+                <span id="sidebar-conn-text">Connecting…</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ============ MAIN CONTENT ============ -->
+    <main class="app-main" id="main-content" tabindex="-1">
+
+        <!-- ============ TOP BAR ============ -->
+        <header class="app-topbar">
+            <div class="topbar-left">
+                <button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Toggle menu">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                </button>
+                <div class="topbar-brand-mobile">
+                    <span class="brand-mark">BST</span>
+                    <span class="brand-cat" id="topbar-cat-label">OTC</span>
+                </div>
+            </div>
+            <div class="topbar-center">
+                <select id="pair-select" class="pair-select" aria-label="Select pair"></select>
+                <div class="price-display">
+                    <span class="price-label">Price</span>
+                    <span class="price-value" id="live-price">—</span>
+                </div>
+                <div class="payout-display">
+                    <span class="payout-label">Payout</span>
+                    <span class="payout-value" id="payout-pct">—%</span>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <div class="candle-countdown" title="Next candle close">
+                    <span class="countdown-label">Next</span>
+                    <span class="countdown-value" id="candle-countdown">--:--</span>
+                </div>
+                <div class="broker-time" title="Broker UTC time">
+                    <span id="broker-time">--:--:--</span>
+                </div>
+                <button class="icon-btn" id="sound-btn" aria-label="Toggle sound">
+                    <svg class="icon-sound-on" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+                    <svg class="icon-sound-off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+                </button>
+                <button class="icon-btn token-btn" id="token-btn" aria-label="Token management" title="Token management">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- ============ TAB PANES ============ -->
+        <div class="tab-panes">
+
+            <!-- =========== HOME TAB =========== -->
+            <section class="tab-pane active" data-pane="home" id="pane-home">
+                <div class="pane-header">
+                    <h2>Dashboard</h2>
+                    <p class="pane-subtitle">Live market overview — every candle, every pair</p>
+                </div>
+
+                <div class="home-grid">
+                    <!-- Quick stats -->
+                    <div class="stat-card stat-card-lg">
+                        <div class="stat-label">Live Pairs</div>
+                        <div class="stat-value" id="home-live-pairs">0 / 0</div>
+                        <div class="stat-sub">Streaming now</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Today's Signals</div>
+                        <div class="stat-value" id="home-today-signals">0</div>
+                        <div class="stat-sub" id="home-today-calls">CALL: 0 / PUT: 0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Win Rate</div>
+                        <div class="stat-value" id="home-winrate">—%</div>
+                        <div class="stat-sub" id="home-winrate-sub">last 50 signals</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Active STRONG</div>
+                        <div class="stat-value" id="home-strong-count">0</div>
+                        <div class="stat-sub">high-confidence signals</div>
+                    </div>
+
+                    <!-- Top movers (signals table) -->
+                    <div class="home-card home-card-wide">
+                        <div class="card-header">
+                            <h3>Top Signals Right Now</h3>
+                            <button class="btn-secondary" id="home-refresh-btn">Refresh</button>
+                        </div>
+                        <div class="share-signal-table-wrap" id="home-signals-wrap">
+                            <table class="share-signal-table" id="home-signals-table">
+                                <thead>
+                                    <tr>
+                                        <th>Pair</th>
+                                        <th>Type</th>
+                                        <th>Signal</th>
+                                        <th>Conf</th>
+                                        <th>Str</th>
+                                        <th>Updated</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="home-signals-tbody">
+                                    <tr><td colspan="6" class="loading-row">Loading…</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Market status -->
+                    <div class="home-card">
+                        <div class="card-header"><h3>Market Status</h3></div>
+                        <div class="market-status-list" id="home-market-status">
+                            <div class="status-row">
+                                <span class="status-label">OTC</span>
+                                <span class="status-badge status-live">24/7</span>
+                            </div>
+                            <div class="status-row">
+                                <span class="status-label">Real</span>
+                                <span class="status-badge" id="home-real-status">Checking…</span>
+                            </div>
+                            <div class="status-row">
+                                <span class="status-label">Connection</span>
+                                <span class="status-badge" id="home-conn-status">Connecting…</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- =========== CHART SIGNAL TAB =========== -->
+            <section class="tab-pane" data-pane="chart" id="pane-chart">
+                <div class="chart-layout">
+                    <div class="chart-main">
+                        <div class="chart-container" id="chart-container">
+                            <div id="chart-loading" class="chart-loading">Loading chart…</div>
+                        </div>
+                        <div class="chart-stale-overlay" id="chart-stale" style="display:none">
+                            <div class="stale-message">
+                                <span>⚠️ Stale data</span>
+                                <button class="btn-secondary" onclick="window.location.reload()">Reconnect</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <aside class="chart-panel" id="chart-panel">
+                        <!-- Signal box -->
+                        <div class="signal-box" id="signal-box">
+                            <div class="signal-header">
+                                <span class="signal-label">Signal</span>
+                                <span class="signal-strength" id="signal-strength">—</span>
+                            </div>
+                            <div class="signal-direction" id="signal-direction">NEUTRAL</div>
+                            <div class="signal-confidence">
+                                <div class="conf-bar"><div class="conf-fill" id="conf-fill"></div></div>
+                                <span class="conf-value" id="conf-value">0%</span>
+                            </div>
+                            <div class="signal-meta">
+                                <span>Next: <strong id="next-signal-time">--:--</strong></span>
+                                <span>Pair: <strong id="signal-pair-name">—</strong></span>
+                            </div>
+                        </div>
+
+                        <!-- Module breakdown -->
+                        <div class="module-panel">
+                            <h4>Module Engine</h4>
+                            <div class="module-list" id="module-list">
+                                <div class="module-row">Loading modules…</div>
+                            </div>
+                        </div>
+
+                        <!-- Microstructure -->
+                        <div class="micro-panel">
+                            <h4>Microstructure</h4>
+                            <div class="micro-stats" id="micro-stats">
+                                <div class="micro-row">
+                                    <span>Buyers</span>
+                                    <div class="micro-bar"><div class="buyers-fill" id="buyers-fill"></div></div>
+                                    <span id="buyers-pct">—%</span>
+                                </div>
+                                <div class="micro-row">
+                                    <span>Sellers</span>
+                                    <div class="micro-bar"><div class="sellers-fill" id="sellers-fill"></div></div>
+                                    <span id="sellers-pct">—%</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Share signal table -->
+                        <div class="share-panel">
+                            <div class="share-header">
+                                <h4>Share Signals</h4>
+                                <div class="share-actions">
+                                    <button class="icon-btn-sm" id="share-refresh-btn" title="Refresh">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                                    </button>
+                                    <button class="icon-btn-sm" id="share-save-btn" title="Save snapshot">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                                    </button>
+                                    <button class="icon-btn-sm" id="share-history-btn" title="View history">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                    </button>
+                                    <button class="icon-btn-sm" id="share-collapse-btn" title="Collapse">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="share-filters">
+                                <select id="share-filter-type" class="filter-select">
+                                    <option value="">All Types</option>
+                                    <option value="OTC">OTC</option>
+                                    <option value="Real">Real</option>
+                                </select>
+                                <select id="share-filter-signal" class="filter-select">
+                                    <option value="">All Signals</option>
+                                    <option value="CALL">CALL</option>
+                                    <option value="PUT">PUT</option>
+                                    <option value="NEUTRAL">NEUTRAL</option>
+                                </select>
+                                <input type="search" id="share-search" class="filter-input" placeholder="Search pair…">
+                            </div>
+                            <div class="share-signal-table-wrap">
+                                <table class="share-signal-table" id="share-signal-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Pair</th>
+                                            <th>Type</th>
+                                            <th>Time</th>
+                                            <th>Buyer%</th>
+                                            <th>Seller%</th>
+                                            <th>Signal</th>
+                                            <th>Conf</th>
+                                            <th>Str</th>
+                                            <th>Update</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="share-signal-tbody">
+                                        <tr><td colspan="9" class="loading-row">Loading…</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+
+            <!-- =========== HISTORY TAB =========== -->
+            <section class="tab-pane" data-pane="history" id="pane-history">
+                <div class="pane-header">
+                    <h2>Signal History</h2>
+                    <p class="pane-subtitle">Past signals, accuracy stats, and backtest results</p>
+                </div>
+
+                <div class="history-tabs">
+                    <button class="hist-tab active" data-hist="signals">Signals</button>
+                    <button class="hist-tab" data-hist="accuracy">Accuracy</button>
+                    <button class="hist-tab" data-hist="backtest">Backtest</button>
+                </div>
+
+                <div class="hist-pane active" data-hist-pane="signals">
+                    <div class="history-controls">
+                        <select id="hist-pair-select" class="filter-select"><option value="">All pairs</option></select>
+                        <select id="hist-direction" class="filter-select">
+                            <option value="">All directions</option>
+                            <option value="CALL">CALL</option>
+                            <option value="PUT">PUT</option>
+                            <option value="NEUTRAL">NEUTRAL</option>
+                        </select>
+                        <select id="hist-accuracy" class="filter-select">
+                            <option value="">All results</option>
+                            <option value="correct">Correct</option>
+                            <option value="wrong">Wrong</option>
+                            <option value="draw">Draw</option>
+                        </select>
+                        <button class="btn-secondary" id="hist-clear-filters">Clear filters</button>
+                    </div>
+                    <div class="history-list" id="history-list">
+                        <div class="loading-row">Loading history…</div>
+                    </div>
+                    <div class="history-pagination">
+                        <button class="btn-secondary" id="hist-load-more">Load older signals</button>
+                    </div>
+                </div>
+
+                <div class="hist-pane" data-hist-pane="accuracy">
+                    <div class="accuracy-grid" id="accuracy-grid">
+                        <div class="acc-card">
+                            <div class="acc-label">Total signals</div>
+                            <div class="acc-value" id="acc-total">—</div>
+                        </div>
+                        <div class="acc-card">
+                            <div class="acc-label">Win rate</div>
+                            <div class="acc-value" id="acc-winrate">—%</div>
+                        </div>
+                        <div class="acc-card">
+                            <div class="acc-label">CALL win rate</div>
+                            <div class="acc-value" id="acc-call-wr">—%</div>
+                        </div>
+                        <div class="acc-card">
+                            <div class="acc-label">PUT win rate</div>
+                            <div class="acc-value" id="acc-put-wr">—%</div>
+                        </div>
+                        <div class="acc-card">
+                            <div class="acc-label">Best pair</div>
+                            <div class="acc-value" id="acc-best-pair">—</div>
+                        </div>
+                        <div class="acc-card">
+                            <div class="acc-label">Best hour</div>
+                            <div class="acc-value" id="acc-best-hour">—</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="hist-pane" data-hist-pane="backtest">
+                    <div class="backtest-controls">
+                        <button class="btn-primary" id="bt-run-btn">Run backtest</button>
+                        <select id="bt-pair-select" class="filter-select"><option value="">All pairs</option></select>
+                        <input type="number" id="bt-candles" class="filter-input" value="100" min="10" max="1000" placeholder="candles">
+                    </div>
+                    <div class="backtest-results" id="backtest-results">
+                        <p class="hint">Click "Run backtest" to verify signals appear on every candle.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- =========== SETTING TAB =========== -->
+            <section class="tab-pane" data-pane="setting" id="pane-setting">
+                <div class="pane-header">
+                    <h2>Settings</h2>
+                    <p class="pane-subtitle">API keys, token management, preferences</p>
+                </div>
+
+                <div class="settings-sections">
+                    <!-- API Keys -->
+                    <div class="settings-section">
+                        <h3>API Keys</h3>
+                        <p class="section-desc">
+                            Public read access is enabled — anyone with the URL can view signals.
+                            API keys are optional, for programmatic clients (bots, scripts).
+                        </p>
+                        <div class="api-key-create">
+                            <input type="text" id="api-key-label" class="filter-input" placeholder="Key label (e.g. my-bot)">
+                            <input type="number" id="api-key-ratelimit" class="filter-input" value="60" min="1" max="600" placeholder="rate/min">
+                            <button class="btn-primary" id="api-key-create-btn">Create key</button>
+                        </div>
+                        <div class="api-key-list" id="api-key-list">
+                            <div class="loading-row">Loading keys…</div>
+                        </div>
+                        <div class="api-key-help">
+                            <p><strong>How to use:</strong> pass the key as <code>Authorization: Bearer qxa_...</code> header, or as <code>?api_key=qxa_...</code> query parameter.</p>
+                            <p><strong>Public endpoints</strong> (no key needed): <code>/api/share-signals</code>, <code>/api/pairs</code>, <code>/api/signals/{asset}/{period}</code>, <code>/api/history/*</code>, <code>/api/stats</code></p>
+                            <p><strong>Key-required endpoints</strong>: <code>POST /api/share-signals/save</code>, <code>POST /api/keys</code></p>
+                            <p><strong>Admin endpoints</strong> (X-App-Pin or X-Admin-Key): <code>/api/set-token</code>, <code>/api/session/*</code>, <code>/api/signals/clear</code></p>
+                        </div>
+                    </div>
+
+                    <!-- Token management -->
+                    <div class="settings-section">
+                        <h3>Quotex Token</h3>
+                        <p class="section-desc">Live Quotex session token status. Token expires ~24h.</p>
+                        <div class="token-status" id="token-status-row">
+                            <div class="token-status-icon" id="token-status-icon">●</div>
+                            <div class="token-status-text">
+                                <div class="token-status-label" id="token-status-label">Checking…</div>
+                                <div class="token-status-sub" id="token-status-sub"></div>
+                            </div>
+                            <button class="btn-secondary" id="token-manage-btn">Manage token</button>
+                        </div>
+                    </div>
+
+                    <!-- Preferences -->
+                    <div class="settings-section">
+                        <h3>Preferences</h3>
+                        <div class="pref-row">
+                            <label class="pref-label">
+                                <span class="pref-title">Sound alerts</span>
+                                <span class="pref-desc">Play sound on new STRONG signal</span>
+                            </label>
+                            <label class="switch">
+                                <input type="checkbox" id="pref-sound" checked>
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+                        <div class="pref-row">
+                            <label class="pref-label">
+                                <span class="pref-title">Auto-refresh share signals</span>
+                                <span class="pref-desc">Poll every 10 seconds</span>
+                            </label>
+                            <label class="switch">
+                                <input type="checkbox" id="pref-autorefresh" checked>
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+                        <div class="pref-row">
+                            <label class="pref-label">
+                                <span class="pref-title">Show WEAK signals</span>
+                                <span class="pref-desc">Display low-confidence signals (gray badge)</span>
+                            </label>
+                            <label class="switch">
+                                <input type="checkbox" id="pref-show-weak" checked>
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+                        <div class="pref-row">
+                            <label class="pref-label">
+                                <span class="pref-title">Default market</span>
+                                <span class="pref-desc">Which market to load on startup</span>
+                            </label>
+                            <select id="pref-default-market" class="filter-select">
+                                <option value="otc">OTC</option>
+                                <option value="real">Real</option>
+                                <option value="alltime_otc">All-OTC</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- About -->
+                    <div class="settings-section">
+                        <h3>About</h3>
+                        <div class="about-info">
+                            <div class="about-row"><span>Version</span><strong>2.0.0 (Phase-2-FIX)</strong></div>
+                            <div class="about-row"><span>Build</span><strong>2026-08-13</strong></div>
+                            <div class="about-row"><span>Engine</span><strong>9-module blender + smart-fallback + last-resort</strong></div>
+                            <div class="about-row"><span>Signal mode</span><strong>Every candle (WEAK enabled, PATTERN_GATE off)</strong></div>
+                            <div class="about-row"><span>Public read</span><strong id="about-public-read">Enabled</strong></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+        </div><!-- /tab-panes -->
+
+        <!-- ============ BOTTOM NAV (mobile <1024px) ============ -->
+        <nav class="app-bottomnav" aria-label="Bottom navigation">
+            <button class="bn-item active" data-tab="home">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                <span>Home</span>
+            </button>
+            <button class="bn-item" data-tab="chart">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                <span>Chart</span>
+            </button>
+            <button class="bn-item" data-tab="history">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15.5 13.5"/></svg>
+                <span>History</span>
+            </button>
+            <button class="bn-item" data-tab="setting">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                <span>Setting</span>
+            </button>
+        </nav>
+
+    </main>
+</div><!-- /app-shell -->
+
+<!-- ============ TOKEN PANEL MODAL (existing) ============ -->
+<div id="token-panel-modal" class="modal-overlay" hidden>
+    <div class="modal-content token-panel-content">
+        <button class="modal-close" id="token-panel-close" aria-label="Close">×</button>
+        <div id="token-panel-body"></div>
+    </div>
+</div>
+
+<!-- ============ API KEY CREATED MODAL ============ -->
+<div id="api-key-modal" class="modal-overlay" hidden>
+    <div class="modal-content api-key-modal-content">
+        <button class="modal-close" id="api-key-modal-close" aria-label="Close">×</button>
+        <h3>API Key Created</h3>
+        <p class="modal-warn">⚠️ Copy this key now — it will not be shown again.</p>
+        <div class="api-key-display">
+            <code id="api-key-raw"></code>
+            <button class="btn-secondary" id="api-key-copy-btn">Copy</button>
+        </div>
+        <div class="api-key-info" id="api-key-info-box"></div>
+    </div>
+</div>
+
+<!-- ============ SIGNAL DETAIL MODAL ============ -->
+<div id="signal-detail-overlay" class="modal-overlay" hidden>
+    <div class="modal-content signal-detail-content">
+        <button class="modal-close" id="signal-detail-close" aria-label="Close">×</button>
+        <div id="signal-detail-body"></div>
+    </div>
+</div>
+
+<!-- ============ SCRIPTS ============ -->
+<script src="/static/lightweight-charts.js"></script>
+<script src="/static/js/common.js"></script>
+<script src="/static/js/app-nav.js"></script>
+<script src="/static/js/api-keys.js"></script>
+<script src="/static/js/token-panel.js"></script>
+<script>
+// Boot the app — read category from URL or localStorage
+(function() {
+    const params = new URLSearchParams(window.location.search);
+    const cat = params.get('market') || params.get('category') || localStorage.getItem('marketCategory') || 'otc';
+    const validCats = ['otc', 'real', 'alltime_otc'];
+    const finalCat = validCats.includes(cat) ? cat : 'otc';
+    document.body.setAttribute('data-category', finalCat);
+    localStorage.setItem('marketCategory', finalCat);
+    // Update brand label
+    const catLabel = document.getElementById('topbar-cat-label');
+    if (catLabel) catLabel.textContent = finalCat.toUpperCase().replace('_', '-');
+
+    // Wait for common.js to expose initApp, then boot
+    function boot() {
+        if (typeof window.initApp === 'function') {
+            window.initApp(finalCat);
+        } else {
+            setTimeout(boot, 50);
+        }
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', boot);
+    } else {
+        boot();
+    }
+})();
+</script>
+</body>
+</html>

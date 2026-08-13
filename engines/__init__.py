@@ -36,9 +36,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # the expensive prediction and return NEUTRAL immediately.
     # This prevents chronic-loser pairs (BRLUSD_otc 44.3%, USDCOP_otc 44.8%,
     # USDBDT_otc 45.4%) from generating losing signals all day.
-    # Disabled via QX_BREAKEVEN_GATE=0.
+    # FIX (PHASE-2-FIX, 2026-08-13): default flipped to "0" — user requirement
+    # is "প্রত্যেক ক্যান্ডেল এ সিগন্যাল আসতে হবে" (every candle must produce a
+    # signal). With this gate ON, entire pairs would be suppressed for the
+    # day. Re-enable per-deploy if quality is preferred over coverage.
     try:
-        if os.environ.get("QX_BREAKEVEN_GATE", "1") == "1" and asset:
+        if os.environ.get("QX_BREAKEVEN_GATE", "0") == "1" and asset:
             from core.breakeven import is_pair_profitable as _is_profitable
             _is_prof, _breason, _wr, _be, _n = _is_profitable(asset, period)
             if not _is_prof:
@@ -73,8 +76,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # Check if the pair is in cooldown (≥8 consecutive losses → skip 30 min).
     # This is a faster-acting gate than the breakeven gate — it catches
     # intraday regime changes before they accumulate into a bad day.
+    # FIX (PHASE-2-FIX, 2026-08-13): default flipped to "0" — same reason
+    # as BREAKEVEN_GATE. Pair-level suppression conflicts with the "every
+    # candle gets a signal" requirement.
     try:
-        if os.environ.get("QX_PAIR_HEALTH_GATE", "1") == "1" and asset:
+        if os.environ.get("QX_PAIR_HEALTH_GATE", "0") == "1" and asset:
             from core.pair_health import is_pair_healthy as _is_healthy
             _healthy, _hreason = _is_healthy(asset)
             if not _healthy:
@@ -95,25 +101,29 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         print(f"[engines] pair health check failed for {asset}: {_ph_exc}")
 
     # Trap-hour auto-skip: NEUTRAL for (asset, hour) pairs the live brain flagged.
+    # FIX (PHASE-2-FIX, 2026-08-13): env-gated via QX_TRAP_HOUR (default "0").
+    # Trap-hour suppression hides signals during specific hours, conflicting
+    # with the "every candle gets a signal" requirement.
     try:
-        _now_utc = _datetime.now(_timezone.utc)
-        _hour_utc = _now_utc.hour
-        if _is_trap_hour(asset, _hour_utc):
-            _reason = _trap_reason(asset, _hour_utc)
-            return {
-                "signal": "NEUTRAL",
-                "confidence": 0,
-                "strength": "WEAK",
-                "score": 0.0,
-                "reasons": [_reason] if _reason else ["trap hour suppression"],
-                "modules": {},
-                "regime": "trap_hour",
-                "category": category if category in ("otc", "real") else "otc",
-                "trap_hour": True,
-                "trap_hour_utc": _hour_utc,
-                "trap_reason": _reason,
-                "skipped": True,
-            }
+        if os.environ.get("QX_TRAP_HOUR", "0") == "1":
+            _now_utc = _datetime.now(_timezone.utc)
+            _hour_utc = _now_utc.hour
+            if _is_trap_hour(asset, _hour_utc):
+                _reason = _trap_reason(asset, _hour_utc)
+                return {
+                    "signal": "NEUTRAL",
+                    "confidence": 0,
+                    "strength": "WEAK",
+                    "score": 0.0,
+                    "reasons": [_reason] if _reason else ["trap hour suppression"],
+                    "modules": {},
+                    "regime": "trap_hour",
+                    "category": category if category in ("otc", "real") else "otc",
+                    "trap_hour": True,
+                    "trap_hour_utc": _hour_utc,
+                    "trap_reason": _reason,
+                    "skipped": True,
+                }
     except Exception as _trap_exc:
         print(f"[engines] trap-hour check failed for {asset}: {_trap_exc}")
 
@@ -157,11 +167,14 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     result["category"] = category
 
     # Apply pair confidence penalty (preserves direction, dampens conviction).
+    # FIX (PHASE-2-FIX, 2026-08-13): the <25 → NEUTRAL hard-cutoff is now
+    # env-gated via QX_PAIR_PENALTY_NEUTRAL (default "0"). With every-candle-
+    # must-signal mode, we dampen confidence but keep the direction visible.
     if _pair_mult < 1.0 and result.get("signal") in ("CALL", "PUT"):
         _orig_conf = result.get("confidence", 0)
         _new_conf = round(_orig_conf * _pair_mult)
         result["confidence"] = _new_conf
-        if _new_conf < 25:
+        if _new_conf < 25 and os.environ.get("QX_PAIR_PENALTY_NEUTRAL", "0") == "1":
             result["signal"] = "NEUTRAL"
             result["confidence"] = 0
             result["strength"] = "NEUTRAL"

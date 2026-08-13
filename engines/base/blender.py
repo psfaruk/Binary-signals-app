@@ -74,8 +74,12 @@ ULTRA_CONSENSUS_ABS_NET_MIN = 5
 ULTRA_CONSENSUS_GROUPS_MIN = 3
 
 LOW_CONF_SKIP_THRESHOLD = 20
-LOW_CONF_SKIP_OTC  = int(os.environ.get("QX_LOW_CONF_SKIP_OTC",  "5"))
-LOW_CONF_SKIP_REAL = int(os.environ.get("QX_LOW_CONF_SKIP_REAL", "5"))
+# FIX (PHASE-2-FIX, 2026-08-13): default 5 → 0. Any positive threshold
+# suppresses low-confidence signals and conflicts with the "every candle
+# must produce a signal" requirement. Last-resort fallback uses conf=35
+# which is already above 5, but explicit zero makes the intent clear.
+LOW_CONF_SKIP_OTC  = int(os.environ.get("QX_LOW_CONF_SKIP_OTC",  "0"))
+LOW_CONF_SKIP_REAL = int(os.environ.get("QX_LOW_CONF_SKIP_REAL", "0"))
 
 MEDIUM_CONFIDENCE_FLOOR = 30
 
@@ -94,14 +98,20 @@ WEAK_BOOST_ENABLED = os.environ.get("QX_WEAK_BOOST", "1") == "1"
 # Never produce a signal when total effective score is 0 (all votes suppressed).
 # When OFF (0): HTF+hourly+range smart fallback produces WEAK signal. Default ON.
 NO_FALLBACK_SIGNAL = os.environ.get("QX_NO_FALLBACK", "0") == "1"
-# Override to allow WEAK signals through (NOT recommended — 41.9% WR).
-ALLOW_WEAK_SIGNALS = os.environ.get("QX_ALLOW_WEAK_SIGNALS", "0") == "1"
+# Override to allow WEAK signals through.
+# FIX (PHASE-2-FIX, 2026-08-13): default flipped to "1" — user requirement
+# is "প্রত্যেক ক্যান্ডেল এ সিগন্যাল আসতে হবে" (every candle must produce a signal).
+# Suppressing WEAK signals defeats that. UI now visually distinguishes WEAK.
+ALLOW_WEAK_SIGNALS = os.environ.get("QX_ALLOW_WEAK_SIGNALS", "1") == "1"
 # Dual confirmation gate — DISABLED by default (too strict, pattern+wickwall
 # rarely fire simultaneously). Use pattern gate instead.
 DUAL_CONFIRM = os.environ.get("QX_DUAL_CONFIRM", "0") == "1"
-# Pattern Gate: require pattern module (63.5% WR) as signal anchor.
-# Without pattern, other modules collectively produce 42-48% WR.
-PATTERN_GATE = os.environ.get("QX_PATTERN_GATE", "1") == "1"
+# Pattern Gate: require pattern module as signal anchor.
+# FIX (PHASE-2-FIX, 2026-08-13): default flipped to "0" — pattern module
+# only fires on classical candlestick formations (Tweezer/Piercing/Harami/
+# Pin Bar/Doji/Two-Bar Reversal), which occur on a minority of candles.
+# Keeping this gate ON caused "mostly natural" symptom reported by user.
+PATTERN_GATE = os.environ.get("QX_PATTERN_GATE", "0") == "1"
 # Require at least 1 group (pattern is the anchor at 63.5% WR).
 # With only pattern+wickwall active, 1 group = pattern fired alone.
 # When both fire: boosted confidence. Set higher to require multi-confirmation.
@@ -592,22 +602,40 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
                 "smart_fallback": True,
             }
 
-        # NO_FALLBACK mode: return NEUTRAL
+        # LAST-RESORT FALLBACK (PHASE-2-FIX, 2026-08-13):
+        # User requirement: "প্রত্যেক ক্যান্ডেল এ সিগন্যাল আসতে হবে" — every
+        # candle must produce a directional signal. When smart-fallback did
+        # not match (no HTF trend, no hourly bias, not ranging) we still need
+        # to emit CALL/PUT. Use last closed candle body direction as a
+        # minimal-edge directional proxy (continuation bias, ~50% baseline).
+        # Tagged strength="WEAK" + confidence=35 so the UI can visually
+        # distinguish low-conviction signals.
+        _last_candle = candles[-1] if candles else {}
+        _last_body = (_last_candle.get("close", 0) - _last_candle.get("open", 0)) if _last_candle else 0
+        _last_resort_signal = "CALL" if _last_body >= 0 else "PUT"
         all_reasons.append(
-            f"_NEUTRAL: all module votes suppressed (total=0) -> no edge detected, "
-            f"returning NEUTRAL")
+            f"_LAST_RESORT: no module fired and no smart-fallback matched "
+            f"-> using last candle body direction {_last_resort_signal} "
+            f"(body={_last_body:.6f}). Tagged WEAK/35% — every candle gets a signal.")
         return {
-            "signal": "NEUTRAL",
-            "confidence": 0,
-            "raw_confidence": 0, "strength": "NONE",
-            "score": 0, "reasons": all_reasons,
-            "regime": regime, "agree": 0,
-            "total": total_groups, "signals_fired": total_groups,
+            "signal": _last_resort_signal,
+            "confidence": _calibrated_confidence(35, 1),
+            "raw_confidence": 35,
+            "strength": "WEAK",
+            "score": 1,
+            "reasons": all_reasons,
+            "regime": regime,
+            "agree": 1,
+            "total": 1,
+            "signals_fired": 0,
             "modules": _module_breakdown(adjusted, all_results, module_names),
-            "asset": asset, "profile": pair_profile, "htf_trend": htf_trend,
-            "strategy": "no_modules",
-            "strategy_reason": "all votes suppressed",
-            "signal_quality": "NONE",
+            "asset": asset,
+            "profile": pair_profile,
+            "htf_trend": htf_trend,
+            "strategy": "last_resort",
+            "strategy_reason": "no module or smart-fallback fired — last candle body direction",
+            "signal_quality": "LOW",
+            "last_resort": True,
         }
     if net == 0:
         # Score tie — try group-count tiebreaker

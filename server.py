@@ -325,6 +325,229 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 static_dir = Path(__file__).parent / "static"
 
+# ── API key system (PHASE-3-FIX, 2026-08-13) ─────────────────────────────────
+# User requirement: "এই অ্যাপ url ব্যবহার করে সমস্ত ডাটা সিগন্যাল সিগন্যাল যে কেউ
+# দেখতে পারবে। কোনো বাধা থাকবে না। প্রয়োজন হলে একটি api key সিস্টেম তৈরি করেন।"
+# Public read endpoints (signals, pairs, history) are accessible WITHOUT any
+# auth. API keys are OPTIONAL — for programmatic clients that want higher rate
+# limits and audit trails. Admin PIN (existing) guards token-management.
+from core import api_keys as _api_keys  # noqa: E402
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    """Classify every request and enforce auth policy.
+
+    • public_read  → no auth required (default behavior, anyone with URL)
+    • api_key_write → require valid API key (Bearer token or ?api_key=)
+    • admin        → require admin PIN (X-App-Pin) or ADMIN_KEY
+    • unknown      → behave as public_read when QX_PUBLIC_READ=1 (default),
+                      otherwise require API key (fail-closed)
+
+    The middleware is intentionally lightweight — it never touches the DB for
+    public reads, so anonymous traffic stays fast.
+
+    FIX: middleware must return JSONResponse (not raise HTTPException) because
+    FastAPI's BaseHTTPMiddleware doesn't translate exceptions into proper
+    status codes — they bubble up as 500.
+    """
+    path = request.url.path
+    # Skip auth for static assets, root, and WebSocket (WS auth handled in /ws).
+    if (path.startswith("/static/") or path == "/" or path == "/favicon.ico"
+            or path == "/ws" or path == "/healthz" or path == "/app"
+            or path in ("/otc.html", "/real.html", "/alltime_otc.html")):
+        return await call_next(request)
+
+    category = _api_keys.classify_request(path)
+
+    if category == "public_read":
+        # Anyone can read — no auth check.
+        return await call_next(request)
+
+    if category == "api_key_write":
+        key = _api_keys.extract_key_from_request(request)
+        if not key:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "API key required. Pass via 'Authorization: Bearer qxa_...' "
+                              "or '?api_key=qxa_...'. Create one at /api/keys (admin).",
+                },
+            )
+        info = _api_keys.verify_key(key)
+        if not info:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "invalid or revoked API key"},
+            )
+        # Attach key info for downstream handlers.
+        request.state.api_key = info
+        return await call_next(request)
+
+    if category == "admin":
+        # Admin routes: require admin PIN (X-App-Pin) OR ADMIN_KEY (X-Admin-Key).
+        # The actual PIN verification is done inside each handler via
+        # _request_secrets() / _check_admin_key(). Here we just enforce that
+        # SOME admin credential is present.
+        pin = request.headers.get("X-App-Pin", "")
+        admin_key = request.headers.get("X-Admin-Key", "")
+        if not pin and not admin_key:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "admin endpoint — provide X-App-Pin (operator PIN) or "
+                              "X-Admin-Key header.",
+                },
+            )
+        return await call_next(request)
+
+    # Unknown route — default to public read when QX_PUBLIC_READ=1 (default).
+    if _api_keys.is_public_read_enabled():
+        return await call_next(request)
+    # Fail-closed mode — require API key.
+    key = _api_keys.extract_key_from_request(request)
+    if not key or not _api_keys.verify_key(key):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "QX_PUBLIC_READ=0 — API key required for this endpoint."},
+        )
+    return await call_next(request)
+
+
+# ── API key management endpoints ─────────────────────────────────────────────
+
+def _require_admin_for_api_keys(request: Request) -> None:
+    """API key management requires either ADMIN_KEY or operator PIN.
+
+    Reuses the existing _check_admin_key helper when ADMIN_KEY is set.
+    Otherwise falls back to PIN verification (same as token-import endpoints).
+    """
+    admin_key = request.headers.get("X-Admin-Key", "")
+    if admin_key:
+        _check_admin_key(admin_key)
+        return
+    # Fall back to PIN (X-App-Pin header only — body not read here to keep
+    # this helper synchronous).
+    pin = request.headers.get("X-App-Pin", "")
+    if not pin:
+        raise HTTPException(
+            status_code=401,
+            detail="X-Admin-Key or X-App-Pin header required to manage API keys.",
+        )
+    try:
+        ok, _reason = _verify_operator_pin(pin)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PIN verification failed: {exc}")
+    if not ok:
+        raise HTTPException(status_code=403, detail=f"invalid PIN: {_reason}")
+
+
+def _verify_operator_pin(pin: str) -> tuple[bool, str]:
+    """Verify the operator PIN via the existing auth system.
+
+    Reuses the same logic as /api/set-token. If no PIN has been claimed yet,
+    the first PIN becomes the operator PIN (same as token-import flow).
+    """
+    import hashlib as _hashlib
+    import sqlite3 as _sqlite3
+    try:
+        with _db._read_cursor() as cur:
+            cur.execute("SELECT value FROM _meta WHERE key='operator_pin_hash'")
+            row = cur.fetchone()
+        if not row:
+            # No PIN claimed — first call claims it. Allow through; the
+            # subsequent POST will set the PIN via the existing claim flow.
+            return True, "no-pin-claimed-yet"
+        # sqlite3.Row supports both index and key access.
+        stored_hash = row["value"] if isinstance(row, _sqlite3.Row) else row[0]
+        candidate = _hashlib.sha256(pin.encode("utf-8")).hexdigest()
+        if not hmac.compare_digest(candidate, stored_hash):
+            return False, "PIN does not match"
+        return True, "ok"
+    except Exception as exc:
+        return False, f"PIN check error: {exc}"
+
+
+@app.get("/api/keys")
+async def api_keys_list(request: Request):
+    """List all API keys (admin only). Returns key metadata, never the raw key."""
+    _require_admin_for_api_keys(request)
+    keys = _api_keys.list_keys()
+    return {
+        "total": len(keys),
+        "keys": [
+            {
+                "id": k.id,
+                "label": k.label,
+                "key_prefix": k.key_prefix,
+                "created": k.created,
+                "last_used": k.last_used,
+                "active": k.active,
+                "rate_limit_per_min": k.rate_limit_per_min,
+                "total_requests": k.total_requests,
+            } for k in keys
+        ],
+    }
+
+
+@app.post("/api/keys")
+async def api_keys_create(request: Request):
+    """Create a new API key (admin only). Returns the raw key ONCE."""
+    _require_admin_for_api_keys(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    label = (body.get("label") or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="label is required")
+    rate_limit = int(body.get("rate_limit_per_min", 60))
+    rate_limit = max(1, min(rate_limit, 600))
+    raw_key, info = _api_keys.create_key(label, rate_limit)
+    return {
+        "raw_key": raw_key,  # shown only here — store client-side
+        "info": {
+            "id": info.id,
+            "label": info.label,
+            "key_prefix": info.key_prefix,
+            "created": info.created,
+            "active": info.active,
+            "rate_limit_per_min": info.rate_limit_per_min,
+        },
+        "message": "Store the raw_key securely — it will not be shown again.",
+    }
+
+
+@app.delete("/api/keys/{key_id}")
+async def api_keys_revoke(key_id: int, request: Request):
+    """Revoke (deactivate) an API key by ID (admin only)."""
+    _require_admin_for_api_keys(request)
+    ok = _api_keys.revoke_key(key_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="key not found")
+    return {"revoked": True, "id": key_id}
+
+
+@app.get("/api/keys/verify")
+async def api_keys_verify_endpoint(request: Request):
+    """Verify the calling client's API key. Public endpoint (no admin needed).
+
+    Useful for clients to test their key. Returns key metadata if valid.
+    """
+    key = _api_keys.extract_key_from_request(request)
+    if not key:
+        return {"valid": False, "reason": "no API key provided"}
+    info = _api_keys.verify_key(key)
+    if not info:
+        return {"valid": False, "reason": "invalid or revoked"}
+    return {
+        "valid": True,
+        "label": info.label,
+        "key_prefix": info.key_prefix,
+        "rate_limit_per_min": info.rate_limit_per_min,
+        "total_requests": info.total_requests,
+    }
+
+
 from starlette.staticfiles import StaticFiles as _StarletteStaticFiles
 class _NoCacheStaticFiles(_StarletteStaticFiles):
     async def get_response(self, path, scope):
@@ -556,8 +779,43 @@ async def auth_verify(request: Request):
 
 @app.get("/")
 async def index():
-    return FileResponse(static_dir / "index.html",
+    """Root — serve the consolidated app.html (PHASE-4-FIX, 2026-08-13).
+
+    Replaces the old router (index.html → otc.html/real.html/alltime_otc.html).
+    The app.html file is a single-page app that reads ?market= from the URL
+    or `marketCategory` from localStorage to decide which market to show.
+    """
+    return FileResponse(static_dir / "app.html",
                         headers={"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate"})
+
+
+@app.get("/app")
+async def app_alias():
+    """Alias for / — same consolidated app.html."""
+    return FileResponse(static_dir / "app.html",
+                        headers={"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate"})
+
+
+# Legacy routes — redirect to the consolidated app so old bookmarks keep working.
+@app.get("/otc.html")
+async def legacy_otc():
+    """Legacy OTC page — redirect to consolidated app."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/?market=otc", status_code=302)
+
+
+@app.get("/real.html")
+async def legacy_real():
+    """Legacy Real page — redirect to consolidated app."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/?market=real", status_code=302)
+
+
+@app.get("/alltime_otc.html")
+async def legacy_alltime_otc():
+    """Legacy All-OTC page — redirect to consolidated app."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/?market=alltime_otc", status_code=302)
 
 @app.get("/api/set-token")
 async def set_token_get(token: str, x_admin_key: Optional[str] = None,
@@ -1700,11 +1958,10 @@ def _active_analyzer() -> str:
     """
     use_agent = (os.environ.get("QX_AGENT_BRAIN", "0") == "1"
                  or os.environ.get("QX_AGENT_FINAL", "0") == "1")
-    use_realtime = os.environ.get("QX_REALTIME_ANALYZER", "0") == "1"
     use_verifier = os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1"
-    if use_agent or not (use_realtime or use_verifier):
+    if use_agent or not use_verifier:
         return "agent_brain"
-    return "realtime_analyzer" if use_realtime else "signal_verifier"
+    return "signal_verifier"
 
 
 @app.get("/api/verifier/status")

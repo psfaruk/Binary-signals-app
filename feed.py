@@ -2131,9 +2131,14 @@ class QuotexFeed:
         # BRAIN-LEARNED: loss cluster cooldown — skip prediction if pair
         # is in cooldown after 5+ consecutive losses.
         # FIX: wrap in try/except to NEVER block the prediction pipeline.
+        # FIX (PHASE-2-FIX, 2026-08-13): env-gated via QX_LOSS_COOLDOWN
+        # (default "0"). Cooldown skipping defeats the "every candle gets a
+        # signal" requirement. The cooldown is still tracked for analytics
+        # but no longer suppresses the signal.
         try:
             cooldown_until = getattr(stream, '_loss_cooldown_until', 0)
-            if cooldown_until and time.time() < cooldown_until:
+            if (os.environ.get("QX_LOSS_COOLDOWN", "0") == "1"
+                    and cooldown_until and time.time() < cooldown_until):
                 # FIX (DEEP-AUDIT-2026-07-26 / F-01-05): use math.ceil so a
                 # 30s-remaining cooldown does not truncate to 0 minutes in
                 # the log message.
@@ -2225,7 +2230,13 @@ class QuotexFeed:
         else:
             _zone = "UNKNOWN"
         _key = (_regime, _zone)
-        if (result["signal"] != "NEUTRAL"
+        # FIX (PHASE-2-FIX, 2026-08-13): CHOP GUARD is now env-gated via
+        # QX_CHOP_GUARD (default "0"). Original behavior suppresses signals
+        # after 3 consecutive wrong (regime, zone) calls, which conflicts
+        # with the "every candle gets a signal" requirement. Re-enable per
+        # deploy if you want to skip choppy zones.
+        if (os.environ.get("QX_CHOP_GUARD", "0") == "1"
+                and result["signal"] != "NEUTRAL"
                 and _key == (stream.zone_streak["regime"], stream.zone_streak["zone"])
                 and stream.zone_streak["losses"] >= ZONE_LOSS_GUARD):
             # FIX (BACKTEST-2026-07-21): backtest of 842 live signals showed
@@ -2245,12 +2256,6 @@ class QuotexFeed:
                 f"CHOP GUARD (BACKTEST-FIX): {_key[0]}/{_key[1]} wrong "
                 f"{_losses}x running → NEUTRAL (skip). "
                 f"Backtest: WEAK signals won 4.2% — skipping is +EV.")
-            # Re-set the signal field on the prediction result so the
-            # downstream code sees NEUTRAL.
-            # FIX (DEEP-AUDIT-2026-07-26 / F-01-46): redundant — line 1860
-            # already set result["signal"] = "NEUTRAL". Kept as a no-op
-            # safety net but documented as dead assignment.
-            # result["signal"] = "NEUTRAL"  # dead — already set at line 1860
 
         # FIX (WEAK-NEUTRAL-FIX-A, 2026-07-23): user backtest observation
         # showed WEAK signals are systematically wrong — historical data
@@ -2270,7 +2275,15 @@ class QuotexFeed:
         # and grade the signal as a wrong trade. This ensures loss
         # signals appear in the history DB (otherwise the win rate
         # looks artificially high because WEAK losses are invisible).
-        if result.get("signal") in ("CALL", "PUT") and result.get("strength") == "WEAK":
+        #
+        # FIX (PHASE-2-FIX, 2026-08-13): this override is now env-gated
+        # via QX_WEAK_NEUTRAL (default "0"). User requirement: every
+        # candle must produce a CALL/PUT signal. The UI now visually
+        # tags WEAK signals (gray badge) so the user can filter
+        # mentally. Set QX_WEAK_NEUTRAL=1 to restore the old behavior.
+        if (os.environ.get("QX_WEAK_NEUTRAL", "0") == "1"
+                and result.get("signal") in ("CALL", "PUT")
+                and result.get("strength") == "WEAK"):
             _weak_conf = result.get("confidence", 0)
             _orig_signal = result.get("signal")
             result["signal"] = "NEUTRAL"

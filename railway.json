@@ -20,7 +20,26 @@
     "QX_LIVE_REEVAL_MIN_TICKS": "30",
     "DB_PATH": "/app/data/signals.db",
     "SIGNAL_DELAY_SEC": "5.0",
-    "SKIP_REDUNDANT_BROADCAST": "0"
+    "SKIP_REDUNDANT_BROADCAST": "0",
+
+    "_comment_PHASE_2_FIX_2026_08_13": "Signal generation env vars — every candle must produce a CALL/PUT signal. Set any of these to '1' to restore the old suppression behavior.",
+    "QX_PATTERN_GATE": "0",
+    "QX_ALLOW_WEAK_SIGNALS": "1",
+    "QX_BREAKEVEN_GATE": "0",
+    "QX_PAIR_HEALTH_GATE": "0",
+    "QX_LOW_CONF_SKIP_OTC": "0",
+    "QX_LOW_CONF_SKIP_REAL": "0",
+    "QX_TRAP_HOUR": "0",
+    "QX_CHOP_GUARD": "0",
+    "QX_WEAK_NEUTRAL": "0",
+    "QX_LOSS_COOLDOWN": "0",
+    "QX_PAIR_PENALTY_NEUTRAL": "0",
+    "QX_NO_FALLBACK": "0",
+    "QX_WEAK_BOOST": "1",
+    "QX_TIERED_FILTER": "0",
+
+    "_comment_PHASE_3_FIX_2026_08_13": "API key system — public read is enabled by default (anyone with URL can view signals). Set QX_PUBLIC_READ=0 to require API key for all reads.",
+    "QX_PUBLIC_READ": "1"
   },
   "env_required": {
     "QX_TOKEN": {
@@ -29,8 +48,10 @@
       "example": "quotex-token.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
     }
   },
-  "_notes_FIX_DEEP_AUDIT_2026_07_26_F_19_40": "Increased healthcheckTimeout 30→60s. Cold start imports brain.py + time_patterns.py + algorithm_monitor.py (each opens SQLite tables); 30s was too tight on Railway cold start and caused spurious deploy failures. A-10 PROBLEM 34.",
-  "_notes_CALIBRATION_2026_07_29": "Added QX_DISABLE_LIVE_REEVAL=1 to disable LIVE re-eval (was the #1 accuracy killer — 88% of signals got demoted to confidence=15 with 43% win rate).",
-  "_notes_PERSISTENT_VOLUME_REQUIRED": "CRITICAL: Railway does NOT persist the filesystem by default. Every redeploy wipes signals.db, losing ALL signal history, brain_learning, and brain_predictions. BOTH steps below are required — mounting the volume alone does NOT persist data, because db.py / core/brain.py / core/*.py all defaulted DB_PATH to a path OUTSIDE the volume (app root) unless an env var told them otherwise: (1) Railway dashboard -> your service -> Settings -> Volumes -> Add Volume, Mount Path '/app/data'. (2) DB_PATH is now set to '/app/data/signals.db' in this file's env block (was missing before 2026-07-31 -- this is the step that was silently making step (1) alone insufficient). (3) Redeploy and check the boot logs: db.py now logs a persistence marker boot_count on every startup -- boot_count > 1 confirms the volume is real; boot_count always resetting to 1 after every redeploy means the volume isn't actually mounted at this path. Without real persistence, the brain adaptation system never accumulates enough samples (needs 20+ per pair) and learned_weights stays at 0.",
-  "_notes_TELEGRAM_ALERTS_OPTIONAL": "Optional: set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in Railway Variables (not committed here) to get a Telegram message the moment the Quotex token dies or the feed goes stale, and again when it recovers -- see alerts.py and .env.example. QX_TOKEN expires ~24h and previously died with zero notification."
+  "_notes_PHASE_2_FIX_2026_08_13": "Signal generation pipeline refactored: (1) added last-resort fallback in blender.py that guarantees every candle produces a CALL or PUT signal using last candle body direction when no module fires. (2) Disabled PATTERN_GATE, WEAK_FILTER, BREAKEVEN_GATE, PAIR_HEALTH_GATE, TRAP_HOUR, CHOP_GUARD, WEAK_NEUTRAL, LOSS_COOLDOWN by default — all env-gated so they can be re-enabled per-deploy. (3) Smoke test (scripts/smoke_test_signals.py) confirms 100% signal coverage on 320/320 candles across 4 pairs.",
+  "_notes_PHASE_3_FIX_2026_08_13": "API key system added: (1) core/api_keys.py — SQLite-backed key storage with SHA-256 hashing. (2) FastAPI middleware classifies every request as public_read / api_key_write / admin / unknown and enforces auth policy. (3) Endpoints: GET/POST /api/keys (admin), DELETE /api/keys/{id} (admin), GET /api/keys/verify (public). (4) Public read endpoints (signals, pairs, history, stats) are accessible WITHOUT any auth per user requirement 'যে কেউ দেখতে পারবে'. (5) API keys are optional, for programmatic clients. (6) Admin PIN (existing) still guards token-management endpoints.",
+  "_notes_PHASE_4_5_FIX_2026_08_13": "Frontend consolidated: (1) Replaced otc.html / real.html / alltime_otc.html with single app.html that reads ?market= from URL. (2) Added 4-tab navigation: Home, Chart Signal, History, Setting. (3) Mobile (<1024px): bottom navigation bar. (4) Desktop (≥1024px): left sidebar. (5) Legacy URLs (/otc.html, /real.html, /alltime_otc.html) return 302 redirects to /?market=. (6) New CSS: static/css/app-nav.css. New JS: static/js/app-nav.js, static/js/api-keys.js.",
+  "_notes_PHASE_6_FIX_2026_08_13": "Dead code removed: core/realtime_analyzer.py (615 LoC, never imported), static/otc.html, static/real.html, static/alltime_otc.html, static/index.html, static/css/otc.css, static/css/real.css, static/js/otc.js, static/js/real.js, static/js/agent-panel.js (399 LoC, hooked undefined functions). Total ~3000+ lines of dead code removed.",
+  "_notes_PERSISTENT_VOLUME_REQUIRED": "CRITICAL: Railway does NOT persist the filesystem by default. Every redeploy wipes signals.db, losing ALL signal history, brain_learning, and brain_predictions. BOTH steps below are required — mounting the volume alone does NOT persist data, because db.py / core/brain.py / core/*.py all defaulted DB_PATH to a path OUTSIDE the volume (app root) unless an env var told them otherwise: (1) Railway dashboard -> your service -> Settings -> Volumes -> Add Volume, Mount Path '/app/data'. (2) DB_PATH is now set to '/app/data/signals.db' in this file's env block. (3) Redeploy and check the boot logs: db.py now logs a persistence marker boot_count on every startup -- boot_count > 1 confirms the volume is real.",
+  "_notes_TELEGRAM_ALERTS_OPTIONAL": "Optional: set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in Railway Variables (not committed here) to get a Telegram message the moment the Quotex token dies or the feed goes stale, and again when it recovers -- see alerts.py and .env.example."
 }
