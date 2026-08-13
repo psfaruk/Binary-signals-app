@@ -74,12 +74,20 @@
         <!-- ============ TOP BAR ============ -->
         <header class="app-topbar">
             <div class="topbar-left">
-                <button class="mobile-menu-toggle" id="mobile-menu-toggle" type="button" aria-label="Toggle menu">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-                </button>
+                <!-- Market switcher dropdown (mobile) — replaces hamburger menu -->
+                <div class="mkt-dropdown">
+                    <button class="mobile-menu-toggle" id="mobile-menu-toggle" type="button" aria-label="Switch market" aria-haspopup="true" aria-expanded="false">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                        <span class="brand-cat" id="topbar-cat-label">OTC</span>
+                    </button>
+                    <div class="mkt-dropdown-menu" id="mkt-dropdown-menu" hidden>
+                        <button class="mkt-dropdown-item" data-mkt="otc" type="button">OTC Market</button>
+                        <button class="mkt-dropdown-item" data-mkt="real" type="button">Real Market</button>
+                        <button class="mkt-dropdown-item" data-mkt="alltime_otc" type="button">All-Time OTC</button>
+                    </div>
+                </div>
                 <div class="topbar-brand-mobile">
                     <span class="brand-mark">BST</span>
-                    <span class="brand-cat" id="topbar-cat-label">OTC</span>
                 </div>
             </div>
             <div class="topbar-center">

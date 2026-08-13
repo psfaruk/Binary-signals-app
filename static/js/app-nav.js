@@ -248,6 +248,39 @@
 
     // ── Click delegation (lightweight — avoids duplicate handlers) ─────
     document.addEventListener('click', function(e) {
+        // Market dropdown toggle (mobile)
+        var dropdownToggle = e.target.closest('#mobile-menu-toggle');
+        if (dropdownToggle) {
+            e.preventDefault();
+            e.stopPropagation();
+            var menu = document.getElementById('mkt-dropdown-menu');
+            if (menu) {
+                menu.hidden = !menu.hidden;
+                dropdownToggle.setAttribute('aria-expanded', String(!menu.hidden));
+            }
+            return;
+        }
+        // Market dropdown item click
+        var dropdownItem = e.target.closest('.mkt-dropdown-item');
+        if (dropdownItem) {
+            e.preventDefault();
+            var mkt = dropdownItem.dataset.mkt;
+            var menu = document.getElementById('mkt-dropdown-menu');
+            if (menu) menu.hidden = true;
+            if (mkt && typeof window.setCategory === 'function') {
+                window.setCategory(mkt);
+            }
+            return;
+        }
+        // Close dropdown when clicking outside
+        var dropdown = document.querySelector('.mkt-dropdown');
+        if (dropdown && !dropdown.contains(e.target)) {
+            var menu = document.getElementById('mkt-dropdown-menu');
+            if (menu) menu.hidden = true;
+            var toggle = document.getElementById('mobile-menu-toggle');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        }
+
         // Home refresh
         if (e.target.closest('#home-refresh-btn')) {
             e.preventDefault();

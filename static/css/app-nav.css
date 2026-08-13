@@ -47,8 +47,10 @@
 /* ============ RESET ============ */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* FIX (UI-FIX2-2026-08-13): on mobile, html/body must NOT have height:100%
+   or it prevents scrolling. Use min-height instead. Desktop keeps height:100%
+   because the app-shell grid manages its own scroll. */
 html, body {
-    height: 100%;
     background: var(--app-bg);
     color: var(--text-primary);
     font-family: var(--font-sans);
@@ -56,10 +58,18 @@ html, body {
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 100%;
+    height: auto;
 }
 
-body {
-    overflow: hidden; /* app shell manages its own scroll */
+@media (min-width: 1024px) {
+    html, body {
+        height: 100%;
+        min-height: 100%;
+        overflow: hidden;
+    }
 }
 
 button {
@@ -94,6 +104,18 @@ code {
     height: 100dvh;
 }
 
+/* FIX (UI-FIX2-2026-08-13): on mobile, don't constrain height — let
+   the page scroll naturally. The bottom nav is position:fixed so it
+   stays visible regardless of scroll position. */
+@media (max-width: 1023px) {
+    .app-shell {
+        display: block;
+        height: auto;
+        min-height: 100vh;
+        min-height: 100dvh;
+        padding-bottom: var(--bottomnav-height);
+    }
+}
 /* ============ SIDEBAR (desktop) ============ */
 .app-sidebar {
     background: var(--nav-bg);
@@ -263,6 +285,18 @@ code {
     background: var(--app-bg);
 }
 
+/* FIX (UI-FIX2-2026-08-13): on mobile, allow natural document flow so
+   the whole page scrolls. overflow:hidden here was the #1 cause of
+   "can't see bottom options" and "can't drag up" on mobile. */
+@media (max-width: 1023px) {
+    .app-main {
+        height: auto;
+        min-height: 100vh;
+        min-height: 100dvh;
+        overflow: visible;
+    }
+}
+
 /* ============ TOP BAR ============ */
 .app-topbar {
     height: var(--topbar-height);
@@ -275,6 +309,18 @@ code {
     flex-shrink: 0;
 }
 
+/* FIX (UI-FIX2-2026-08-13): on mobile, make topbar sticky so it stays
+   visible while the page scrolls. z-index above content but below modals. */
+@media (max-width: 1023px) {
+    .app-topbar {
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        padding: 0 8px;
+        gap: 8px;
+    }
+}
+
 .topbar-left {
     display: flex;
     align-items: center;
@@ -284,11 +330,57 @@ code {
 .mobile-menu-toggle {
     display: none;
     color: var(--text-secondary);
-    padding: 8px;
+    padding: 6px 10px;
     border-radius: 6px;
+    align-items: center;
+    gap: 6px;
 }
 
 .mobile-menu-toggle:hover { background: rgba(255,255,255,0.06); }
+
+/* FIX (UI-FIX2-2026-08-13): market switcher dropdown for mobile */
+.mkt-dropdown {
+    position: relative;
+    display: none;
+}
+
+.mkt-dropdown-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    background: var(--nav-bg-elev);
+    border: 1px solid var(--nav-border);
+    border-radius: 8px;
+    min-width: 160px;
+    padding: 4px;
+    z-index: 200;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+
+.mkt-dropdown-menu[hidden] { display: none; }
+
+.mkt-dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 10px 12px;
+    text-align: left;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    border-radius: 6px;
+    min-height: 44px;
+}
+
+.mkt-dropdown-item:hover, .mkt-dropdown-item:active {
+    background: var(--nav-accent-soft);
+    color: var(--nav-accent);
+}
+
+@media (max-width: 1023px) {
+    .mobile-menu-toggle, .mkt-dropdown {
+        display: flex;
+    }
+}
 
 .topbar-brand-mobile {
     display: none;
@@ -411,10 +503,29 @@ code {
     padding-bottom: calc(var(--bottomnav-height) + 16px); /* space for bottom nav on mobile */
 }
 
+/* FIX (UI-FIX2-2026-08-13): on mobile, tab-panes should NOT have its own
+   scroll container — let the body scroll instead. This fixes the issue
+   where users couldn't drag/scroll to see content below the fold. */
+@media (max-width: 1023px) {
+    .tab-panes {
+        overflow: visible;
+        padding-bottom: calc(var(--bottomnav-height) + 24px);
+    }
+}
+
 .tab-pane {
     display: none;
     padding: 20px;
     min-height: 100%;
+}
+
+/* FIX (UI-FIX2-2026-08-13): on mobile, don't force min-height:100% which
+   causes empty space. Let content be its natural height. */
+@media (max-width: 1023px) {
+    .tab-pane {
+        min-height: auto;
+        padding: 12px;
+    }
 }
 
 .tab-pane.active {
@@ -547,8 +658,10 @@ code {
     display: grid;
     grid-template-columns: 1fr 360px;
     gap: 16px;
-    height: calc(100vh - var(--topbar-height) - 80px);
-    height: calc(100dvh - var(--topbar-height) - 80px);
+    /* Desktop: fill available height minus topbar and padding.
+       The tab-panes container handles the scroll. */
+    height: calc(100vh - var(--topbar-height) - 40px);
+    height: calc(100dvh - var(--topbar-height) - 40px);
 }
 
 .chart-main {
@@ -602,6 +715,16 @@ code {
     display: flex;
     flex-direction: column;
     gap: 16px;
+}
+
+/* FIX (UI-FIX2-2026-08-13): on mobile, chart-panel should NOT have its
+   own overflow scroll — let the body scroll. This prevents the nested-
+   scroll-container bug where touch-drag doesn't work inside the panel. */
+@media (max-width: 1023px) {
+    .chart-panel {
+        overflow: visible;
+        padding: 12px;
+    }
 }
 
 .signal-box {
@@ -1361,17 +1484,26 @@ code {
     }
 
     .chart-layout {
+        /* FIX (UI-FIX2-2026-08-13): stack vertically on mobile, let
+           chart be a reasonable height and panel flow below it.
+           NO fixed height — body scrolls naturally. */
         grid-template-columns: 1fr;
-        grid-template-rows: 1fr auto;
+        grid-template-rows: auto auto;
         height: auto;
+        gap: 12px;
     }
 
     .chart-main {
-        height: 50vh;
+        /* Chart takes 45vh on mobile — enough to see candles, leaves
+           room for the signal panel below to be visible without scroll. */
+        height: 45vh;
+        min-height: 280px;
     }
 
     .chart-panel {
+        /* Panel flows below chart, no max-height — body scrolls. */
         max-height: none;
+        overflow: visible;
     }
 
     .app-bottomnav {
@@ -1379,7 +1511,7 @@ code {
     }
 
     .tab-panes {
-        padding-bottom: calc(var(--bottomnav-height) + 16px);
+        padding-bottom: calc(var(--bottomnav-height) + 24px);
     }
 }
 
