@@ -1525,36 +1525,32 @@ function _renderRegimeBreakdown(){
    3 tab panes. Also fires tab-specific refresh logic so the just-shown
    pane is up-to-date (cheap re-render from in-memory state). */
 function switchTab(tabName){
-  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'accuracy') return;
-  currentTab = tabName;
+  // FIX (UI-FIX-2026-08-13): new 4-tab system uses home/chart/history/setting.
+  // Map old 'accuracy' to 'history' (accuracy grid now lives inside history tab).
+  // Accept both old names (chart/history/accuracy) and new names (home/chart/history/setting).
+  if(tabName === 'accuracy') tabName = 'history';
+  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'home' && tabName !== 'setting') return;
+  currentTab = (tabName === 'home' || tabName === 'setting') ? 'chart' : tabName;
 
-  // Update tab buttons
-  const tabBtns = document.querySelectorAll('.tab-btn');
-  tabBtns.forEach(btn => {
+  // Update sidebar nav items + bottom nav items (new system)
+  document.querySelectorAll('.nav-item, .bn-item').forEach(btn => {
     const isActive = btn.dataset.tab === tabName;
     btn.classList.toggle('active', isActive);
-    btn.setAttribute('aria-selected', String(isActive));
   });
 
-  // Update tab panes
-  ['chart', 'history', 'accuracy'].forEach(name => {
-    const pane = $('tab-' + name);
-    if(pane) pane.classList.toggle('active', name === tabName);
+  // Update tab panes (new system: .tab-pane[data-pane])
+  document.querySelectorAll('.tab-pane').forEach(pane => {
+    pane.classList.toggle('active', pane.dataset.pane === tabName);
   });
 
   // Tab-specific refresh — ensures the just-shown pane is current.
   if(tabName === 'history'){
     renderHistoryPairSelect();
-    // Refresh from server (no-op if WS not open) — gives the user fresh
-    // last-1-hour data every time they open the tab.
     loadServerHistory();
     renderHistory();
     setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
-  } else if(tabName === 'accuracy'){
     renderAccuracyTab();
   } else if(tabName === 'chart'){
-    // The chart's autoSize handles hidden→visible resizes, but on some
-    // browsers the chart needs an explicit nudge after being display:none.
     if(chart){
       try{
         const container = $('chart-container');
@@ -1778,20 +1774,18 @@ function renderPairs(payload){
 
 // FIX (DATA-FLOW-2026-07-22): update the switch button's label/title
 // based on what the NEXT market is.
+// FIX (UI-FIX-2026-08-13): old #market-switch-btn no longer exists.
+// New UI uses .mkt-btn buttons — highlight the active one.
 function _updateSwitchButtonLabel(){
-  const btn = $('market-switch-btn');
-  if(!btn) return;
-  const next = _nextCategory(currentCategory);
-  const labels = {
-    'real':         { text: 'Switch to Real',  title: 'Real Market (live forex, weekdays only)' },
-    'otc':          { text: 'Switch to OTC',   title: 'OTC Market (standard OTC pairs, 24/7)' },
-    'alltime_otc':  { text: 'Switch to All-OTC', title: 'All-Time OTC (exotic pairs, 24/7, no payout floor)' },
-  };
-  const lbl = labels[next] || labels.otc;
-  const textEl = btn.querySelector('.switch-text');
-  if(textEl) textEl.textContent = lbl.text;
-  btn.setAttribute('aria-label', lbl.text);
-  btn.title = lbl.title;
+  // Highlight current market button
+  document.querySelectorAll('.mkt-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mkt === currentCategory);
+  });
+  // Update topbar category label
+  const catLabel = document.getElementById('topbar-cat-label');
+  if(catLabel){
+    catLabel.textContent = currentCategory.toUpperCase().replace('_', '-');
+  }
 }
 
 /* ─── MARKET STATUS INDICATOR ──────────────────────────────────────────────
@@ -1857,21 +1851,10 @@ function setCategory(newCat){
   }catch(_){}
 
   try{ localStorage.setItem('marketCategory', newCat); }catch(_){}
-  const targets = {
-    'real':         '/static/real.html',
-    'otc':          '/static/otc.html',
-    'alltime_otc':  '/static/alltime_otc.html',
-  };
-  const target = targets[newCat] || '/static/otc.html';
-  // FIX (DEEP-AUDIT-2026-07-26 / F-17-46, HIGH): use location.href instead of
-  // location.replace(). Previously `replace()` removed the current page from
-  // browser history, breaking the back button — user on Real clicks "Switch
-  // to OTC", lands on OTC, presses back, and goes to whatever page was BEFORE
-  // Real (not back to Real as expected). Now: `href` pushes a new history
-  // entry so back returns to the previous market page. The original "bouncing
-  // between market pages" concern is moot — the cycle real→otc→alltime_otc→real
-  // is exactly what users want when navigating between markets.
-  window.location.href = target;
+  // FIX (UI-FIX-2026-08-13): old code navigated to /static/real.html etc.
+  // which no longer exist (consolidated into app.html). Now reload app.html
+  // with ?market= query param so common.js re-inits with the new category.
+  window.location.href = '/?market=' + encodeURIComponent(newCat);
 }
 
 // FIX (DATA-FLOW-2026-07-22): cycle through the 3 markets on switch click.
@@ -2332,11 +2315,11 @@ function wireEvents(){
     });
   }
 
-  // ── TAB BAR: switch between Live Chart / Signal History / Accuracy Stats
-  // The 3 buttons live in #tab-bar; clicking one calls switchTab() which
-  // toggles the .active class on both the button and the matching pane.
-  const tabBtns = document.querySelectorAll('.tab-btn');
-  tabBtns.forEach(btn => {
+  // ── TAB BAR: switch between Home / Chart Signal / History / Setting
+  // FIX (UI-FIX-2026-08-13): new 4-tab system uses .nav-item (sidebar) and
+  // .bn-item (bottom nav) instead of old .tab-btn. Wire both.
+  const navBtns = document.querySelectorAll('.nav-item, .bn-item');
+  navBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       const tabName = btn.dataset.tab;
       if(tabName) switchTab(tabName);
@@ -2436,14 +2419,22 @@ function wireEvents(){
     });
   }
 
-  // Market switch button → cycle to the NEXT market.
-  // FIX (DATA-FLOW-2026-07-22): cycle real → otc → alltime_otc → real.
-  const switchBtn = $('market-switch-btn');
-  if(switchBtn){
-    switchBtn.addEventListener('click', () => {
-      setCategory(_nextCategory(currentCategory));
+  // Market switch buttons → cycle to the NEXT market.
+  // FIX (UI-FIX-2026-08-13): new app.html uses .mkt-btn buttons (OTC/Real/All-OTC)
+  // instead of single #market-switch-btn. Wire all of them. Each button switches
+  // to its specific market (not a cycle).
+  document.querySelectorAll('.mkt-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mkt = btn.dataset.mkt;
+      if(mkt && mkt !== currentCategory){
+        setCategory(mkt);
+      }
     });
-  }
+  });
+  // Highlight the current market button
+  document.querySelectorAll('.mkt-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mkt === currentCategory);
+  });
 
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-18 + F-17-19, HIGH): DELETED the
   // entire drawerToggle (#history-drawer-toggle) mobile-history-drawer
@@ -2583,15 +2574,13 @@ function initApp(category){
   // Reset tab state — always start on the Live Chart tab.
   currentTab = 'chart';
   // Force the DOM back to the chart tab in case bfcache left another tab active.
-  // (Use document.getElementById directly — the local $ helper isn't bound yet.)
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    const isActive = btn.dataset.tab === 'chart';
-    btn.classList.toggle('active', isActive);
-    btn.setAttribute('aria-selected', String(isActive));
+  // FIX (UI-FIX-2026-08-13): new 4-tab system uses .nav-item / .bn-item and
+  // .tab-pane[data-pane] instead of old .tab-btn and #tab-*.
+  document.querySelectorAll('.nav-item, .bn-item').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === 'chart');
   });
-  ['chart', 'history', 'accuracy'].forEach(name => {
-    const pane = document.getElementById('tab-' + name);
-    if(pane) pane.classList.toggle('active', name === 'chart');
+  document.querySelectorAll('.tab-pane').forEach(pane => {
+    pane.classList.toggle('active', pane.dataset.pane === 'chart');
   });
 
   currentCategory = category;
