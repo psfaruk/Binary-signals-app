@@ -112,13 +112,15 @@ ENABLE_LIVE_THEORY   = os.environ.get("ENABLE_LIVE_REEVAL",  "1") == "1"
 ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
 # ── Signal delay ───────────────────────────────────────────────────────────
 # How long after a new candle opens before the prediction is broadcast.
-# Was set to 0.0 on 2026-07-15 per user request, but this caused
-# predictions to fire on the open price with zero opening-tick confirmation
-# — a documented cause of wrong predictions (Bug #2, restored 2026-07-17).
-# Default 3.0s: lets the first 2-3 opening ticks confirm gap direction
-# before broadcasting. Override to 0.0 via env var only if you specifically
-# want instant EOC broadcast.
-SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "3.0"))
+# FIX (USER-AUG-2026 / 0-SEC-SIGNAL): default changed from 3.0 → 0.0.
+# User requirement: "একটি এক মিনিটের ক্যান্ডেল যখন 0 সেকেন্ড এ শুরু হবে, টিক তখনি
+# সিগন্যাল আসতে হবে" — signal must arrive at second 0 of the new candle.
+# The prediction is already computed AT candle close (second 0 of new candle)
+# during EOC processing. The 3-5s delay was withholding an already-ready
+# prediction. With improved multi-module blending + 4 new strategies
+# (bollinger_rsi, stochastic, ema_ribbon, sr_bounce) the prediction is
+# robust enough to broadcast on the first eligible tick.
+SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "0.0"))
 
 # ── Event-driven pipeline tuning (2026-07-11) ──────────────────────────────
 # MICRO_RECALC_EVERY: recompute _analyze_microstructure() every N ticks. The

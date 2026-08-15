@@ -1,6 +1,8 @@
-"""engines/real/config.py — DATA-DRIVEN CONFIG (DEEP-FIX-2026-08-07 V2).
+"""engines/real/config.py — DATA-DRIVEN CONFIG (USER-AUG-2026 V3).
 
-Only pattern (63.5% WR) + wickwall (55.6% WR) enabled. All others disabled.
+FIX (USER-AUG-2026): Activated 7 previously-dead modules + added 4 new
+strategy modules with pair-specific weights based on web research
+(Task 3 findings).
 """
 from engines.base.blender import BlenderConfig
 from engines.base.per_pair import PairWeightAdapter
@@ -11,16 +13,52 @@ RELIABILITY = {
 }
 
 DEFAULT_WEIGHTS = {
-    "candle_reaction": 0.0, "pattern": 2.5, "key_level": 0.0,
-    "market_state": 0.0, "wickwall": 1.5, "divergence": 0.0, "tickrun": 0.0,
-    "multi_tf": 0.0, "momentum": 0.0,
+    "candle_reaction": 1.0,
+    "pattern":         3.0,
+    "key_level":       1.5,
+    "market_state":    0.8,
+    "wickwall":        2.0,
+    "divergence":      1.0,
+    "tickrun":         0.8,
+    "multi_tf":        1.2,
+    "momentum":        1.5,
+    "bollinger_rsi":   2.0,
+    "stochastic":      1.5,
+    "ema_ribbon":      1.2,
+    "sr_bounce":       1.8,
 }
 
+# Real-pair strategy mapping (Task 3 research)
 PAIR_CONFIGS = {
-    "EURUSD": {"profile": "default", "description": "Default", "weights": DEFAULT_WEIGHTS},
-    "EURGBP": {"profile": "default", "description": "Default", "weights": DEFAULT_WEIGHTS},
-    "AUDUSD": {"profile": "default", "description": "Default", "weights": DEFAULT_WEIGHTS},
-    "USDJPY": {"profile": "default", "description": "Default", "weights": DEFAULT_WEIGHTS},
+    "EURUSD": {
+        "profile": "calibrated", "description": "EURUSD: BB+RSI+Engulfing primary (most liquid)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "bollinger_rsi": 2.5,
+                    "sr_bounce": 2.2,
+                    "pattern": 3.0,
+                    "ema_ribbon": 1.0},
+    },
+    "EURGBP": {
+        "profile": "calibrated", "description": "EURGBP: BB bounce primary (range-bound)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "bollinger_rsi": 2.5,
+                    "stochastic": 1.8,
+                    "ema_ribbon": 0.8},
+    },
+    "AUDUSD": {
+        "profile": "calibrated", "description": "AUDUSD: balanced trend + BB",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "ema_ribbon": 2.0,
+                    "bollinger_rsi": 2.0,
+                    "sr_bounce": 1.8},
+    },
+    "USDJPY": {
+        "profile": "calibrated", "description": "USDJPY: trend-following primary (sustained trends)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "ema_ribbon": 2.5,
+                    "momentum": 2.0,
+                    "bollinger_rsi": 1.5},
+    },
 }
 
 _config_keys = set(PAIR_CONFIGS.keys())

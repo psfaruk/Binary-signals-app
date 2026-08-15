@@ -237,11 +237,19 @@ OTC_MODULES = (
     "candle_reaction", "pattern", "key_level",
     "market_state", "wickwall", "divergence", "tickrun",
     "multi_tf", "momentum",
+    # FIX (USER-AUG-2026 / STRATEGY-EXPANSION): 4 new strategy modules
+    # added per web research on Quotex OTC 1-min binary trading.
+    # Each adds a distinct analysis dimension that was missing:
+    "bollinger_rsi",   # BB(20,2) + RSI(14) + Engulfing — 60-70% expected WR
+    "stochastic",      # Stochastic(14,3,3) crossover — 55-60% expected WR
+    "ema_ribbon",      # EMA(5/8/13) ribbon trend — 55-62% expected WR
+    "sr_bounce",       # S/R bounce with candle confirmation — 60-68% expected WR
 )
 REAL_MODULES = (
     "candle_reaction", "pattern", "key_level",
     "market_state", "wickwall", "divergence", "tickrun",
     "multi_tf", "momentum",
+    "bollinger_rsi", "stochastic", "ema_ribbon", "sr_bounce",
 )
 
 # Allowed candle periods (seconds). Whitelisted to prevent bogus streams

@@ -10,6 +10,16 @@ ALWAYS_REVERSAL = {
     "BEAR_PIN_BAR", "BULL_PIN_BAR",
     "BULL_TWO_BAR_REV", "BEAR_TWO_BAR_REV",
     "DOJI_BEARISH", "DOJI_BULLISH",
+    # FIX (USER-AUG-2026 / PATTERN-EXPANSION): newly added classical patterns
+    "MORNING_STAR", "EVENING_STAR",
+    "BULL_ENGULFING", "BEAR_ENGULFING",
+    "DRAGONFLY_DOJI", "GRAVESTONE_DOJI",
+}
+
+# Continuation patterns (strong momentum, trend-extension signals).
+ALWAYS_CONTINUATION = {
+    "BULL_MARUBOZU", "BEAR_MARUBOZU",
+    "THREE_WHITE_SOLDIERS", "THREE_BLACK_CROWS",
 }
 
 
@@ -24,10 +34,14 @@ def analyze(candles, ctx: MarketContext) -> list:
         name = pat["name"]
         direction = pat["direction"]
 
-        if name not in ALWAYS_REVERSAL:
-            continue
+        # Determine signal type: reversal vs continuation
+        if name in ALWAYS_REVERSAL:
+            sig_type = "REVERSAL"
+        elif name in ALWAYS_CONTINUATION:
+            sig_type = "CONTINUATION"
+        else:
+            continue  # unknown pattern, skip
 
-        sig_type = "REVERSAL"
         reason_str = pat.get("reason") or ""
         results.append(ModuleResult(
             module_name="pattern",
@@ -36,7 +50,7 @@ def analyze(candles, ctx: MarketContext) -> list:
             confidence=pat["score"] * 18,  # 3->54, 2->36
             signal_type=sig_type,
             reliability="PATTERN",
-            group="PATTERN_REVERSAL",
+            group="PATTERN_REVERSAL" if sig_type == "REVERSAL" else "PATTERN_CONTINUATION",
             reasons=[reason_str],
         ))
     return results

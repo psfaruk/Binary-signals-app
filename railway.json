@@ -19,7 +19,7 @@
     "QX_DISABLE_LIVE_REEVAL": "0",
     "QX_LIVE_REEVAL_MIN_TICKS": "30",
     "DB_PATH": "/app/data/signals.db",
-    "SIGNAL_DELAY_SEC": "5.0",
+    "SIGNAL_DELAY_SEC": "0.0",
     "SKIP_REDUNDANT_BROADCAST": "0",
 
     "_comment_PHASE_2_FIX_2026_08_13": "Signal generation env vars — every candle must produce a CALL/PUT signal. Set any of these to '1' to restore the old suppression behavior.",

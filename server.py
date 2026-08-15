@@ -1323,7 +1323,7 @@ async def debug_info(request: Request):
             "PAYOUT_FLOOR_REAL": os.environ.get("QX_PAYOUT_FLOOR_REAL", "70"),
             "PAYOUT_FLOOR_OTC":  os.environ.get("QX_PAYOUT_FLOOR_OTC",
                                                 os.environ.get("QX_PAYOUT_FLOOR", "85")),
-            "SIGNAL_DELAY_SEC": os.environ.get("SIGNAL_DELAY_SEC", "3.0"),
+            "SIGNAL_DELAY_SEC": os.environ.get("SIGNAL_DELAY_SEC", "0.0"),
         },
     }
     def _collect_streams(feed_obj):
@@ -2240,6 +2240,115 @@ async def get_signals(asset: str, period: int, limit: int = 100, before_ctime: O
     signals = await asyncio.to_thread(
         _db.get_recent_signals, asset, period, safe_limit, before_ctime)
     return {"signals": signals}
+
+# FIX (USER-AUG-2026 / OPEN-API): Public endpoint that returns the LATEST
+# signal for every pair in a flat list — designed for curl / external
+# integrations. Always CALL/PUT (or "PENDING" if no prediction yet).
+# No auth required when QX_PUBLIC_READ=1 (railway default).
+@app.get("/api/signals/latest")
+async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
+    """Latest signal snapshot for all pairs — open public endpoint.
+
+    Returns a flat list of {pair, signal, confidence, strength, time, ...}
+    for easy consumption by external scripts, Telegram bots, or webhooks.
+
+    Query params:
+      limit: max number of pairs to return (default 50, capped at 100)
+      pair:  filter to a single pair (e.g. ?pair=EURUSD_otc)
+
+    Example:
+      curl https://your-app.up.railway.app/api/signals/latest
+      curl https://your-app.up.railway.app/api/signals/latest?pair=EURUSD_otc
+    """
+    import time as _time
+    from core.constants import ALLOWED_PAIRS
+
+    now = _time.time()
+    safe_limit = max(1, min(int(limit), 100))
+
+    # Filter to single pair if requested
+    if pair:
+        pair = pair.strip()
+        pairs_to_query = [pair] if pair in ALLOWED_PAIRS else []
+    else:
+        pairs_to_query = sorted(ALLOWED_PAIRS)[:safe_limit]
+
+    rows = []
+    for asset in pairs_to_query:
+        pair_type = "OTC" if asset.endswith("_otc") else "Real"
+        stream = getattr(feed, '_streams', {}).get((asset, 60))
+
+        if not stream:
+            rows.append({
+                "pair": asset,
+                "type": pair_type,
+                "signal": "PENDING",
+                "confidence": 0,
+                "strength": "—",
+                "strategy": "—",
+                "candle_time": None,
+                "candle_time_str": "—",
+                "buyer_pct": None,
+                "seller_pct": None,
+                "last_update": None,
+                "live": False,
+            })
+            continue
+
+        # Candle close time
+        candles = getattr(stream, 'candles', [])
+        last_candle = candles[-1] if candles else None
+        candle_time = None
+        candle_time_str = "—"
+        if last_candle and last_candle.get("time"):
+            candle_time = int(last_candle["time"])
+            from datetime import datetime, timezone
+            candle_time_str = datetime.fromtimestamp(candle_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        # Prediction
+        pred = getattr(stream, 'prediction', None) or {}
+        signal = pred.get("signal", "PENDING")
+        confidence = pred.get("confidence", 0)
+        strength = pred.get("strength", "—")
+        strategy = pred.get("strategy", "—")
+        reasons = pred.get("reasons", [])
+        # Top 3 reasons only (for compactness)
+        top_reasons = reasons[-3:] if reasons else []
+
+        # Buyer/seller from microstructure
+        micro = getattr(stream, '_last_micro', None) or {}
+        buyer_pct = micro.get("buy_pct")
+        seller_pct = micro.get("sell_pct")
+
+        # Last tick recency
+        last_tick = getattr(stream, 'last_real_tick_wall', 0)
+        last_update = round(now - last_tick, 0) if last_tick > 0 else None
+        is_live = last_tick > 0 and (now - last_tick) < 120
+
+        rows.append({
+            "pair": asset,
+            "type": pair_type,
+            "signal": signal,
+            "confidence": round(confidence, 1) if confidence else 0,
+            "strength": strength,
+            "strategy": strategy,
+            "candle_time": candle_time,
+            "candle_time_str": candle_time_str,
+            "buyer_pct": round(buyer_pct, 1) if buyer_pct is not None else None,
+            "seller_pct": round(seller_pct, 1) if seller_pct is not None else None,
+            "last_update_sec_ago": last_update,
+            "live": is_live,
+            "reasons": top_reasons,
+        })
+
+    return {
+        "endpoint": "/api/signals/latest",
+        "timestamp": now,
+        "total_pairs": len(rows),
+        "live_pairs": sum(1 for r in rows if r["live"]),
+        "signals": rows,
+        "usage": "GET /api/signals/latest?pair=EURUSD_otc for single pair",
+    }
 
 @app.get("/api/signals/{asset}/{period}/{ctime}")
 async def get_signal_detail(asset: str, period: int, ctime: int):

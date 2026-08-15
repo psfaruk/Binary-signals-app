@@ -169,6 +169,128 @@ def detect_candle_patterns(candles):
                     "score": 2,
                     "reason": f"Doji after downtrend (body {body_pct3:.0f}%) → CALL reversal (58% win rate)"
                 })
+    # FIX (USER-AUG-2026 / PATTERN-EXPANSION): Add 6 more classical
+    # candlestick patterns per Task 3 research. These cover gap-continuation
+    # and 3-candle reversal formations that were missing.
+    if r3 > 0 and atr > 0:
+        body_pct3 = _abs_body(c3) / r3 * 100
+        uw3 = c3["high"] - max(c3["open"], c3["close"])
+        lw3 = min(c3["open"], c3["close"]) - c3["low"]
+        uw_pct3 = uw3 / r3 * 100
+        lw_pct3 = lw3 / r3 * 100
+
+        # Marubozu (bullish): very large body, no wicks — strong continuation
+        if body_pct3 >= 90 and b3 > 0:
+            patterns.append({
+                "name": "BULL_MARUBOZU",
+                "direction": "CALL",
+                "score": 2,
+                "reason": f"Bullish Marubozu (body {body_pct3:.0f}%, no wicks) → CALL continuation (strong momentum)"
+            })
+        # Marubozu (bearish): very large body, no wicks
+        elif body_pct3 >= 90 and b3 < 0:
+            patterns.append({
+                "name": "BEAR_MARUBOZU",
+                "direction": "PUT",
+                "score": 2,
+                "reason": f"Bearish Marubozu (body {body_pct3:.0f}%, no wicks) → PUT continuation (strong momentum)"
+            })
+
+        # Morning Star (3-candle bullish reversal)
+        # c1: large bearish, c2: small body (doji/spinning), c3: bullish closing >= 50% into c1 body
+        if (b1 < -atr * 0.3 and _abs_body(c2) < atr * 0.2
+                and b3 > atr * 0.3
+                and c3["close"] > (c1["open"] + c1["close"]) / 2):
+            patterns.append({
+                "name": "MORNING_STAR",
+                "direction": "CALL",
+                "score": 3,
+                "reason": "Morning Star (bearish → small body → bullish close >50% into c1) → CALL reversal (65% win rate)"
+            })
+
+        # Evening Star (3-candle bearish reversal)
+        if (b1 > atr * 0.3 and _abs_body(c2) < atr * 0.2
+                and b3 < -atr * 0.3
+                and c3["close"] < (c1["open"] + c1["close"]) / 2):
+            patterns.append({
+                "name": "EVENING_STAR",
+                "direction": "PUT",
+                "score": 3,
+                "reason": "Evening Star (bullish → small body → bearish close <50% into c1) → PUT reversal (65% win rate)"
+            })
+
+        # Three White Soldiers (3 consecutive bullish, each opens inside prior body, each closes higher)
+        if (b1 > 0 and b2 > 0 and b3 > 0
+                and c2["open"] > c1["open"] and c2["open"] < c1["close"]
+                and c3["open"] > c2["open"] and c3["open"] < c2["close"]
+                and c3["close"] > c2["close"] > c1["close"]
+                and _abs_body(c1) > r1 * 0.5
+                and _abs_body(c2) > r2 * 0.5
+                and _abs_body(c3) > r3 * 0.5):
+            patterns.append({
+                "name": "THREE_WHITE_SOLDIERS",
+                "direction": "CALL",
+                "score": 3,
+                "reason": "Three White Soldiers (3 strong bullish candles, each opens inside prior body) → CALL continuation (62% win rate)"
+            })
+
+        # Three Black Crows (3 consecutive bearish, mirror of soldiers)
+        if (b1 < 0 and b2 < 0 and b3 < 0
+                and c2["open"] < c1["open"] and c2["open"] > c1["close"]
+                and c3["open"] < c2["open"] and c3["open"] > c2["close"]
+                and c3["close"] < c2["close"] < c1["close"]
+                and _abs_body(c1) > r1 * 0.5
+                and _abs_body(c2) > r2 * 0.5
+                and _abs_body(c3) > r3 * 0.5):
+            patterns.append({
+                "name": "THREE_BLACK_CROWS",
+                "direction": "PUT",
+                "score": 3,
+                "reason": "Three Black Crows (3 strong bearish candles, each opens inside prior body) → PUT continuation (62% win rate)"
+            })
+
+        # Bullish Engulfing (2-candle): c2 bearish, c3 bullish, c3 engulfs c2 body
+        if (b2 < 0 and b3 > 0
+                and c3["open"] <= c2["close"]
+                and c3["close"] >= c2["open"]
+                and _abs_body(c3) > _abs_body(c2)):
+            patterns.append({
+                "name": "BULL_ENGULFING",
+                "direction": "CALL",
+                "score": 3,
+                "reason": f"Bullish Engulfing (c3 body engulfs c2 body, body {body_pct3:.0f}%) → CALL reversal (63% win rate)"
+            })
+
+        # Bearish Engulfing (2-candle): c2 bullish, c3 bearish, c3 engulfs c2 body
+        if (b2 > 0 and b3 < 0
+                and c3["open"] >= c2["close"]
+                and c3["close"] <= c2["open"]
+                and _abs_body(c3) > _abs_body(c2)):
+            patterns.append({
+                "name": "BEAR_ENGULFING",
+                "direction": "PUT",
+                "score": 3,
+                "reason": f"Bearish Engulfing (c3 body engulfs c2 body, body {body_pct3:.0f}%) → PUT reversal (63% win rate)"
+            })
+
+        # Dragonfly Doji (doji with long lower wick, close near high) — bullish at support
+        if body_pct3 < 10 and lw_pct3 >= 70 and uw_pct3 <= 10:
+            patterns.append({
+                "name": "DRAGONFLY_DOJI",
+                "direction": "CALL",
+                "score": 2,
+                "reason": f"Dragonfly Doji (lower wick {lw_pct3:.0f}%, body {body_pct3:.0f}%) → CALL reversal (58% win rate)"
+            })
+
+        # Gravestone Doji (doji with long upper wick, close near low) — bearish at resistance
+        if body_pct3 < 10 and uw_pct3 >= 70 and lw_pct3 <= 10:
+            patterns.append({
+                "name": "GRAVESTONE_DOJI",
+                "direction": "PUT",
+                "score": 2,
+                "reason": f"Gravestone Doji (upper wick {uw_pct3:.0f}%, body {body_pct3:.0f}%) → PUT reversal (58% win rate)"
+            })
+
     return patterns
 def classify_market_regime(candles, lookback=30):
     """Classify market state into one of four regimes."""
