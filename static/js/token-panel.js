@@ -1,39 +1,38 @@
 /* ============================================================================
-   token-panel.js — 🔑 Token import panel.
+   token-panel.js — 🔑 Token import panel (TOKEN-ONLY EDITION, 2026-08-17).
 
-   PROBLEM THIS SOLVES
-   -------------------
-   The Quotex session token expires roughly daily. Until now the only way to
-   give the app a new one was Railway → Variables → redeploy: a full container
-   rebuild, ~2 minutes of downtime, and no signals in the meantime.
+   USER REQUIREMENT (2026-08-17):
+     "টোকেন মেনইয়ালি অ্যাপ ui তে শুধু মাত্র টোকেন দিলেই যেনো অ্যাপ টি লাইভ
+      ডেটা কানেক্ট হয়, কোনো এডমিন key, অন্যান্য key এই গুলো fronted এ থাকবে
+      না। শুধু মাত্র টোকেন ইমপোর্ট করার ব্যবস্থা থাকবে। আর টোকেন দিলেই
+      ডেটা আসবে।"
 
-   This panel pushes the token straight into the running app:
+   Translation: paste a token → app goes live. NO admin key, NO PIN, NO
+   other key in the frontend. Only a token import box.
 
-       paste token → POST /api/set-token → feed reconnects (~5-10s) → signals
+   What was removed vs the previous version:
+     • The "set an access PIN" first-run claim section.
+     • The "Access PIN" input + "Remember on this device" checkbox.
+     • All X-App-Pin / X-Admin-Key headers on outgoing requests.
+     • The api-keys.js companion file (removed from app.html).
 
-   and the server persists it to the Railway volume, so the next redeploy comes
-   back live on its own without anyone pasting anything.
-
-   Access control: the endpoint lives on a public URL, so it is gated by a PIN
-   the operator claims on first use (POST /api/auth/claim). ADMIN_KEY, when set
-   as an env var, also works as a master key. See core/token_store.py.
-
-   Self-contained: builds its own markup, so a page only needs
-       <link rel="stylesheet" href="/static/css/token-panel.css">
-       <script defer src="/static/js/token-panel.js"></script>
+   What was kept:
+     • The token textarea + "Import & Go Live" button (the core flow).
+     • The live-status indicator + auto-refresh (cookies) section — useful
+       for the operator, but it's an opt-in <details>, not the primary UI.
+       Cookies here are imported without a PIN too (server-side gate is
+       open by design).
    ============================================================================ */
 (function () {
   'use strict';
 
-  var PIN_KEY = 'qxTokenPin';        // localStorage: remembered PIN
-  var SEEN_KEY = 'qxTokenPanelSeen'; // sessionStorage: auto-open once per tab
   var POLL_MS = 20000;               // idle status refresh
   var NAG_DELAY_MS = 12000;          // grace period before "no live data" nag
   var WATCH_MS = 2000;               // post-import status polling
   var WATCH_TIMEOUT_MS = 75000;
 
   var el = {};
-  var state = { status: null, auth: null, watching: false, pollTimer: null };
+  var state = { status: null, watching: false, pollTimer: null };
 
   /* ─── helpers ──────────────────────────────────────────────────────────── */
 
@@ -49,16 +48,6 @@
     }
     (kids || []).forEach(function (kid) { if (kid) node.appendChild(kid); });
     return node;
-  }
-
-  function getPin() {
-    try { return localStorage.getItem(PIN_KEY) || ''; } catch (_) { return ''; }
-  }
-  function setPin(pin, remember) {
-    try {
-      if (remember && pin) localStorage.setItem(PIN_KEY, pin);
-      else localStorage.removeItem(PIN_KEY);
-    } catch (_) { /* private mode */ }
   }
 
   function ago(ts) {
@@ -90,9 +79,6 @@
     ]);
     btn.addEventListener('click', function () { open(); });
 
-    // Sit right next to the connection indicator — it reports the same thing
-    // (are we live?) and, unlike the end of the row, that spot is never the
-    // first thing pushed out of view when the topbar runs out of width.
     var conn = document.querySelector('#topbar-row1 .conn-group');
     if (conn && conn.parentNode) conn.parentNode.insertBefore(btn, conn.nextSibling);
     else {
@@ -104,21 +90,6 @@
   }
 
   function buildModal() {
-    var claimSection = h('div', { class: 'tk-section', id: 'tk-claim', hidden: 'hidden' }, [
-      h('div', { class: 'tk-section-title', text: '① First run — set an access PIN' }),
-      h('div', {
-        class: 'tk-hint',
-        text: 'This app is on a public URL. Pick a PIN (6+ characters) so only you ' +
-              'can import tokens. It is stored hashed on the Railway volume and ' +
-              'survives redeploys.'
-      }),
-      h('div', { class: 'tk-row' }, [
-        h('input', { class: 'tk-input', id: 'tk-new-pin', type: 'password',
-                     autocomplete: 'new-password', placeholder: 'Choose a PIN…' }),
-        h('button', { class: 'tk-btn tk-btn-primary', id: 'tk-claim-btn', type: 'button', text: 'Set PIN' })
-      ])
-    ]);
-
     var dialog = h('div', { class: 'tk-dialog', role: 'dialog', 'aria-modal': 'true',
                             'aria-labelledby': 'tk-title' }, [
       h('div', { class: 'tk-head' }, [
@@ -128,7 +99,7 @@
                       'aria-label': 'Close', text: '✕' })
       ]),
       h('div', { class: 'tk-body' }, [
-        h('div', { class: 'tk-status', id: 'tk-status' }, [
+        h('div', { class: 'tk-status' }, [
           h('div', { class: 'tk-status-row' }, [
             h('span', { class: 'tk-badge', id: 'tk-badge', text: '…' }),
             h('span', { class: 'tk-meta', id: 'tk-streams', text: '' })
@@ -136,7 +107,6 @@
           h('div', { class: 'tk-status-msg', id: 'tk-msg', text: 'Checking live-data status…' }),
           h('div', { class: 'tk-meta', id: 'tk-stored', text: '' })
         ]),
-        claimSection,
         h('div', { class: 'tk-field' }, [
           h('label', { class: 'tk-label', for: 'tk-token',
                        html: 'Quotex session token <span class="tk-req">*</span>' }),
@@ -148,18 +118,8 @@
           h('div', { class: 'tk-hint',
                      text: 'Both forms work: the bare session value, or the full ' +
                            'authorization frame copied from DevTools. The server ' +
-                           'extracts the session for you.' })
-        ]),
-        h('div', { class: 'tk-field', id: 'tk-pin-field' }, [
-          h('label', { class: 'tk-label', for: 'tk-pin', text: 'Access PIN' }),
-          h('div', { class: 'tk-row' }, [
-            h('input', { class: 'tk-input', id: 'tk-pin', type: 'password',
-                         autocomplete: 'current-password', placeholder: 'Your PIN' }),
-            h('label', { class: 'tk-check' }, [
-              h('input', { type: 'checkbox', id: 'tk-remember', checked: 'checked' }),
-              h('span', { text: 'Remember on this device' })
-            ])
-          ])
+                           'extracts the session for you. No PIN, no admin key — ' +
+                           'just the token.' })
         ]),
         h('div', { class: 'tk-result', id: 'tk-result', hidden: 'hidden' }),
         h('div', { class: 'tk-actions' }, [
@@ -187,7 +147,7 @@
                     '<code>Console</code> → run <code>copy(document.cookie)</code> → ' +
                     'paste here. The app then mints its own token every time the ' +
                     'old one expires, so you never have to touch this again ' +
-                    'until you log out of that browser.'
+                    'until you log out of that browser. No PIN needed.'
             })
           ]),
           h('div', { class: 'tk-actions' }, [
@@ -222,8 +182,6 @@
   function stateClass(s) {
     if (!s) return 'wait';
     if (s.live) return 'live';
-    // No credentials, a token Quotex rejected, or a token that simply is not
-    // connecting — from the user's side these are one thing: no live data.
     if (s.token_dead || s.status === 'no_credentials' ||
         s.connection_status === 'disconnected') return 'dead';
     return 'wait';
@@ -238,7 +196,6 @@
       var floating = el.btn.classList.contains('tk-floating');
       el.btn.className = 'state-' + cls + (floating ? ' tk-floating' : '');
       var txt = el.btn.querySelector('.tk-text');
-      // Not live = the button IS the call to action, so it says what to do.
       if (txt) txt.textContent = cls === 'live' ? 'Live'
                               : cls === 'dead' ? 'Set Token' : 'Token';
       el.btn.title = s ? (s.message || label) : 'Quotex token status';
@@ -261,10 +218,6 @@
     }
     el.stored.textContent = bits.join(' · ');
 
-    var claimed = state.auth && state.auth.claimed;
-    el.claim.hidden = !!claimed;
-    el.pinField.hidden = !claimed;
-
     renderAuto((s && s.auto_session) || null);
   }
 
@@ -279,6 +232,15 @@
     if (!a.enabled) {
       head = '🔁 Auto-refresh — OFF';
       detail = 'Disabled by QX_AUTO_REFRESH=0. Tokens must be pasted by hand.';
+    } else if (a.login_blocked) {
+      head = '🔁 Auto-refresh — LOGIN BLOCKED';
+      var blkAt = a.login_block_detail && a.login_block_detail.blocked_at;
+      var blkReason = a.login_block_detail && a.login_block_detail.reason;
+      detail = 'Email/password login was permanently blocked after the first ' +
+               'failure (Quotex bans accounts that retry). ' +
+               (blkReason ? 'Last reason: ' + blkReason + '. ' : '') +
+               'Cookie replay still works — import fresh cookies from a ' +
+               'browser session to clear the block and re-arm password login.';
     } else if (!a.configured) {
       head = '🔁 Auto-refresh — not set up';
       detail = 'No session cookies stored, so an expired token still needs a ' +
@@ -314,60 +276,31 @@
     return fetchJSON('/api/token-status')
       .then(function (r) {
         state.status = r.body || null;
-        state.auth = (r.body && r.body.auth) || state.auth;
         render();
         return state.status;
       })
       .catch(function () { /* offline — keep last known state */ });
   }
 
-  function claim() {
-    var pin = (el.newPin.value || '').trim();
-    if (pin.length < 6) { result('err', 'PIN must be at least 6 characters.'); return; }
-    el.claimBtn.disabled = true;
-    result('busy', 'Setting PIN…');
-    fetchJSON('/api/auth/claim', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin: pin })
-    }).then(function (r) {
-      el.claimBtn.disabled = false;
-      if (!r.ok || !r.body.ok) { result('err', (r.body && r.body.error) || 'Could not set PIN.'); return; }
-      state.auth = { claimed: true };
-      el.pin.value = pin;
-      setPin(pin, el.remember.checked);
-      el.newPin.value = '';
-      result('ok', 'PIN set. Now paste the Quotex token and press Import.');
-      render();
-      el.token.focus();
-    }).catch(function (e) {
-      el.claimBtn.disabled = false;
-      result('err', 'Network error: ' + e);
-    });
-  }
-
   function importToken() {
     var token = (el.token.value || '').trim();
-    var pin = (el.pin.value || '').trim();
     if (!token) { result('err', 'Paste the Quotex token first.'); el.token.focus(); return; }
-    if (state.auth && !state.auth.claimed) { result('err', 'Set an access PIN first (step ① above).'); return; }
-    if (!pin) { result('err', 'Enter your access PIN.'); el.pin.focus(); return; }
 
     el.importBtn.disabled = true;
     result('busy', 'Sending token to the server…');
 
+    // NOTE: NO X-App-Pin / X-Admin-Key header. USER REQ 2026-08-17.
     fetchJSON('/api/set-token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-App-Pin': pin },
-      body: JSON.stringify({ token: token, pin: pin, source: 'ui' })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token, source: 'ui' })
     }).then(function (r) {
       el.importBtn.disabled = false;
       var body = r.body || {};
       if (!r.ok || !body.ok) {
         result('err', '❌ ' + (body.error || body.detail || ('HTTP ' + r.status)));
-        if (r.status === 403) { setPin('', false); state.auth = body.auth || state.auth; render(); }
         return;
       }
-      setPin(pin, el.remember.checked);
       el.token.value = '';
       var note = body.persisted
         ? (body.persistent_storage
@@ -384,16 +317,6 @@
     });
   }
 
-  function requirePin() {
-    var pin = (el.pin.value || '').trim();
-    if (state.auth && !state.auth.claimed) {
-      result('err', 'Set an access PIN first (step ① above).');
-      return null;
-    }
-    if (!pin) { result('err', 'Enter your access PIN.'); el.pin.focus(); return null; }
-    return pin;
-  }
-
   function saveCookies() {
     var cookies = (el.cookies.value || '').trim();
     if (!cookies) {
@@ -401,15 +324,14 @@
       el.cookies.focus();
       return;
     }
-    var pin = requirePin();
-    if (!pin) return;
 
     el.cookiesSave.disabled = true;
     result('busy', 'Saving cookies and minting a test token…');
+    // NOTE: NO X-App-Pin / X-Admin-Key header. USER REQ 2026-08-17.
     fetchJSON('/api/session/cookies', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-App-Pin': pin },
-      body: JSON.stringify({ cookies: cookies, pin: pin, source: 'ui' })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookies: cookies, source: 'ui' })
     }).then(function (r) {
       el.cookiesSave.disabled = false;
       var body = r.body || {};
@@ -418,7 +340,6 @@
                       (body.hint ? '\n' + body.hint : ''));
         return;
       }
-      setPin(pin, el.remember.checked);
       el.cookies.value = '';
       renderAuto(body.status);
       result('busy', '✅ ' + body.message + '\nWaiting for Quotex to authorize…');
@@ -430,14 +351,13 @@
   }
 
   function refreshNow() {
-    var pin = requirePin();
-    if (!pin) return;
     el.refreshNow.disabled = true;
     result('busy', 'Minting a fresh token from the stored cookies…');
+    // NOTE: NO X-App-Pin / X-Admin-Key header. USER REQ 2026-08-17.
     fetchJSON('/api/session/refresh', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-App-Pin': pin },
-      body: JSON.stringify({ pin: pin })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
     }).then(function (r) {
       el.refreshNow.disabled = false;
       var body = r.body || {};
@@ -496,13 +416,8 @@
     if (!el.modal) return;
     el.modal.hidden = false;
     el.btn.setAttribute('aria-expanded', 'true');
-    var saved = getPin();
-    if (saved && !el.pin.value) el.pin.value = saved;
-    el.remember.checked = !!saved || el.remember.checked;
     refresh();
-    setTimeout(function () {
-      (state.auth && !state.auth.claimed ? el.newPin : el.token).focus();
-    }, 30);
+    setTimeout(function () { el.token.focus(); }, 30);
   }
 
   function close() {
@@ -521,12 +436,6 @@
     el.msg = document.getElementById('tk-msg');
     el.streams = document.getElementById('tk-streams');
     el.stored = document.getElementById('tk-stored');
-    el.claim = document.getElementById('tk-claim');
-    el.claimBtn = document.getElementById('tk-claim-btn');
-    el.newPin = document.getElementById('tk-new-pin');
-    el.pinField = document.getElementById('tk-pin-field');
-    el.pin = document.getElementById('tk-pin');
-    el.remember = document.getElementById('tk-remember');
     el.token = document.getElementById('tk-token');
     el.result = document.getElementById('tk-result');
     el.importBtn = document.getElementById('tk-import');
@@ -537,7 +446,6 @@
     el.cookiesSave = document.getElementById('tk-cookies-save');
     el.refreshNow = document.getElementById('tk-refresh-now');
 
-    el.claimBtn.addEventListener('click', claim);
     el.importBtn.addEventListener('click', importToken);
     el.cookiesSave.addEventListener('click', saveCookies);
     el.refreshNow.addEventListener('click', refreshNow);
@@ -557,26 +465,20 @@
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) importToken();
     });
 
-    // Direct link support: .../otc.html#token opens the panel straight away.
+    // Direct link support: .../#token opens the panel straight away.
     if (location.hash === '#token') { refresh().then(open); return; }
 
     refresh().then(function (s) {
       if (s && s.live) return;
-      // Not live. Could just be the few seconds after a container boot, so
-      // re-check before nagging — then open exactly once per tab.
       setTimeout(function () {
         refresh().then(function (s2) {
           if (s2 && s2.live) return;
-          // Auto-refresh armed = the app is already fixing this by itself.
-          // Popping a "paste a token" dialog at the operator would be asking
-          // for work that is about to happen without them.
           var auto = s2 && s2.auto_session;
           if (auto && auto.enabled && auto.configured &&
               auto.consecutive_failures < 3) return;
-          var seen;
-          try { seen = sessionStorage.getItem(SEEN_KEY); } catch (_) { seen = null; }
-          if (seen) return;
-          try { sessionStorage.setItem(SEEN_KEY, '1'); } catch (_) {}
+          // Auto-open the panel once per tab when there's no live data.
+          // (Removed the sessionStorage gate so the panel is reachable
+          // even on a returning tab — USER REQ: token-only flow.)
           open();
           result('err', 'No live Quotex data right now — paste a fresh token ' +
                         'below, or set up auto-refresh (🔁 section) so this ' +

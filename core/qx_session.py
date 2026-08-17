@@ -82,6 +82,15 @@ SESSION_FILE = "qx_session.json"
 _REFRESH_MIN_INTERVAL = float(os.environ.get("QX_REFRESH_MIN_INTERVAL", "60"))
 # Password login is the dangerous one — see module docstring.
 _LOGIN_MIN_INTERVAL = float(os.environ.get("QX_LOGIN_MIN_INTERVAL", "1800"))
+# USER REQUIREMENT (2026-08-17): "যদি কোনো কারণে প্রথম বারে লগিং ফেইল হলে,
+# সেকেন্ড টাইম আর লগিং ট্রাই করা যাবে না" — if email/password login fails ONCE,
+# NEVER try again. Repeated failed logins get the Quotex account banned
+# (the operator already got blocked once). Only a fresh cookie import
+# (i.e. a human re-logged in via browser) clears the block.
+# Stored in qx_session.json so it survives restarts.
+LOGIN_BLOCKED_KEY = "login_blocked"
+LOGIN_BLOCKED_AT_KEY = "login_blocked_at"
+LOGIN_BLOCKED_REASON_KEY = "login_blocked_reason"
 # After this many consecutive cookie failures, stop trying so often: the
 # cookies are almost certainly dead and only a human can fix them.
 _DEAD_AFTER_FAILURES = int(os.environ.get("QX_COOKIE_DEAD_AFTER", "5"))
@@ -340,8 +349,59 @@ def save_cookies(jar: dict[str, str], source: str = "refresh") -> dict:
     return rec
 
 
+# ── login-blocked flag (USER REQ 2026-08-17) ──────────────────────────────
+# If email/password login fails ONCE, we must NEVER retry — Quotex bans
+# the account for repeated failed attempts. The block persists to disk
+# so it survives restarts. Only a fresh cookie import (operator logged
+# in via browser) clears it.
+
+def is_login_blocked() -> bool:
+    """True if a previous email/password login failed and must not be retried."""
+    rec = _read_store()
+    return bool(rec.get(LOGIN_BLOCKED_KEY))
+
+
+def _login_block_detail() -> dict:
+    rec = _read_store()
+    if not rec.get(LOGIN_BLOCKED_KEY):
+        return {"blocked": False}
+    return {
+        "blocked": True,
+        "blocked_at": rec.get(LOGIN_BLOCKED_AT_KEY),
+        "reason": rec.get(LOGIN_BLOCKED_REASON_KEY),
+    }
+
+
+def _set_login_block(reason: str) -> None:
+    """Mark email/password login as permanently blocked for this session."""
+    rec = _read_store()
+    rec[LOGIN_BLOCKED_KEY] = True
+    rec[LOGIN_BLOCKED_AT_KEY] = time.time()
+    rec[LOGIN_BLOCKED_REASON_KEY] = (reason or "login failed")[:500]
+    _write_store(rec)
+    print(f"[qx_session] 🚫 email/password login PERMANENTLY BLOCKED after "
+          f"first failure: {reason[:200]}. Re-import cookies from a fresh "
+          f"browser session to clear the block.")
+
+
+def _clear_login_block() -> None:
+    """Clear the login-blocked flag (called after a successful cookie import)."""
+    rec = _read_store()
+    if rec.get(LOGIN_BLOCKED_KEY):
+        rec.pop(LOGIN_BLOCKED_KEY, None)
+        rec.pop(LOGIN_BLOCKED_AT_KEY, None)
+        rec.pop(LOGIN_BLOCKED_REASON_KEY, None)
+        _write_store(rec)
+        print("[qx_session] ✓ login block CLEARED — fresh cookies imported")
+
+
 def import_cookies(raw: str, source: str = "ui") -> dict:
-    """Operator pasted a fresh cookie blob. Validate the essentials, store it."""
+    """Operator pasted a fresh cookie blob. Validate the essentials, store it.
+
+    A successful cookie import means the operator re-logged in to Quotex
+    in their browser, so this also CLEARS the login_blocked flag — the
+    human has just proven they can authenticate again. (USER REQ 2026-08-17)
+    """
     jar = _normalize_recaller(parse_cookie_blob(raw))
     if not jar:
         return {"ok": False, "error": "could not parse any cookies out of that "
@@ -356,6 +416,10 @@ def import_cookies(raw: str, source: str = "ui") -> dict:
     save_cookies(jar, source=source)
     _state["consecutive_failures"] = 0
     _state["last_error"] = None
+    # Clear the login-blocked flag: a fresh cookie import means the human
+    # re-authenticated in their browser, so the next auto-refresh can
+    # safely try the password path again if it ever needs to.
+    _clear_login_block()
     return {"ok": True, "cookies": sorted(jar.keys()),
             "has_cf_clearance": "cf_clearance" in jar}
 
@@ -659,18 +723,27 @@ async def _do_refresh(reason: str) -> tuple[Optional[str], str]:
                 errors.append(detail)
 
         # ── strategy 2: form login (opt-in, hard rate-limited) ──────────
-        if password_login_allowed():
+        # USER REQ 2026-08-17: if a previous password login failed, NEVER
+        # try again. Quotex bans the account for repeated failed attempts.
+        # Only a fresh cookie import (operator re-logged in via browser)
+        # clears the block (see import_cookies()).
+        if password_login_allowed() and not is_login_blocked():
             since = time.time() - _state["last_login_attempt"]
             if since < _LOGIN_MIN_INTERVAL:
                 errors.append(f"password login rate-limited "
                               f"({since:.0f}s < {_LOGIN_MIN_INTERVAL:.0f}s)")
             else:
                 _state["last_login_attempt"] = time.time()
+                _login_failed_this_cycle = False
                 for host in web_hosts():
                     ok, detail = await _password_login(client, host)
                     errors.append(detail)
                     if not ok:
-                        continue
+                        # FIRST failure → permanent block. Stop trying
+                        # any other host immediately. Do not retry.
+                        _set_login_block(detail)
+                        _login_failed_this_cycle = True
+                        break
                     token, detail2 = await _try_trade_page(client, host)
                     errors.append(detail2)
                     if token:
@@ -680,6 +753,17 @@ async def _do_refresh(reason: str) -> tuple[Optional[str], str]:
                         print(f"[qx_session] ✅ fresh SSID via password login "
                               f"({token_store.mask(token)}) from {host}")
                         return token, f"password@{host}"
+                if _login_failed_this_cycle:
+                    # Block is set; do not fall through to other strategies
+                    # that might indirectly retry. Surface the failure.
+                    return None, " | ".join(errors)
+        elif password_login_allowed() and is_login_blocked():
+            blk = _login_block_detail()
+            errors.append(
+                f"password login BLOCKED since "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(blk.get('blocked_at') or 0))} "
+                f"after the first failure: {blk.get('reason', '?')}. "
+                f"Re-import cookies from a fresh browser session to clear.")
 
     return None, " | ".join(errors) or "no strategy produced a token"
 
@@ -731,6 +815,8 @@ def status() -> dict:
         "web_hosts": web_hosts(),
         "user_agent": user_agent(),
         "password_login_allowed": password_login_allowed(),
+        "login_blocked": is_login_blocked(),
+        "login_block_detail": _login_block_detail(),
         "account_email": _state["account_email"],
         "last_success": _state["last_success"] or None,
         "last_attempt": _state["last_attempt"] or None,

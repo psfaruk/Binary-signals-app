@@ -820,7 +820,13 @@ async def legacy_alltime_otc():
 @app.get("/api/set-token")
 async def set_token_get(token: str, x_admin_key: Optional[str] = None,
                         pin: Optional[str] = None):
-    """Set Quotex token at runtime — no restart needed (browser-friendly)."""
+    """Set Quotex token at runtime — no restart needed (browser-friendly).
+
+    USER REQ 2026-08-17: just `?token=...` is enough — no PIN, no admin key
+    needed on the frontend. Auth gate is open by design (see
+    core/token_store.authorize). Admin-key is still accepted for backwards
+    compatibility with scripts/token_agent.py and scripts/minter_service.py.
+    """
     allowed, reason = _token_store.authorize(pin=pin or "",
                                              admin_key=x_admin_key or "")
     if not allowed:
@@ -829,12 +835,17 @@ async def set_token_get(token: str, x_admin_key: Optional[str] = None,
 
 @app.post("/api/set-token")
 async def set_token_post(request: Request):
-    """Set Quotex token via POST — used by the 🔑 Token panel in the UI."""
+    """Set Quotex token via POST — used by the 🔑 Token panel in the UI.
+
+    USER REQ 2026-08-17: "টোকেন দিলেই ডেটা আসবে" — paste a token, get live
+    data. No PIN, no admin key required. The body only needs `{token: "..."}`.
+    """
     body = await _json_body(request)
     if not body:
         return JSONResponse(status_code=400,
                             content={"ok": False, "error": "invalid JSON body"})
     pin, admin_key = _request_secrets(body, request)
+    # authorize() always returns (True, "open") now — kept for audit trail.
     allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
     if not allowed:
         return JSONResponse(status_code=403,
@@ -996,7 +1007,13 @@ async def session_status():
 
 @app.post("/api/session/cookies")
 async def session_set_cookies(request: Request):
-    """Import a fresh Quotex cookie blob (document.cookie or JSON export)."""
+    """Import a fresh Quotex cookie blob (document.cookie or JSON export).
+
+    USER REQ 2026-08-17: no PIN/admin key required — just `{"cookies": "..."}`.
+    Also clears the login_blocked flag (a fresh cookie import means the
+    operator re-logged in via browser, so password login is safe to try
+    again if it ever needs to).
+    """
     body = await _json_body(request)
     pin, admin_key = _request_secrets(body, request)
     allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
@@ -1037,7 +1054,10 @@ async def session_set_cookies(request: Request):
 
 @app.post("/api/session/refresh")
 async def session_refresh(request: Request):
-    """Force an immediate token refresh from the stored cookies."""
+    """Force an immediate token refresh from the stored cookies.
+
+    USER REQ 2026-08-17: no PIN/admin key required.
+    """
     body = await _json_body(request)
     pin, admin_key = _request_secrets(body, request)
     allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
@@ -1045,6 +1065,15 @@ async def session_refresh(request: Request):
         return JSONResponse(status_code=403,
                             content={"ok": False, "error": _auth_error(reason)})
     from core import qx_session
+    if qx_session.is_login_blocked():
+        blk = qx_session.status().get("login_block_detail") or {}
+        return JSONResponse(status_code=400, content={
+            "ok": False,
+            "error": "password login is permanently blocked after the first "
+                     "failure. Re-import cookies from a fresh browser session "
+                     "to clear the block.",
+            "login_block_detail": blk,
+        })
     if not qx_session.configured():
         return JSONResponse(status_code=400, content={
             "ok": False,

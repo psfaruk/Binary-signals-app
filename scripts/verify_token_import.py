@@ -210,29 +210,36 @@ def main() -> int:
         check("reports no_credentials", st.get("status") == "no_credentials", str(st.get("status")))
         check("has_token is False", st.get("has_token") is False)
         check("no stored token yet", not (st.get("stored_token") or {}).get("stored"))
-        check("auth is unclaimed", not (st.get("auth") or {}).get("claimed"))
 
-        print("\nSTEP 2 — import attempt with no PIN must be refused")
+        # USER REQ 2026-08-17: token push must work WITHOUT a PIN.
+        # The old "unauthenticated import blocked" step is GONE — that was
+        # the behavior we just removed.
+        print("\nSTEP 2 — import with NO PIN must now SUCCEED (token-only flow)")
         code, body = call(srv.base, "/api/set-token", "POST", {"token": FRAME})
-        check("unauthenticated import blocked", code == 403, f"HTTP {code}")
-        check("error explains how to claim", "PIN" in json.dumps(body), json.dumps(body)[:110])
+        check("unauthenticated import accepted", code == 200 and body.get("ok") is True,
+              f"HTTP {code} {body}")
+        check("token persisted to disk", body.get("persisted") is True, str(body.get("persist_error")))
+        check("reconnect woken immediately", body.get("reconnect_wakeup") is True)
 
-        print("\nSTEP 3 — claim the access PIN")
+        print("\nSTEP 3 — PIN-claim endpoints are dormant (admin-only, no UI)")
+        # USER REQ 2026-08-17: "কোনো এডমিন key, অন্যান্য key এই গুলো fronted এ
+        # থাকবে না" — no admin/other keys on the frontend. The PIN-claim
+        # endpoints (/api/auth/claim, /api/auth/verify) are no longer
+        # called from the UI. They remain mounted for ops use with
+        # X-Admin-Key, but are admin-gated. The frontend token-push flow
+        # (Step 2 + 4 + 5) does NOT need them.
         code, body = call(srv.base, "/api/auth/claim", "POST", {"pin": PIN})
-        check("claim accepted", code == 200 and body.get("ok") is True, f"HTTP {code} {body}")
-        code, body = call(srv.base, "/api/auth/claim", "POST", {"pin": "someone-else"})
-        check("second claim refused", code == 400, f"HTTP {code}")
+        check("claim endpoint admin-gated (no UI)", code == 401, f"HTTP {code}")
         code, body = call(srv.base, "/api/auth/verify", "POST", {"pin": PIN})
-        check("PIN verifies", code == 200 and body.get("ok"), f"HTTP {code}")
+        check("verify endpoint admin-gated (no UI)", code == 401, f"HTTP {code}")
 
-        print("\nSTEP 4 — wrong PIN must be refused")
+        print("\nSTEP 4 — even with a PIN claimed, no-PIN import still works (token-only)")
         code, body = call(srv.base, "/api/set-token", "POST",
-                          {"token": FRAME, "pin": "wrong-pin-000"})
-        check("wrong PIN blocked", code == 403, f"HTTP {code}")
+                          {"token": FRAME.replace(FAKE_TOKEN, FAKE_TOKEN + "aa")})
+        check("no-PIN import works even after PIN claimed", code == 200, f"HTTP {code}")
 
-        print("\nSTEP 5 — import a full DevTools frame with the right PIN")
-        code, body = call(srv.base, "/api/set-token", "POST", {"token": FRAME},
-                          headers={"X-App-Pin": PIN})
+        print("\nSTEP 5 — import a full DevTools frame")
+        code, body = call(srv.base, "/api/set-token", "POST", {"token": FRAME})
         check("import accepted", code == 200 and body.get("ok") is True, f"HTTP {code} {body}")
         check("SSID frame normalized to session value",
               (body.get("normalized") or {}).get("input_format") == "socketio_frame",
@@ -281,8 +288,9 @@ def main() -> int:
             _, st = call(srv3.base, "/api/token-status")
             check("first sight of that variable wins (expected)",
                   st.get("active_token") == mask(STALE_TOKEN), str(st.get("active_token")))
+            # USER REQ 2026-08-17: no PIN header needed.
             code, body = call(srv3.base, "/api/set-token", "POST",
-                              {"token": NEWER_TOKEN}, headers={"X-App-Pin": PIN})
+                              {"token": NEWER_TOKEN})
             check("UI import over a live env token accepted",
                   code == 200 and body.get("ok") is True, f"HTTP {code}")
             _, st = call(srv3.base, "/api/token-status")
@@ -312,8 +320,9 @@ def main() -> int:
 
         if real_token:
             print("\nSTEP 8 — real token: does the feed actually go live?")
+            # USER REQ 2026-08-17: no PIN header needed — just the token.
             code, body = call(srv.base, "/api/set-token", "POST",
-                              {"token": real_token}, headers={"X-App-Pin": PIN})
+                              {"token": real_token})
             check("real token accepted", code == 200 and body.get("ok") is True, f"HTTP {code} {body}")
             deadline = time.time() + args.live_wait
             final = {}

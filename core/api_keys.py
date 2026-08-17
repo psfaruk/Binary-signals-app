@@ -265,13 +265,23 @@ _PUBLIC_READ_PREFIXES = (
     "/healthz",
     "/api/token-status",  # token import status (read-only)
     "/api/auth/state",  # first-run check
-)
-
-_ADMIN_ONLY_PREFIXES = (
+    # ── Token-push endpoints — USER REQ 2026-08-17 ──
+    # "টোকেন দিলেই ডেটা আসবে" — paste a token, get data. No PIN, no admin
+    # key on the frontend. These accept POST {token: "..."} from anyone
+    # with the URL.
     "/api/set-token",
     "/api/session/cookies",
     "/api/session/refresh",
+    "/api/session/status",
     "/api/reconnect",
+)
+
+_ADMIN_ONLY_PREFIXES = (
+    # USER REQ 2026-08-17: token-push endpoints (/api/set-token,
+    # /api/session/cookies, /api/session/refresh, /api/reconnect) are
+    # NO LONGER admin-gated. The frontend pushes tokens with NO PIN and
+    # NO admin key. They fall through to the "unknown" branch below,
+    # which defaults to public_read when QX_PUBLIC_READ=1 (the default).
     "/api/signals/clear",
     "/api/admin/",
     "/api/auth/claim",
@@ -280,6 +290,16 @@ _ADMIN_ONLY_PREFIXES = (
     "/api/patterns/refresh",
     "/api/auto-tune/apply",
     "/api/pair-health/reset",
+)
+
+# Token-push endpoints that USED to be admin-only and are now PUBLIC.
+# Listed explicitly so the test script (and any future audit) can verify
+# the policy is correct.
+TOKEN_PUSH_PREFIXES = (
+    "/api/set-token",
+    "/api/session/cookies",
+    "/api/session/refresh",
+    "/api/reconnect",
 )
 
 _API_KEY_WRITE_PREFIXES = (

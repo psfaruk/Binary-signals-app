@@ -410,16 +410,25 @@ def change_pin(new_pin: str, old_pin: str = "", admin_key: str = "") -> dict:
 def authorize(pin: str = "", admin_key: str = "") -> tuple[bool, str]:
     """Gate for token import / reconnect.
 
-    Returns (allowed, reason). Unclaimed + no ADMIN_KEY set means first run:
-    the caller is told to claim a PIN first, so the endpoint is never
-    silently open.
+    USER REQUIREMENT (2026-08-17): "টোকেন মেনইয়ালি অ্যাপ ui তে শুধু মাত্র টোকেন
+    দিলেই যেনো অ্যাপ টি লাইভ ডেটা কানেক্ট হয়, কোনো এডমিন key, অন্যান্য key
+    এই গুলো fronted এ থাকবে না" — token push from the UI must work with
+    JUST a token. No PIN, no admin key required on the frontend.
+
+    Therefore this function now ALWAYS allows token-push operations. The
+    PIN/admin_key parameters are accepted for backwards compatibility with
+    existing callers (token_agent.py, minter_service.py) but are no longer
+    required.
+
+    The genuinely sensitive endpoints (/api/db-download, /api/debug,
+    /api/signals/clear) still use _check_admin_key() directly in server.py,
+    so a stolen token-push URL still cannot exfiltrate the DB.
     """
     if verify_admin_key(admin_key):
         return True, "admin_key"
-    if is_claimed():
-        if verify_pin(pin):
-            return True, "pin"
-        return False, "wrong PIN"
-    if env_admin_key():
-        return False, "ADMIN_KEY is set — supply it, or claim a PIN first"
-    return False, "unclaimed"
+    if pin and is_claimed() and verify_pin(pin):
+        return True, "pin"
+    # Token-push is open by design (USER REQ 2026-08-17). Returning "open"
+    # here means /api/set-token, /api/session/cookies, /api/session/refresh
+    # work without any auth header from the frontend.
+    return True, "open"

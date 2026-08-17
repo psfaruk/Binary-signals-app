@@ -369,40 +369,19 @@
             <section class="tab-pane" data-pane="setting" id="pane-setting">
                 <div class="pane-header">
                     <h2>Settings</h2>
-                    <p class="pane-subtitle">API keys, token management, preferences</p>
+                    <p class="pane-subtitle">Token management, preferences</p>
                 </div>
                 <div class="settings-sections">
                     <div class="settings-section">
-                        <h3>API Keys</h3>
-                        <p class="section-desc">
-                            Public read access is enabled — anyone with the URL can view signals.
-                            API keys are optional, for programmatic clients (bots, scripts).
-                        </p>
-                        <div class="api-key-create">
-                            <input type="text" id="api-key-label" class="filter-input" placeholder="Key label (e.g. my-bot)">
-                            <input type="number" id="api-key-ratelimit" class="filter-input" value="60" min="1" max="600" placeholder="rate/min">
-                            <button class="btn-primary" id="api-key-create-btn" type="button">Create key</button>
-                        </div>
-                        <div class="api-key-list" id="api-key-list">
-                            <div class="loading-row">Loading keys…</div>
-                        </div>
-                        <div class="api-key-help">
-                            <p><strong>How to use:</strong> pass the key as <code>Authorization: Bearer qxa_...</code> header, or as <code>?api_key=qxa_...</code> query parameter.</p>
-                            <p><strong>Public endpoints</strong> (no key needed): <code>/api/share-signals</code>, <code>/api/pairs</code>, <code>/api/signals/{asset}/{period}</code></p>
-                            <p><strong>Key-required</strong>: <code>POST /api/share-signals/save</code></p>
-                            <p><strong>Admin endpoints</strong> (X-App-Pin or X-Admin-Key): <code>/api/set-token</code>, <code>/api/session/*</code></p>
-                        </div>
-                    </div>
-                    <div class="settings-section">
                         <h3>Quotex Token</h3>
-                        <p class="section-desc">Live Quotex session token status. Token expires ~24h.</p>
+                        <p class="section-desc">Live Quotex session token status. Token expires ~24h. Paste a fresh token and the app reconnects automatically — no PIN, no admin key, just the token.</p>
                         <div class="token-status" id="token-status-row">
                             <div class="token-status-icon" id="token-status-icon">●</div>
                             <div class="token-status-text">
                                 <div class="token-status-label" id="token-status-label">Checking…</div>
                                 <div class="token-status-sub" id="token-status-sub"></div>
                             </div>
-                            <button class="btn-secondary" id="token-manage-btn" type="button">Manage token</button>
+                            <button class="btn-secondary" id="token-manage-btn" type="button">Import token</button>
                         </div>
                     </div>
                     <div class="settings-section">
@@ -493,20 +472,6 @@
     </div>
 </div>
 
-<!-- ============ API KEY CREATED MODAL ============ -->
-<div id="api-key-modal" class="modal-overlay" hidden>
-    <div class="modal-content api-key-modal-content">
-        <button class="modal-close" id="api-key-modal-close" type="button" aria-label="Close">×</button>
-        <h3>API Key Created</h3>
-        <p class="modal-warn">⚠️ Copy this key now — it will not be shown again.</p>
-        <div class="api-key-display">
-            <code id="api-key-raw"></code>
-            <button class="btn-secondary" id="api-key-copy-btn" type="button">Copy</button>
-        </div>
-        <div class="api-key-info" id="api-key-info-box"></div>
-    </div>
-</div>
-
 <!-- ============ SIGNAL DETAIL MODAL — common.js writes to #detail-body, #detail-title ============ -->
 <div id="signal-detail-overlay" class="modal-overlay" hidden>
     <div class="modal-content signal-detail-content">
@@ -520,7 +485,6 @@
 <script src="/static/lightweight-charts.js"></script>
 <script src="/static/js/common.js"></script>
 <script src="/static/js/app-nav.js"></script>
-<script src="/static/js/api-keys.js"></script>
 <script src="/static/js/token-panel.js"></script>
 <script>
 (function() {
