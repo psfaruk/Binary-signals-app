@@ -3322,6 +3322,22 @@ class QuotexFeed:
         # upgrade path normally.
         stream._option_b_fired = False
 
+        # FIX (EOC-IDENTITY-2026-08-31): the eoc broadcast carried only
+        # `accuracy` — no signal/ctime identity. Clients had to GUESS which
+        # prediction the result belonged to; a client that reconnected
+        # mid-candle misattributed wins/losses. Stash the graded signal
+        # identity on the stream so both eoc broadcast sites (timer-close
+        # and tick-close) can attach it.
+        try:
+            stream.last_graded = {
+                "signal": (old_prediction or {}).get("signal"),
+                "ctime": closed.get("time"),
+                "confidence": (old_prediction or {}).get("confidence"),
+                "strength": (old_prediction or {}).get("strength"),
+            }
+        except Exception:
+            stream.last_graded = None
+
         return accuracy
 
     async def _smart_sleep(self, stream: _AssetStream) -> None:
@@ -3628,6 +3644,10 @@ class QuotexFeed:
                             "candles":    all_c[-SNAPSHOT_CANDLES:],
                             "prediction": None,   # gated — arrives via tick
                             "accuracy":   accuracy,
+                            # FIX (EOC-IDENTITY-2026-08-31): which signal the
+                            # result belongs to — no more client-side guessing.
+                            "signal":     (getattr(stream, "last_graded", None) or {}).get("signal"),
+                            "ctime":      (getattr(stream, "last_graded", None) or {}).get("ctime"),
                         })
 
                 if self._client is None:
@@ -3821,6 +3841,10 @@ class QuotexFeed:
                             "candles":    last_eoc_candles,
                             "prediction": None,   # gated — arrives via tick
                             "accuracy":   last_accuracy,
+                            # FIX (EOC-IDENTITY-2026-08-31): which signal the
+                            # result belongs to — no more client-side guessing.
+                            "signal":     (getattr(stream, "last_graded", None) or {}).get("signal"),
+                            "ctime":      (getattr(stream, "last_graded", None) or {}).get("ctime"),
                         })
                     # remaining ticks (if any) were already appended in the loop.
 

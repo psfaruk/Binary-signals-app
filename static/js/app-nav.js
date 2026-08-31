@@ -132,6 +132,13 @@
     }
 
     function openTokenPanel() {
+        // FIX (AURORA-V3-2026-08-31): token-panel.js owns a fully-featured
+        // dynamic modal and now binds the static #token-btn itself. Prefer its
+        // open() — the old path (static #token-panel-modal + 'bst-open-token-    // panel' event nobody listened to) left the modal stuck on "Loading…".
+        if (typeof window.__tokenPanelOpen === 'function') {
+            window.__tokenPanelOpen();
+            return;
+        }
         const modal = document.getElementById('token-panel-modal');
         const body = document.getElementById('token-panel-body');
         if (!modal || !body) return;

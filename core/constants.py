@@ -128,6 +128,18 @@ MODULE_NAMES = (
     "tickrun",
     "multi_tf",     # FIX (DEEP-FIX-2026-08-07): HTF confirmation module
     "momentum",     # FIX (DEEP-FIX-2026-08-07): RSI + MACD oscillators
+    # FIX (MODULE-REGISTRY-FIX-2026-08-31): these 4 modules have been live in
+    # OTC_MODULES / REAL_MODULES since the "4 new strategy modules" commit
+    # (bbb5696) but were NEVER registered here. Consequences of the omission:
+    #   - db._MODULE_TAG_RE never extracted their [module] tags → zero
+    #     module_votes rows → their win rates were invisible everywhere
+    #   - per_module_accuracy() never returned stats for them →
+    #     PairWeightAdapter could not adapt their weights (frozen forever)
+    # Now registered so their learning loop actually closes.
+    "bollinger_rsi",
+    "stochastic",
+    "ema_ribbon",
+    "sr_bounce",
 )
 
 # Human-readable display names for the UI.
@@ -141,6 +153,10 @@ MODULE_DISPLAY_NAMES = {
     "tickrun":         "Tick Run (Sweep/Absorb/Flip)",
     "multi_tf":        "Multi-Timeframe",
     "momentum":        "RSI + MACD Momentum",
+    "bollinger_rsi":   "Bollinger + RSI",
+    "stochastic":      "Stochastic",
+    "ema_ribbon":      "EMA Ribbon",
+    "sr_bounce":       "S/R Bounce",
 }
 
 # ───────────────────────────────────────────────────────────────────────────

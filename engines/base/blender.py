@@ -1,6 +1,9 @@
 """engines/base/blender.py — Smart blender shared by both OTC and Real engines."""
 import os
 import math
+import time  # FIX (NAMEERROR-TIME-2026-08-31): was missing at module level —
+# the WEAK-boost hourly-WR block used int(time.time()) and silently died in
+# its own `except Exception: pass`, so the hourly bonus NEVER fired.
 from dataclasses import dataclass
 from typing import Callable
 

@@ -1688,6 +1688,36 @@ async def quality_analysis(period: int = 60, hours: int = 0):
         _logger.exception("quality analysis failed")
         return {"error": str(e), "hint": "signal_quality column may not exist yet — run db.init()"}
 
+@app.get("/api/winrate")
+async def api_winrate(period: int = 60, days: Optional[int] = None,
+                      category: Optional[str] = None):
+    """Per-pair, per-direction (CALL vs PUT) win rates.
+
+    FIX (WINRATE-API-2026-08-31): the app had no endpoint that answered
+    "which pair's CALL vs PUT signals are actually winning?". This endpoint
+    returns exact final-signal win rates from signal_log for every pair —
+    powering the new frontend Win Rate dashboard.
+
+    Query params:
+        period   : candle period seconds (default 60)
+        days     : lookback window — 1=today-ish, 7, 30; omit for all-time
+        category : 'otc' | 'real' (optional filter)
+
+    Response: { ok, period, window_days, overall:{...}, pairs:[{...}] }
+    Each row: asset, category, graded, win_pct, call{total,correct,win_pct},
+              put{total,correct,win_pct}, last_signal, last_accuracy,
+              streak_type, streak_count, last_ctime
+    """
+    try:
+        data = _db.get_directional_winrate(
+            period=period, days=days,
+            category=category if category in ('otc', 'real') else None,
+        )
+        return {"ok": True, **data}
+    except Exception as e:
+        _logger.exception("winrate endpoint failed")
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
 @app.get("/api/pair-deep-stats/{asset}")
 async def pair_deep_stats(asset: str, period: int = 60):
     """Deep statistics for a specific pair — all the data needed for calibration."""

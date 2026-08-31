@@ -70,6 +70,17 @@
   /* ─── markup ───────────────────────────────────────────────────────────── */
 
   function buildButton() {
+    // FIX (AURORA-V3-2026-08-31): the page now ships a static #token-btn in
+    // the topbar. Reuse it instead of creating a floating duplicate (which
+    // produced duplicate IDs and a stray fixed-position button).
+    var existing = document.getElementById('token-btn');
+    if (existing) {
+      existing.setAttribute('aria-haspopup', 'dialog');
+      existing.setAttribute('aria-expanded', 'false');
+      existing.setAttribute('aria-label', 'Import Quotex token');
+      existing.addEventListener('click', function () { open(); });
+      return existing;
+    }
     var btn = h('button', {
       id: 'token-btn', type: 'button', title: 'Quotex token / live data status',
       'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'aria-label': 'Import Quotex token'
@@ -194,7 +205,12 @@
 
     if (el.btn) {
       var floating = el.btn.classList.contains('tk-floating');
-      el.btn.className = 'state-' + cls + (floating ? ' tk-floating' : '');
+      // FIX (AURORA-V3-2026-08-31): toggle state classes instead of clobbering
+      // className — the static Aurora topbar button carries its own design
+      // classes (.icon-btn .token-btn) that must survive state updates.
+      el.btn.classList.remove('state-live', 'state-wait', 'state-dead');
+      el.btn.classList.add('state-' + cls);
+      if (floating) el.btn.classList.add('tk-floating');
       var txt = el.btn.querySelector('.tk-text');
       if (txt) txt.textContent = cls === 'live' ? 'Live'
                               : cls === 'dead' ? 'Set Token' : 'Token';
@@ -415,6 +431,10 @@
   function open() {
     if (!el.modal) return;
     el.modal.hidden = false;
+    // FIX (AURORA-V3-2026-08-31): expose for app-nav.js openTokenPanel() so
+    // BOTH the static topbar button and the sidebar "টোকেন ইমপোর্ট" button
+    // open this same canonical modal.
+    try { window.__tokenPanelOpen = open; } catch (_e) {}
     el.btn.setAttribute('aria-expanded', 'true');
     refresh();
     setTimeout(function () { el.token.focus(); }, 30);

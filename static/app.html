@@ -3,15 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
-    <meta name="theme-color" content="#0a0e1a">
-    <title>Binary Signal Terminal</title>
+    <meta name="theme-color" content="#04070f">
+    <title>Binary Signal — Aurora Terminal</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/common.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/app-v3.css">
+    <link rel="stylesheet" href="/static/css/app-v3-panels.css">
     <link rel="stylesheet" href="/static/css/token-panel.css">
-    <link rel="stylesheet" href="/static/css/app-nav.css">
-    <link rel="stylesheet" href="/static/css/app-ui-fix.css">
 </head>
 <body data-category="otc" data-tab="chart">
 
@@ -24,36 +23,40 @@
     <aside class="app-sidebar" id="app-sidebar" aria-label="Main navigation">
         <div class="sidebar-brand">
             <div class="brand-icon">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>
             </div>
             <div class="brand-text">
                 <h1>Binary Signal</h1>
-                <span class="brand-version">Terminal v2</span>
+                <span class="brand-version">Aurora v3</span>
             </div>
         </div>
 
         <nav class="sidebar-nav">
             <button class="nav-item" data-tab="home" type="button">
-                <span class="nav-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>
-                <span class="nav-label">Home</span>
+                <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>
+                <span class="nav-label">হোম</span>
             </button>
             <button class="nav-item active" data-tab="chart" type="button">
-                <span class="nav-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
-                <span class="nav-label">Chart Signal</span>
+                <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
+                <span class="nav-label">লাইভ সিগন্যাল</span>
+            </button>
+            <button class="nav-item" data-tab="winrate" type="button">
+                <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg></span>
+                <span class="nav-label">উইন রেট</span>
             </button>
             <button class="nav-item" data-tab="history" type="button">
-                <span class="nav-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15.5 13.5"/></svg></span>
-                <span class="nav-label">History</span>
+                <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15.5 13.5"/></svg></span>
+                <span class="nav-label">হিস্টোরি</span>
             </button>
             <button class="nav-item" data-tab="setting" type="button">
-                <span class="nav-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
-                <span class="nav-label">Setting</span>
+                <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+                <span class="nav-label">সেটিংস</span>
             </button>
         </nav>
 
         <div class="sidebar-footer">
             <div class="market-switcher">
-                <label class="switcher-label">Market</label>
+                <label class="switcher-label">মার্কেট</label>
                 <div class="switcher-buttons">
                     <button class="mkt-btn" data-mkt="otc" type="button">OTC</button>
                     <button class="mkt-btn" data-mkt="real" type="button">Real</button>
@@ -74,15 +77,14 @@
         <!-- ============ TOP BAR ============ -->
         <header class="app-topbar">
             <div class="topbar-left">
-                <!-- Market switcher dropdown (mobile) — replaces hamburger menu -->
                 <div class="mkt-dropdown">
                     <button class="mobile-menu-toggle" id="mobile-menu-toggle" type="button" aria-label="Switch market" aria-haspopup="true" aria-expanded="false">
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
                         <span class="brand-cat" id="topbar-cat-label">OTC</span>
                     </button>
                     <div class="mkt-dropdown-menu" id="mkt-dropdown-menu" hidden>
-                        <button class="mkt-dropdown-item" data-mkt="otc" type="button">OTC Market</button>
-                        <button class="mkt-dropdown-item" data-mkt="real" type="button">Real Market</button>
+                        <button class="mkt-dropdown-item" data-mkt="otc" type="button">OTC মার্কেট</button>
+                        <button class="mkt-dropdown-item" data-mkt="real" type="button">Real মার্কেট</button>
                         <button class="mkt-dropdown-item" data-mkt="alltime_otc" type="button">All-Time OTC</button>
                     </div>
                 </div>
@@ -96,8 +98,8 @@
                 <div class="price-display">
                     <span class="price-label">Price</span>
                     <div class="price-row">
-                        <span class="price-value" id="live-price">—</span>
-                        <span class="price-arrow" id="live-price-arrow"></span>
+                        <span class="live-price-val" id="live-price">—</span>
+                        <span class="live-price-arrow" id="live-price-arrow"></span>
                     </div>
                 </div>
                 <!-- common.js writes "Payout: X%" to #payout-label -->
@@ -115,7 +117,7 @@
                 </div>
                 <button class="icon-btn" id="sound-btn" type="button" aria-label="Toggle sound">🔔</button>
                 <button class="icon-btn token-btn" id="token-btn" type="button" aria-label="Token management" title="Token management">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
                 </button>
             </div>
         </header>
@@ -126,50 +128,50 @@
             <!-- =========== HOME TAB =========== -->
             <section class="tab-pane" data-pane="home" id="pane-home">
                 <div class="pane-header">
-                    <h2>Dashboard</h2>
-                    <p class="pane-subtitle">Live market overview — every candle, every pair</p>
+                    <h2>ড্যাশবোর্ড</h2>
+                    <p class="pane-subtitle">লাইভ মার্কেট ওভারভিউ — প্রতি ক্যান্ডেল, প্রতি পেয়ার</p>
                 </div>
                 <div class="home-grid">
                     <div class="stat-card stat-card-lg">
-                        <div class="stat-label">Live Pairs</div>
+                        <div class="stat-label">লাইভ পেয়ার</div>
                         <div class="stat-value" id="home-live-pairs">0 / 0</div>
-                        <div class="stat-sub">Streaming now</div>
+                        <div class="stat-sub">স্ট্রিমিং চলছে</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">Today's Signals</div>
+                        <div class="stat-label">আজকের সিগন্যাল</div>
                         <div class="stat-value" id="home-today-signals">0</div>
                         <div class="stat-sub" id="home-today-calls">CALL: 0 / PUT: 0</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">Win Rate</div>
+                        <div class="stat-label">উইন রেট</div>
                         <div class="stat-value" id="home-winrate">—%</div>
-                        <div class="stat-sub" id="home-winrate-sub">last 50 signals</div>
+                        <div class="stat-sub" id="home-winrate-sub">শেষ ৫০ সিগন্যাল</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">Active STRONG</div>
+                        <div class="stat-label">STRONG সিগন্যাল</div>
                         <div class="stat-value" id="home-strong-count">0</div>
-                        <div class="stat-sub">high-confidence signals</div>
+                        <div class="stat-sub">হাই-কনফিডেন্স</div>
                     </div>
                     <div class="home-card home-card-wide">
                         <div class="card-header">
-                            <h3>Top Signals Right Now</h3>
-                            <button class="btn-secondary" id="home-refresh-btn" type="button">Refresh</button>
+                            <h3>এই মুহূর্তের টপ সিগন্যাল</h3>
+                            <button class="btn-secondary" id="home-refresh-btn" type="button">রিফ্রেশ</button>
                         </div>
                         <div class="share-signal-table-wrap">
                             <table class="share-signal-table">
-                                <thead><tr><th>Pair</th><th>Type</th><th>Signal</th><th>Conf</th><th>Str</th><th>Updated</th></tr></thead>
+                                <thead><tr><th>পেয়ার</th><th>টাইপ</th><th>সিগন্যাল</th><th>কনফ</th><th>স্ট্রেংথ</th><th>আপডেট</th></tr></thead>
                                 <tbody id="home-signals-tbody">
-                                    <tr><td colspan="6" class="loading-row">Loading…</td></tr>
+                                    <tr><td colspan="6" class="loading-row">লোড হচ্ছে…</td></tr>
                                 </tbody>
                             </table>
                         </div>
                     </div>
                     <div class="home-card">
-                        <div class="card-header"><h3>Market Status</h3></div>
+                        <div class="card-header"><h3>মার্কেট স্ট্যাটাস</h3></div>
                         <div class="market-status-list">
                             <div class="status-row"><span class="status-label">OTC</span><span class="status-badge status-live">24/7</span></div>
-                            <div class="status-row"><span class="status-label">Real</span><span class="status-badge" id="home-real-status">Checking…</span></div>
-                            <div class="status-row"><span class="status-label">Connection</span><span class="status-badge" id="home-conn-status">Connecting…</span></div>
+                            <div class="status-row"><span class="status-label">Real</span><span class="status-badge" id="home-real-status">চেক হচ্ছে…</span></div>
+                            <div class="status-row"><span class="status-label">কানেকশন</span><span class="status-badge" id="home-conn-status">কানেক্টিং…</span></div>
                         </div>
                     </div>
                 </div>
@@ -181,20 +183,17 @@
                     <div class="chart-main">
                         <!-- common.js mounts LightweightCharts in #chart-container -->
                         <div id="chart-container" class="chart-container" style="touch-action: pan-y;">
-                            <!-- common.js toggles .show on #chart-loading-overlay -->
                             <div id="chart-loading-overlay" class="chart-loading-overlay">
                                 <div class="chart-loading-spinner"></div>
-                                <div id="chart-loading-text" class="chart-loading-text">Loading chart…</div>
+                                <div id="chart-loading-text" class="chart-loading-text">চার্ট লোড হচ্ছে…</div>
                             </div>
-                            <!-- common.js toggles #chart-no-data -->
                             <div id="chart-no-data" class="chart-no-data" style="display:none">
-                                <p>No data received — check connection</p>
+                                <p>কোনো ডেটা আসেনি — কানেকশন চেক করুন</p>
                             </div>
-                            <!-- common.js toggles #stale-overlay -->
                             <div id="stale-overlay" class="stale-overlay" style="display:none">
                                 <div class="stale-message">
-                                    <span id="stale-msg">⚠️ Stale data</span>
-                                    <button class="btn-secondary" type="button" onclick="window.location.reload()">Reconnect</button>
+                                    <span id="stale-msg">⚠️ ডেটা স্টেল</span>
+                                    <button class="btn-secondary" type="button" onclick="window.location.reload()">রিকানেক্ট</button>
                                 </div>
                             </div>
                         </div>
@@ -242,62 +241,62 @@
                         <!-- Module breakdown — common.js renderModuleBreakdown() writes to #theories-list -->
                         <div class="module-panel">
                             <div class="panel-section-header">
-                                <h4>Module Engine</h4>
+                                <h4>মডিউল ইঞ্জিন</h4>
                                 <button class="icon-btn-sm" id="theories-toggle" type="button" aria-expanded="true">▾</button>
                             </div>
-                            <div class="module-list" id="theories-list">
-                                <div class="module-row">Waiting for signal…</div>
+                            <div class="module-list open" id="theories-list">
+                                <div class="module-row">সিগন্যালের অপেক্ষায়…</div>
                             </div>
                         </div>
 
                         <!-- Market state — common.js writes to #ms-* elements -->
                         <div class="market-state-panel">
-                            <h4>Market State</h4>
+                            <h4>মার্কেট স্টেট</h4>
                             <div class="ms-grid">
-                                <div class="ms-item"><span class="ms-label">Trend</span><span class="ms-value" id="ms-trend">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Zone</span><span class="ms-value" id="ms-zone">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Volatility</span><span class="ms-value" id="ms-volatility">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Pressure</span><span class="ms-value" id="ms-pressure">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Reaction</span><span class="ms-value" id="ms-reaction">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Fight</span><span class="ms-value" id="ms-fight">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Hold</span><span class="ms-value" id="ms-hold">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Last React</span><span class="ms-value" id="ms-last-react">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Run Conf</span><span class="ms-value" id="ms-running-conf">—</span></div>
-                                <div class="ms-item"><span class="ms-label">Ticks</span><span class="ms-value" id="ms-ticks">0</span></div>
-                                <div class="ms-item"><span class="ms-label">Net</span><span class="ms-value" id="ms-net">0</span></div>
-                                <div class="ms-item"><span class="ms-label">Round</span><span class="ms-value" id="ms-round">—</span></div>
+                                <div class="ms-item"><span class="ms-label">ট্রেন্ড</span><span class="ms-value" id="ms-trend">—</span></div>
+                                <div class="ms-item"><span class="ms-label">জোন</span><span class="ms-value" id="ms-zone">—</span></div>
+                                <div class="ms-item"><span class="ms-label">ভোলাটিলিটি</span><span class="ms-value" id="ms-volatility">—</span></div>
+                                <div class="ms-item"><span class="ms-label">প্রেসার</span><span class="ms-value pressure-badge none" id="ms-pressure">—</span></div>
+                                <div class="ms-item"><span class="ms-label">রিঅ্যাকশন</span><span class="ms-value react-badge none" id="ms-reaction">—</span></div>
+                                <div class="ms-item"><span class="ms-label">ফাইট</span><span class="ms-value" id="ms-fight">—</span></div>
+                                <div class="ms-item"><span class="ms-label">হোল্ড</span><span class="ms-value" id="ms-hold">—</span></div>
+                                <div class="ms-item"><span class="ms-label">লাস্ট রিঅ্যাক্ট</span><span class="ms-value react-badge none" id="ms-last-react">—</span></div>
+                                <div class="ms-item"><span class="ms-label">রান কনফ</span><span class="ms-value running-conf none" id="ms-running-conf">—</span></div>
+                                <div class="ms-item"><span class="ms-label">টিক</span><span class="ms-value" id="ms-ticks">0</span></div>
+                                <div class="ms-item"><span class="ms-label">নেট</span><span class="ms-value" id="ms-net">0</span></div>
+                                <div class="ms-item"><span class="ms-label">রাউন্ড</span><span class="ms-value" id="ms-round">—</span></div>
                             </div>
                             <div class="phase-grid">
-                                <div class="phase-card"><span class="phase-label">Early</span><span class="phase-value" id="ph-early">—</span></div>
-                                <div class="phase-card"><span class="phase-label">Mid</span><span class="phase-value" id="ph-mid">—</span></div>
-                                <div class="phase-card"><span class="phase-label">Late</span><span class="phase-value" id="ph-late">—</span></div>
+                                <div class="phase-card"><span class="phase-label">Early</span><span class="phase-value phase-dir flat" id="ph-early">—</span></div>
+                                <div class="phase-card"><span class="phase-label">Mid</span><span class="phase-value phase-dir flat" id="ph-mid">—</span></div>
+                                <div class="phase-card"><span class="phase-label">Late</span><span class="phase-value phase-dir flat" id="ph-late">—</span></div>
                             </div>
                         </div>
 
                         <!-- Microstructure — common.js writes to #bs-buy, #bs-sell -->
                         <div class="micro-panel panel-section--micro">
-                            <h4>Microstructure</h4>
+                            <h4>মাইক্রোস্ট্রাকচার</h4>
                             <div class="micro-stats">
                                 <div class="micro-row">
                                     <span class="micro-label">Buyers</span>
-                                    <div class="micro-bar"><div class="buyers-fill" id="bs-buy" style="width:0%"></div></div>
+                                    <div class="micro-bar"><span class="buyers-fill" id="bs-buy" style="width:0%"></span></div>
                                 </div>
                                 <div class="micro-row">
                                     <span class="micro-label">Sellers</span>
-                                    <div class="micro-bar"><div class="sellers-fill" id="bs-sell" style="width:0%"></div></div>
+                                    <div class="micro-bar"><span class="sellers-fill" id="bs-sell" style="width:0%"></span></div>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Share signal table — common.js (lines 2743-2927) owns this -->
+                        <!-- Share signal table — common.js owns this -->
                         <div class="share-panel" id="share-signal-section">
                             <div class="share-header share-signal-header">
-                                <h4>Share Signals</h4>
+                                <h4>শেয়ার সিগন্যাল</h4>
                                 <div class="share-actions">
-                                    <button class="icon-btn-sm" id="share-signal-refresh" type="button" title="Refresh">🔄</button>
-                                    <button class="icon-btn-sm" id="share-signal-save" type="button" title="Save snapshot">💾</button>
-                                    <button class="icon-btn-sm" id="share-signal-history" type="button" title="View history">📋</button>
-                                    <button class="icon-btn-sm" id="share-signal-toggle" type="button" title="Collapse">▾</button>
+                                    <button class="icon-btn-sm" id="share-signal-refresh" type="button" title="রিফ্রেশ">🔄</button>
+                                    <button class="icon-btn-sm" id="share-signal-save" type="button" title="স্ন্যাপশট সেভ">💾</button>
+                                    <button class="icon-btn-sm" id="share-signal-history" type="button" title="হিস্টোরি দেখুন">📋</button>
+                                    <button class="icon-btn-sm" id="share-signal-toggle" type="button" title="কোলাপ্স">▾</button>
                                 </div>
                             </div>
                             <div class="share-signal-count-row">
@@ -307,13 +306,13 @@
                                 <table class="share-signal-table" id="share-signal-table">
                                     <thead>
                                         <tr>
-                                            <th>Pair</th><th>Type</th><th>Time</th>
+                                            <th>পেয়ার</th><th>টাইপ</th><th>টাইম</th>
                                             <th>Buyer%</th><th>Seller%</th>
-                                            <th>Signal</th><th>Conf</th><th>Str</th><th>Update</th>
+                                            <th>সিগন্যাল</th><th>কনফ</th><th>Str</th><th>আপডেট</th>
                                         </tr>
                                     </thead>
                                     <tbody id="share-signal-tbody">
-                                        <tr><td colspan="9" class="loading-row">Loading…</td></tr>
+                                        <tr><td colspan="9" class="share-signal-loading">লোড হচ্ছে…</td></tr>
                                     </tbody>
                                 </table>
                             </div>
@@ -322,45 +321,117 @@
                 </div>
             </section>
 
+            <!-- =========== WIN RATE TAB (NEW) =========== -->
+            <section class="tab-pane" data-pane="winrate" id="pane-winrate">
+                <div class="pane-header">
+                    <h2>উইন রেট ড্যাশবোর্ড</h2>
+                    <p class="pane-subtitle">প্রতি পেয়ার ও Call/Put আলাদা উইন রেট — রিয়েল গ্রেডেড রেজাল্ট থেকে</p>
+                </div>
+
+                <div class="wr-toolbar">
+                    <div class="wr-group" id="wr-market-filter">
+                        <span class="wr-group-label">মার্কেট</span>
+                        <button class="wr-chip active" data-mkt="all" type="button">সব</button>
+                        <button class="wr-chip" data-mkt="otc" type="button">OTC</button>
+                        <button class="wr-chip" data-mkt="real" type="button">Real</button>
+                    </div>
+                    <div class="wr-group" id="wr-window-filter">
+                        <span class="wr-group-label">সময়</span>
+                        <button class="wr-chip" data-window="1" type="button">আজ</button>
+                        <button class="wr-chip active" data-window="7" type="button">৭ দিন</button>
+                        <button class="wr-chip" data-window="30" type="button">৩০ দিন</button>
+                        <button class="wr-chip" data-window="0" type="button">সব সময়</button>
+                    </div>
+                    <div class="wr-group" id="wr-dir-filter">
+                        <span class="wr-group-label">দেখুন</span>
+                        <button class="wr-chip active" data-dir="all" type="button">সব সিগন্যাল</button>
+                        <button class="wr-chip" data-dir="CALL" type="button">শুধু CALL</button>
+                        <button class="wr-chip" data-dir="PUT" type="button">শুধু PUT</button>
+                    </div>
+                    <button class="btn-secondary wr-refresh-btn" id="wr-refresh-btn" type="button">🔄 রিফ্রেশ</button>
+                </div>
+
+                <div class="wr-summary" id="wr-summary">
+                    <div class="wr-hero">
+                        <div class="wr-hero-pct mid" id="wr-hero-pct">—</div>
+                        <div class="wr-hero-meta">
+                            <span class="wr-hero-title">Overall Win Rate</span>
+                            <span class="wr-hero-sub" id="wr-hero-sub">ডেটা লোড হচ্ছে…</span>
+                            <span class="wr-hero-sub" id="wr-hero-window"></span>
+                        </div>
+                        <div class="wr-split">
+                            <div class="wr-split-row">
+                                <div class="wr-split-head"><span class="dir-call">▲ CALL</span><span class="dir-call" id="wr-call-pct">—</span></div>
+                                <div class="wr-split-bar"><div class="wr-split-fill call" id="wr-call-bar" style="width:0%"></div></div>
+                            </div>
+                            <div class="wr-split-row">
+                                <div class="wr-split-head"><span class="dir-put">▼ PUT</span><span class="dir-put" id="wr-put-pct">—</span></div>
+                                <div class="wr-split-bar"><div class="wr-split-fill put" id="wr-put-bar" style="width:0%"></div></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="wr-cards" id="wr-cards">
+                    <div class="wr-empty">ডেটা লোড হচ্ছে…</div>
+                </div>
+
+                <p class="wr-note">
+                    💡 উইন রেট হিসাব হয় <b>গ্রেডেড</b> সিগন্যাল থেকে (ক্যান্ডেল ক্লোজে যাচাইকৃত)।
+                    Draw গুলো উইন রেটে গণনা হয় না। যে পেয়ারের CALL রেট ভালো সেখানে CALL সিগন্যাল
+                    নিন, যেখানে PUT ভালো সেখানে PUT — ফিল্টার করে দেখুন।
+                </p>
+            </section>
+
             <!-- =========== HISTORY TAB =========== -->
             <section class="tab-pane" data-pane="history" id="pane-history">
                 <div class="pane-header">
-                    <h2>Signal History</h2>
-                    <p class="pane-subtitle">Past signals and accuracy stats</p>
+                    <h2>সিগন্যাল হিস্টোরি</h2>
+                    <p class="pane-subtitle">পাস্ট সিগন্যাল ও একুরেসি স্ট্যাটস</p>
                 </div>
 
                 <!-- Accuracy hero — common.js writes to #acc-hero-pct, #acc-hero-detail -->
                 <div class="accuracy-hero">
-                    <div class="acc-hero-pct" id="acc-hero-pct">—%</div>
-                    <div class="acc-hero-detail" id="acc-hero-detail">no graded signals yet</div>
+                    <div class="acc-hero-pct" id="acc-hero-pct">—</div>
+                    <div class="acc-hero-detail" id="acc-hero-detail">এখনো কোনো গ্রেডেড সিগন্যাল নেই</div>
                 </div>
 
                 <!-- Stat grid — common.js writes to #acc-* -->
                 <div class="accuracy-grid">
-                    <div class="acc-card"><div class="acc-label">Total</div><div class="acc-value" id="acc-total">0</div></div>
-                    <div class="acc-card"><div class="acc-label">Wins</div><div class="acc-value acc-wins" id="acc-wins">0</div></div>
-                    <div class="acc-card"><div class="acc-label">Losses</div><div class="acc-value acc-losses" id="acc-losses">0</div></div>
-                    <div class="acc-card"><div class="acc-label">Draws</div><div class="acc-value" id="acc-draws">0</div></div>
+                    <div class="acc-card"><div class="acc-label">মোট</div><div class="acc-value" id="acc-total">0</div></div>
+                    <div class="acc-card"><div class="acc-label">উইন</div><div class="acc-value acc-wins" id="acc-wins">0</div></div>
+                    <div class="acc-card"><div class="acc-label">লস</div><div class="acc-value acc-losses" id="acc-losses">0</div></div>
+                    <div class="acc-card"><div class="acc-label">ড্র</div><div class="acc-value" id="acc-draws">0</div></div>
                 </div>
 
                 <!-- Breakdowns — common.js writes to #acc-strength-breakdown, #acc-regime-breakdown -->
                 <div class="breakdown-section">
-                    <h3>By Strength</h3>
+                    <h3>স্ট্রেংথ অনুযায়ী</h3>
                     <div id="acc-strength-breakdown" class="breakdown-grid"></div>
                 </div>
                 <div class="breakdown-section">
-                    <h3>By Regime</h3>
+                    <h3>রেজিম অনুযায়ী</h3>
                     <div id="acc-regime-breakdown" class="breakdown-grid"></div>
                 </div>
 
                 <!-- History list — common.js renderHistory() writes to #history-list -->
                 <div class="history-section">
-                    <h3>Recent Signals</h3>
+                    <h3>সাম্প্রতিক সিগন্যাল</h3>
                     <div class="history-controls">
-                        <select id="history-pair-select" class="filter-select"><option value="">All pairs</option></select>
+                        <select id="history-pair-select" class="filter-select"><option value="">সব পেয়ার</option></select>
+                        <div class="wr-chips" id="history-dir-chips">
+                            <button class="wr-chip active" data-filter="all" type="button">সব</button>
+                            <button class="wr-chip" data-filter="CALL" type="button">CALL</button>
+                            <button class="wr-chip" data-filter="PUT" type="button">PUT</button>
+                        </div>
+                        <div class="wr-chips" id="history-result-chips">
+                            <button class="wr-chip active" data-filter="all" type="button">সব রেজাল্ট</button>
+                            <button class="wr-chip" data-filter="win" type="button">✅ WIN</button>
+                            <button class="wr-chip" data-filter="loss" type="button">❌ LOSS</button>
+                        </div>
                     </div>
                     <div id="history-list" class="history-list">
-                        <div class="loading-row">No signals yet</div>
+                        <div class="loading-row">এখনো কোনো সিগন্যাল নেই</div>
                     </div>
                 </div>
             </section>
@@ -368,28 +439,28 @@
             <!-- =========== SETTING TAB =========== -->
             <section class="tab-pane" data-pane="setting" id="pane-setting">
                 <div class="pane-header">
-                    <h2>Settings</h2>
-                    <p class="pane-subtitle">Token management, preferences</p>
+                    <h2>সেটিংস</h2>
+                    <p class="pane-subtitle">টোকেন ম্যানেজমেন্ট, প্রেফারেন্স</p>
                 </div>
                 <div class="settings-sections">
                     <div class="settings-section">
-                        <h3>Quotex Token</h3>
-                        <p class="section-desc">Live Quotex session token status. Token expires ~24h. Paste a fresh token and the app reconnects automatically — no PIN, no admin key, just the token.</p>
+                        <h3>Quotex টোকেন</h3>
+                        <p class="section-desc">লাইভ Quotex সেশন টোকেন স্ট্যাটাস। টোকেন ~২৪ ঘণ্টা পরে এক্সপায়ার হয়। নতুন টোকেন পেস্ট করলে অ্যাপ অটো রিকানেক্ট করবে।</p>
                         <div class="token-status" id="token-status-row">
                             <div class="token-status-icon" id="token-status-icon">●</div>
                             <div class="token-status-text">
-                                <div class="token-status-label" id="token-status-label">Checking…</div>
+                                <div class="token-status-label" id="token-status-label">চেক হচ্ছে…</div>
                                 <div class="token-status-sub" id="token-status-sub"></div>
                             </div>
-                            <button class="btn-secondary" id="token-manage-btn" type="button">Import token</button>
+                            <button class="btn-secondary" id="token-manage-btn" type="button">টোকেন ইমপোর্ট</button>
                         </div>
                     </div>
                     <div class="settings-section">
-                        <h3>Preferences</h3>
+                        <h3>প্রেফারেন্স</h3>
                         <div class="pref-row">
                             <label class="pref-label">
-                                <span class="pref-title">Sound alerts</span>
-                                <span class="pref-desc">Play sound on new STRONG signal</span>
+                                <span class="pref-title">সাউন্ড অ্যালার্ট</span>
+                                <span class="pref-desc">STRONG সিগন্যালে সাউন্ড বাজবে</span>
                             </label>
                             <label class="switch">
                                 <input type="checkbox" id="pref-sound" checked>
@@ -398,8 +469,8 @@
                         </div>
                         <div class="pref-row">
                             <label class="pref-label">
-                                <span class="pref-title">Auto-refresh share signals</span>
-                                <span class="pref-desc">Poll every 10 seconds</span>
+                                <span class="pref-title">অটো-রিফ্রেশ শেয়ার সিগন্যাল</span>
+                                <span class="pref-desc">প্রতি ১০ সেকেন্ডে পোল</span>
                             </label>
                             <label class="switch">
                                 <input type="checkbox" id="pref-autorefresh" checked>
@@ -408,8 +479,8 @@
                         </div>
                         <div class="pref-row">
                             <label class="pref-label">
-                                <span class="pref-title">Show WEAK signals</span>
-                                <span class="pref-desc">Display low-confidence signals (gray badge)</span>
+                                <span class="pref-title">WEAK সিগন্যাল দেখাও</span>
+                                <span class="pref-desc">লো-কনফিডেন্স সিগন্যাল (ধূসর ব্যাজ)</span>
                             </label>
                             <label class="switch">
                                 <input type="checkbox" id="pref-show-weak" checked>
@@ -418,8 +489,8 @@
                         </div>
                         <div class="pref-row">
                             <label class="pref-label">
-                                <span class="pref-title">Default market</span>
-                                <span class="pref-desc">Which market to load on startup</span>
+                                <span class="pref-title">ডিফল্ট মার্কেট</span>
+                                <span class="pref-desc">স্টার্টআপে কোন মার্কেট লোড হবে</span>
                             </label>
                             <select id="pref-default-market" class="filter-select">
                                 <option value="otc">OTC</option>
@@ -429,13 +500,13 @@
                         </div>
                     </div>
                     <div class="settings-section">
-                        <h3>About</h3>
+                        <h3>সম্পর্কে</h3>
                         <div class="about-info">
-                            <div class="about-row"><span>Version</span><strong>2.1.0 (UI-fix)</strong></div>
-                            <div class="about-row"><span>Build</span><strong>2026-08-13</strong></div>
-                            <div class="about-row"><span>Engine</span><strong>9-module blender + last-resort</strong></div>
-                            <div class="about-row"><span>Signal mode</span><strong>Every candle (WEAK enabled)</strong></div>
-                            <div class="about-row"><span>Public read</span><strong id="about-public-read">Enabled</strong></div>
+                            <div class="about-row"><span>ভার্সন</span><strong>3.0.0 (Aurora)</strong></div>
+                            <div class="about-row"><span>বিল্ড</span><strong>2026-08-31</strong></div>
+                            <div class="about-row"><span>ইঞ্জিন</span><strong>13-module blender</strong></div>
+                            <div class="about-row"><span>সিগন্যাল মোড</span><strong>প্রতি ক্যান্ডেলে (WEAK চালু)</strong></div>
+                            <div class="about-row"><span>Public read</span><strong id="about-public-read">চালু</strong></div>
                         </div>
                     </div>
                 </div>
@@ -445,20 +516,24 @@
         <!-- ============ BOTTOM NAV (mobile <1024px) ============ -->
         <nav class="app-bottomnav" aria-label="Bottom navigation">
             <button class="bn-item" data-tab="home" type="button">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-                <span>Home</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                <span>হোম</span>
             </button>
             <button class="bn-item active" data-tab="chart" type="button">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-                <span>Chart</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                <span>সিগন্যাল</span>
+            </button>
+            <button class="bn-item" data-tab="winrate" type="button">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+                <span>উইন রেট</span>
             </button>
             <button class="bn-item" data-tab="history" type="button">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15.5 13.5"/></svg>
-                <span>History</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15.5 13.5"/></svg>
+                <span>হিস্টোরি</span>
             </button>
             <button class="bn-item" data-tab="setting" type="button">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                <span>Setting</span>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                <span>সেটিং</span>
             </button>
         </nav>
     </main>
@@ -476,7 +551,7 @@
 <div id="signal-detail-overlay" class="modal-overlay" hidden>
     <div class="modal-content signal-detail-content">
         <button class="modal-close" id="detail-close" type="button" aria-label="Close">×</button>
-        <h3 id="detail-title">Signal Detail</h3>
+        <h3 id="detail-title">সিগন্যাল ডিটেইল</h3>
         <div id="detail-body"></div>
     </div>
 </div>
@@ -484,6 +559,7 @@
 <!-- ============ SCRIPTS ============ -->
 <script src="/static/lightweight-charts.js"></script>
 <script src="/static/js/common.js"></script>
+<script src="/static/js/winrate.js"></script>
 <script src="/static/js/app-nav.js"></script>
 <script src="/static/js/token-panel.js"></script>
 <script>

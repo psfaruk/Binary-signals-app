@@ -50,21 +50,31 @@ def analyze(candles, ctx: MarketContext) -> list:
                         signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
                         reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) -> PUT (failed breakout)"]))
 
-    # SIGNAL 3: Previous candle high/low as micro-S/R (prev_low only)
+    # SIGNAL 3: Previous candle high/low as micro-S/R (prev_low + prev_high)
     if len(candles) >= 2 and atr > 0:
         prev = candles[-2]
         prev_low = prev["low"]
+        prev_high = prev["high"]
         tol = atr * MICRO_SR_PROXIMITY_ATR
         _granularity = 0.01 if abs(close) > JPY_PRICE_THRESHOLD else 0.0001
         eps = max(abs(close) * EPS_PRICE_SCALE, _granularity * EPS_GRANULARITY_SCALE)
 
+        # FIX (SYMMETRY-FIX-2026-08-31): the PUT mirror was missing — close
+        # near prev HIGH had only a `pass` placeholder, leaving a structural
+        # CALL bias in the MICRO_SR vote group. Close pinning to prev high
+        # (resistance) is the exact mirror of close near prev low (support).
         if abs(close - prev_low) < tol:
             if close > prev_low + eps:
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=1, confidence=52,
                     signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close near prev low ({prev_low:.5f}) -> CALL bounce"]))
-            pass
+        elif abs(close - prev_high) < tol:
+            if close < prev_high - eps:
+                results.append(ModuleResult(
+                    module_name="key_level", direction="PUT", score=1, confidence=52,
+                    signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
+                    reasons=[f"Close near prev high ({prev_high:.5f}) -> PUT rejection"]))
 
     # SIGNAL 6: Support/Resistance Flip
     if len(candles) >= 10 and atr > 0:

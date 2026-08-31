@@ -169,6 +169,23 @@ def init():
         except Exception as _e:
             print(f"[db] ix_sl_quality index creation skipped: {_e}")
 
+        # FIX (TRUE-WR-MIGRATION-2026-08-31): pair_hourly_patterns historically
+        # stored call/put win rates as an EMA approximation (old*0.8 + x*0.2)
+        # which never converges to the real ratio and is skewed by recency.
+        # Add true counter columns; call_win_pct / put_win_pct are now exact
+        # ratios computed from them (see _update_hourly_pattern).
+        for _new_col in ("call_total INT", "call_correct INT",
+                         "put_total INT", "put_correct INT"):
+            try:
+                _col_name = _new_col.split()[0]
+                _php_cols = [row["name"] for row in c.execute(
+                    "PRAGMA table_info(pair_hourly_patterns)").fetchall()]
+                if _php_cols and _col_name not in _php_cols:
+                    c.execute(f"ALTER TABLE pair_hourly_patterns ADD COLUMN {_new_col}")
+                    print(f"[db] migrated pair_hourly_patterns: added `{_col_name}` column")
+            except Exception as _e:
+                print(f"[db] pair_hourly_patterns `{_col_name}` migration skipped: {_e}")
+
         try:
             done_row = c.execute(
                 "SELECT value FROM _meta WHERE key='signal_log_dedup_done'"
@@ -814,6 +831,15 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         ))
 
                     if vote_rows:
+                        # FIX (VOTE-DEDUP-2026-08-31): signal_log is UPSERT-keyed
+                        # on (asset, period, ctime), but module_votes/theory_votes
+                        # had no dedup — any re-grade of the same candle (replay
+                        # backtests, manual re-grading) double-counted every vote
+                        # and skewed per-module win rates. Delete the old vote
+                        # rows for this candle before inserting the fresh set.
+                        cur.execute("DELETE FROM module_votes "
+                                    "WHERE asset=? AND period=? AND ctime=?",
+                                    (asset, period, ctime))
                         cur.executemany("""INSERT INTO module_votes
                             (signal_id, asset, period, ctime, module_name, direction,
                              vote_correct, score, confidence, signal_group,
@@ -827,6 +853,9 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         asset, period, ctime, actual, category,
                         kw.get('regime'), kw.get('strength'), ts_val)
                     if theory_rows:
+                        cur.execute("DELETE FROM theory_votes "
+                                    "WHERE asset=? AND period=? AND ctime=?",
+                                    (asset, period, ctime))
                         cur.executemany("""INSERT INTO theory_votes
                             (signal_id, asset, period, ctime, module_name,
                              theory_name, theory_group, direction, signal_type,
@@ -892,6 +921,10 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
         """, (asset, hour_utc))
         existing = cur.fetchone()
 
+        # FIX (TRUE-WR-2026-08-31): call/put win rates are now TRUE ratios
+        # tracked via explicit counter columns (call_total/call_correct/
+        # put_total/put_correct), replacing the old EMA approximation that
+        # never converged to the actual win rate.
         if existing:
             old_total = existing['total_signals'] or 0
             old_correct = existing['correct'] or 0
@@ -901,41 +934,64 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
             new_wrong = old_wrong + (1 - is_correct)
             new_win_pct = round(100.0 * new_correct / new_total, 1) if new_total > 0 else 0
 
+            _row = dict(existing)
             if is_call:
-                call_wins = existing['call_win_pct'] or 0
-                new_call_wr = call_wins * 0.8 + is_correct * 100 * 0.2
-                new_put_wr = existing['put_win_pct']
+                ct = (_row.get('call_total') or 0) + 1
+                cc = (_row.get('call_correct') or 0) + is_correct
+                pt = (_row.get('put_total') or 0)
+                pc = (_row.get('put_correct') or 0)
             else:
-                put_wins = existing['put_win_pct'] or 0
-                new_put_wr = put_wins * 0.8 + is_correct * 100 * 0.2
-                new_call_wr = existing['call_win_pct']
+                pt = (_row.get('put_total') or 0) + 1
+                pc = (_row.get('put_correct') or 0) + is_correct
+                ct = (_row.get('call_total') or 0)
+                cc = (_row.get('call_correct') or 0)
+            new_call_wr = round(100.0 * cc / ct, 1) if ct > 0 else None
+            new_put_wr = round(100.0 * pc / pt, 1) if pt > 0 else None
 
-            best_dir = 'CALL' if (new_call_wr or 0) >= (new_put_wr or 0) else 'PUT'
+            # best_direction: only commit a direction once BOTH sides have
+            # enough evidence. FIX: the old code set best_direction to the
+            # OPPOSITE direction on a wrong first signal (zero evidence),
+            # and compared EMA percentages thereafter.
+            if ct >= 5 and pt >= 5 and (new_call_wr is not None) and (new_put_wr is not None):
+                best_dir = 'CALL' if new_call_wr >= new_put_wr else 'PUT'
+            else:
+                best_dir = existing['best_direction']  # keep whatever we had (may be NULL)
 
             cur.execute("""
                 UPDATE pair_hourly_patterns SET
                     session = ?, total_signals = ?, correct = ?, wrong = ?,
                     win_pct = ?, avg_confidence = ?,
                     best_direction = ?, call_win_pct = ?, put_win_pct = ?,
+                    call_total = ?, call_correct = ?,
+                    put_total = ?, put_correct = ?,
                     last_updated = ?, ts = ?
                 WHERE asset = ? AND hour_utc = ?
             """, (session, new_total, new_correct, new_wrong, new_win_pct,
                   confidence, best_dir, new_call_wr, new_put_wr,
+                  ct, cc, pt, pc,
                   ts_val, ts_val, asset, hour_utc))
         else:
             win_pct = 100.0 if is_correct else 0.0
             call_wr = 100.0 if (is_call and is_correct) else (0.0 if is_call else None)
             put_wr = 100.0 if (not is_call and is_correct) else (0.0 if not is_call else None)
-            best_dir = signal if is_correct else ('PUT' if signal == 'CALL' else 'CALL')
+            # FIX: no best_direction on a single sample — the old code guessed
+            # the OPPOSITE direction when the first signal lost.
+            best_dir = None
+            ct = 1 if is_call else 0
+            cc = is_correct if is_call else 0
+            pt = 0 if is_call else 1
+            pc = 0 if is_call else is_correct
 
             cur.execute("""
                 INSERT INTO pair_hourly_patterns
                     (asset, hour_utc, session, total_signals, correct, wrong,
                      win_pct, avg_confidence, best_direction, call_win_pct,
-                     put_win_pct, last_updated, ts)
-                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     put_win_pct, call_total, call_correct, put_total,
+                     put_correct, last_updated, ts)
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (asset, hour_utc, session, is_correct, 1 - is_correct,
-                  win_pct, confidence, best_dir, call_wr, put_wr, ts_val, ts_val))
+                  win_pct, confidence, best_dir, call_wr, put_wr,
+                  ct, cc, pt, pc, ts_val, ts_val))
 
         conn.commit()
     except Exception as e:
@@ -1039,6 +1095,175 @@ def get_recent_signals(asset, period, limit=50, before_ctime=None):
         params.append(limit)
         rows = c.execute(base, params).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+
+# ── Directional win rates (NEW 2026-08-31) ─────────────────────────────────
+# FIX (WINRATE-API-2026-08-31): there was NO endpoint that ran
+# "SELECT signal, accuracy GROUP BY asset, signal" — i.e. no exact per-pair,
+# per-direction (CALL vs PUT) FINAL-signal win rate anywhere in the app.
+# /api/stats only exposed per-MODULE-VOTE call/put rates, and
+# pair_hourly_patterns used an EMA approximation. This function powers the
+# new /api/winrate endpoint and the Win Rate dashboard tab in the frontend.
+
+def get_directional_winrate(period=60, days=None, category=None,
+                            min_ctime=None):
+    """Per-pair, per-direction final-signal win rates from signal_log.
+
+    Args:
+        period: candle period in seconds (default 60).
+        days:   optional lookback window in days (from now). None = all time.
+        category: optional engine filter ('otc' | 'real'). None = all.
+        min_ctime: optional explicit lower ctime bound (overrides days).
+
+    Returns dict:
+        {
+          "pairs": [ { asset, category, total, correct, wrong, draws,
+                       graded, win_pct,
+                       call: {total, correct, win_pct},
+                       put:  {total, correct, win_pct},
+                       last_ctime, last_signal, last_accuracy,
+                       streak_type, streak_count }, ... sorted by graded desc ],
+          "overall": same shape with asset="ALL",
+          "window_days": days or None,
+        }
+    """
+    cutoff = min_ctime
+    if cutoff is None and days is not None:
+        cutoff = time.time() - days * _SECONDS_PER_DAY
+
+    where = ["period = ?", "signal IN ('CALL','PUT')"]
+    params = [period]
+    if cutoff is not None:
+        where.append("ctime > ?")
+        params.append(cutoff)
+    if category in ('otc', 'real'):
+        where.append("category = ?")
+        params.append(category)
+    where_sql = " AND ".join(where)
+
+    with _read_cursor() as c:
+        rows = c.execute(
+            f"""SELECT asset, category, ctime, signal, accuracy
+                FROM signal_log
+                WHERE {where_sql}
+                ORDER BY asset, ctime, id""",
+            params,
+        ).fetchall()
+
+    # Aggregate per asset in chronological order (streaks need order).
+    per = {}
+    for r in rows:
+        a = r["asset"]
+        d = per.setdefault(a, {
+            "category": r["category"] or ('otc' if str(a).endswith('_otc') else 'real'),
+            "total": 0, "correct": 0, "wrong": 0, "draws": 0, "graded": 0,
+            "call_total": 0, "call_correct": 0,
+            "put_total": 0, "put_correct": 0,
+            "last_ctime": 0, "last_signal": None, "last_accuracy": None,
+            "streak_type": None, "streak_count": 0,
+        })
+        acc = r["accuracy"]
+        sig = r["signal"]
+        d["total"] += 1
+        d["last_ctime"] = r["ctime"]
+        d["last_signal"] = sig
+        d["last_accuracy"] = acc
+        if acc == "draw":
+            d["draws"] += 1
+            continue
+        # Only correct/wrong feed graded stats & streaks.
+        is_call = (sig == "CALL")
+        if is_call:
+            d["call_total"] += 1
+        else:
+            d["put_total"] += 1
+        if acc == "correct":
+            d["correct"] += 1
+            d["graded"] += 1
+            if is_call:
+                d["call_correct"] += 1
+            else:
+                d["put_correct"] += 1
+            if d["streak_type"] == "win":
+                d["streak_count"] += 1
+            else:
+                d["streak_type"], d["streak_count"] = "win", 1
+        elif acc == "wrong":
+            d["wrong"] += 1
+            d["graded"] += 1
+            if d["streak_type"] == "loss":
+                d["streak_count"] += 1
+            else:
+                d["streak_type"], d["streak_count"] = "loss", 1
+
+    def _finalize(d, asset=""):
+        graded = d["graded"]
+        out = {
+            "asset": asset or "ALL",
+            "category": d["category"],
+            "total": d["total"],
+            "correct": d["correct"],
+            "wrong": d["wrong"],
+            "draws": d["draws"],
+            "graded": graded,
+            "win_pct": round(100.0 * d["correct"] / graded, 1) if graded else None,
+            "call": {
+                "total": d["call_total"],
+                "correct": d["call_correct"],
+                "win_pct": round(100.0 * d["call_correct"] / d["call_total"], 1)
+                           if d["call_total"] else None,
+            },
+            "put": {
+                "total": d["put_total"],
+                "correct": d["put_correct"],
+                "win_pct": round(100.0 * d["put_correct"] / d["put_total"], 1)
+                           if d["put_total"] else None,
+            },
+            "last_ctime": d["last_ctime"],
+            "last_signal": d["last_signal"],
+            "last_accuracy": d["last_accuracy"],
+            "streak_type": d["streak_type"],
+            "streak_count": d["streak_count"],
+        }
+        return out
+
+    pairs = sorted(
+        (_finalize(d, asset=a) for a, d in per.items()),
+        key=lambda p: (-p["graded"], -(p["win_pct"] or 0)),
+    )
+
+    # Overall rollup across every asset in the window.
+    overall_d = {
+        "category": "all",
+        "total": 0, "correct": 0, "wrong": 0, "draws": 0, "graded": 0,
+        "call_total": 0, "call_correct": 0,
+        "put_total": 0, "put_correct": 0,
+        "last_ctime": 0, "last_signal": None, "last_accuracy": None,
+        "streak_type": None, "streak_count": 0,
+    }
+    for p in pairs:
+        overall_d["total"] += p["total"]
+        overall_d["correct"] += p["correct"]
+        overall_d["wrong"] += p["wrong"]
+        overall_d["draws"] += p["draws"]
+        overall_d["graded"] += p["graded"]
+        overall_d["call_total"] += p["call"]["total"]
+        overall_d["call_correct"] += p["call"]["correct"]
+        overall_d["put_total"] += p["put"]["total"]
+        overall_d["put_correct"] += p["put"]["correct"]
+        if p["last_ctime"] > overall_d["last_ctime"]:
+            overall_d["last_ctime"] = p["last_ctime"]
+            overall_d["last_signal"] = p["last_signal"]
+            overall_d["last_accuracy"] = p["last_accuracy"]
+    overall = _finalize(overall_d, asset="ALL")
+
+    return {
+        "pairs": pairs,
+        "overall": overall,
+        "window_days": days,
+        "period": period,
+        "category": category,
+    }
 
 
 def get_signal_detail(asset, period, ctime):

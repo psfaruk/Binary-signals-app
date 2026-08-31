@@ -76,6 +76,10 @@ let candleData = [];
 let lastPrediction = null;
 let signalHistory = [];
 let totalCorrect = 0, totalSignals = 0;
+// FIX (AURORA-V3-2026-08-31): history filter chips — direction (সব/CALL/PUT)
+// and result (সব/WIN/LOSS). Applied inside renderHistory().
+let historyDirFilter = 'all';
+let historyResultFilter = 'all';
 let soundEnabled = false, audioCtx = null;
 let realPairsList = [], otcPairsList = [], alltimeOtcPairsList = [], pairsList = [];
 let currentMicro = null, runningConf = null;
@@ -1127,16 +1131,34 @@ function renderHistory(){
   // filter keeps the view focused on what the user actually wants to see.
   // When the history tab is NOT active, render the full list (the rendering is
   // invisible but stays in sync so switching tabs is instant).
-  const filterLastHour = (currentTab === 'history');
+  // FIX (AURORA-V3-2026-08-31): the 1-hour filter is now OFF by default — the
+  // user asked to browse history freely ("নিজের মতো করে দেখতে পারবো") and we
+  // added CALL/PUT + WIN/LOSS filter chips instead. The hour filter only
+  // re-engages when the user explicitly picks the "আজ" scope (not wired yet).
+  const filterLastHour = false;
   const nowSec = Math.floor(Date.now() / 1000);
   const oneHourAgo = nowSec - 3600;
-  const displayHistory = filterLastHour
+  let displayHistory = filterLastHour
     ? signalHistory.filter(h => h && h.detail && h.detail.ctime && h.detail.ctime >= oneHourAgo)
     : signalHistory;
 
+  // FIX (AURORA-V3-2026-08-31): direction + result filter chips
+  // (#history-dir-chips: সব/CALL/PUT, #history-result-chips: সব/WIN/LOSS).
+  if(historyDirFilter !== 'all'){
+    displayHistory = displayHistory.filter(h => h && h.signal === historyDirFilter);
+  }
+  if(historyResultFilter === 'win'){
+    displayHistory = displayHistory.filter(h => h && h.accuracy === 'correct');
+  } else if(historyResultFilter === 'loss'){
+    displayHistory = displayHistory.filter(h => h && h.accuracy === 'wrong');
+  }
+
   if(!displayHistory.length){
-    historyList.innerHTML = '<div style="color:var(--text-dim);font-size:11px;padding:8px 4px">'
-      + (filterLastHour ? 'No signals in the last hour' : 'No signals yet')
+    historyList.innerHTML = '<div style="color:var(--text-faint);font-size:11.5px;padding:12px 4px">'
+      + (filterLastHour ? 'শেষ ১ ঘণ্টায় কোনো সিগন্যাল নেই'
+        : (historyDirFilter !== 'all' || historyResultFilter !== 'all')
+          ? 'এই ফিল্টারে কোনো সিগন্যাল নেই'
+          : 'এখনো কোনো সিগন্যাল নেই')
       + '</div>';
     return;
   }
@@ -1528,9 +1550,11 @@ function switchTab(tabName){
   // FIX (UI-FIX-2026-08-13): new 4-tab system uses home/chart/history/setting.
   // Map old 'accuracy' to 'history' (accuracy grid now lives inside history tab).
   // Accept both old names (chart/history/accuracy) and new names (home/chart/history/setting).
+  // FIX (AURORA-V3-2026-08-31): + 'winrate' — the new Win Rate dashboard tab.
   if(tabName === 'accuracy') tabName = 'history';
-  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'home' && tabName !== 'setting') return;
-  currentTab = (tabName === 'home' || tabName === 'setting') ? 'chart' : tabName;
+  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'home'
+     && tabName !== 'setting' && tabName !== 'winrate') return;
+  currentTab = (tabName === 'home' || tabName === 'setting' || tabName === 'winrate') ? 'chart' : tabName;
 
   // Update sidebar nav items + bottom nav items (new system)
   document.querySelectorAll('.nav-item, .bn-item').forEach(btn => {
@@ -1550,6 +1574,10 @@ function switchTab(tabName){
     renderHistory();
     setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
     renderAccuracyTab();
+  } else if(tabName === 'winrate'){
+    // FIX (AURORA-V3-2026-08-31): notify winrate.js so it fetches fresh data
+    // when the user opens the Win Rate dashboard.
+    try{ window.dispatchEvent(new CustomEvent('winrate:show')); }catch(_){}
   } else if(tabName === 'chart'){
     if(chart){
       try{
@@ -2164,6 +2192,25 @@ function onEoc(msg){
   } else {
     renderPending();
   }
+  // FIX (EOC-IDENTITY-2026-08-31): the server now echoes WHICH signal the
+  // result belongs to (msg.signal + msg.ctime). If the graded ctime differs
+  // from the prediction the client had in view (reconnect mid-candle etc.),
+  // trust the server identity instead of guessing. The authoritative row
+  // still arrives via loadServerHistory 500ms later.
+  if(msg.signal && msg.ctime && lastPrediction
+     && msg.ctime !== lastPrediction.candle_time
+     && msg.signal !== (lastPrediction.signal || 'NEUTRAL')){
+    // Misattributed — patch the just-added history entry to the true signal.
+    for(let i = signalHistory.length - 1; i >= 0; i--){
+      const h = signalHistory[i];
+      if(h && h.detail && h.detail.ctime === msg.ctime){
+        h.signal = msg.signal;
+        if(h.detail) h.detail.signal = msg.signal;
+        break;
+      }
+    }
+    renderHistory();
+  }
   // ALWAYS refresh from server — the DB has the authoritative graded row
   // with postmortem, tags, regime, etc. that the live optimistic add lacks.
   setTimeout(loadServerHistory, 500);
@@ -2351,6 +2398,24 @@ function wireEvents(){
       }
     });
   }
+
+  // FIX (AURORA-V3-2026-08-31): history filter chips — direction + result.
+  // One generic wiring helper; both chip groups live in the History tab.
+  const _wireFilterChips = (boxId, apply) => {
+    const box = document.getElementById(boxId);
+    if(!box || box.dataset.wired === '1') return;
+    box.dataset.wired = '1';
+    box.addEventListener('click', (ev) => {
+      const chip = ev.target.closest('.wr-chip');
+      if(!chip) return;
+      box.querySelectorAll('.wr-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      apply(chip.dataset.filter || 'all');
+      renderHistory();
+    });
+  };
+  _wireFilterChips('history-dir-chips', v => { historyDirFilter = v; });
+  _wireFilterChips('history-result-chips', v => { historyResultFilter = v; });
 
   // Sound toggle.
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-34, HIGH): update aria-label dynamically

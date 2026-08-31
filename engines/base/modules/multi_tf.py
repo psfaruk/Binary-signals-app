@@ -37,14 +37,50 @@ def _ema(values, period):
 
 
 def _build_n_min_closes(candles, n_candles):
-    """Aggregate 1-min candles into n-min closes by summing open→close moves."""
+    """Aggregate 1-min candles into n-min closes by timestamp-boundary alignment.
+
+    FIX (HTF-ALIGN-FIX-2026-08-31): the old version chunked candles[i:i+n]
+    from the START of the rolling buffer, which is almost never on an n-minute
+    wall boundary. That produced "5m/15m candles" spanning wall boundaries and
+    injected artificial momentum/reversal noise into the HTF EMA trend — the
+    exact Bug A that feed._aggregate_5m_closes (2026-07-19) already fixed for
+    the 5m HTF trend, but this module was never ported.
+
+    Now: floor each 1m candle's `time` to its n-minute bucket, group candles
+    in the same bucket, emit the close of the LAST candle in each bucket.
+    Partial (trailing) buckets are kept — their close still reflects the most
+    recent price, and EMA responds to the newest value.
+
+    Args:
+        candles: list of candle dicts with at least "time" and "close"
+                 (`time` seconds or ms — auto-detected by magnitude).
+        n_candles: bucket size in 1-min candles (5 → 5-minute buckets).
+
+    Returns:
+        List of n-min close prices, oldest → newest.
+    """
     if len(candles) < n_candles:
         return []
+    # Auto-detect seconds vs milliseconds (same heuristic as feed.py).
+    t0 = candles[0].get("time", 0)
+    tN = candles[-1].get("time", 0)
+    ms_mode = (t0 > 10_000_000_000 or tN > 10_000_000_000)
+    bucket_seconds = n_candles * 60
     closes = []
-    for i in range(0, len(candles) - n_candles + 1, n_candles):
-        bucket = candles[i:i + n_candles]
-        # Use last candle's close as the period's close
-        closes.append(bucket[-1]["close"])
+    current_bucket = None
+    prev_close = 0.0
+    for c in candles:
+        t = c.get("time", 0)
+        if ms_mode:
+            t = t / 1000
+        bucket = (int(t) // bucket_seconds) * bucket_seconds
+        if current_bucket is None or bucket != current_bucket:
+            if current_bucket is not None:
+                closes.append(prev_close)
+            current_bucket = bucket
+        prev_close = c["close"]
+    if current_bucket is not None:
+        closes.append(prev_close)
     return closes
 
 
