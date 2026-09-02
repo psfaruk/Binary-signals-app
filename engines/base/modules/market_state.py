@@ -74,7 +74,11 @@ def analyze(candles, ctx: MarketContext) -> list:
     body = abs(c - o)
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
-    is_bull = c >= o
+    # FIX (CONFLUENCE-V1 2026-09-02): a doji (c == o) counted as bullish in
+    # the old `c >= o` check, inflating EXHAUSTION streaks by 1 in flat tape.
+    # Zero-body candles carry no direction — treat them as non-directional.
+    is_bull = c > o
+    is_doji = c == o
 
     _regime, _zone = _market_regime_simple(candles)
     _trend_dir = (+1 if _regime == "UPTREND"
@@ -87,8 +91,11 @@ def analyze(candles, ctx: MarketContext) -> list:
 
     _streak = 0
     for _i in range(len(candles) - 1, 0, -1):
-        _d = (candles[_i]["close"] >= candles[_i]["open"]) == is_bull
-        if _d:
+        # FIX (CONFLUENCE-V1): strict direction compare — dojis (close==open)
+        # no longer pad the streak (old code used >= which counted them as
+        # bullish and mirrored the current candle's side).
+        _c_dir = candles[_i]["close"] > candles[_i]["open"]
+        if not is_doji and _c_dir == is_bull:
             _streak += 1
         else:
             break
@@ -167,20 +174,22 @@ def analyze(candles, ctx: MarketContext) -> list:
         _st_ev["REVERSAL"].append("(unanchored: weight halved)")
 
     # TRAP
-    if body / total_range >= 0.68 and (
-            (is_bull and upper_wick < total_range * 0.10)
-            or (not is_bull and lower_wick < total_range * 0.10)):
-        _st("TRAP", 2, -_cand_dir,
-            "Big one-sided candle invites chasers when fuel is spent")
-    for _fb_lvl in [p for p, _ in [(p, _key_touches(candles, p))
-                                   for p in [candles[-2]["high"], candles[-2]["low"]]]
-                    if _ > 0]:
-        if prev["close"] > _fb_lvl >= c:
-            _st("TRAP", 2, -1, f"Failed breakout above {_fb_lvl:.5g}")
-            break
-        if prev["close"] < _fb_lvl <= c:
-            _st("TRAP", 2, +1, f"Failed breakdown below {_fb_lvl:.5g}")
-            break
+    # FIX (CONFLUENCE-V1 2026-09-02): the old failed-breakout conditions
+    # compared prev["close"] against prev["high"]/prev["low"] of the SAME
+    # candle (close can never exceed its own high) — the intended branch was
+    # dead and the live branches were mislabeled. Correct semantics:
+    #   failed breakout:  prev candle CLOSED above its own high? impossible.
+    #   A breakout is measured against the candle BEFORE prev:
+    #   candle[-3] high/low are the broken levels; prev is the breakout
+    #   candle; cur failing back inside = trap.
+    if len(candles) >= 3:
+        _base = candles[-3]
+        # Failed breakout above base high: prev closed above it, cur fell back below
+        if (prev["close"] > _base["high"] and c < _base["high"]):
+            _st("TRAP", 2, -1, f"Failed breakout above {_base['high']:.5g} — back inside")
+        # Failed breakdown below base low: prev closed below it, cur recovered above
+        elif (prev["close"] < _base["low"] and c > _base["low"]):
+            _st("TRAP", 2, +1, f"Failed breakdown below {_base['low']:.5g} — back inside")
 
     # RANGE
     if _trend_dir == 0:

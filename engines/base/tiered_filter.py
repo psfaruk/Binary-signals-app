@@ -60,9 +60,21 @@ TRAP_HOURS = {3, 8, 9, 11, 16, 18, 22}
 
 
 def _get_db_path() -> str:
-    """Get the SQLite DB path from environment."""
-    # Match the path used by db.py
-    return os.environ.get("QX_DB_PATH", "/app/data/signals.db")
+    """Get the SQLite DB path from environment.
+
+    FIX (CONFLUENCE-V1 2026-09-02): was reading QX_DB_PATH with a
+    /app/data/signals.db default while every other module resolves through
+    core.constants.DB_PATH — on any non-Railway deploy the tiered filter
+    silently found no DB and every CALL/PUT degraded to NEUTRAL. Now uses
+    the canonical resolution (env DB_PATH → repo-root signals.db).
+    """
+    try:
+        from core.constants import DB_PATH as _CANONICAL
+        return os.environ.get("DB_PATH", _CANONICAL)
+    except Exception:
+        return os.environ.get(
+            "DB_PATH",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "signals.db")))
 
 
 def _load_stats_from_db() -> Tuple[Dict, Dict]:

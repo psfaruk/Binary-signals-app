@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="/static/css/app-v3.css">
     <link rel="stylesheet" href="/static/css/app-v3-panels.css">
     <link rel="stylesheet" href="/static/css/token-panel.css">
+    <link rel="stylesheet" href="/static/css/confluence.css">
 </head>
 <body data-category="otc" data-tab="chart">
 
@@ -228,6 +229,18 @@
                                 <div class="conf-bar"><div class="conf-fill" id="sig-conf-bar"></div></div>
                                 <span class="conf-value" id="sig-conf-val">0%</span>
                             </div>
+                            <!-- CONFLUENCE-V1 (2026-09-02): cluster agreement chips —
+                                 six independent evidence clusters light up as they
+                                 agree with the final signal. Green = agreeing,
+                                 red = opposing, gray = abstaining. -->
+                            <div class="confluence-chips" id="confluence-chips" aria-label="Cluster confluence">
+                                <span class="cf-chip" data-cluster="TREND" title="EMA Ribbon + Multi-Timeframe trend">TREND</span>
+                                <span class="cf-chip" data-cluster="MOMENTUM" title="RSI/MACD + Stochastic momentum">MOMENTUM</span>
+                                <span class="cf-chip" data-cluster="MEANREV" title="Bollinger+RSI + Divergence overextension">MEANREV</span>
+                                <span class="cf-chip" data-cluster="LEVEL" title="Key Level + S/R Bounce + Wick Wall">LEVEL</span>
+                                <span class="cf-chip" data-cluster="PATTERN" title="Candlestick pattern">PATTERN</span>
+                                <span class="cf-chip" data-cluster="MICRO" title="Tick flow + Market state + Candle reaction">MICRO</span>
+                            </div>
                             <div class="signal-strategy-row" id="sig-strategy-row" style="display:none">
                                 <span class="strategy-label">Strategy:</span>
                                 <span class="strategy-value" id="sig-strategy">—</span>
@@ -337,7 +350,11 @@
                     </div>
                     <div class="wr-group" id="wr-window-filter">
                         <span class="wr-group-label">সময়</span>
-                        <button class="wr-chip" data-window="1" type="button">আজ</button>
+                        <!-- FIX (CONFLUENCE-V1 2026-09-02): "আজ" claimed a calendar
+                             day but the API treated it as a rolling 24h — relabeled
+                             to the honest "২৪ ঘণ্টা". The ৩০ দিন / সব সময় windows are
+                             now REAL (DB retention raised 7 → 90 days). -->
+                        <button class="wr-chip" data-window="1" type="button">২৪ ঘণ্টা</button>
                         <button class="wr-chip active" data-window="7" type="button">৭ দিন</button>
                         <button class="wr-chip" data-window="30" type="button">৩০ দিন</button>
                         <button class="wr-chip" data-window="0" type="button">সব সময়</button>

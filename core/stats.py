@@ -170,11 +170,20 @@ def _compute_module_stats_inner(cur):
         final_signal = row["signal"]
         accuracy = row["accuracy"]
         reasons = parse_reasons(row["reasons"] or "[]")
+        # FIX (CONFLUENCE-V1 2026-09-02): dedupe (module, direction) pairs per
+        # candle. LIVE re-eval used to merge fresh reasons into the stored
+        # list without dedup, so the same "[module] ... → DIR" line could
+        # appear twice for one candle and double-count that module in these
+        # stats (module_votes table already dedupes — this is its parity fix).
+        _seen_module_dirs = set()
         for reason in reasons:
             reason_str = str(reason)
             module, direction = parse_module_direction(reason_str, MODULE_NAMES)
             if module is None or direction is None:
                 continue
+            if (module, direction) in _seen_module_dirs:
+                continue
+            _seen_module_dirs.add((module, direction))
             if direction == final_signal:
                 if accuracy == "correct":
                     module_stats[module][direction]["correct"] += 1

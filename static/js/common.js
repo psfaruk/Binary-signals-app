@@ -726,7 +726,20 @@ function renderSignal(pred){
   _setStyle('sig-conf-bar', 'background',
             s === 'CALL' ? 'var(--green)' : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)');
 
-  _setText('sig-agree', (pred.agree || 0) + '/' + (pred.total || 0) + ' modules');
+  // CONFLUENCE-V1 (2026-09-02): agree now shows CLUSTER agreement (not the
+  // old fake group count). e.g. "4 clusters".
+  const agreeN = pred.agree || 0;
+  const totalN = pred.total || 0;
+  if(pred.strategy === 'confluence_v1' || pred.confluence){
+    _setText('sig-agree', agreeN + '/' + totalN + ' clusters');
+  } else {
+    _setText('sig-agree', agreeN + '/' + totalN + ' modules');
+  }
+
+  // CONFLUENCE-V1: cluster chips — light up agreeing clusters green,
+  // opposing red, abstaining gray. Works on both CALL and PUT signals and
+  // on NEUTRAL (everything gray with the reject-gate tooltip).
+  renderConfluenceChips(pred);
 
   // Regime display — clean format (no debug-looking output).
   // FIX (UI-P1-15/16, 2026-07-21): drop the "(str=0.85)" debug suffix;
@@ -824,6 +837,44 @@ function renderSignal(pred){
       engineLabel.style.color = 'var(--yellow)';
     }
   }
+}
+
+/* CONFLUENCE-V1 (2026-09-02): cluster agreement chips.
+   Reads pred.confluence.cluster_detail and lights each chip:
+     .agree  → cluster voted WITH the final signal (green pulse)
+     .oppose → cluster voted AGAINST (red)
+     .abstain → cluster did not vote (gray)
+   Null-safe: chips may be missing from older HTML. */
+function renderConfluenceChips(pred){
+  const chipsWrap = $('confluence-chips');
+  if(!chipsWrap) return;
+  const cf = pred.confluence || null;
+  const finalSignal = pred.signal;
+  const detail = cf && cf.cluster_detail ? cf.cluster_detail : null;
+  chipsWrap.querySelectorAll('.cf-chip').forEach(chip => {
+    const cname = chip.getAttribute('data-cluster');
+    chip.classList.remove('agree', 'oppose', 'abstain');
+    if(!detail || !(cname in detail)){
+      chip.classList.add('abstain');
+      chip.title = (chip.title || cname) + ' — no data';
+      return;
+    }
+    const v = detail[cname] || {};
+    const dir = v.direction || 'NEUTRAL';
+    if(finalSignal !== 'CALL' && finalSignal !== 'PUT'){
+      chip.classList.add('abstain');
+      chip.title = `${cname}: ${dir} (score ${v.score || 0}) — no trade (${cf.gate || pred.confluence_reject_gate || 'gate'})`;
+    } else if(dir === finalSignal){
+      chip.classList.add('agree');
+      chip.title = `${cname}: ${dir} (score ${v.score || 0}) — AGREE ✓ members: ${(v.members || []).join(', ') || '—'}`;
+    } else if(dir === 'NEUTRAL'){
+      chip.classList.add('abstain');
+      chip.title = `${cname}: abstained (members split or silent)`;
+    } else {
+      chip.classList.add('oppose');
+      chip.title = `${cname}: ${dir} (score ${v.score || 0}) — OPPOSES the signal`;
+    }
+  });
 }
 
 /* Display the 6-module engine breakdown. Uses the active category's 6-module
@@ -1136,6 +1187,8 @@ function renderHistory(){
   // added CALL/PUT + WIN/LOSS filter chips instead. The hour filter only
   // re-engages when the user explicitly picks the "আজ" scope (not wired yet).
   const filterLastHour = false;
+  // CONFLUENCE-V1 (2026-09-02): track how many pages we have loaded so the
+  // load-more button can stop at a sane depth (10 pages = 1000 signals).
   const nowSec = Math.floor(Date.now() / 1000);
   const oneHourAgo = nowSec - 3600;
   let displayHistory = filterLastHour
@@ -1235,30 +1288,22 @@ function renderHistory(){
   }
   // FIX (AUDIT-CORE #106, 2026-07-21): add a "Load more" button at the
   // bottom so users can page through older signals beyond HISTORY_MAX.
-  // The button uses the oldest visible signal's ctime as the cursor and
-  // requests the next 100 signals from the server via the WS `signals`
-  // message with a `before_ctime` field (newly supported by server.py).
-  // FIX (DEEP-AUDIT-2026-07-26 / F-17-02, CRITICAL): the previous logic
-  // rendered the button only when `!filterLastHour` (i.e. NOT on the
-  // History tab). But `#history-list` lives inside `#tab-history`, which
-  // is `display:none` whenever another tab is active — so when the
-  // button WAS rendered (on Chart/Stats tabs) it was invisible, and when
-  // the History tab was actually shown the button was suppressed. The
-  // pagination feature was completely unreachable. The intent of "skip
-  // load-more when filtering to last 1 hour" is wrong — the History tab
-  // is precisely where users want to load OLDER signals (which are
-  // outside the 1-hour window). Now: render the button ONLY on the
-  // History tab (where it's visible) using the full signalHistory (not
-  // the filtered displayHistory) to find the oldest ctime cursor.
-  if(filterLastHour){
-    const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
-      ? signalHistory[0].detail.ctime : 0;
-    if(oldestCtime){
-      html += `<div id="history-load-more" class="history-load-more" `
-           +  `onclick="window._loadMoreHistory()" role="button" tabindex="0" `
-           +  `onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._loadMoreHistory()}">`
-           +  `Load older signals ↓</div>`;
-    }
+  //
+  // FIX (CONFLUENCE-V1 2026-09-02): PAGINATION WAS DEAD CODE. The button was
+  // gated on `if(filterLastHour)` while filterLastHour is hardcoded false —
+  // so the "Load older signals" button NEVER rendered and history was
+  // hard-capped at the last 100 rows. The user could not browse past 100
+  // signals and the Accuracy tab could only ever sample 100 rows.
+  // Now: always render the button while we have a valid oldest-ctime cursor
+  // (signalHistory is stored oldest-first) and the page depth is < 10 pages.
+  const oldestCtime = signalHistory.length && signalHistory[0] && signalHistory[0].detail
+    ? signalHistory[0].detail.ctime : 0;
+  const pagesLoaded = (window._historyPagesLoaded || 1);
+  if(oldestCtime && pagesLoaded < 10){
+    html += `<div id="history-load-more" class="history-load-more" `
+         +  `onclick="window._loadMoreHistory()" role="button" tabindex="0" `
+         +  `onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._loadMoreHistory()}">`
+         +  `আরও পুরোনো সিগন্যাল লোড করুন ↓</div>`;
   }
   historyList.innerHTML = html;
 }
@@ -1304,6 +1349,8 @@ window._loadMoreHistory = function(){
   // a real attack vector (no public surface) but fragile. Now: bail if it's
   // not a positive finite number.
   if(typeof beforeCtime !== 'number' || !isFinite(beforeCtime) || beforeCtime <= 0) return;
+  // CONFLUENCE-V1: count pages so renderHistory can hide the button at depth 10.
+  window._historyPagesLoaded = (window._historyPagesLoaded || 1) + 1;
   // Send the signals request with before_ctime — server returns the
   // 100 signals older than the cursor. onServerSignals merges them.
   send({ type: 'signals', asset: currentAsset, period: currentPeriod,
@@ -1352,10 +1399,12 @@ function showSignalDetail(idx){
   const dateStr = d.ctime ? new Date(d.ctime * 1000).toLocaleString() : '—';
   rows += detailRow('Time', dateStr);
   rows += detailRow('Asset', currentAsset);
+  // CONFLUENCE-V1 (2026-09-02): prove which strategy produced this signal.
+  rows += detailRow('Strategy', d.strategy || 'confluence_v1');
   rows += detailRow('Score', d.score != null ? (d.score >= 0 ? '+' : '') + d.score : '—');
   rows += detailRow('Confidence', d.confidence != null ? Math.round(d.confidence) + '%' : '—');
   rows += detailRow('Strength', d.strength || '—');
-  rows += detailRow('Agree', d.agree != null ? d.agree + ' modules' : '—');
+  rows += detailRow('Agree', d.agree != null ? d.agree + ' clusters' : '—');
   rows += detailRow('Actual', d.actual || '—');
   rows += detailRow('Regime', (d.regime || '—') + '/' + (d.zone || '—'));
   if(d.a_open != null && d.a_close != null){
@@ -1401,14 +1450,25 @@ function detailRow(label, value){
 
 function renderAccuracy(){
   // Legacy: update the topbar mini-stat (elements may be gone — null-safe).
+  // FIX (CONFLUENCE-V1 2026-09-02): unified win-rate rule across the WHOLE app:
+  //   WR = correct / (correct + wrong). Draws are NOT wins/losses and are
+  //   excluded from every denominator (matches core/constants.compute_win_rate
+  //   and /api/winrate). The old topbar math (correct/total incl. draws over a
+  //   ≤100-row page) disagreed with the Accuracy tab AND the Win Rate tab —
+  //   three different numbers for "the win rate". Also 1-decimal precision
+  //   everywhere (the old Math.round disagreed with server-side 1dp).
   const accPct = $('acc-pct');
   const accDetail = $('acc-detail');
   if(accPct){
-    if(!totalSignals){ accPct.textContent = '—'; if(accDetail) accDetail.textContent = ''; }
+    // Use the same signalHistory source as the Accuracy tab for consistency.
+    const graded = signalHistory.filter(h => h && (
+      h.accuracy === 'correct' || h.accuracy === 'wrong'));
+    const correct = graded.filter(h => h.accuracy === 'correct').length;
+    if(graded.length === 0){ accPct.textContent = '—'; if(accDetail) accDetail.textContent = ''; }
     else {
-      const pct = Math.round((totalCorrect / totalSignals) * 100);
-      accPct.textContent = pct + '%';
-      if(accDetail) accDetail.textContent = '(' + totalCorrect + '/' + totalSignals + ')';
+      const pct = (correct / graded.length) * 100;
+      accPct.textContent = pct.toFixed(1) + '%';
+      if(accDetail) accDetail.textContent = '(' + correct + '/' + graded.length + ')';
       accPct.style.color = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
     }
   }
@@ -1426,41 +1486,44 @@ function renderAccuracy(){
    Uses signalHistory as the source (already kept in sync by addHistory +
    onServerSignals). Recomputes on every call — cheap for ≤100 entries. */
 function renderAccuracyTab(){
-  const graded = signalHistory.filter(h => h && (
-    h.accuracy === 'correct' || h.accuracy === 'wrong' || h.accuracy === 'draw'
-  ));
-  const correct = graded.filter(h => h.accuracy === 'correct').length;
-  const wrong   = graded.filter(h => h.accuracy === 'wrong').length;
-  const draws   = graded.filter(h => h.accuracy === 'draw').length;
-  const total   = graded.length;
+  // FIX (CONFLUENCE-V1 2026-09-02): the hero win rate previously divided by
+  // `graded.length` which INCLUDED draws — disagreeing with every server-side
+  // calculation (draws excluded) and with the Win Rate tab. Unified rule:
+  //   win rate = correct / (correct + wrong); draws counted separately.
+  const correct = signalHistory.filter(h => h && h.accuracy === 'correct').length;
+  const wrong   = signalHistory.filter(h => h && h.accuracy === 'wrong').length;
+  const draws   = signalHistory.filter(h => h && h.accuracy === 'draw').length;
+  const gradedTotal = correct + wrong;   // draws excluded from WR denominator
+  const allCounted  = gradedTotal + draws;
   const pending = signalHistory.filter(h => h && h.accuracy === 'pending').length;
 
   // Hero pct
   const heroPct = $('acc-hero-pct');
   const heroDetail = $('acc-hero-detail');
   if(heroPct){
-    if(total === 0){
+    if(gradedTotal === 0){
       heroPct.textContent = '—';
       heroPct.style.color = 'var(--text-dim)';
     } else {
-      const pct = Math.round((correct / total) * 100);
-      heroPct.textContent = pct + '%';
+      const pct = (correct / gradedTotal) * 100;
+      heroPct.textContent = pct.toFixed(1) + '%';
       heroPct.style.color = pct >= 60 ? 'var(--green)' : pct >= 40 ? 'var(--yellow)' : 'var(--red)';
     }
   }
   if(heroDetail){
-    if(total === 0){
+    if(gradedTotal === 0){
       heroDetail.textContent = pending > 0
         ? pending + ' signal' + (pending === 1 ? '' : 's') + ' pending'
         : 'No graded signals yet';
     } else {
-      heroDetail.textContent = correct + ' correct / ' + total + ' total'
+      heroDetail.textContent = correct + 'W / ' + wrong + 'L'
+        + (draws ? ' · ' + draws + ' draw' + (draws === 1 ? '' : 's') + ' (excluded)' : '')
         + (pending ? ' · ' + pending + ' pending' : '');
     }
   }
 
   // Stat grid
-  _setText('acc-total',  String(total));
+  _setText('acc-total',  String(allCounted));
   _setText('acc-wins',   String(correct));
   _setText('acc-losses', String(wrong));
   _setText('acc-draws',  String(draws));

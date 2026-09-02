@@ -19,8 +19,13 @@ def _wick_wall(candles, lookback=20):
         out = []
         grp_p = [s[0][0]]
         grp_w = [s[0][1]]
+        # FIX (CONFLUENCE-V1 2026-09-02): chaining bug — the old code compared
+        # each tip to the FIRST member of the group (grp_p[0]), letting a
+        # cluster "walk" arbitrarily far from its anchor and merge distinct
+        # walls. Compare against the RUNNING EDGE (last member) so every
+        # member is within tol of its neighbour chain only.
         for t, w in s[1:]:
-            if t - grp_p[0] <= tol:
+            if t - grp_p[-1] <= tol:
                 grp_p.append(t)
                 grp_w.append(w)
             else:
@@ -39,11 +44,13 @@ def _wick_wall(candles, lookback=20):
     # Recency-weighted tips.
     # FIX (PREDICTION-BUG-2026-08-07 / A-17 B18): previously used
     # `1.0 - i/n` which gives weight 1.0 to OLDEST candle (i=0) and ~0 to
-    # NEWEST. That meant wick-wall detection was dominated by stale 20-candle-
-    # old rejections. Now `i/n` gives weight ~0 to oldest, 1.0 to newest —
-    # recent rejections dominate, which is the whole point of "wick wall".
-    _low_tips = [(recent[i]["low"], i / n) for i in range(n)]
-    _high_tips = [(recent[i]["high"], i / n) for i in range(n)]
+    # NEWEST. Now `i/n` gives weight ~0 to oldest, 1.0 to newest.
+    # FIX (CONFLUENCE-V1): weight floor 0.25 — the old floor of 0.0 gave the
+    # oldest tip literally zero weight while still counting it as a "touch",
+    # so a 20-candle-old tip could satisfy the >=2.0 touch threshold while
+    # contributing nothing to the wall's position.
+    _low_tips = [(recent[i]["low"], 0.25 + 0.75 * i / n) for i in range(n)]
+    _high_tips = [(recent[i]["high"], 0.25 + 0.75 * i / n) for i in range(n)]
 
     return (_cluster(_low_tips), _cluster(_high_tips), avg_rng)
 

@@ -151,7 +151,11 @@ def detect_candle_patterns(candles):
     if r3 > 0 and atr > 0:
         body_pct3 = _abs_body(c3) / r3 * 100
         if body_pct3 < 10:
-            if b1 > 0 and b2 > 0 and c3["close"] < c3["open"] + (r3 * 0.05):
+            # FIX (CONFLUENCE-V1 2026-09-02): DOJI_BEARISH required only
+            # `close < open + range*0.05` — satisfied by virtually ANY doji,
+            # including slightly BULLISH ones. A bearish doji reversal needs a
+            # genuinely bearish or flat body: close <= open.
+            if b1 > 0 and b2 > 0 and c3["close"] <= c3["open"]:
                 patterns.append({
                     "name": "DOJI_BEARISH",
                     "direction": "PUT",
@@ -162,7 +166,8 @@ def detect_candle_patterns(candles):
             # was MISSING — only DOJI_BEARISH existed. Classic candlestick
             # theory: doji after downtrend signals selling exhaustion →
             # bullish reversal (CALL). Added symmetric detection.
-            elif b1 < 0 and b2 < 0 and c3["close"] > c3["open"] - (r3 * 0.05):
+            # FIX (CONFLUENCE-V1): mirrored the strict body rule.
+            elif b1 < 0 and b2 < 0 and c3["close"] >= c3["open"]:
                 patterns.append({
                     "name": "DOJI_BULLISH",
                     "direction": "CALL",
@@ -302,9 +307,15 @@ def classify_market_regime(candles, lookback=30):
         }
     lookback = min(lookback, len(candles))
     recent = candles[-lookback:]
+    # FIX (CONFLUENCE-V1 2026-09-02): EMA9/EMA21 were computed over only the
+    # 30-candle regime window — EMA21 was seeded from the first 21 of those
+    # and received just 9 recursion steps, producing a heavily lagged, biased
+    # average that fed the regime classifier (and the whole trend gate).
+    # Now seeded from the full available close history (up to 500 candles).
+    closes_full = [c["close"] for c in candles]
     closes = [c["close"] for c in recent]
-    ema9 = _ema(closes, 9)
-    ema21 = _ema(closes, 21)
+    ema9 = _ema(closes_full, 9)
+    ema21 = _ema(closes_full, 21)
     ema_diff = (ema9 - ema21) / ema21 if ema21 > 0 else 0
     atr_val = _atr(candles, 20)
     price_mid = (ema9 + ema21) / 2 if (ema9 + ema21) > 0 else 1.0

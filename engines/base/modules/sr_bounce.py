@@ -79,27 +79,38 @@ def _detect_reversal_candle(candle, prev_candle):
     prev_body = prev_c - prev_o
 
     # Bullish patterns
-    if lower_pct >= 60 and body_pct <= 35 and (c - o) >= 0:
+    # FIX (CONFLUENCE-V1 2026-09-02): pin/dragonfly now require a BULLISH or
+    # neutral-close body with the body in the TOP part of the range. The old
+    # definitions accepted a bearish candle with big lower AND upper wicks as
+    # a "bullish pin" — a candle with two long wicks is indecision, not a
+    # rejection hammer.
+    if (lower_pct >= 60 and body_pct <= 35 and (c - o) > 0
+            and upper_pct <= 25):
         return "BULL_HAMMER"
-    if lower_pct >= 70 and body_pct <= 15:
+    if (lower_pct >= 70 and body_pct <= 15 and (c - o) >= 0
+            and upper_pct <= 15):
         return "BULL_DRAGONFLY"
     if (prev_body < 0 and c - o > 0
             and c >= prev_o and o <= prev_c
             and body > abs(prev_body)):
         return "BULL_ENGULF"
-    if lower_pct >= 66 and body_pct <= 33:
+    if (lower_pct >= 66 and body_pct <= 33 and (c - o) >= 0
+            and upper_pct <= 20):
         return "BULL_PIN"
 
     # Bearish patterns
-    if upper_pct >= 60 and body_pct <= 35 and (c - o) <= 0:
+    if (upper_pct >= 60 and body_pct <= 35 and (c - o) < 0
+            and lower_pct <= 25):
         return "BEAR_STAR"
-    if upper_pct >= 70 and body_pct <= 15:
+    if (upper_pct >= 70 and body_pct <= 15 and (c - o) <= 0
+            and lower_pct <= 15):
         return "BEAR_GRAVESTONE"
     if (prev_body > 0 and c - o < 0
             and c <= prev_o and o >= prev_c
             and body > abs(prev_body)):
         return "BEAR_ENGULF"
-    if upper_pct >= 66 and body_pct <= 33:
+    if (upper_pct >= 66 and body_pct <= 33 and (c - o) <= 0
+            and lower_pct <= 20):
         return "BEAR_PIN"
 
     return None
@@ -179,18 +190,21 @@ def analyze(candles, ctx: MarketContext) -> list:
                 ],
             ))
         else:
-            # Touched support but closed below — breakdown risk, weaker signal
+            # FIX (CONFLUENCE-V1 2026-09-02): a bounce requires the candle to
+            # CLOSE BACK ABOVE the support. The old "closed below support but
+            # still CALL score 2" branch voted CALL on a BREAKDOWN candle —
+            # exactly the trade that loses. No confirmation close → no vote.
             results.append(ModuleResult(
                 module_name="sr_bounce",
-                direction="CALL",
-                score=2,
-                confidence=55,
+                direction="NEUTRAL",
+                score=0,
+                confidence=0,
                 signal_type="REVERSAL",
                 reliability="CANDLE",
                 group="SR_BOUNCE",
                 reasons=[
-                    f"SR bounce CALL (weak): support {nearest_support:.5f} touched, "
-                    f"{reversal} pattern but close {close:.5f} ≤ support — caution"
+                    f"SR breakdown: support {nearest_support:.5f} touched, "
+                    f"close {close:.5f} ≤ support — bounce INVALID, no vote"
                 ],
             ))
 
@@ -212,48 +226,26 @@ def analyze(candles, ctx: MarketContext) -> list:
                 ],
             ))
         else:
+            # FIX (CONFLUENCE-V1): mirror of the support fix — a PUT bounce
+            # requires the close to be BACK BELOW the resistance. A candle
+            # closing above the resistance is a BREAKOUT, not a rejection.
             results.append(ModuleResult(
                 module_name="sr_bounce",
-                direction="PUT",
-                score=2,
-                confidence=55,
+                direction="NEUTRAL",
+                score=0,
+                confidence=0,
                 signal_type="REVERSAL",
                 reliability="CANDLE",
                 group="SR_BOUNCE",
                 reasons=[
-                    f"SR bounce PUT (weak): resistance {nearest_resistance:.5f} touched, "
-                    f"{reversal} pattern but close {close:.5f} ≥ resistance — caution"
+                    f"SR breakout: resistance {nearest_resistance:.5f} touched, "
+                    f"close {close:.5f} ≥ resistance — rejection INVALID, no vote"
                 ],
             ))
 
-    # ── Level touched but no reversal candle — weak confluence ──────────
-    elif nearest_support is not None:
-        results.append(ModuleResult(
-            module_name="sr_bounce",
-            direction="CALL",
-            score=1,
-            confidence=52,
-            signal_type="REVERSAL",
-            reliability="LEVEL",
-            group="SR_BOUNCE",
-            reasons=[
-                f"SR touch CALL: support {nearest_support:.5f} touched "
-                f"({support_dist / atr:.2f} ATR), no reversal candle confirm → weak"
-            ],
-        ))
-    elif nearest_resistance is not None:
-        results.append(ModuleResult(
-            module_name="sr_bounce",
-            direction="PUT",
-            score=1,
-            confidence=52,
-            signal_type="REVERSAL",
-            reliability="LEVEL",
-            group="SR_BOUNCE",
-            reasons=[
-                f"SR touch PUT: resistance {nearest_resistance:.5f} touched "
-                f"({resistance_dist / atr:.2f} ATR), no reversal candle confirm → weak"
-            ],
-        ))
+    # FIX (CONFLUENCE-V1): REMOVED the "level touched but no reversal candle"
+    # weak votes (score 1 CALL/PUT). A mere level touch without a
+    # confirmation candle is location, not a trade signal — it only added
+    # fake confluence weight and ~52% WR noise votes.
 
     return results

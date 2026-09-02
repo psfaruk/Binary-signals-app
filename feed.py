@@ -108,8 +108,8 @@ def _payout_floor_for(asset: str) -> int:
 # Method A (LIVE running-candle re-eval) / Method B (strength gating) rollout
 # flags — both untested, added 2026-07-10. Zero-redeploy killswitch: set
 # either to "0" via the platform's env var UI to fall back to prior behavior.
-ENABLE_LIVE_THEORY   = os.environ.get("ENABLE_LIVE_REEVAL",  "1") == "1"
-ENABLE_STRENGTH_GATE = os.environ.get("ENABLE_STRENGTH_GATE", "1") == "1"
+ENABLE_LIVE_THEORY   = False  # CONFLUENCE-V1 (2026-09-02): permanently OFF — see DISABLE_LIVE_REEVAL
+ENABLE_STRENGTH_GATE = False  # CONFLUENCE-V1 (2026-09-02): permanently OFF — mid-candle demotions deleted
 # ── Signal delay ───────────────────────────────────────────────────────────
 # How long after a new candle opens before the prediction is broadcast.
 # FIX (USER-AUG-2026 / 0-SEC-SIGNAL): default changed from 3.0 → 0.0.
@@ -205,9 +205,13 @@ BUYER_PCT_THRESHOLD = int(os.environ.get("QX_BUYER_PCT_THRESHOLD", "62"))
 # FIX (CALIBRATION-2026-07-29): LIVE re-eval was the #1 cause of low accuracy.
 # 88% of signals (1,172/1,325) had confidence reduced to 15 via "RECOVERED_CONFIDENCE"
 # path, and these signals had only 43.3% win rate (vs 99%+ for non-recovered signals).
-# Setting QX_DISABLE_LIVE_REEVAL=1 disables the entire LIVE re-eval system —
-# signals keep their original confidence from candle close.
-DISABLE_LIVE_REEVAL = os.environ.get("QX_DISABLE_LIVE_REEVAL", "1") == "1"
+#
+# CONFLUENCE-V1 (2026-09-02) — USER REQUIREMENT: "অ্যাপ এ কোনো প্রকার ওভার রাইট
+# থাকতে পারবে না" (no overwriting whatsoever). The signal published at candle
+# close is FINAL and IMMUTABLE for the whole candle: no live re-evaluation, no
+# mid-candle confidence/strength changes, no NEUTRAL→CALL upgrades. The env
+# override was REMOVED so this can never be re-enabled by accident.
+DISABLE_LIVE_REEVAL = True
 LIVE_REEVAL_MIN_TICKS = int(os.environ.get("QX_LIVE_REEVAL_MIN_TICKS", "15"))
 LIVE_REEVAL_INTERVAL_CRITICAL = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_CRITICAL", "10"))
 LIVE_REEVAL_INTERVAL_LAST_10S = int(os.environ.get("QX_LIVE_REEVAL_INTERVAL_LAST_10S", "15"))
@@ -2563,6 +2567,9 @@ class QuotexFeed:
                     a_open=closed["open"], a_close=closed["close"],
                     regime=regime, zone=zone,
                     tags=",".join(tags), postmortem=pm,
+                    strategy=prediction.get("strategy"),
+                    total=prediction.get("total"),
+                    signal_quality=prediction.get("signal_quality"),
                 )
         except Exception as _e:
             # FIX (DEEP-AUDIT-2026-07-26 / F-01-39): already prints to stderr

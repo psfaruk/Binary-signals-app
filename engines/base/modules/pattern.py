@@ -24,12 +24,21 @@ ALWAYS_CONTINUATION = {
 
 
 def analyze(candles, ctx: MarketContext) -> list:
-    """Detect multi-candle patterns; returns one ModuleResult per detected pattern."""
+    """Detect multi-candle patterns; returns AT MOST ONE vote per direction.
+
+    FIX (CONFLUENCE-V1 2026-09-02): the old implementation emitted one
+    ModuleResult per detected pattern, and detect_candle_patterns() can flag
+    several overlapping patterns on the SAME candle (tweezer-bottom +
+    two-bar-rev + engulfing are often all true together). The old blender
+    summed their scores inside one group — triple-counting a single
+    observation. Now: keep only the single highest-score pattern per
+    direction; secondary overlapping patterns are recorded as notes.
+    """
     patterns = detect_candle_patterns(candles)
     if not patterns:
         return []
 
-    results = []
+    candidates = []
     for pat in patterns:
         name = pat["name"]
         direction = pat["direction"]
@@ -42,15 +51,32 @@ def analyze(candles, ctx: MarketContext) -> list:
         else:
             continue  # unknown pattern, skip
 
-        reason_str = pat.get("reason") or ""
+        candidates.append((direction, sig_type, pat))
+
+    if not candidates:
+        return []
+
+    results = []
+    for direction in ("CALL", "PUT"):
+        same_dir = [(st, p) for d, st, p in candidates if d == direction]
+        if not same_dir:
+            continue
+        same_dir.sort(key=lambda x: -x[1]["score"])
+        best_st, best = same_dir[0]
+        reason_str = best.get("reason") or ""
+        note = ""
+        if len(same_dir) > 1:
+            others = [p["name"] for _, p in same_dir[1:]]
+            note = (f" [+{len(same_dir) - 1} overlapping pattern(s) deduped: "
+                    f"{', '.join(others)}]")
         results.append(ModuleResult(
             module_name="pattern",
             direction=direction,
-            score=pat["score"],
-            confidence=pat["score"] * 18,  # 3->54, 2->36
-            signal_type=sig_type,
+            score=best["score"],
+            confidence=best["score"] * 18,  # 3->54, 2->36
+            signal_type=best_st,
             reliability="PATTERN",
-            group="PATTERN_REVERSAL" if sig_type == "REVERSAL" else "PATTERN_CONTINUATION",
-            reasons=[reason_str],
+            group="PATTERN_REVERSAL" if best_st == "REVERSAL" else "PATTERN_CONTINUATION",
+            reasons=[reason_str + note],
         ))
     return results

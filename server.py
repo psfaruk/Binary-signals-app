@@ -1779,9 +1779,15 @@ async def pair_deep_stats(asset: str, period: int = 60):
                 FROM signal_log
                 WHERE asset = ? AND period = ? AND accuracy IN ('correct', 'wrong')
                 GROUP BY conf_bucket, accuracy
-                ORDER BY conf_bucket
             """, (asset, period))
-            conf_data = [dict(r) for r in cur.fetchall()]
+            # FIX (CONFLUENCE-V1 2026-09-02): the old `ORDER BY conf_bucket`
+            # sorted LEXICOGRAPHICALLY in SQLite ('<46' after '57+') — the
+            # buckets displayed out of order. Sort in Python with an explicit
+            # ordinal so the calibration table reads low → high.
+            _conf_order = {'<46': 0, '46-48': 1, '49-50': 2, '51-52': 3, '53-56': 4, '57+': 5}
+            conf_data = sorted(
+                (dict(r) for r in cur.fetchall()),
+                key=lambda r: _conf_order.get(r['conf_bucket'], 99))
 
             # Strength distribution
             cur.execute("""

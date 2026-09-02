@@ -148,6 +148,15 @@ def init():
                 print("[db] migrated signal_log: added `signal_quality` column")
         except Exception as _e:
             print(f"[db] signal_log `signal_quality` column migration skipped: {_e}")
+        # CONFLUENCE-V1 (2026-09-02): persist which strategy produced each
+        # signal so history can prove exactly what fired (confluence_v1).
+        try:
+            cols = [row["name"] for row in c.execute("PRAGMA table_info(signal_log)").fetchall()]
+            if "strategy" not in cols:
+                c.execute("ALTER TABLE signal_log ADD COLUMN strategy TEXT")
+                print("[db] migrated signal_log: added `strategy` column")
+        except Exception as _e:
+            print(f"[db] signal_log `strategy` column migration skipped: {_e}")
         c.execute("DROP INDEX IF EXISTS ix_sl_asset_period")
         c.execute("CREATE INDEX IF NOT EXISTS ix_sl_ctime ON signal_log(asset, period, ctime DESC)")
         c.execute("DROP INDEX IF EXISTS ix_sl_ts")
@@ -174,17 +183,10 @@ def init():
         # which never converges to the real ratio and is skewed by recency.
         # Add true counter columns; call_win_pct / put_win_pct are now exact
         # ratios computed from them (see _update_hourly_pattern).
-        for _new_col in ("call_total INT", "call_correct INT",
-                         "put_total INT", "put_correct INT"):
-            try:
-                _col_name = _new_col.split()[0]
-                _php_cols = [row["name"] for row in c.execute(
-                    "PRAGMA table_info(pair_hourly_patterns)").fetchall()]
-                if _php_cols and _col_name not in _php_cols:
-                    c.execute(f"ALTER TABLE pair_hourly_patterns ADD COLUMN {_new_col}")
-                    print(f"[db] migrated pair_hourly_patterns: added `{_col_name}` column")
-            except Exception as _e:
-                print(f"[db] pair_hourly_patterns `{_col_name}` migration skipped: {_e}")
+        # NOTE (CONFLUENCE-V1): these ALTERs run AFTER the CREATE TABLE block
+        # further down in init() — moving them earlier silently skipped them
+        # on fresh DBs (the table did not exist yet → `call_total` missing →
+        # every _update_hourly_pattern call failed with "no such column").
 
         try:
             done_row = c.execute(
@@ -392,6 +394,23 @@ def init():
             c.execute("CREATE INDEX IF NOT EXISTS ix_php_asset ON pair_hourly_patterns(asset)")
         except sqlite3.Error as _e:
             print(f"[db] pair_hourly_patterns table creation skipped: {_e}")
+
+        # CONFLUENCE-V1 (2026-09-02) + TRUE-WR migration: pair_hourly_patterns
+        # column migrations — run AFTER the CREATE TABLE above so they work on
+        # BOTH fresh DBs (table just created) and existing DBs.
+        try:
+            _php_cols = [row["name"] for row in c.execute(
+                "PRAGMA table_info(pair_hourly_patterns)").fetchall()]
+            if _php_cols:
+                for _new_col in ("call_total INT", "call_correct INT",
+                                 "put_total INT", "put_correct INT",
+                                 "last_ctime INT"):
+                    _col_name = _new_col.split()[0]
+                    if _col_name not in _php_cols:
+                        c.execute(f"ALTER TABLE pair_hourly_patterns ADD COLUMN {_new_col}")
+                        print(f"[db] migrated pair_hourly_patterns: added `{_col_name}` column")
+        except Exception as _e:
+            print(f"[db] pair_hourly_patterns column migration skipped: {_e}")
 
         try:
             c.execute("""CREATE TABLE IF NOT EXISTS quotex_algo_patterns (
@@ -727,6 +746,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
 
     conn = _conn()
     try:
+        strategy_val = kw.get("strategy")
         try:
             cur = conn.cursor()
             try:
@@ -735,8 +755,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         (asset,period,ctime,signal,score,confidence,theories,
                          actual,accuracy,strength,agree,right_codes,wrong_codes,
                          reasons,a_open,a_close,regime,zone,tags,postmortem,
-                         category,total,ts,signal_quality)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         category,total,ts,signal_quality,strategy)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(asset, period, ctime) DO UPDATE SET
                         signal=excluded.signal,
                         score=excluded.score,
@@ -758,7 +778,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         category=excluded.category,
                         total=excluded.total,
                         ts=excluded.ts,
-                        signal_quality=excluded.signal_quality
+                        signal_quality=excluded.signal_quality,
+                        strategy=excluded.strategy
                     """,
                     (asset, period, ctime, signal, score, confidence, _as_text(theories),
                      actual, accuracy,
@@ -768,7 +789,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                      kw.get("a_open"), kw.get("a_close"),
                      kw.get("regime"), kw.get("zone"),
                      _as_text(kw.get("tags")), kw.get("postmortem"),
-                     category, total_val, ts_val, kw.get("signal_quality")))
+                     category, total_val, ts_val, kw.get("signal_quality"),
+                     strategy_val))
             except sqlite3.Error as _conflict_err:
                 if "ON CONFLICT" in str(_conflict_err) and "UNIQUE" in str(_conflict_err).upper():
                     # Fallback: no unique constraint, use INSERT OR REPLACE.
@@ -777,8 +799,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                             (asset,period,ctime,signal,score,confidence,theories,
                              actual,accuracy,strength,agree,right_codes,wrong_codes,
                              reasons,a_open,a_close,regime,zone,tags,postmortem,
-                             category,total,ts,signal_quality)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                             category,total,ts,signal_quality,strategy)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (asset, period, ctime, signal, score, confidence, _as_text(theories),
                          actual, accuracy,
@@ -788,7 +810,8 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                          kw.get("a_open"), kw.get("a_close"),
                          kw.get("regime"), kw.get("zone"),
                          _as_text(kw.get("tags")), kw.get("postmortem"),
-                         category, total_val, ts_val, kw.get("signal_quality")))
+                         category, total_val, ts_val, kw.get("signal_quality"),
+                         strategy_val))
                 else:
                     raise
             conn.commit()
@@ -896,7 +919,14 @@ def _get_session_name(hour_utc: int) -> str:
 
 def _update_hourly_pattern(asset: str, ctime: int, signal: str,
                            accuracy: str, confidence):
-    """Update pair_hourly_patterns table after each graded signal."""
+    """Update pair_hourly_patterns table after each graded signal.
+
+    FIX (CONFLUENCE-V1 2026-09-02): added a last_ctime dedup ledger.
+    log_signal is an UPSERT keyed on (asset, period, ctime) — any re-grade of
+    the same candle used to increment these counters a second time and
+    silently corrupt every time-pattern win rate. A re-grade of the SAME
+    candle is now a no-op for this table.
+    """
     if not ctime or accuracy not in ('correct', 'wrong'):
         return
     try:
@@ -915,11 +945,17 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT total_signals, correct, wrong, call_win_pct, put_win_pct
+            SELECT total_signals, correct, wrong, call_win_pct, put_win_pct,
+                   last_ctime, avg_confidence
             FROM pair_hourly_patterns
             WHERE asset = ? AND hour_utc = ?
         """, (asset, hour_utc))
         existing = cur.fetchone()
+
+        # FIX (CONFLUENCE-V1): dedup ledger — same candle re-graded → skip.
+        if existing and existing['last_ctime'] and int(existing['last_ctime']) == int(ctime):
+            conn.close()
+            return
 
         # FIX (TRUE-WR-2026-08-31): call/put win rates are now TRUE ratios
         # tracked via explicit counter columns (call_total/call_correct/
@@ -948,6 +984,14 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
             new_call_wr = round(100.0 * cc / ct, 1) if ct > 0 else None
             new_put_wr = round(100.0 * pc / pt, 1) if pt > 0 else None
 
+            # FIX (CONFLUENCE-V1): avg_confidence is now a real running mean,
+            # not the last signal's confidence (the old overwrite made the
+            # column meaningless for /api/pair-deep-stats).
+            _n = new_total
+            _old_avg = existing['avg_confidence'] or 0
+            _conf_num = float(confidence) if confidence is not None else 0.0
+            new_avg_conf = round(((_old_avg * old_total) + _conf_num) / _n, 2) if _n > 0 else _conf_num
+
             # best_direction: only commit a direction once BOTH sides have
             # enough evidence. FIX: the old code set best_direction to the
             # OPPOSITE direction on a wrong first signal (zero evidence),
@@ -964,12 +1008,12 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
                     best_direction = ?, call_win_pct = ?, put_win_pct = ?,
                     call_total = ?, call_correct = ?,
                     put_total = ?, put_correct = ?,
-                    last_updated = ?, ts = ?
+                    last_ctime = ?, last_updated = ?, ts = ?
                 WHERE asset = ? AND hour_utc = ?
             """, (session, new_total, new_correct, new_wrong, new_win_pct,
-                  confidence, best_dir, new_call_wr, new_put_wr,
+                  new_avg_conf, best_dir, new_call_wr, new_put_wr,
                   ct, cc, pt, pc,
-                  ts_val, ts_val, asset, hour_utc))
+                  int(ctime), ts_val, ts_val, asset, hour_utc))
         else:
             win_pct = 100.0 if is_correct else 0.0
             call_wr = 100.0 if (is_call and is_correct) else (0.0 if is_call else None)
@@ -981,17 +1025,18 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
             cc = is_correct if is_call else 0
             pt = 0 if is_call else 1
             pc = 0 if is_call else is_correct
+            _conf_num = float(confidence) if confidence is not None else 0.0
 
             cur.execute("""
                 INSERT INTO pair_hourly_patterns
                     (asset, hour_utc, session, total_signals, correct, wrong,
                      win_pct, avg_confidence, best_direction, call_win_pct,
                      put_win_pct, call_total, call_correct, put_total,
-                     put_correct, last_updated, ts)
-                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     put_correct, last_ctime, last_updated, ts)
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (asset, hour_utc, session, is_correct, 1 - is_correct,
-                  win_pct, confidence, best_dir, call_wr, put_wr,
-                  ct, cc, pt, pc, ts_val, ts_val))
+                  win_pct, _conf_num, best_dir, call_wr, put_wr,
+                  ct, cc, pt, pc, int(ctime), ts_val, ts_val))
 
         conn.commit()
     except Exception as e:
@@ -1079,12 +1124,16 @@ def get_micro_history(asset, period, n=5, before_ctime=None):
 
 
 def get_recent_signals(asset, period, limit=50, before_ctime=None):
-    """Return recent signals with full details for frontend history display."""
+    """Return recent signals with full details for frontend history display.
+
+    CONFLUENCE-V1 (2026-09-02): also returns the `strategy` column so the
+    history can prove which strategy version produced each signal.
+    """
     with _read_cursor() as c:
         base = """SELECT asset, period, ctime, signal, accuracy, score, confidence,
                    strength, agree, theories, actual, regime, zone,
                    tags, postmortem, right_codes, wrong_codes,
-                   a_open, a_close, reasons
+                   a_open, a_close, reasons, strategy
                    FROM signal_log
                    WHERE asset=? AND period=? AND signal IN ('CALL','PUT')"""
         params = [asset, period]
@@ -1126,10 +1175,23 @@ def get_directional_winrate(period=60, days=None, category=None,
           "overall": same shape with asset="ALL",
           "window_days": days or None,
         }
+
+    FIX (CONFLUENCE-V1 2026-09-02): results are now restricted to the
+    CURRENT 16-pair allowlist. Previously legacy rows for removed pairs
+    (EURUSD_otc, GBPUSD_otc, ...) silently polluted the Win Rate dashboard
+    until someone manually called /api/admin/prune-pairs — making the
+    dashboard disagree with /api/stats (which IS allowlist-filtered).
     """
     cutoff = min_ctime
     if cutoff is None and days is not None:
         cutoff = time.time() - days * _SECONDS_PER_DAY
+
+    # CONFLUENCE-V1: canonical allowlist (11 OTC + 5 Real).
+    try:
+        from core.constants import ALLOWED_PAIRS as _ALLOWED
+        _allow = tuple(sorted(_ALLOWED))
+    except Exception:
+        _allow = None
 
     where = ["period = ?", "signal IN ('CALL','PUT')"]
     params = [period]
@@ -1139,6 +1201,9 @@ def get_directional_winrate(period=60, days=None, category=None,
     if category in ('otc', 'real'):
         where.append("category = ?")
         params.append(category)
+    if _allow:
+        where.append(f"asset IN ({','.join('?' * len(_allow))})")
+        params.extend(_allow)
     where_sql = " AND ".join(where)
 
     with _read_cursor() as c:
@@ -1399,8 +1464,20 @@ def clear_all_signals():
         return c.rowcount
 
 
-def cleanup(days=7):
-    """Delete rows older than `days`. Returns (deleted_candle_micro, deleted_signal_log)."""
+def cleanup(days=None):
+    """Delete rows older than `days`. Returns (deleted_candle_micro, deleted_signal_log).
+
+    FIX (CONFLUENCE-V1 2026-09-02): default retention raised 7 → 90 days
+    (env QX_RETENTION_DAYS). The old 7-day cleanup ran at startup + every 6h
+    and silently made the UI's "30 days" / "All time" chips cap at 7 days —
+    the win-rate dashboard could never show what it claimed. 90 days keeps
+    those windows meaningful while still bounding DB growth.
+    """
+    if days is None:
+        try:
+            days = int(os.environ.get("QX_RETENTION_DAYS", "90"))
+        except ValueError:
+            days = 90
     if not isinstance(days, int) or days < 1:
         raise ValueError(f"cleanup: days must be a positive int, got {days!r}")
 

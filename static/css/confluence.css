@@ -1,0 +1,169 @@
+/* ============================================================
+   CONFLUENCE-V1 UI (2026-09-02) — cluster chips, signal
+   animations, highlights, win-rate meter effects.
+   Loaded after app-v3-panels.css.
+   ============================================================ */
+
+/* ── Cluster agreement chips ─────────────────────────────────── */
+.confluence-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin: 8px 0 2px;
+    padding: 0 2px;
+}
+
+.cf-chip {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    color: var(--text-dim, #7a8699);
+    background: rgba(255, 255, 255, 0.03);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    cursor: default;
+    user-select: none;
+}
+
+/* Agreeing cluster — green glow + pop animation */
+.cf-chip.agree {
+    color: #06d17a;
+    border-color: rgba(6, 209, 122, 0.55);
+    background: rgba(6, 209, 122, 0.13);
+    box-shadow: 0 0 8px rgba(6, 209, 122, 0.25);
+    animation: cf-agree-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Opposing cluster — red */
+.cf-chip.oppose {
+    color: #ff5470;
+    border-color: rgba(255, 84, 112, 0.55);
+    background: rgba(255, 84, 112, 0.12);
+    box-shadow: 0 0 6px rgba(255, 84, 112, 0.2);
+    animation: cf-agree-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Abstaining — dim */
+.cf-chip.abstain {
+    opacity: 0.55;
+}
+
+@keyframes cf-agree-pop {
+    0%   { transform: scale(0.82); opacity: 0.4; }
+    60%  { transform: scale(1.08); }
+    100% { transform: scale(1); opacity: 1; }
+}
+
+/* ── Signal box entrance highlight ───────────────────────────── */
+.signal-box.call,
+.signal-box.put {
+    position: relative;
+    overflow: hidden;
+}
+
+/* Sweep highlight across the signal box when a new signal pops */
+.signal-box.signal-pop::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        105deg,
+        transparent 30%,
+        rgba(255, 255, 255, 0.13) 48%,
+        transparent 62%);
+    transform: translateX(-100%);
+    animation: signal-sweep 0.9s ease-out 0.05s;
+    pointer-events: none;
+}
+
+@keyframes signal-sweep {
+    to { transform: translateX(100%); }
+}
+
+/* STRONG signal pulse ring */
+.signal-box.signal-pop .signal-strength-badge.strength-badge.strong {
+    animation: strong-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes strong-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(6, 209, 122, 0.45); }
+    50%      { box-shadow: 0 0 0 6px rgba(6, 209, 122, 0); }
+}
+
+/* Confidence bar — animated fill sweep */
+.conf-fill {
+    transition: width 0.5s cubic-bezier(0.25, 0.8, 0.35, 1) !important;
+    position: relative;
+}
+
+.conf-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(255, 255, 255, 0.28) 50%,
+        transparent 100%);
+    animation: conf-shimmer 2.4s linear infinite;
+}
+
+@keyframes conf-shimmer {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+/* ── History rows — win/loss flash highlights ────────────────── */
+.history-row.correct {
+    animation: row-win-flash 0.9s ease-out;
+}
+
+.history-row.wrong {
+    animation: row-loss-flash 0.9s ease-out;
+}
+
+@keyframes row-win-flash {
+    0%   { background: rgba(6, 209, 122, 0.22); }
+    100% { background: transparent; }
+}
+
+@keyframes row-loss-flash {
+    0%   { background: rgba(255, 84, 112, 0.2); }
+    100% { background: transparent; }
+}
+
+/* Load-more button */
+.history-load-more {
+    text-align: center;
+    padding: 9px 4px;
+    margin-top: 4px;
+    font-size: 11.5px;
+    color: #00e5ff;
+    border: 1px dashed rgba(0, 229, 255, 0.35);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s ease, transform 0.1s ease;
+    user-select: none;
+}
+
+.history-load-more:hover  { background: rgba(0, 229, 255, 0.08); }
+.history-load-more:active { transform: scale(0.985); }
+
+/* ── NEUTRAL "no trade" clarity ──────────────────────────────── */
+.signal-box.neutral {
+    border: 1px dashed rgba(255, 255, 255, 0.14);
+}
+
+/* Reduced motion — respect user preference */
+@media (prefers-reduced-motion: reduce) {
+    .cf-chip.agree, .cf-chip.oppose,
+    .signal-box.signal-pop::after,
+    .signal-box.signal-pop .signal-strength-badge.strength-badge.strong,
+    .conf-fill::after,
+    .history-row.correct, .history-row.wrong {
+        animation: none !important;
+    }
+}

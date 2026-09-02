@@ -126,74 +126,41 @@ def analyze(candles, ctx: MarketContext) -> list:
         else:
             trend_15m = "SIDEWAYS"
 
-    # Get current signal from last candle
-    last = candles[-1]
-    signal = "CALL" if last["close"] >= last["open"] else "PUT"
-
-    # ── Determine alignment ──────────────────────────────────────────────
-    align_5m = (trend_5m == "UP" and signal == "CALL") or \
-               (trend_5m == "DOWN" and signal == "PUT")
-    counter_5m = (trend_5m == "UP" and signal == "PUT") or \
-                 (trend_5m == "DOWN" and signal == "CALL")
-    align_15m = (trend_15m == "UP" and signal == "CALL") or \
-                (trend_15m == "DOWN" and signal == "PUT")
-    counter_15m = (trend_15m == "UP" and signal == "PUT") or \
-                  (trend_15m == "DOWN" and signal == "CALL")
-
-    # ── Vote ─────────────────────────────────────────────────────────────
-    if align_5m and align_15m:
-        # Strongest: both HTFs confirm
+    # FIX (CONFLUENCE-V1 2026-09-02): the old vote anchored the "signal" to
+    # the LAST CANDLE COLOR (`signal = CALL if close >= open else PUT`) — the
+    # audit flagged this as the purest fake-confluence source (identical to
+    # candle_reaction, momentum continuation, ema_ribbon votes). The module
+    # now votes on the STRUCTURAL HTF trend itself, independent of the last
+    # candle's color:
+    #   5m AND 15m both UP   → CALL (trend continuation on both timeframes)
+    #   5m AND 15m both DOWN → PUT
+    #   anything else        → abstain (mixed timeframes = no high-confidence
+    #                           trend evidence; the blender's HTF gate applies
+    #                           the 5m trend separately anyway).
+    if trend_5m == "UP" and trend_15m == "UP":
         results.append(ModuleResult(
             module_name="multi_tf",
-            direction=signal,
+            direction="CALL",
             score=3,
             confidence=65,
             signal_type="CONTINUATION",
             reliability="CANDLE",
             group="MULTI_TF",
-            reasons=[f"HTF CONFIRM: 5m={trend_5m}, 15m={trend_15m} "
-                     f"both aligned with {signal} → strong confirmation"],
+            reasons=[f"HTF TREND: 5m={trend_5m}, 15m={trend_15m} "
+                     f"both structurally UP → CALL"],
         ))
-    elif align_5m and trend_15m == "SIDEWAYS":
-        # Moderate: 5m confirms, 15m neutral
+    elif trend_5m == "DOWN" and trend_15m == "DOWN":
         results.append(ModuleResult(
             module_name="multi_tf",
-            direction=signal,
-            score=2,
-            confidence=58,
+            direction="PUT",
+            score=3,
+            confidence=65,
             signal_type="CONTINUATION",
             reliability="CANDLE",
             group="MULTI_TF",
-            reasons=[f"HTF CONFIRM: 5m={trend_5m} aligned, "
-                     f"15m={trend_15m} neutral → moderate confirmation"],
+            reasons=[f"HTF TREND: 5m={trend_5m}, 15m={trend_15m} "
+                     f"both structurally DOWN → PUT"],
         ))
-    elif counter_5m and counter_15m:
-        # Strong counter-signal: both HTFs oppose → VETO-worthy
-        results.append(ModuleResult(
-            module_name="multi_tf",
-            direction="PUT" if signal == "CALL" else "CALL",
-            score=3,
-            confidence=62,
-            signal_type="REVERSAL",
-            reliability="CANDLE",
-            group="MULTI_TF",
-            reasons=[f"HTF COUNTER: 5m={trend_5m}, 15m={trend_15m} "
-                     f"both opposing {signal} → strong counter-signal"],
-        ))
-    elif counter_5m or counter_15m:
-        # Mild counter: one HTF opposes
-        opposing = "5m" if counter_5m else "15m"
-        results.append(ModuleResult(
-            module_name="multi_tf",
-            direction="PUT" if signal == "CALL" else "CALL",
-            score=1,
-            confidence=52,
-            signal_type="REVERSAL",
-            reliability="CANDLE",
-            group="MULTI_TF",
-            reasons=[f"HTF WEAKEN: {opposing}={trend_5m if counter_5m else trend_15m} "
-                     f"opposes {signal} → mild counter-signal"],
-        ))
-    # else: sideways on both → no vote (PASS)
+    # Mixed / sideways timeframes → no vote (PASS)
 
     return results

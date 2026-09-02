@@ -184,4 +184,17 @@ def analyze(candles, ticks, ctx: MarketContext) -> list:
                 reasons=[reason],
             ))
 
+    # FIX (CONFLUENCE-V1 2026-09-02): the old module could emit up to THREE
+    # same-direction results (TICKSWEEP + ABSORBWALL + LATEFLIP) from one
+    # tick stream — alone enough for "agree=3" ULTRA_CONSENSUS in the old
+    # engine (a fake-confluence vector). Keep AT MOST ONE vote: the highest
+    # magnitude theory; ties resolved in the order sweep > wall > flip.
+    if len(results) > 1:
+        results.sort(key=lambda r: -r.score)
+        best = results[0]
+        dropped = [r.group for r in results[1:]]
+        best.reasons.append(f"[DEDUP] {len(results)} tick theories fired, "
+                            f"kept {best.group}, dropped {dropped}")
+        results = [best]
+
     return results

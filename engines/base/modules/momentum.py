@@ -33,9 +33,17 @@ def _rsi(closes, period=14):
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
 
+    # FIX (CONFLUENCE-V1 2026-09-02): flat series (avg_loss == 0 AND
+    # avg_gain == 0) previously returned 100.0 — a full-overbought reading
+    # on a market that did not move at all. No movement = NO momentum
+    # information → neutral 50. Only a pure one-way rally (gains, no
+    # losses) is a genuine RSI 100.
+    if avg_loss == 0:
+        if avg_gain == 0:
+            return 50.0  # flat series — no information, not "overbought"
+        return 100.0
+
     if len(gains) <= period:
-        if avg_loss == 0:
-            return 100.0
         rs = avg_gain / avg_loss
         return 100.0 - (100.0 / (1.0 + rs))
 
@@ -45,7 +53,8 @@ def _rsi(closes, period=14):
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
     if avg_loss == 0:
-        return 100.0
+        # FIX (CONFLUENCE-V1): same flat-series guard after smoothing.
+        return 100.0 if avg_gain > 0 else 50.0
     rs = avg_gain / avg_loss
     return round(100.0 - (100.0 / (1.0 + rs)), 1)
 
@@ -135,30 +144,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                 reasons=[f"RSI {rsi_val:.0f} oversold + bullish candle → CALL reversal (x{score})"],
             ))
 
-        # RSI middle zone — divergence confirmation
-        # Rising RSI + bullish → mild continuation signal
-        if is_bull and rsi_val > 50 and rsi_val < 70:
-            results.append(ModuleResult(
-                module_name="momentum",
-                direction="CALL",
-                score=1,
-                confidence=55,
-                signal_type="CONTINUATION",
-                reliability="CANDLE",
-                group="MOMENTUM_RSI",
-                reasons=[f"RSI {rsi_val:.0f} bullish momentum → CALL continuation"],
-            ))
-        elif not is_bull and rsi_val < 50 and rsi_val > 30:
-            results.append(ModuleResult(
-                module_name="momentum",
-                direction="PUT",
-                score=1,
-                confidence=55,
-                signal_type="CONTINUATION",
-                reliability="CANDLE",
-                group="MOMENTUM_RSI",
-                reasons=[f"RSI {rsi_val:.0f} bearish momentum → PUT continuation"],
-            ))
+        # FIX (CONFLUENCE-V1 2026-09-02): the "RSI middle zone continuation"
+        # votes were REMOVED. Audit found they were literally the last
+        # candle's color re-issued with an RSI number attached — a fake
+        # confluence source that duplicated candle_reaction/multi_tf/ema_ribbon
+        # and inflated the old agree= count. Only genuine EXTREME-zone RSI
+        # readings (oversold/overbought + confirming candle) vote here.
 
     # ── MACD Analysis ────────────────────────────────────────────────────
     macd_result = _macd(closes)
@@ -192,28 +183,10 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"MACD bearish crossover (hist {histogram:+.5f}) → PUT"],
                 ))
 
-        # Histogram divergence from RSI signal
-        if histogram > 0 and is_bull:
-            results.append(ModuleResult(
-                module_name="momentum",
-                direction="CALL",
-                score=1,
-                confidence=55,
-                signal_type="CONTINUATION",
-                reliability="CANDLE",
-                group="MOMENTUM_MACD",
-                reasons=[f"MACD histogram bullish ({histogram:+.5f}) + bull candle → CALL"],
-            ))
-        elif histogram < 0 and not is_bull:
-            results.append(ModuleResult(
-                module_name="momentum",
-                direction="PUT",
-                score=1,
-                confidence=55,
-                signal_type="CONTINUATION",
-                reliability="CANDLE",
-                group="MOMENTUM_MACD",
-                reasons=[f"MACD histogram bearish ({histogram:+.5f}) + bear candle → PUT"],
-            ))
+        # FIX (CONFLUENCE-V1 2026-09-02): the "histogram + candle color"
+        # vote was REMOVED. Audit: it fired simultaneously with the crossover
+        # vote in the SAME group (MOMENTUM_MACD), double-scoring one group for
+        # one observation, and separately duplicated the last-candle-color
+        # cluster. MACD now votes ONLY on a genuine crossover event.
 
     return results

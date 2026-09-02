@@ -23,7 +23,13 @@ def compute_atr(candles) -> float:
 
 def compute_context(candles) -> MarketContext:
     """Compute all shared market context from candle list."""
-    if not candles or len(candles) < _MIN_CANDLES_FOR_CONTEXT:
+    # FIX (CONFLUENCE-V1 2026-09-02): explicit None guard — the cold-start
+    # branch below crashed with TypeError on `candles is None` because the
+    # list comprehension still evaluated. Also log analysis failures instead
+    # of silently trading on a wrong-scale cold-start ATR.
+    if candles is None:
+        candles = []
+    if len(candles) < _MIN_CANDLES_FOR_CONTEXT:
         # Cold-start defaults: NEUTRAL regime + JPY-aware ATR floor.
         _cold_atr = _COLD_START_ATR_FLOOR_JPY if _looks_like_jpy_pair(candles) \
                     else _COLD_START_ATR_FLOOR
@@ -48,7 +54,12 @@ def compute_context(candles) -> MarketContext:
         stats = compute_statistical_edge(candles)
         key_levels = find_key_levels(candles, lookback=_KEY_LEVEL_LOOKBACK)
         level_conf = check_level_confluence(candles, key_levels, atr)
-    except Exception:
+    except Exception as _ctx_err:
+        # FIX (CONFLUENCE-V1): visible log — silent cold-start fallback meant
+        # the pipeline kept trading on a wrong-scale ATR with zero signal.
+        import sys as _sys
+        print(f"[context] analysis failed ({type(_ctx_err).__name__}: {_ctx_err}) "
+              f"— using COLD_START defaults", file=_sys.stderr)
         _cold_atr = _COLD_START_ATR_FLOOR_JPY if _looks_like_jpy_pair(candles) \
                     else _COLD_START_ATR_FLOOR
         return MarketContext(

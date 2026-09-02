@@ -63,16 +63,21 @@ def _rsi(closes, period=14):
     losses = [-d if d < 0 else 0.0 for d in deltas]
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
+    # FIX (CONFLUENCE-V1 2026-09-02): flat series guard — avg_loss==0 with
+    # avg_gain==0 returned 100.0 ("fully overbought") on a market that did
+    # not move. No movement = neutral 50.
+    if avg_loss == 0:
+        if avg_gain == 0:
+            return 50.0
+        return 100.0
     if len(gains) <= period:
-        if avg_loss == 0:
-            return 100.0
         rs = avg_gain / avg_loss
         return 100.0 - (100.0 / (1.0 + rs))
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
     if avg_loss == 0:
-        return 100.0
+        return 100.0 if avg_gain > 0 else 50.0
     rs = avg_gain / avg_loss
     return round(100.0 - (100.0 / (1.0 + rs)), 1)
 

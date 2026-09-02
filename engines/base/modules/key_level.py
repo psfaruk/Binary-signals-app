@@ -27,6 +27,22 @@ def analyze(candles, ctx: MarketContext) -> list:
     trend_strength = regime.get("trend_strength", 0.0)
 
     # SIGNAL 1: Support / Resistance wick rejection
+    # FIX (CONFLUENCE-V1 2026-09-02): require a MEANINGFUL wick. Previously a
+    # 1-tick poke beyond the level qualified as "wick rejection" and earned
+    # the module's highest vote (score 4, conf 70). Minimum bars: the wick
+    # must span >= 45% of the candle's range AND be >= 0.15 ATR long.
+    _last = candles[-1]
+    _c_rng = max(1e-12, _last.get("high", 0.0) - _last.get("low", 0.0))
+    if _last.get("close", 0.0) >= _last.get("open", 0.0):
+        _up_wick = _last.get("high", 0.0) - _last.get("close", 0.0)
+        _dn_wick = _last.get("open", 0.0) - _last.get("low", 0.0)
+    else:
+        _up_wick = _last.get("high", 0.0) - _last.get("open", 0.0)
+        _dn_wick = _last.get("close", 0.0) - _last.get("low", 0.0)
+    _min_wick_abs = max(0.15 * atr, 0.45 * _c_rng)
+    _has_upper_rejection = (_up_wick >= _min_wick_abs) and _c_rng > 0
+    _has_lower_rejection = (_dn_wick >= _min_wick_abs) and _c_rng > 0
+
     if level_conf.get("near_level", False):
         lvl_type = level_conf.get("level_type")
         action = level_conf.get("action")
@@ -35,20 +51,20 @@ def analyze(candles, ctx: MarketContext) -> list:
 
         if lvl_type is not None:
             if action == "wick_rejection":
-                if lvl_type == "support":
+                if lvl_type == "support" and _has_lower_rejection:
                     results.append(ModuleResult(
                         module_name="key_level", direction="CALL", score=4, confidence=70,
                         signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                        reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) -> CALL (failed breakdown)"]))
+                        reasons=[f"Support wick rejection ({lvl_price:.5f}, {dist:.2f} ATR, lower_wick={_dn_wick:.5f}) -> CALL (failed breakdown)"]))
                 # FIX (DEEP-FIX-2026-08-07 / A-17 B09): Resistance wick rejection → PUT
                 # was MISSING — only support → CALL existed, creating a structural
                 # CALL bias. Resistance rejection (price spikes above resistance but
                 # closes back below) is a classic bearish reversal signal.
-                elif lvl_type == "resistance":
+                elif lvl_type == "resistance" and _has_upper_rejection:
                     results.append(ModuleResult(
                         module_name="key_level", direction="PUT", score=4, confidence=70,
                         signal_type="REVERSAL", reliability="LEVEL", group="LEVEL",
-                        reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR) -> PUT (failed breakout)"]))
+                        reasons=[f"Resistance wick rejection ({lvl_price:.5f}, {dist:.2f} ATR, upper_wick={_up_wick:.5f}) -> PUT (failed breakout)"]))
 
     # SIGNAL 3: Previous candle high/low as micro-S/R (prev_low + prev_high)
     if len(candles) >= 2 and atr > 0:
