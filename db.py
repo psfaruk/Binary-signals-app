@@ -1146,6 +1146,40 @@ def get_recent_signals(asset, period, limit=50, before_ctime=None):
         return [dict(r) for r in reversed(rows)]
 
 
+def get_recent_signals_all(period, limit=100, before_ctime=None, category=None):
+    """Cross-pair signal history — USER REQ (2026-09-07):
+    "প্রত্যেকটি সিগন্যাল হিস্টোরি দেখাতে হবে, কোনো সময়ে কোন সিগন্যাল টি দিলো".
+
+    Returns the newest `limit` CALL/PUT signals across ALL allowlisted pairs
+    (core.constants.ALLOWED_PAIRS) for one candle period, newest-first
+    ordering preserved via the same oldest-first list contract as
+    get_recent_signals (rows are reversed so callers can merge identically).
+
+    Args:
+        period: candle period seconds (e.g. 60).
+        limit: max rows (server clamps to 500).
+        before_ctime: pagination cursor (older-than).
+        category: optional 'otc' | 'real' filter.
+    """
+    from core.constants import allowlist_sql_filter
+    frag, pair_params = allowlist_sql_filter("asset", category)
+    with _read_cursor() as c:
+        base = f"""SELECT asset, period, ctime, signal, accuracy, score, confidence,
+                   strength, agree, theories, actual, regime, zone,
+                   tags, postmortem, right_codes, wrong_codes,
+                   a_open, a_close, reasons, strategy
+                   FROM signal_log
+                   WHERE period=? AND signal IN ('CALL','PUT'){frag}"""
+        params = [period] + list(pair_params)
+        if before_ctime is not None:
+            base += " AND ctime < ?"
+            params.append(before_ctime)
+        base += " ORDER BY ctime DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = c.execute(base, params).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+
 # ── Directional win rates (NEW 2026-08-31) ─────────────────────────────────
 # FIX (WINRATE-API-2026-08-31): there was NO endpoint that ran
 # "SELECT signal, accuracy GROUP BY asset, signal" — i.e. no exact per-pair,

@@ -80,6 +80,21 @@ let totalCorrect = 0, totalSignals = 0;
 // and result (সব/WIN/LOSS). Applied inside renderHistory().
 let historyDirFilter = 'all';
 let historyResultFilter = 'all';
+// FIX (ALL-PAIRS-HISTORY-2026-09-07): USER REQ — "প্রত্যেকটি সিগন্যাল হিস্টোরি
+// দেখাতে হবে". '__ALL__' = cross-pair history view (server asset "ALL");
+// '' = follow the topbar pair (classic behavior).
+let historyAsset = '';
+const HISTORY_ALL = '__ALL__';
+// Compact pair-name display for history badges (mirrors winrate.js displayFor).
+function displayPairName(asset){
+  let a = asset || '';
+  if(a === 'BRLUSD_otc') return 'BRL/USD';
+  let base = a.replace(/_otc$/, '');
+  if(base.length === 6 || base.length === 7){
+    base = base.slice(0, 3) + '/' + base.slice(3);
+  }
+  return base + (a.endsWith('_otc') ? ' OTC' : '');
+}
 let soundEnabled = false, audioCtx = null;
 let realPairsList = [], otcPairsList = [], alltimeOtcPairsList = [], pairsList = [];
 let currentMicro = null, runningConf = null;
@@ -1087,14 +1102,24 @@ function addHistory(signal, accuracy, detail){
 
 function loadServerHistory(){
   if(!ws || ws.readyState !== WebSocket.OPEN) return;
-  send({ type: 'signals', asset: currentAsset, period: currentPeriod });
+  // FIX (ALL-PAIRS-HISTORY-2026-09-07): when the History tab is in
+  // "সব পেয়ার" mode, request the cross-pair feed (server asset "ALL").
+  const assetForReq = (historyAsset === HISTORY_ALL) ? 'ALL' : currentAsset;
+  send({ type: 'signals', asset: assetForReq, period: currentPeriod });
 }
 
 function onServerSignals(sigs, asset, period){
   if(!sigs) return;
   // Drop stale responses from a previous pair switch.
-  if(asset && asset !== currentAsset) return;
-  if(period && period !== currentPeriod) return;
+  // FIX (ALL-PAIRS-HISTORY-2026-09-07): in ALL mode the server echoes
+  // asset="ALL" — accept it; still drop non-ALL echoes in pair mode.
+  if(historyAsset === HISTORY_ALL){
+    if(asset && asset !== 'ALL') return;
+    if(period && period !== currentPeriod) return;
+  } else {
+    if(asset && asset !== currentAsset) return;
+    if(period && period !== currentPeriod) return;
+  }
   if(!sigs.length){
     // Empty list — render the empty state but don't wipe locally-added
     // entries that haven't been persisted yet (e.g. just-graded candle).
@@ -1267,10 +1292,20 @@ function renderHistory(){
     // signalHistory was mutated between render and click. Index-based
     // lookup was fragile — pair-switch / addHistory / onServerSignals
     // could all shift indices.
-    const clickKey = (h.detail && h.detail.ctime) ? String(h.detail.ctime) : '';
+    const clickKey = (h.detail && h.detail.ctime)
+      ? (historyAsset === HISTORY_ALL && h.detail.asset
+          ? esc(h.detail.asset) + '|' + String(h.detail.ctime)
+          : String(h.detail.ctime))
+      : '';
     const clickable = clickKey ? `onclick="window._showSignalDetail('${clickKey}')" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window._showSignalDetail('${clickKey}')}"` : '';
+    // FIX (ALL-PAIRS-HISTORY-2026-09-07): in "সব পেয়ার" mode show WHICH pair
+    // produced each signal — that is the entire point of this view.
+    const assetBadge = (historyAsset === HISTORY_ALL && h.detail && h.detail.asset)
+      ? `<span class="history-pair-badge" style="font-size:9px;color:var(--text-dim);font-family:var(--mono);max-width:86px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(displayPairName(h.detail.asset))}</span>`
+      : '';
     html += `<div class="history-row${accCls}${recentCls}" ${clickable}>`
          +  `<span class="history-time">${time}</span>`
+         +  assetBadge
          // FIX (DEEP-AUDIT-2026-07-26 / F-17-11, HIGH): XSS — escape h.signal before
          // interpolation. The signal field comes from the WS server response
          // (onServerSignals → s.signal) and could contain arbitrary HTML if the
@@ -1313,14 +1348,24 @@ function renderHistory(){
 // onclick handlers can reach them.
 window._showSignalDetail = function(ctimeKey){
   if(ctimeKey == null || ctimeKey === '') return;
-  const ctime = parseInt(ctimeKey, 10);
-  // Find the entry by ctime — robust to array reordering.
+  // FIX (ALL-PAIRS-HISTORY-2026-09-07): in ALL mode the key is
+  // "<asset>|<ctime>" — the same ctime exists for many pairs, so the
+  // lookup must be asset-aware to open the right signal.
+  let assetFilter = null;
+  let ctimePart = ctimeKey;
+  if(typeof ctimeKey === 'string' && ctimeKey.includes('|')){
+    const idx = ctimeKey.indexOf('|');
+    assetFilter = ctimeKey.slice(0, idx);
+    ctimePart = ctimeKey.slice(idx + 1);
+  }
+  const ctime = parseInt(ctimePart, 10);
+  // Find the entry by (asset, ctime) — robust to array reordering.
   let foundIdx = -1;
   for(let i = 0; i < signalHistory.length; i++){
-    if(signalHistory[i] && signalHistory[i].detail
-       && signalHistory[i].detail.ctime === ctime){
-      foundIdx = i; break;
-    }
+    const d = signalHistory[i] && signalHistory[i].detail;
+    if(!d || d.ctime !== ctime) continue;
+    if(assetFilter != null && d.asset && d.asset !== assetFilter) continue;
+    foundIdx = i; break;
   }
   if(foundIdx === -1) return;
   // FIX (UI-P1-10 + P3-5, 2026-07-21): remember the focused row so we
@@ -1353,7 +1398,9 @@ window._loadMoreHistory = function(){
   window._historyPagesLoaded = (window._historyPagesLoaded || 1) + 1;
   // Send the signals request with before_ctime — server returns the
   // 100 signals older than the cursor. onServerSignals merges them.
-  send({ type: 'signals', asset: currentAsset, period: currentPeriod,
+  // FIX (ALL-PAIRS-HISTORY-2026-09-07): request the right asset scope.
+  const assetForReq = (historyAsset === HISTORY_ALL) ? 'ALL' : currentAsset;
+  send({ type: 'signals', asset: assetForReq, period: currentPeriod,
          before_ctime: beforeCtime, limit: 100 });
   // Optimistically disable the load-more button to prevent double-clicks.
   const btn = $('history-load-more');
@@ -1398,7 +1445,9 @@ function showSignalDetail(idx){
   // on LOCAL time. No code change needed here — kept comment for clarity.
   const dateStr = d.ctime ? new Date(d.ctime * 1000).toLocaleString() : '—';
   rows += detailRow('Time', dateStr);
-  rows += detailRow('Asset', currentAsset);
+  // FIX (ALL-PAIRS-HISTORY-2026-09-07): in ALL mode the detail modal must
+  // show the row's OWN pair (not the currently-selected topbar pair).
+  rows += detailRow('Asset', d.asset || currentAsset);
   // CONFLUENCE-V1 (2026-09-02): prove which strategy produced this signal.
   rows += detailRow('Strategy', d.strategy || 'confluence_v1');
   rows += detailRow('Score', d.score != null ? (d.score >= 0 ? '+' : '') + d.score : '—');
@@ -1671,16 +1720,24 @@ function renderHistoryPairSelect(){
 
   // Build new options only if the set actually changed — avoids clobbering
   // the user's in-progress dropdown interaction on every renderPairs call.
-  const newOptions = [];
+  // FIX (ALL-PAIRS-HISTORY-2026-09-07): first option = "সব পেয়ার" cross-pair
+  // history view (server asset "ALL").
+  const newOptions = [{
+    value: HISTORY_ALL,
+    text: '★ সব পেয়ার (ALL)',
+    locked: false,
+    selected: historyAsset === HISTORY_ALL,
+  }];
   activeList.forEach(p => {
     newOptions.push({
       value: p.asset,
       text: p.display + (p.payout ? ' (' + p.payout + '%)' : ''),
       locked: !!p.locked,
-      selected: p.asset === currentAsset,
+      selected: p.asset === currentAsset && historyAsset !== HISTORY_ALL,
     });
   });
   // Quick diff: if same length + same values + same selected, skip rebuild.
+  // (historyAsset scope switch always forces a rebuild via selected change.)
   const sameCount = histPairSelect.options.length === newOptions.length;
   let sameContent = sameCount;
   if(sameCount){
@@ -1695,7 +1752,8 @@ function renderHistoryPairSelect(){
   }
   if(sameContent){
     // Just ensure the selected state is right.
-    if(histPairSelect.value !== currentAsset) histPairSelect.value = currentAsset;
+    const wantVal = (historyAsset === HISTORY_ALL) ? HISTORY_ALL : currentAsset;
+    if(histPairSelect.value !== wantVal) histPairSelect.value = wantVal;
     return;
   }
   // Rebuild.
@@ -2444,9 +2502,30 @@ function wireEvents(){
   // ── History tab pair-select — mirrors the topbar #pair-select. When the
   // user picks a different pair here, we sync the topbar select and dispatch
   // its change event so the existing re-subscribe logic runs unchanged.
+  // FIX (ALL-PAIRS-HISTORY-2026-09-07): the new "★ সব পেয়ার (ALL)" option
+  // switches the History tab into cross-pair mode WITHOUT touching the
+  // topbar subscription — history is served from the DB, not the live feed.
   const histPairSelect = $('history-pair-select');
   if(histPairSelect){
     histPairSelect.addEventListener('change', () => {
+      if(histPairSelect.value === HISTORY_ALL){
+        if(historyAsset !== HISTORY_ALL){
+          historyAsset = HISTORY_ALL;
+          signalHistory = [];
+          window._historyPagesLoaded = 1;
+          renderHistory();
+          loadServerHistory();
+        }
+        return;
+      }
+      // Leaving ALL mode (or normal pair switch) — reset scope.
+      const wasAll = (historyAsset === HISTORY_ALL);
+      historyAsset = '';
+      if(wasAll || !signalHistory.length){
+        signalHistory = [];
+        window._historyPagesLoaded = 1;
+        renderHistory();
+      }
       const topbarSelect = $('pair-select');
       if(!topbarSelect) return;
       if(topbarSelect.value !== histPairSelect.value){
@@ -2458,6 +2537,9 @@ function wireEvents(){
           // Fallback for older browsers — invoke the change handler directly.
           if(topbarSelect.onchange) topbarSelect.onchange();
         }
+      } else if(wasAll){
+        // Same pair as topbar but we left ALL mode — reload its history.
+        loadServerHistory();
       }
     });
   }

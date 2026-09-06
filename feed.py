@@ -284,7 +284,11 @@ _USER_REAL_PAIRS = [
     "EURUSD",        # EUR/USD real
     "USDJPY",        # USD/JPY real
     "EURGBP",        # EUR/GBP real
-    "GBPUSD",        # GBP/USD real
+    # FIX (PAIR-ALIGN-2026-09-07): GBPUSD was streamable here but is NOT in
+    # core/constants.ALLOWED_PAIRS (the single source of truth — "the user
+    # trades exactly 15 pairs: 11 OTC + 4 Real"). Signals for a pair outside
+    # the allowlist are invisible to /api/winrate, /api/signals/* and every
+    # history view — dead weight + confusing. Aligned to the 15-pair list.
 ]
 
 # OTC pair list (used for otc_pairs_list + fallback)
@@ -699,6 +703,10 @@ class _AssetStream:
     _micro_cache_high: float = 0.0
     _micro_cache_low: float = 0.0
     _micro_cache_close: float = 0.0
+    # FIX (LAST-MICRO-2026-09-07): latest micro snapshot mirror — server.py
+    # reads stream._last_micro for /api/signals/latest buyer/seller pct.
+    # Previously never assigned → always null in that API.
+    _last_micro: dict | None = None
 
     # ── Skip-redundant-broadcast (2026-07-11) ────────────────────────────
     # Snapshot of the last-broadcast candle (high/low/close). If the next
@@ -3743,6 +3751,12 @@ class QuotexFeed:
                     remaining = new_ticks
                     last_accuracy = None
                     last_eoc_candles = None
+                    # FIX (MULTI-BOUNDARY-EOC-2026-09-07 / closes TODO
+                    # DEEP-AUDIT-2026-07-26 / F-01-14): collect EVERY close
+                    # in this batch — reconnect gaps can span 2+ candles and
+                    # the user requires each candle's signal/result to be
+                    # visible in history AND on screen, not just the last.
+                    eoc_events = []
                     for _iter in range(10):
                         if not remaining:
                             break
@@ -3817,41 +3831,39 @@ class QuotexFeed:
                             stream, tick_new_open, first_px, open_is_real=True)
                         # FIX (DEEP-AUDIT-2026-07-26 / F-01-35): use SNAPSHOT_CANDLES instead of magic 300.
                         last_eoc_candles = (stream.candles + [self._running_candle(stream)])[-SNAPSHOT_CANDLES:]
+                        # FIX (MULTI-BOUNDARY-EOC-2026-09-07): capture each
+                        # boundary's graded result + candle snapshot NOW
+                        # (stream.candles mutates on the next close).
+                        if last_accuracy is not None:
+                            eoc_events.append({
+                                "accuracy": last_accuracy,
+                                "candles": last_eoc_candles,
+                                "signal": (getattr(stream, "last_graded", None) or {}).get("signal"),
+                                "ctime": (getattr(stream, "last_graded", None) or {}).get("ctime"),
+                            })
 
                         # Continue with ticks AFTER this boundary — may contain
                         # another boundary (N+2, N+3, ...)
                         remaining = remaining[b_idx + 1:]
 
-                    # After the loop: broadcast the last EOC. If we did multiple
-                    # closes, only the LAST one's EOC is broadcast (intermediate
-                    # candles are still graded + logged, just not broadcast —
-                    # the chart only needs the final state).
-                    # TODO (DEEP-AUDIT-2026-07-26 / F-01-14): multi-boundary
-                    # close broadcasts only the LAST EOC. Intermediate EOCs
-                    # (reconnect after a gap with 2+ boundaries) are graded
-                    # and logged but NEVER broadcast to viewers — the chart
-                    # "jumps" without showing intermediate signals. Fix would
-                    # broadcast each EOC inside the loop with per-asset rate-
-                    # limit dedup. SKIPPED for now: risky change to a hot path,
-                    # needs separate validation pass.
-                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-45): note that
-                    # last_eoc_candles is a fresh snapshot built ABOVE from
-                    # stream.candles + [running_candle]. _close_running_and_start_new
-                    # does NOT broadcast inside its body — the caller does.
-                    # The watchdog path (line 2995) is the only place that
-                    # broadcasts a snapshot inside its own body.
-                    if last_accuracy is not None and last_eoc_candles is not None:
+                    # After the loop: broadcast EVERY collected EOC (not just
+                    # the last one). Single-boundary batches broadcast exactly
+                    # one event — identical to the old behavior. Multi-boundary
+                    # (reconnect gap) batches now replay each candle close so
+                    # no signal/result is silently dropped.
+                    # Resolves TODO (DEEP-AUDIT-2026-07-26 / F-01-14).
+                    for _ev in eoc_events:
                         await self._broadcast({
                             "type":       "eoc",
                             "asset":      stream.asset,
                             "period":     stream.period,
-                            "candles":    last_eoc_candles,
+                            "candles":    _ev["candles"],
                             "prediction": None,   # gated — arrives via tick
-                            "accuracy":   last_accuracy,
+                            "accuracy":   _ev["accuracy"],
                             # FIX (EOC-IDENTITY-2026-08-31): which signal the
                             # result belongs to — no more client-side guessing.
-                            "signal":     (getattr(stream, "last_graded", None) or {}).get("signal"),
-                            "ctime":      (getattr(stream, "last_graded", None) or {}).get("ctime"),
+                            "signal":     _ev["signal"],
+                            "ctime":      _ev["ctime"],
                         })
                     # remaining ticks (if any) were already appended in the loop.
 
@@ -4302,6 +4314,12 @@ class QuotexFeed:
                             stream._micro_cache_low     = cur_low
                             stream._micro_cache_close   = cur_close
                         micro_snap = stream._micro_cache
+                        # FIX (LAST-MICRO-2026-09-07): server.py reads
+                        # stream._last_micro for /api/signals/latest
+                        # buyer/seller pct — it was NEVER assigned anywhere,
+                        # so those fields were always null. Keep the latest
+                        # micro snapshot on the stream.
+                        stream._last_micro = micro_snap
 
                         # ── Signal delay gate (2026-07-10) ──────────────────
                         # While the opening-tick confirmation window is still

@@ -142,10 +142,19 @@ check("OTC module list matches cluster membership",
 check("REAL module list matches cluster membership",
       set(REAL_CONFIG.module_names) == set(cf.MODULE_TO_CLUSTER.keys()))
 
-# Insufficient data → NEUTRAL (no fallback)
+# Insufficient data handling — mode-dependent (2026-09-07):
+#   every_candle (default) → deterministic fallback CALL/PUT (100% coverage)
+#   strict                 → NEUTRAL with confidence 0
 pred_short = engines_predict(gen_trend(25, 0.0003), asset="EURUSD_otc")
-check("insufficient candles → NEUTRAL (no fallback signal)",
-      pred_short["signal"] == "NEUTRAL" and pred_short.get("confidence") == 0)
+if cf.SIGNAL_MODE == "every_candle":
+    check("insufficient candles → every-candle fallback signal (labeled)",
+          pred_short["signal"] in ("CALL", "PUT")
+          and pred_short.get("strategy") == "confluence_v1_fallback"
+          and pred_short.get("signal_quality") == "FALLBACK",
+          f"signal={pred_short['signal']} strategy={pred_short.get('strategy')}")
+else:
+    check("insufficient candles → NEUTRAL (no fallback signal)",
+          pred_short["signal"] == "NEUTRAL" and pred_short.get("confidence") == 0)
 
 # ── 2. INDICATOR MATH ───────────────────────────────────────────────────────
 print("\n[2] Indicator math fixes")
@@ -311,8 +320,15 @@ check("no engine errors across 960 candles",
       str([p for p in [] ]))
 total_fired = sum(r["n_fired"] for r in results.values())
 total_graded = sum(r["correct"] + r["wrong"] for r in results.values())
-check("engine abstains often (high-confidence mode: fired < 50% of candles)",
-      total_fired < 0.5 * 3 * 259, f"fired={total_fired}/777")
+# FIX (2026-09-07): mode-aware coverage expectation.
+#   every_candle (default) → USER REQ: 100% of candles must fire
+#   strict                 → high-confidence abstention (< 50% fired)
+if cf.SIGNAL_MODE == "every_candle":
+    check("every-candle mode: 100% of candles fire (user requirement)",
+          total_fired == 3 * 259, f"fired={total_fired}/777")
+else:
+    check("engine abstains often (high-confidence mode: fired < 50% of candles)",
+          total_fired < 0.5 * 3 * 259, f"fired={total_fired}/777")
 check("every fired signal has >= MIN_AGREE_CLUSTERS cluster agreement",
       True)  # structurally guaranteed by confluence gates; verified by gate tests below
 graded_wr = [r["win_rate"] for r in results.values() if r["win_rate"] is not None]
@@ -356,6 +372,28 @@ def _run_gates(spec, candles, htf="SIDEWAYS", ctx=None):
 
 trend_candles = gen_trend(60, 0.0004, seed=55)
 
+# FIX (2026-09-07): mode-aware gate assertions. Gates B-J assert STRICT
+# rejection semantics. In every_candle mode the SAME gate failure still
+# happens (confluence_reject_gate records WHY strict rejected) but a
+# deterministic fallback CALL/PUT is emitted with honest low-band
+# confidence instead of NEUTRAL.
+def _assert_gate_reject(res, gate, name):
+    if cf.SIGNAL_MODE == "every_candle":
+        check(name + " [every_candle: labeled fallback emitted]",
+              res["signal"] in ("CALL", "PUT")
+              and res.get("confluence_reject_gate") == gate
+              and res.get("strategy") == "confluence_v1_fallback"
+              and res.get("signal_quality") == "FALLBACK"
+              and cf.FALLBACK_CONF_BASE <= (res.get("confidence") or 0)
+                  <= cf.FALLBACK_CONF_CAP,
+              f"signal={res['signal']} gate={res.get('confluence_reject_gate')} "
+              f"conf={res.get('confidence')}")
+    else:
+        check(name,
+              res["signal"] == "NEUTRAL"
+              and res.get("confluence_reject_gate") == gate,
+              f"signal={res['signal']} gate={res.get('confluence_reject_gate')}")
+
 # A) 3 clusters agree CALL in uptrend → CALL
 spec_a = [("ema_ribbon", "CALL", 3), ("multi_tf", "CALL", 3),
           ("momentum", "CALL", 2), ("pattern", "CALL", 2),
@@ -367,18 +405,18 @@ check("gate A: honest confidence in [65, 92]",
       65 <= res_a["confidence"] <= 92, f"got {res_a['confidence']}")
 check("gate A: strength never WEAK", res_a["strength"] in ("MEDIUM", "STRONG"))
 
-# B) only 2 clusters agree → NEUTRAL
+# B) only 2 clusters agree → strict: NEUTRAL / every_candle: labeled fallback
 spec_b = [("ema_ribbon", "CALL", 3), ("multi_tf", "CALL", 3)]
 res_b, r_b = _run_gates(spec_b, trend_candles)
-check("gate B: 2 clusters < 3 → NEUTRAL (insufficient_agreement)",
-      res_b["signal"] == "NEUTRAL" and res_b["confluence_reject_gate"] == "insufficient_agreement")
+_assert_gate_reject(res_b, "insufficient_agreement",
+                    "gate B: 2 clusters < 3 (insufficient_agreement)")
 
-# C) 3 agree + 1 opposes → NEUTRAL (zero-opposition rule)
+# C) 3 agree + 1 opposes → strict: NEUTRAL / every_candle: labeled fallback
 spec_c = [("ema_ribbon", "CALL", 3), ("multi_tf", "CALL", 3),
           ("momentum", "CALL", 2), ("tickrun", "PUT", 3)]
 res_c, _ = _run_gates(spec_c, trend_candles)
-check("gate C: any opposing cluster → NEUTRAL (opposition)",
-      res_c["signal"] == "NEUTRAL" and res_c["confluence_reject_gate"] == "opposition")
+_assert_gate_reject(res_c, "opposition",
+                    "gate C: any opposing cluster (opposition)")
 
 # D) counter-trend in TREND regime → NEUTRAL
 # NOTE (CONFLUENCE-V1): multi_tf now votes on STRUCTURAL HTF trend (not candle
@@ -390,29 +428,27 @@ class _DownCtx(_FakeCtx):
               "is_volatile": False, "trend_strength": 0.5}
 spec_d = [("ema_ribbon", "PUT", 3), ("pattern", "PUT", 3), ("sr_bounce", "PUT", 3)]
 res_d, r_d = _run_gates(spec_d, trend_candles, ctx=_DownCtx())
-check("gate D: counter-trend signal in trend regime → NEUTRAL (position gate)",
-      res_d["signal"] == "NEUTRAL" and res_d["confluence_reject_gate"] == "position_counter_trend",
-      f"gate={res_d.get('confluence_reject_gate')} signal={res_d['signal']}")
+_assert_gate_reject(res_d, "position_counter_trend",
+                    "gate D: counter-trend signal in trend regime (position gate)")
 
-# E) HTF opposition → NEUTRAL
+# E) HTF opposition → strict: NEUTRAL / every_candle: labeled fallback
 res_e, _ = _run_gates(spec_a, trend_candles, htf="DOWNTREND")
-check("gate E: HTF DOWNTREND opposes CALL → NEUTRAL",
-      res_e["signal"] == "NEUTRAL" and res_e["confluence_reject_gate"] == "htf_opposition")
+_assert_gate_reject(res_e, "htf_opposition",
+                    "gate E: HTF DOWNTREND opposes CALL (htf_opposition)")
 
 # F) volatile regime → always NEUTRAL
 class _VolCtx(_FakeCtx):
     regime = {"regime": "VOLATILE", "is_trending": False, "is_ranging": False,
               "is_volatile": True, "trend_strength": 0.0}
 res_f, _ = _run_gates(spec_a, trend_candles, ctx=_VolCtx())
-check("gate F: VOLATILE regime → NEUTRAL",
-      res_f["signal"] == "NEUTRAL" and res_f["confluence_reject_gate"] == "position_volatile")
+_assert_gate_reject(res_f, "position_volatile",
+                    "gate F: VOLATILE regime (position_volatile)")
 
 # G) sub-noise candle → NEUTRAL
 noise_candles = gen_trend(60, 0.0, vol=0.00001, seed=66)  # tiny ranges
 res_g, _ = _run_gates(spec_a, noise_candles)
-check("gate G: sub-noise candle (<0.2 ATR range) → NEUTRAL",
-      res_g["signal"] == "NEUTRAL" and res_g["confluence_reject_gate"] == "noise",
-      f"got gate={res_g.get('confluence_reject_gate')}")
+_assert_gate_reject(res_g, "noise",
+                    "gate G: sub-noise candle (<0.2 ATR range)")
 
 # H) range regime mid-range CALL → NEUTRAL (fade only at extremes)
 class _RangeCtx(_FakeCtx):
@@ -427,9 +463,8 @@ range_candles[-1]["close"] = (_lo + _hi) / 2
 range_candles[-1]["open"] = (_lo + _hi) / 2 - 0.0001
 range_candles[-1]["high"] = range_candles[-1]["close"] + 0.00005
 res_h, _ = _run_gates(spec_a, range_candles, ctx=_RangeCtx())
-check("gate H: RANGE regime mid-range signal → NEUTRAL (position_range_mid)",
-      res_h["signal"] == "NEUTRAL" and res_h["confluence_reject_gate"] == "position_range_mid",
-      f"got gate={res_h.get('confluence_reject_gate')}")
+_assert_gate_reject(res_h, "position_range_mid",
+                    "gate H: RANGE regime mid-range signal (position_range_mid)")
 
 # I) module split → module abstains; still works if 3+ clusters intact
 spec_i = [("momentum", "CALL", 2), ("stochastic", "PUT", 2),
@@ -438,13 +473,16 @@ res_i, _ = _run_gates(spec_i, trend_candles)
 # MOMENTUM cluster splits → abstains; remaining CALL clusters: TREND+PATTERN+LEVEL?
 # key_level not in spec_i → LEVEL abstains. So CALL clusters = TREND, PATTERN (+MICRO if
 # candle_reaction present — it isn't) → 2 → NEUTRAL expected.
-check("gate I: cluster-internal split makes cluster abstain (2 left → NEUTRAL)",
-      res_i["signal"] == "NEUTRAL", f"got {res_i['signal']}")
+check("gate I: cluster-internal split makes cluster abstain (2 left → strict NEUTRAL)",
+      (res_i["signal"] == "NEUTRAL" if cf.SIGNAL_MODE == "strict"
+       else (res_i["signal"] in ("CALL", "PUT")
+             and res_i.get("confluence_reject_gate") == "insufficient_agreement")),
+      f"got {res_i['signal']} gate={res_i.get('confluence_reject_gate')}")
 
-# J) no fallback exists: even a perfect 0-cluster scenario returns NEUTRAL
+# J) zero votes → strict: NEUTRAL / every_candle: deterministic fallback
 res_j, _ = _run_gates([], trend_candles)
-check("gate J: zero votes → NEUTRAL (no fallback signal)",
-      res_j["signal"] == "NEUTRAL" and res_j["confluence_reject_gate"] == "no_votes")
+_assert_gate_reject(res_j, "no_votes",
+                    "gate J: zero votes (no_votes)")
 
 # ── SUMMARY ─────────────────────────────────────────────────────────────────
 print("\n" + "=" * 72)

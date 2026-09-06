@@ -2306,6 +2306,36 @@ async def get_signals(asset: str, period: int, limit: int = 100, before_ctime: O
         _db.get_recent_signals, asset, period, safe_limit, before_ctime)
     return {"signals": signals}
 
+# FIX (ALL-PAIRS-HISTORY-2026-09-07): USER REQ — "প্রত্যেকটি সিগন্যাল হিস্টোরি
+# দেখাতে হবে, কোনো সময়ে কোন সিগন্যাল টি দিলো". Cross-pair history endpoint:
+# returns the newest signals across ALL allowlisted pairs with timestamps.
+@app.get("/api/signals/all")
+async def get_signals_all(
+    period: int = 60,
+    limit: int = 200,
+    before_ctime: Optional[int] = None,
+    category: Optional[str] = None,
+):
+    """Recent signals across ALL pairs (newest first by ctime).
+
+    Query params: period (default 60), limit (max 500), before_ctime
+    (pagination cursor), category ('otc' | 'real', optional).
+    """
+    if period not in _ALLOWED_PERIODS:
+        raise HTTPException(status_code=400, detail=f"invalid period {period!r}")
+    if category is not None and category not in ("otc", "real"):
+        raise HTTPException(status_code=400, detail="category must be 'otc' or 'real'")
+    safe_limit = max(1, min(int(limit), 500))
+    signals = await asyncio.to_thread(
+        _db.get_recent_signals_all, period, safe_limit, before_ctime, category)
+    return {
+        "signals": signals,
+        "asset": "ALL",
+        "period": period,
+        "before_ctime": before_ctime,
+        "count": len(signals),
+    }
+
 # FIX (USER-AUG-2026 / OPEN-API): Public endpoint that returns the LATEST
 # signal for every pair in a flat list — designed for curl / external
 # integrations. Always CALL/PUT (or "PENDING" if no prediction yet).
@@ -2648,8 +2678,15 @@ async def ws_endpoint(ws: WebSocket):
                     except (TypeError, ValueError):
                         await ws.send_text(json.dumps({"type": "error", "error": f"invalid before_ctime {before_ctime!r}; " f"must be an integer or null"}))
                         continue
-                sigs = await asyncio.to_thread(
-                    _db.get_recent_signals, asset, period, req_limit, before_ctime)
+                # FIX (ALL-PAIRS-HISTORY-2026-09-07): asset == "ALL" returns
+                # the newest signals across every allowlisted pair so the
+                # History tab can show "কোন সময়ে কোন পেয়ারে কী সিগন্যাল দিলো".
+                if asset.upper() == "ALL":
+                    sigs = await asyncio.to_thread(
+                        _db.get_recent_signals_all, period, req_limit, before_ctime)
+                else:
+                    sigs = await asyncio.to_thread(
+                        _db.get_recent_signals, asset, period, req_limit, before_ctime)
                 await ws.send_text(json.dumps({"type": "signals", "signals": sigs, "asset": asset, "period": period, "before_ctime": before_ctime}))
 
     except WebSocketDisconnect:

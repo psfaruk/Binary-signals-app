@@ -66,18 +66,33 @@
     var subEl = $('wr-hero-sub');
     var winEl = $('wr-hero-window');
     if(!pctEl) return;
-    if(!overall || overall.graded === 0){
+    // FIX (WR-DIR-FILTER-2026-09-07): in "শুধু CALL"/"শুধু PUT" mode the hero
+    // shows THAT direction's overall win rate (not the blended one) — the
+    // user asked for call/put win rates separately per pair.
+    var bucket = overall;
+    var dirSuffix = '';
+    if(overall && wrState.dir !== 'all' && overall[wrState.dir.toLowerCase()]){
+      bucket = overall[wrState.dir.toLowerCase()];
+      dirSuffix = ' · শুধু ' + wrState.dir;
+      bucket = {
+        graded: bucket.total, correct: bucket.correct,
+        wrong: bucket.total - bucket.correct, win_pct: bucket.win_pct,
+        draws: 0,
+      };
+    }
+    if(!overall || !bucket || bucket.graded === 0){
       pctEl.textContent = '—';
       pctEl.className = 'wr-hero-pct mid';
       if(subEl) subEl.textContent = 'এই উইন্ডোতে কোনো গ্রেডেড সিগন্যাল নেই';
       if(winEl) winEl.textContent = '';
     } else {
-      var pct = overall.win_pct;
+      var pct = bucket.win_pct;
       pctEl.textContent = fmtPct(pct);
       pctEl.className = 'wr-hero-pct ' + wrClass(pct);
       if(subEl){
-        subEl.textContent = overall.correct + ' উইন / ' + overall.graded
-          + ' গ্রেডেড' + (overall.draws ? (' · ' + overall.draws + ' ড্র') : '');
+        subEl.textContent = bucket.correct + ' উইন / ' + bucket.graded
+          + ' গ্রেডেড' + (overall.draws && wrState.dir === 'all' ? (' · ' + overall.draws + ' ড্র') : '')
+          + dirSuffix;
       }
       if(winEl){
         winEl.textContent = (windowDays === 0 ? 'সব সময়'
@@ -120,11 +135,19 @@
     }
     for(var j = 0; j < list.length; j++){
       var q = list[j];
-      var wr = q.win_pct;
       var isBest = best && q.asset === best.asset;
       var dirMode = wrState.dir;
-      // In "শুধু CALL/PUT" mode the pair's own best-direction stays visible
-      // in the cards — the hero split + sort already reflect the filter.
+      // FIX (WR-DIR-FILTER-2026-09-07): in "শুধু CALL"/"শুধু PUT" mode the
+      // card headline shows THAT direction's own win rate + counts (the
+      // per-direction sub-stats already exist in the payload) — not the
+      // blended rate. The other direction stays visible in the dir-grid.
+      var showBucket = q;
+      if(dirMode === 'CALL' && q.call && q.call.total > 0){
+        showBucket = { win_pct: q.call.win_pct, correct: q.call.correct, graded: q.call.total };
+      } else if(dirMode === 'PUT' && q.put && q.put.total > 0){
+        showBucket = { win_pct: q.put.win_pct, correct: q.put.correct, graded: q.put.total };
+      }
+      var wr = showBucket.win_pct;
       html += '<div class="wr-pair-card">'
         + '<div class="wr-pair-head">'
         +   '<span class="wr-pair-name">' + esc(displayFor(q.asset)) + '</span>'
@@ -135,7 +158,8 @@
         + '</div>'
         + '<div class="wr-pair-wr">'
         +   '<span class="num ' + wrClass(wr) + '">' + (wr == null ? '—' : wr.toFixed(1) + '%') + '</span>'
-        +   '<span class="den">' + q.correct + '/' + q.graded + ' গ্রেডেড</span>'
+        +   '<span class="den">' + showBucket.correct + '/' + showBucket.graded + ' গ্রেডেড'
+        +     (dirMode !== 'all' ? ' · ' + dirMode : '') + '</span>'
         + '</div>'
         + '<div class="wr-dir-grid">'
         +   '<div class="wr-dir-cell call">'

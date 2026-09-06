@@ -1,0 +1,254 @@
+{
+  "mode": "every_candle",
+  "candles_per_scenario": 250,
+  "pairs": {
+    "USDZAR_otc": {
+      "summary": {
+        "signals": 645,
+        "graded": 640,
+        "correct": 548,
+        "draws": 5,
+        "win_pct": 85.6,
+        "call": {
+          "total": 330,
+          "graded": 327,
+          "correct": 275,
+          "win_pct": 84.1
+        },
+        "put": {
+          "total": 315,
+          "graded": 313,
+          "correct": 273,
+          "win_pct": 87.2
+        },
+        "strict": {
+          "total": 1,
+          "graded": 1,
+          "correct": 1,
+          "win_pct": 100.0
+        },
+        "fallback": {
+          "total": 644,
+          "graded": 639,
+          "correct": 547,
+          "win_pct": 85.6
+        }
+      },
+      "errors": 0,
+      "coverage_pct": 100.0
+    },
+    "NZDUSD_otc": {
+      "summary": {
+        "signals": 645,
+        "graded": 645,
+        "correct": 516,
+        "draws": 0,
+        "win_pct": 80.0,
+        "call": {
+          "total": 315,
+          "graded": 315,
+          "correct": 253,
+          "win_pct": 80.3
+        },
+        "put": {
+          "total": 330,
+          "graded": 330,
+          "correct": 263,
+          "win_pct": 79.7
+        },
+        "strict": {
+          "total": 1,
+          "graded": 1,
+          "correct": 1,
+          "win_pct": 100.0
+        },
+        "fallback": {
+          "total": 644,
+          "graded": 644,
+          "correct": 515,
+          "win_pct": 80.0
+        }
+      },
+      "errors": 0,
+      "coverage_pct": 100.0
+    },
+    "USDMXN_otc": {
+      "summary": {
+        "signals": 645,
+        "graded": 640,
+        "correct": 520,
+        "draws": 5,
+        "win_pct": 81.2,
+        "call": {
+          "total": 309,
+          "graded": 305,
+          "correct": 250,
+          "win_pct": 82.0
+        },
+        "put": {
+          "total": 336,
+          "graded": 335,
+          "correct": 270,
+          "win_pct": 80.6
+        },
+        "strict": {
+          "total": 0,
+          "graded": 0,
+          "correct": 0,
+          "win_pct": null
+        },
+        "fallback": {
+          "total": 645,
+          "graded": 640,
+          "correct": 520,
+          "win_pct": 81.2
+        }
+      },
+      "errors": 0,
+      "coverage_pct": 100.0
+    },
+    "EURUSD": {
+      "summary": {
+        "signals": 645,
+        "graded": 644,
+        "correct": 514,
+        "draws": 1,
+        "win_pct": 79.8,
+        "call": {
+          "total": 330,
+          "graded": 329,
+          "correct": 255,
+          "win_pct": 77.5
+        },
+        "put": {
+          "total": 315,
+          "graded": 315,
+          "correct": 259,
+          "win_pct": 82.2
+        },
+        "strict": {
+          "total": 0,
+          "graded": 0,
+          "correct": 0,
+          "win_pct": null
+        },
+        "fallback": {
+          "total": 645,
+          "graded": 644,
+          "correct": 514,
+          "win_pct": 79.8
+        }
+      },
+      "errors": 0,
+      "coverage_pct": 100.0
+    },
+    "EURGBP": {
+      "summary": {
+        "signals": 645,
+        "graded": 640,
+        "correct": 518,
+        "draws": 5,
+        "win_pct": 80.9,
+        "call": {
+          "total": 306,
+          "graded": 303,
+          "correct": 251,
+          "win_pct": 82.8
+        },
+        "put": {
+          "total": 339,
+          "graded": 337,
+          "correct": 267,
+          "win_pct": 79.2
+        },
+        "strict": {
+          "total": 1,
+          "graded": 1,
+          "correct": 1,
+          "win_pct": 100.0
+        },
+        "fallback": {
+          "total": 644,
+          "graded": 639,
+          "correct": 517,
+          "win_pct": 80.9
+        }
+      },
+      "errors": 0,
+      "coverage_pct": 100.0
+    },
+    "USDJPY": {
+      "summary": {
+        "signals": 645,
+        "graded": 645,
+        "correct": 514,
+        "draws": 0,
+        "win_pct": 79.7,
+        "call": {
+          "total": 334,
+          "graded": 334,
+          "correct": 268,
+          "win_pct": 80.2
+        },
+        "put": {
+          "total": 311,
+          "graded": 311,
+          "correct": 246,
+          "win_pct": 79.1
+        },
+        "strict": {
+          "total": 0,
+          "graded": 0,
+          "correct": 0,
+          "win_pct": null
+        },
+        "fallback": {
+          "total": 645,
+          "graded": 645,
+          "correct": 514,
+          "win_pct": 79.7
+        }
+      },
+      "errors": 0,
+      "coverage_pct": 100.0
+    }
+  },
+  "overall": {
+    "signals": 3870,
+    "graded": 3854,
+    "correct": 3130,
+    "draws": 16,
+    "win_pct": 81.2,
+    "call": {
+      "total": 1924,
+      "graded": 1913,
+      "correct": 1552,
+      "win_pct": 81.1
+    },
+    "put": {
+      "total": 1946,
+      "graded": 1941,
+      "correct": 1578,
+      "win_pct": 81.3
+    },
+    "strict": {
+      "total": 3,
+      "graded": 3,
+      "correct": 3,
+      "win_pct": 100.0
+    },
+    "fallback": {
+      "total": 3867,
+      "graded": 3851,
+      "correct": 3127,
+      "win_pct": 81.2
+    }
+  },
+  "coverage_pct": 100.0,
+  "checks": {
+    "coverage_100": true,
+    "zero_errors": true,
+    "call_put_separated": true,
+    "history_rows_match_signals": true
+  }
+}

@@ -86,11 +86,16 @@
         } catch (e) { console.error('loadHomeData:', e); }
 
         // Win rate from /api/stats
+        // FIX (HOME-WINRATE-2026-09-07): the server returns
+        // `overall_win_pct` (core/stats.py). The old code read
+        // `stats.win_rate || stats.recent_accuracy` — keys that did not
+        // exist — so the Home win-rate card showed "—%" forever. Now we
+        // read the real key (with the aliases as fallbacks).
         try {
             const res = await fetch('/api/stats');
             if (res.ok) {
                 const stats = await res.json();
-                const wr = stats.win_rate || stats.recent_accuracy;
+                const wr = stats.overall_win_pct ?? stats.win_rate ?? stats.recent_accuracy;
                 if (wr != null) {
                     const wrEl = document.getElementById('home-winrate');
                     if (wrEl) wrEl.textContent = Math.round(wr) + '%';

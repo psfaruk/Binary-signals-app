@@ -18,7 +18,12 @@ The new pipeline:
   3. hand the cluster votes to engines.base.confluence.evaluate() which
      applies the strict high-confidence gates (>=3 clusters agree, zero
      opposition, position-aware, HTF-aware, noise-aware, honest confidence),
-  4. return NEUTRAL whenever any gate fails — NO FALLBACK SIGNALS, EVER.
+  4. EVERY-CANDLE MODE (default, QX_SIGNAL_MODE=every_candle): when a gate
+     fails, confluence emits a DETERMINISTIC evidence-based fallback signal
+     (labeled "confluence_v1_fallback", confidence 50-63) instead of
+     NEUTRAL — 100% candle coverage per the user requirement
+     "প্রত্যেক ক্যান্ডেল এ সিগন্যাল আসতে হবে". Set QX_SIGNAL_MODE=strict to
+     restore pure abstention.
 
 Output dict keeps the exact key set the frontend and feed pipeline expect.
 """
@@ -90,6 +95,53 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     module_names = config.module_names
 
     if candles is None or len(candles) < MIN_CANDLES_FOR_PREDICTION:
+        # EVERY-CANDLE MODE: even below the indicator warmup floor the user
+        # still requires a direction. Use the deterministic body-direction /
+        # HTF tie-break chain (no indicator math — the data is too thin for
+        # the modules) with the honest fallback labeling.
+        if _cf.SIGNAL_MODE == "every_candle" and candles:
+            n = len(candles)
+            direction = "CALL"
+            basis = "default"
+            if n >= 1:
+                try:
+                    o = float(candles[-1].get("open", 0.0))
+                    c = float(candles[-1].get("close", 0.0))
+                    if c > o:
+                        direction, basis = "CALL", "body_direction"
+                    elif c < o:
+                        direction, basis = "PUT", "body_direction"
+                except Exception:
+                    pass
+            if basis == "default":
+                if htf_trend == "UPTREND":
+                    direction, basis = "CALL", "htf_trend"
+                elif htf_trend == "DOWNTREND":
+                    direction, basis = "PUT", "htf_trend"
+            conf = _cf.FALLBACK_CONF_BASE
+            if (htf_trend == "UPTREND" and direction == "CALL") or (
+                    htf_trend == "DOWNTREND" and direction == "PUT"):
+                conf += 2
+            result = _neutral(
+                [f"INSUFFICIENT_DATA: need >= {MIN_CANDLES_FOR_PREDICTION} "
+                 f"closed candles (got {n}) — every-candle fallback active"],
+                {}, asset, weight_adapter,
+                module_names=module_names, htf_trend=htf_trend)
+            result.update({
+                "signal": direction,
+                "confidence": conf,
+                "raw_confidence": conf,
+                "strength": "WEAK",
+                "score": 0,
+                "strategy": "confluence_v1_fallback",
+                "strategy_reason": (
+                    f"every-candle fallback ({basis}) — insufficient data"),
+                "signal_quality": "FALLBACK",
+                "fallback": True,
+                "fallback_basis": basis,
+                "confluence_reject_gate": "insufficient_data",
+            })
+            return result
         return _neutral(["INSUFFICIENT_DATA: need >= 30 closed candles"],
                         {}, asset, weight_adapter,
                         module_names=module_names, htf_trend=htf_trend)

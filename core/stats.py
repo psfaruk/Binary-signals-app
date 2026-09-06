@@ -346,6 +346,13 @@ def _compute_module_stats_inner(cur):
         "total_graded_signals": total,
         "total_graded": total_graded,
         "overall_win_pct": round(overall_win, 1),
+        # FIX (HOME-WINRATE-2026-09-07): aliases so every consumer agrees.
+        # app-nav.js (Home tab) used to read `stats.win_rate` /
+        # `stats.recent_accuracy` — keys that never existed — so the Home
+        # win-rate card was stuck at "—%" forever. Expose the same number
+        # under all three names.
+        "win_rate": round(overall_win, 1),
+        "recent_accuracy": round(overall_win, 1),
         "total_correct": total_correct,
         "total_wrong": total_wrong,
         "modules": modules_summary,
