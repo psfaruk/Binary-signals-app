@@ -593,6 +593,19 @@ svg{display:block}
   .signal-meta-row{flex-wrap:wrap;gap:6px}
   .ms-grid{grid-template-columns:1fr 1fr}
   .share-signal-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+  /* RESULT-VIEW-FIX 2026-09-07: master-detail compression (no overlap) */
+  .wr-pair-row{padding:9px 11px;gap:8px}
+  .wr-row-dir{padding:5px 7px}
+  .wr-row-dir-val{font-size:14px}
+  .wr-row-chev{font-size:17px}
+  .wrph-grid{gap:6px;margin-bottom:8px}
+  .wrph-cell{padding:7px 9px}
+  .wrph-val{font-size:17px}
+  .wr-pair-hero{padding:12px 13px}
+  .wr-live{padding:12px 13px}
+  .wr-live-dir{font-size:24px;min-width:104px}
+  .wr-live-body{gap:12px}
 }
 
 /* ─── ≤479px: small phones ──────────────────────────────────────────────── */
@@ -608,6 +621,18 @@ svg{display:block}
   .bn-item span{font-size:9.5px}
   .modal-content{padding:16px}
   .history-row{gap:6px}
+
+  /* RESULT-VIEW-FIX 2026-09-07: small phones — pair rows reflow to 2 rows
+     (name on top, CALL|PUT below) so nothing clips or overlaps. */
+  .wr-pair-row{grid-template-columns:1fr 1fr;row-gap:8px;padding:10px 11px}
+  .wr-row-name{grid-column:1 / -1;flex-direction:row;align-items:center;justify-content:space-between}
+  .wr-row-chev{display:none}
+  .wr-row-dir-val{font-size:15px}
+  .wrph-grid{grid-template-columns:repeat(3,1fr);gap:5px}
+  .wrph-val{font-size:15.5px}
+  .wrph-cnt{font-size:9px}
+  .wr-live-dir{font-size:21px;min-width:92px}
+  .wr-live-meta-row{font-size:10.5px}
 }
 
 /* ─── Desktop sanity: bottom nav never shows ≥1024px ───────────────────── */

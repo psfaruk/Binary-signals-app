@@ -43,7 +43,9 @@
             </button>
             <button class="nav-item" data-tab="winrate" type="button">
                 <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg></span>
-                <span class="nav-label">রেজাল্ট ও হিস্টোরি</span>
+                <!-- RESULT-VIEW-FIX 2026-09-07: shortened — the merged tab is
+                     now the master-detail "রেজাল্ট" view -->
+                <span class="nav-label">রেজাল্ট</span>
             </button>
             <button class="nav-item" data-tab="setting" type="button">
                 <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
@@ -333,111 +335,144 @@
             <!-- =========== RESULTS TAB (WIN RATE + HISTORY MERGED) ===========
                  USER REQ (2026-09-07): "Win rate ট্যাব ও হিস্টোরি ট্যাব আলাদা
                  আলাদা করলেন কেনো, এই দুইটা কে মার্জ করে একটি ট্যাব এ সহজ করে
-                 দিলেই তো ভালো হয়" — one tab: per-pair CALL/PUT win rates on
-                 top, full signal history + accuracy breakdown below. -->
+                 দিলেই তো ভালো হয়" — ONE tab, TWO views (MASTER-DETAIL,
+                 RESULT-VIEW-FIX 2026-09-07, USER REQ):
+                   View A (default)  → সব পেয়ারের CALL/PUT উইন রেট লিস্ট
+                   View B (drill-in) → শুধু সেই পেয়ারের লগ + লাইভ সিগন্যাল
+                 "রেজাল্ট ট্যাব এ ক্লিক করলেই সব গুলো পেয়ার এর call put এর
+                  রেজাল্ট উইন রেট গুলো দেখাবে। তার পর আমি কোনো নির্দিষ্ট
+                  পেয়ার এ ক্লিক করলে তখন শুধু সেই একক পেয়ার এর জন্য লগ
+                  গুলো দেখাবে, লাইভ সিগন্যাল সহ।" -->
             <section class="tab-pane" data-pane="winrate" id="pane-winrate">
                 <div class="pane-header">
-                    <h2>রেজাল্ট ও হিস্টোরি</h2>
-                    <p class="pane-subtitle">প্রতি পেয়ারে Call/Put আলাদা উইন রেট + কোন সময়ে কোন সিগন্যাল — সব এক ট্যাবে</p>
+                    <h2 id="wr-title">রেজাল্ট</h2>
+                    <p class="pane-subtitle" id="wr-subtitle">সব পেয়ারের Call/Put উইন রেট — বিস্তারিত দেখতে পেয়ারে ক্লিক করুন</p>
                 </div>
 
-                <div class="wr-toolbar">
-                    <div class="wr-group" id="wr-market-filter">
-                        <span class="wr-group-label">মার্কেট</span>
-                        <button class="wr-chip active" data-mkt="all" type="button">সব</button>
-                        <button class="wr-chip" data-mkt="otc" type="button">OTC</button>
-                        <button class="wr-chip" data-mkt="real" type="button">Real</button>
-                    </div>
-                    <div class="wr-group" id="wr-window-filter">
-                        <span class="wr-group-label">সময়</span>
-                        <!-- FIX (CONFLUENCE-V1 2026-09-02): "আজ" claimed a calendar
-                             day but the API treated it as a rolling 24h — relabeled
-                             to the honest "২৪ ঘণ্টা". The ৩০ দিন / সব সময় windows are
-                             now REAL (DB retention raised 7 → 90 days). -->
-                        <button class="wr-chip" data-window="1" type="button">২৪ ঘণ্টা</button>
-                        <button class="wr-chip active" data-window="7" type="button">৭ দিন</button>
-                        <button class="wr-chip" data-window="30" type="button">৩০ দিন</button>
-                        <button class="wr-chip" data-window="0" type="button">সব সময়</button>
-                    </div>
-                    <div class="wr-group" id="wr-dir-filter">
-                        <span class="wr-group-label">দেখুন</span>
-                        <button class="wr-chip active" data-dir="all" type="button">সব সিগন্যাল</button>
-                        <button class="wr-chip" data-dir="CALL" type="button">শুধু CALL</button>
-                        <button class="wr-chip" data-dir="PUT" type="button">শুধু PUT</button>
-                    </div>
-                    <button class="btn-secondary wr-refresh-btn" id="wr-refresh-btn" type="button">🔄 রিফ্রেশ</button>
-                </div>
-
-                <div class="wr-summary" id="wr-summary">
-                    <div class="wr-hero">
-                        <div class="wr-hero-pct mid" id="wr-hero-pct">—</div>
-                        <div class="wr-hero-meta">
-                            <span class="wr-hero-title">Overall Win Rate</span>
-                            <span class="wr-hero-sub" id="wr-hero-sub">ডেটা লোড হচ্ছে…</span>
-                            <span class="wr-hero-sub" id="wr-hero-window"></span>
+                <!-- ═══ VIEW A: ALL-PAIRS RESULT LIST (default) ═══ -->
+                <div id="wr-view-list">
+                    <div class="wr-toolbar">
+                        <div class="wr-group" id="wr-market-filter">
+                            <span class="wr-group-label">মার্কেট</span>
+                            <button class="wr-chip active" data-mkt="all" type="button">সব</button>
+                            <button class="wr-chip" data-mkt="otc" type="button">OTC</button>
+                            <button class="wr-chip" data-mkt="real" type="button">Real</button>
                         </div>
-                        <div class="wr-split">
-                            <div class="wr-split-row">
-                                <div class="wr-split-head"><span class="dir-call">▲ CALL</span><span class="dir-call" id="wr-call-pct">—</span></div>
-                                <div class="wr-split-bar"><div class="wr-split-fill call" id="wr-call-bar" style="width:0%"></div></div>
+                        <div class="wr-group" id="wr-window-filter">
+                            <span class="wr-group-label">সময়</span>
+                            <!-- FIX (CONFLUENCE-V1 2026-09-02): "আজ" claimed a calendar
+                                 day but the API treated it as a rolling 24h — relabeled
+                                 to the honest "২৪ ঘণ্টা". The ৩০ দিন / সব সময় windows are
+                                 now REAL (DB retention raised 7 → 90 days). -->
+                            <button class="wr-chip" data-window="1" type="button">২৪ ঘণ্টা</button>
+                            <button class="wr-chip active" data-window="7" type="button">৭ দিন</button>
+                            <button class="wr-chip" data-window="30" type="button">৩০ দিন</button>
+                            <button class="wr-chip" data-window="0" type="button">সব সময়</button>
+                        </div>
+                        <button class="btn-secondary wr-refresh-btn" id="wr-refresh-btn" type="button">🔄 রিফ্রেশ</button>
+                    </div>
+
+                    <div class="wr-summary" id="wr-summary">
+                        <div class="wr-hero">
+                            <div class="wr-hero-pct mid" id="wr-hero-pct">—</div>
+                            <div class="wr-hero-meta">
+                                <span class="wr-hero-title">Overall Win Rate</span>
+                                <span class="wr-hero-sub" id="wr-hero-sub">ডেটা লোড হচ্ছে…</span>
+                                <span class="wr-hero-sub" id="wr-hero-window"></span>
                             </div>
-                            <div class="wr-split-row">
-                                <div class="wr-split-head"><span class="dir-put">▼ PUT</span><span class="dir-put" id="wr-put-pct">—</span></div>
-                                <div class="wr-split-bar"><div class="wr-split-fill put" id="wr-put-bar" style="width:0%"></div></div>
+                            <div class="wr-split">
+                                <div class="wr-split-row">
+                                    <div class="wr-split-head"><span class="dir-call">▲ CALL</span><span class="dir-call" id="wr-call-pct">—</span></div>
+                                    <div class="wr-split-bar"><div class="wr-split-fill call" id="wr-call-bar" style="width:0%"></div></div>
+                                </div>
+                                <div class="wr-split-row">
+                                    <div class="wr-split-head"><span class="dir-put">▼ PUT</span><span class="dir-put" id="wr-put-pct">—</span></div>
+                                    <div class="wr-split-bar"><div class="wr-split-fill put" id="wr-put-bar" style="width:0%"></div></div>
+                                </div>
                             </div>
                         </div>
                     </div>
+
+                    <!-- Pair rows: name | CALL win | PUT win | → (click = drill-in) -->
+                    <div class="wr-pairlist" id="wr-pairlist">
+                        <div class="wr-empty">ডেটা লোড হচ্ছে…</div>
+                    </div>
+
+                    <p class="wr-note">
+                        💡 উইন রেট হিসাব হয় <b>গ্রেডেড</b> সিগন্যাল থেকে (ক্যান্ডেল ক্লোজে যাচাইকৃত)।
+                        Draw গুলো উইন রেটে গণনা হয় না। যে পেয়ারের CALL রেট ভালো সেখানে CALL সিগন্যাল
+                        নিন, যেখানে PUT ভালো সেখানে PUT — পেয়ারে ক্লিক করলে সেই পেয়ারের লগ দেখা যাবে।
+                    </p>
                 </div>
 
-                <div class="wr-cards" id="wr-cards">
-                    <div class="wr-empty">ডেটা লোড হচ্ছে…</div>
-                </div>
+                <!-- ═══ VIEW B: SINGLE PAIR (drill-in: logs + live signal) ═══ -->
+                <div id="wr-view-pair" hidden>
+                    <div class="wr-detail-top">
+                        <button class="wr-back-btn" id="wr-back-btn" type="button">← সব পেয়ারের রেজাল্ট</button>
+                    </div>
 
-                <p class="wr-note">
-                    💡 উইন রেট হিসাব হয় <b>গ্রেডেড</b> সিগন্যাল থেকে (ক্যান্ডেল ক্লোজে যাচাইকৃত)।
-                    Draw গুলো উইন রেটে গণনা হয় না। যে পেয়ারের CALL রেট ভালো সেখানে CALL সিগন্যাল
-                    নিন, যেখানে PUT ভালো সেখানে PUT — ফিল্টার করে দেখুন।
-                </p>
+                    <!-- Pair result hero — filled by common.js from the winrate payload -->
+                    <div class="wr-pair-hero" id="wr-pair-hero"></div>
 
-                <!-- ─── SIGNAL HISTORY (moved from the old History tab) ─── -->
-                <div class="history-section">
-                    <h3>সিগন্যাল হিস্টোরি</h3>
-                    <p class="history-sub">কোন সময়ে কোন পেয়ারে কী সিগন্যাল দিলো — সব রেকর্ড</p>
-                    <div class="history-controls">
-                        <select id="history-pair-select" class="filter-select"><option value="">সব পেয়ার</option></select>
-                        <div class="wr-chips" id="history-dir-chips">
-                            <button class="wr-chip active" data-filter="all" type="button">সব</button>
-                            <button class="wr-chip" data-filter="CALL" type="button">CALL</button>
-                            <button class="wr-chip" data-filter="PUT" type="button">PUT</button>
+                    <!-- Live signal card — mirrors the live WS stream of this pair -->
+                    <div class="wr-live" id="wr-live-card">
+                        <div class="wr-live-head">
+                            <span class="wr-live-dot" id="wr-live-dot"></span>
+                            <span class="wr-live-title">লাইভ সিগন্যাল</span>
+                            <span class="wr-live-pair" id="wr-live-pair">—</span>
                         </div>
-                        <div class="wr-chips" id="history-result-chips">
-                            <button class="wr-chip active" data-filter="all" type="button">সব রেজাল্ট</button>
-                            <button class="wr-chip" data-filter="win" type="button">✅ WIN</button>
-                            <button class="wr-chip" data-filter="loss" type="button">❌ LOSS</button>
+                        <div class="wr-live-body">
+                            <div class="wr-live-dir neutral" id="wr-live-dir">—</div>
+                            <div class="wr-live-meta">
+                                <div class="wr-live-meta-row"><span>স্ট্রেংথ</span><b id="wr-live-strength">—</b></div>
+                                <div class="wr-live-meta-row"><span>স্কোর</span><b id="wr-live-score">—</b></div>
+                                <div class="wr-live-meta-row"><span>কনফিডেন্স</span><b id="wr-live-conf">—</b></div>
+                                <div class="wr-live-meta-row"><span>আপডেট</span><b id="wr-live-time">—</b></div>
+                            </div>
+                        </div>
+                        <div class="wr-live-conf"><div class="wr-live-conf-bar" id="wr-live-conf-bar" style="width:0%"></div></div>
+                        <p class="wr-live-note" id="wr-live-note" hidden></p>
+                    </div>
+
+                    <!-- ─── THIS PAIR'S SIGNAL LOGS ─── -->
+                    <div class="history-section">
+                        <h3>এই পেয়ারের সিগন্যাল লগ</h3>
+                        <p class="history-sub">কোন সময়ে কী সিগন্যাল দিলো এবং রেজাল্ট কী হলো</p>
+                        <div class="history-controls">
+                            <div class="wr-chips" id="history-dir-chips">
+                                <button class="wr-chip active" data-filter="all" type="button">সব</button>
+                                <button class="wr-chip" data-filter="CALL" type="button">CALL</button>
+                                <button class="wr-chip" data-filter="PUT" type="button">PUT</button>
+                            </div>
+                            <div class="wr-chips" id="history-result-chips">
+                                <button class="wr-chip active" data-filter="all" type="button">সব রেজাল্ট</button>
+                                <button class="wr-chip" data-filter="win" type="button">✅ WIN</button>
+                                <button class="wr-chip" data-filter="loss" type="button">❌ LOSS</button>
+                            </div>
+                        </div>
+                        <div id="history-list" class="history-list">
+                            <div class="loading-row">এখনো কোনো সিগন্যাল নেই</div>
                         </div>
                     </div>
-                    <div id="history-list" class="history-list">
-                        <div class="loading-row">এখনো কোনো সিগন্যাল নেই</div>
-                    </div>
-                </div>
 
-                <!-- ─── ACCURACY BREAKDOWN ─── -->
-                <div class="breakdown-section">
-                    <h3>মোট ফলাফল</h3>
-                    <div class="accuracy-grid">
-                        <div class="acc-card"><div class="acc-label">মোট</div><div class="acc-value" id="acc-total">0</div></div>
-                        <div class="acc-card"><div class="acc-label">উইন</div><div class="acc-value acc-wins" id="acc-wins">0</div></div>
-                        <div class="acc-card"><div class="acc-label">লস</div><div class="acc-value acc-losses" id="acc-losses">0</div></div>
-                        <div class="acc-card"><div class="acc-label">ড্র</div><div class="acc-value" id="acc-draws">0</div></div>
+                    <!-- ─── THIS PAIR'S BREAKDOWN (from the loaded logs) ─── -->
+                    <div class="breakdown-section">
+                        <h3>এই পেয়ারের বিশ্লেষণ (লোড করা লগ থেকে)</h3>
+                        <div class="accuracy-grid">
+                            <div class="acc-card"><div class="acc-label">মোট</div><div class="acc-value" id="acc-total">0</div></div>
+                            <div class="acc-card"><div class="acc-label">উইন</div><div class="acc-value acc-wins" id="acc-wins">0</div></div>
+                            <div class="acc-card"><div class="acc-label">লস</div><div class="acc-value acc-losses" id="acc-losses">0</div></div>
+                            <div class="acc-card"><div class="acc-label">ড্র</div><div class="acc-value" id="acc-draws">0</div></div>
+                        </div>
                     </div>
-                </div>
-                <div class="breakdown-section">
-                    <h3>স্ট্রেংথ অনুযায়ী</h3>
-                    <div id="acc-strength-breakdown" class="breakdown-grid"></div>
-                </div>
-                <div class="breakdown-section">
-                    <h3>রেজিম অনুযায়ী</h3>
-                    <div id="acc-regime-breakdown" class="breakdown-grid"></div>
+                    <div class="breakdown-section">
+                        <h3>স্ট্রেংথ অনুযায়ী</h3>
+                        <div id="acc-strength-breakdown" class="breakdown-grid"></div>
+                    </div>
+                    <div class="breakdown-section">
+                        <h3>রেজিম অনুযায়ী</h3>
+                        <div id="acc-regime-breakdown" class="breakdown-grid"></div>
+                    </div>
                 </div>
             </section>
 

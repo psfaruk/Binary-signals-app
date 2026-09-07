@@ -1,23 +1,25 @@
 /* ============================================================================
-   winrate.js — Win Rate dashboard (Aurora v3, 2026-08-31)
+   winrate.js — RESULT tab, View A: all-pairs CALL/PUT win-rate list
+   (Aurora v3 · RESULT-VIEW-FIX 2026-09-07)
    ----------------------------------------------------------------------------
-   NEW TAB: "উইন রেট" — per-pair, per-direction (CALL vs PUT) win rates from
-   the new /api/winrate endpoint (db.get_directional_winrate).
+   USER REQ (2026-09-07, verbatim):
+     "রেজাল্ট ট্যাব এ ক্লিক করলেই সব গুলো পেয়ার এর call put এর রেজাল্ট
+      উইন রেট গুলো দেখাবে। তার পর আমি কোনো নির্দিষ্ট পেয়ার এ ক্লিক করলে
+      তখন শুধু সেই একক পেয়ার এর জন্য লগ গুলো দেখাবে, লাইভ সিগন্যাল সহ।"
 
-   User requirement this implements:
-     "প্রত্যেক পেয়ার ও সিগন্যাল হিস্টোরি উইন রেট আমি দেখতে পারবো। Call ও put
-      কোনো সিগন্যাল গুলো কেমন win রেট দিচ্ছে। সেই গুলো আলাদা আলাদা করে নিজের
-      মতো করে দেখতে পারবো।"
+   This file renders VIEW A (the all-pairs list). The heavy cards were
+   replaced with clean one-line ROWS: pair | CALL win% | PUT win% | →.
+   Clicking a row dispatches 'wr:openpair' — common.js owns VIEW B
+   (pair drill-in: that pair's logs + live signal).
 
-   Self-contained IIFE — no coupling with common.js. Communicates via:
-     - fetch('/api/winrate?period=60&days=N&category=X')
-     - CustomEvent 'winrate:show' dispatched by common.js switchTab()
+   Data: fetch('/api/winrate?period=60&days=N&category=X')
+         (db.get_directional_winrate — graded-only, draws excluded)
    ============================================================================ */
 (function(global){
   'use strict';
 
-  var WR_REFRESH_MS = 20000;   // background auto-refresh
-  var wrState = { market:'all', window:7, dir:'all' };
+  var WR_REFRESH_MS = 20000;   // background auto-refresh (pane visible only)
+  var wrState = { market:'all', window:7 };
   var wrTimer = null;
   var wrLoading = false;
 
@@ -50,14 +52,15 @@
     return base + (a.endsWith('_otc') ? ' OTC' : '');
   }
 
-  function applyDirFilter(pairs){
-    if(wrState.dir === 'all') return pairs;
-    // "শুধু CALL" → sort by CALL win rate; "শুধু PUT" → PUT win rate.
-    var key = wrState.dir === 'CALL' ? 'call' : 'put';
+  /* Sort for View A: best blended win rate first (nulls last), so the user
+     sees the strongest pairs at the top of the রেজাল্ট list. */
+  function sortPairs(pairs){
     return pairs.slice().sort(function(a,b){
-      var av = (a[key] && a[key].win_pct != null) ? a[key].win_pct : -1;
-      var bv = (b[key] && b[key].win_pct != null) ? b[key].win_pct : -1;
-      return bv - av;
+      var av = (a.win_pct != null) ? a.win_pct : -1;
+      var bv = (b.win_pct != null) ? b.win_pct : -1;
+      if(bv !== av) return bv - av;
+      // tie-break: more graded signals = more trustworthy stat, first.
+      return (b.graded || 0) - (a.graded || 0);
     });
   }
 
@@ -66,40 +69,24 @@
     var subEl = $('wr-hero-sub');
     var winEl = $('wr-hero-window');
     if(!pctEl) return;
-    // FIX (WR-DIR-FILTER-2026-09-07): in "শুধু CALL"/"শুধু PUT" mode the hero
-    // shows THAT direction's overall win rate (not the blended one) — the
-    // user asked for call/put win rates separately per pair.
-    var bucket = overall;
-    var dirSuffix = '';
-    if(overall && wrState.dir !== 'all' && overall[wrState.dir.toLowerCase()]){
-      bucket = overall[wrState.dir.toLowerCase()];
-      dirSuffix = ' · শুধু ' + wrState.dir;
-      bucket = {
-        graded: bucket.total, correct: bucket.correct,
-        wrong: bucket.total - bucket.correct, win_pct: bucket.win_pct,
-        draws: 0,
-      };
-    }
-    if(!overall || !bucket || bucket.graded === 0){
+    if(!overall || overall.graded === 0){
       pctEl.textContent = '—';
       pctEl.className = 'wr-hero-pct mid';
       if(subEl) subEl.textContent = 'এই উইন্ডোতে কোনো গ্রেডেড সিগন্যাল নেই';
       if(winEl) winEl.textContent = '';
     } else {
-      var pct = bucket.win_pct;
+      var pct = overall.win_pct;
       pctEl.textContent = fmtPct(pct);
       pctEl.className = 'wr-hero-pct ' + wrClass(pct);
       if(subEl){
-        subEl.textContent = bucket.correct + ' উইন / ' + bucket.graded
-          + ' গ্রেডেড' + (overall.draws && wrState.dir === 'all' ? (' · ' + overall.draws + ' ড্র') : '')
-          + dirSuffix;
+        subEl.textContent = overall.correct + ' উইন / ' + overall.graded
+          + ' গ্রেডেড' + (overall.draws ? (' · ' + overall.draws + ' ড্র') : '');
       }
       if(winEl){
         winEl.textContent = (windowDays === 0 ? 'সব সময়'
-          // FIX (BREAKEVEN-TEXT-2026-09-07): said "~54%" while the true
-          // 85%-payout breakeven is 100/185 = 54.05% (core/breakeven.py).
-          // server.py:1556's hardcoded 51.8 (=93% payout) was also wrong —
-          // all surfaces now quote 54.05%.
+          // FIX (BREAKEVEN-TEXT-2026-09-07): the true 85%-payout breakeven is
+          // 100/185 = 54.05% (core/breakeven.py) — quoted identically on
+          // every surface.
           : 'শেষ ' + windowDays + ' দিন') + ' · ব্রেকইভেন ৫৪.০৫% (৮৫% পেআউট)';
       }
     }
@@ -121,8 +108,11 @@
     }
   }
 
-  function renderPairCards(pairs){
-    var wrap = $('wr-cards');
+  /* ─── VIEW A: all-pairs rows ──────────────────────────────────────────────
+     One row per pair:  [name + tag] [▲ CALL wr (w/t)] [▼ PUT wr (w/t)] [→]
+     The entire row is a tap target → 'wr:openpair' → common.js drill-in. */
+  function renderPairRows(pairs){
+    var wrap = $('wr-pairlist');
     if(!wrap) return;
     if(!pairs || !pairs.length){
       wrap.innerHTML = '<div class="wr-empty">এই ফিল্টারে কোনো ডেটা নেই — '
@@ -130,74 +120,60 @@
       return;
     }
     var html = '';
-    var list = applyDirFilter(pairs);
-    // Find the best overall pair to badge it.
-    var best = null;
-    for(var i = 0; i < list.length; i++){
-      var p = list[i];
-      if(p.graded >= 10 && (best == null || (p.win_pct || 0) > (best.win_pct || 0))) best = p;
-    }
+    var list = sortPairs(pairs);
     for(var j = 0; j < list.length; j++){
       var q = list[j];
-      var isBest = best && q.asset === best.asset;
-      var dirMode = wrState.dir;
-      // FIX (WR-DIR-FILTER-2026-09-07): in "শুধু CALL"/"শুধু PUT" mode the
-      // card headline shows THAT direction's own win rate + counts (the
-      // per-direction sub-stats already exist in the payload) — not the
-      // blended rate. The other direction stays visible in the dir-grid.
-      var showBucket = q;
-      if(dirMode === 'CALL' && q.call && q.call.total > 0){
-        showBucket = { win_pct: q.call.win_pct, correct: q.call.correct, graded: q.call.total };
-      } else if(dirMode === 'PUT' && q.put && q.put.total > 0){
-        showBucket = { win_pct: q.put.win_pct, correct: q.put.correct, graded: q.put.total };
-      }
-      var wr = showBucket.win_pct;
-      html += '<div class="wr-pair-card">'
-        + '<div class="wr-pair-head">'
+      var callPct = q.call ? q.call.win_pct : null;
+      var putPct  = q.put  ? q.put.win_pct  : null;
+      var callStats = q.call ? (q.call.correct + '/' + q.call.total) : '—';
+      var putStats  = q.put  ? (q.put.correct  + '/' + q.put.total)  : '—';
+      // Live pulse: mark the pair the user is currently watching live.
+      var isLive = (typeof currentAsset === 'string' && currentAsset === q.asset);
+      html += '<div class="wr-pair-row' + (isLive ? ' live' : '') + '"'
+        + ' data-asset="' + esc(q.asset) + '" role="button" tabindex="0">'
+        + '<div class="wr-row-name">'
         +   '<span class="wr-pair-name">' + esc(displayFor(q.asset)) + '</span>'
         +   '<span class="wr-pair-tags">'
         +     '<span class="wr-tag ' + esc(q.category) + '">' + esc(q.category === 'otc' ? 'OTC' : 'REAL') + '</span>'
-        +     (isBest ? '<span class="wr-tag best">★ BEST</span>' : '')
+        +     (isLive ? '<span class="wr-tag live">● লাইভ</span>' : '')
         +   '</span>'
         + '</div>'
-        + '<div class="wr-pair-wr">'
-        +   '<span class="num ' + wrClass(wr) + '">' + (wr == null ? '—' : wr.toFixed(1) + '%') + '</span>'
-        +   '<span class="den">' + showBucket.correct + '/' + showBucket.graded + ' গ্রেডেড'
-        +     (dirMode !== 'all' ? ' · ' + dirMode : '') + '</span>'
+        + '<div class="wr-row-dir call">'
+        +   '<span class="wr-row-dir-label">CALL</span>'
+        +   '<span class="wr-row-dir-val ' + wrClass(callPct) + '">' + fmtPct(callPct) + '</span>'
+        +   '<span class="wr-row-dir-cnt">' + callStats + '</span>'
         + '</div>'
-        + '<div class="wr-dir-grid">'
-        +   '<div class="wr-dir-cell call">'
-        +     '<div class="wr-dir-top"><span class="wr-dir-name">▲ CALL</span>'
-        +       '<span class="wr-dir-val">' + fmtPct(q.call.win_pct) + '</span></div>'
-        +     '<div class="wr-dir-bar"><div class="wr-dir-fill" style="width:'
-        +       (q.call.win_pct != null ? q.call.win_pct : 0) + '%"></div></div>'
-        +     '<span style="font-size:9.5px;color:var(--text-faint);font-family:var(--mono)">'
-        +       q.call.correct + '/' + q.call.total + '</span>'
-        +   '</div>'
-        +   '<div class="wr-dir-cell put">'
-        +     '<div class="wr-dir-top"><span class="wr-dir-name">▼ PUT</span>'
-        +       '<span class="wr-dir-val">' + fmtPct(q.put.win_pct) + '</span></div>'
-        +     '<div class="wr-dir-bar"><div class="wr-dir-fill" style="width:'
-        +       (q.put.win_pct != null ? q.put.win_pct : 0) + '%"></div></div>'
-        +     '<span style="font-size:9.5px;color:var(--text-faint);font-family:var(--mono)">'
-        +       q.put.correct + '/' + q.put.total + '</span>'
-        +   '</div>'
+        + '<div class="wr-row-dir put">'
+        +   '<span class="wr-row-dir-label">PUT</span>'
+        +   '<span class="wr-row-dir-val ' + wrClass(putPct) + '">' + fmtPct(putPct) + '</span>'
+        +   '<span class="wr-row-dir-cnt">' + putStats + '</span>'
         + '</div>'
-        + '<div class="wr-pair-foot">'
-        +   '<span>স্ট্রিক: '
-        +     (q.streak_type
-        ?       '<span class="wr-streak ' + esc(q.streak_type) + '">'
-        +       (q.streak_type === 'win' ? 'W' : 'L') + q.streak_count + '</span>'
-        :      '—')
-        +   '</span>'
-        +   '<span class="wr-last ' + esc((q.last_signal || '').toLowerCase()) + '">'
-        +     (q.last_signal ? ('শেষ: ' + esc(q.last_signal)) : '')
-        +     (q.last_accuracy === 'correct' ? ' ✅' : q.last_accuracy === 'wrong' ? ' ❌' : '')
-        +   '</span>'
-        + '</div>'
+        + '<div class="wr-row-chev" aria-hidden="true">›</div>'
         + '</div>';
     }
     wrap.innerHTML = html;
+  }
+
+  /* Row tap → ask common.js to open the pair drill-in view. Delegated on the
+     container so re-renders never need re-wiring. Keyboard accessible. */
+  function wirePairRows(){
+    var wrap = $('wr-pairlist');
+    if(!wrap || wrap.dataset.wired === '1') return;
+    wrap.dataset.wired = '1';
+    var open = function(asset){
+      if(!asset) return;
+      try{ global.dispatchEvent(new CustomEvent('wr:openpair', { detail: { asset: asset } })); }
+      catch(_){}
+    };
+    wrap.addEventListener('click', function(ev){
+      var row = ev.target.closest('.wr-pair-row');
+      if(row) open(row.getAttribute('data-asset'));
+    });
+    wrap.addEventListener('keydown', function(ev){
+      if(ev.key !== 'Enter' && ev.key !== ' ') return;
+      var row = ev.target.closest('.wr-pair-row');
+      if(row){ ev.preventDefault(); open(row.getAttribute('data-asset')); }
+    });
   }
 
   function fetchWinrate(){
@@ -211,15 +187,23 @@
       .then(function(data){
         wrLoading = false;
         if(!data || !data.ok){
-          renderPairCards([]);
+          renderPairRows([]);
           return;
         }
+        // Cache the payload — common.js reads it to build View B's pair hero
+        // (window._wrPayload.pairs.find(asset) → CALL/PUT/streak/last signal).
+        global._wrPayload = { overall: data.overall, pairs: data.pairs || [],
+                              window: wrState.window, market: wrState.market };
         renderHero(data.overall, wrState.window);
-        renderPairCards(data.pairs);
+        renderPairRows(data.pairs);
+        // Pair view open? refresh its hero with the fresh numbers.
+        if(typeof global._wrPairHeroRefresh === 'function'){
+          try{ global._wrPairHeroRefresh(); }catch(_){}
+        }
       })
       .catch(function(){
         wrLoading = false;
-        var wrap = $('wr-cards');
+        var wrap = $('wr-pairlist');
         if(wrap) wrap.innerHTML = '<div class="wr-empty">⚠ সার্ভার থেকে ডেটা আসেনি — '
           + 'কিছুক্ষণ পরে আবার চেষ্টা করুন</div>';
       });
@@ -241,10 +225,10 @@
   }
 
   function initWinrate(){
-    if($('wr-cards') === null) return;   // not on a page with this tab
+    if($('wr-pairlist') === null) return;   // not on a page with this tab
     wireChips('wr-market-filter', 'mkt', function(v){ wrState.market = v; });
     wireChips('wr-window-filter', 'window', function(v){ wrState.window = parseInt(v, 10) || 0; });
-    wireChips('wr-dir-filter', 'dir', function(v){ wrState.dir = v; });
+    wirePairRows();
 
     var refreshBtn = $('wr-refresh-btn');
     if(refreshBtn && !refreshBtn.dataset.wired){
@@ -258,10 +242,8 @@
     // First fetch (tab may be opened before any event fires on some flows).
     fetchWinrate();
 
-    // FIX (WR-POLL-VISIBILITY-2026-09-07, LOW): the 20s background poll ran
-    // from page load whether the merged Results tab was visible or not —
-    // wasted DB load (the endpoint aggregates signal_log) for data nobody
-    // sees. Poll only while the pane is actually shown.
+    // FIX (WR-POLL-VISIBILITY-2026-09-07, LOW): poll only while the pane is
+    // actually shown — wasted DB load otherwise.
     if(wrTimer) clearInterval(wrTimer);
     wrTimer = setInterval(function(){
       var pane = document.getElementById('pane-winrate');
@@ -275,6 +257,7 @@
     initWinrate();
   }
 
-  // Expose for debugging.
-  global._wrDebug = { state: wrState, refresh: fetchWinrate };
+  // Expose for debugging + common.js hooks.
+  global._wrDebug = { state: wrState, refresh: fetchWinrate,
+                      displayFor: displayFor, wrClass: wrClass, fmtPct: fmtPct };
 })(window);

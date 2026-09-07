@@ -882,6 +882,11 @@ function renderSignal(pred){
       engineLabel.style.color = 'var(--yellow)';
     }
   }
+
+  // RESULT-VIEW-FIX 2026-09-07: mirror the live prediction into the Result
+  // tab's pair drill-in live card (no-op unless that view is open and the
+  // drilled pair is the live-subscribed pair).
+  _updatePairLiveCard(pred);
 }
 
 /* CONFLUENCE-V1 (2026-09-02): cluster agreement chips.
@@ -1138,7 +1143,10 @@ function loadServerHistory(){
   if(!ws || ws.readyState !== WebSocket.OPEN) return;
   // FIX (ALL-PAIRS-HISTORY-2026-09-07): when the History tab is in
   // "সব পেয়ার" mode, request the cross-pair feed (server asset "ALL").
-  const assetForReq = (historyAsset === HISTORY_ALL) ? 'ALL' : currentAsset;
+  // RESULT-VIEW-FIX 2026-09-07: '' → live pair, '<asset>' → drilled pair,
+  // '__ALL__' → cross-pair feed.
+  const assetForReq = (historyAsset === HISTORY_ALL) ? 'ALL'
+                    : (historyAsset || currentAsset);
   send({ type: 'signals', asset: assetForReq, period: currentPeriod });
 }
 
@@ -1149,6 +1157,11 @@ function onServerSignals(sigs, asset, period){
   // asset="ALL" — accept it; still drop non-ALL echoes in pair mode.
   if(historyAsset === HISTORY_ALL){
     if(asset && asset !== 'ALL') return;
+    if(period && period !== currentPeriod) return;
+  } else if(historyAsset){
+    // RESULT-VIEW-FIX 2026-09-07: pair drill-in mode — this response is for
+    // the drilled pair, which may NOT be the live-subscribed pair.
+    if(asset && asset !== historyAsset) return;
     if(period && period !== currentPeriod) return;
   } else {
     if(asset && asset !== currentAsset) return;
@@ -1236,6 +1249,11 @@ function onServerSignals(sigs, asset, period){
   totalCorrect = graded.filter(s => s.accuracy === 'correct').length;
   renderHistory();
   renderAccuracy();
+  // RESULT-VIEW-FIX 2026-09-07: static live-card fallback — when the drilled
+  // pair couldn't go live, feed the card from the freshly loaded logs.
+  if(wrPairLiveStatic && historyAsset && historyAsset !== HISTORY_ALL){
+    _renderPairLiveFromLogs();
+  }
   // FIX (UI-P1-7, 2026-07-21): only reset scroll to top if the user was
   // already near the top. Previously every refresh forced scrollTop=0,
   // disrupting users who were browsing older signals (especially after
@@ -1447,7 +1465,9 @@ window._loadMoreHistory = function(){
   // Send the signals request with before_ctime — server returns the
   // 100 signals older than the cursor. onServerSignals merges them.
   // FIX (ALL-PAIRS-HISTORY-2026-09-07): request the right asset scope.
-  const assetForReq = (historyAsset === HISTORY_ALL) ? 'ALL' : currentAsset;
+  // RESULT-VIEW-FIX 2026-09-07: paginate the scope actually on screen.
+  const assetForReq = (historyAsset === HISTORY_ALL) ? 'ALL'
+                    : (historyAsset || currentAsset);
   send({ type: 'signals', asset: assetForReq, period: currentPeriod,
          before_ctime: beforeCtime, limit: 100 });
   // Optimistically disable the load-more button to prevent double-clicks.
@@ -1732,10 +1752,12 @@ function switchTab(tabName){
 
   // Tab-specific refresh — ensures the just-shown pane is current.
   if(tabName === 'winrate'){
-    // Merged tab: refresh BOTH halves — the win-rate dashboard (via the
-    // winrate.js event) and the history list + accuracy breakdown (from
-    // in-memory state + a server fetch).
-    renderHistoryPairSelect();
+    // RESULT-VIEW-FIX 2026-09-07 (USER REQ): opening the Result tab ALWAYS
+    // lands on View A (the all-pairs CALL/PUT win-rate list). Any previous
+    // pair drill-in is closed so the tab behaves exactly as asked:
+    // "রেজাল্ট ট্যাব এ ক্লিক করলেই সব গুলো পেয়ার এর call put এর রেজাল্ট
+    //  উইন রেট গুলো দেখাবে"।
+    closePairResult({ keepData: true });
     loadServerHistory();
     renderHistory();
     renderAccuracyTab();
@@ -1762,74 +1784,314 @@ function switchTab(tabName){
   }
 }
 
-/* renderHistoryPairSelect(): mirrors the topbar #pair-select into the
-   history tab's #history-pair-select dropdown. Called from renderPairs()
-   (so the dropdown stays in sync) and from switchTab('history') (so the
-   dropdown is populated on first tab open even before pairs arrive). */
-function renderHistoryPairSelect(){
-  const histPairSelect = $('history-pair-select');
-  if(!histPairSelect) return;
-  let activeList;
-  if(currentCategory === 'real')              activeList = realPairsList;
-  else if(currentCategory === 'alltime_otc')  activeList = alltimeOtcPairsList;
-  else                                        activeList = otcPairsList;
+/* ═══ RESULT TAB MASTER-DETAIL (RESULT-VIEW-FIX 2026-09-07) ═══════════════
+   View A = all-pairs CALL/PUT win-rate list (winrate.js → #wr-pairlist).
+   View B = ONE pair's drill-in: its WR hero + LIVE signal card + ITS logs.
 
-  // Build new options only if the set actually changed — avoids clobbering
-  // the user's in-progress dropdown interaction on every renderPairs call.
-  // FIX (ALL-PAIRS-HISTORY-2026-09-07): first option = "সব পেয়ার" cross-pair
-  // history view (server asset "ALL").
-  const newOptions = [{
-    value: HISTORY_ALL,
-    text: '★ সব পেয়ার (ALL)',
-    locked: false,
-    selected: historyAsset === HISTORY_ALL,
-  }];
-  activeList.forEach(p => {
-    newOptions.push({
-      value: p.asset,
-      text: p.display + (p.payout ? ' (' + p.payout + '%)' : ''),
-      locked: !!p.locked,
-      selected: p.asset === currentAsset && historyAsset !== HISTORY_ALL,
+   USER REQ (verbatim): "রেজাল্ট ট্যাব এ ক্লিক করলেই সব গুলো পেয়ার এর call
+   put এর রেজাল্ট উইন রেট গুলো দেখাবে। তার পর আমি কোনো নির্দিষ্ট পেয়ার এ
+   ক্লিক করলে তখন শুধু সেই একক পেয়ার এর জন্য লগ গুলো দেখাবে, লাইভ সিগন্যাল
+   সহ।"
+
+   Log-scope state model (historyAsset):
+     ''         → default: logs follow the live-subscribed pair
+     '__ALL__'  → cross-pair feed (kept for compatibility)
+     '<asset>'  → pair drill-in open (wrPairViewAsset === historyAsset)     */
+let wrPairViewAsset = null;   // asset shown in View B, null = View A
+let wrPairLiveStatic = false; // true = drilled pair couldn't go live → card renders from logs
+
+function _wrPairFromPayload(asset){
+  const payload = window._wrPayload;
+  if(!payload || !Array.isArray(payload.pairs)) return null;
+  for(const p of payload.pairs){
+    if(p && p.asset === asset) return p;
+  }
+  return null;
+}
+
+/* _renderPairHero(): fills View B's win-rate hero (#wr-pair-hero) from the
+   cached /api/winrate payload (window-scoped, matches the chips in View A).
+   Re-rendered by winrate.js's 20s poll via window._wrPairHeroRefresh. */
+function _renderPairHero(){
+  const hero = $('wr-pair-hero');
+  if(!hero || !wrPairViewAsset) return;
+  const asset = wrPairViewAsset;
+  const name = (window._wrDebug && window._wrDebug.displayFor)
+    ? window._wrDebug.displayFor(asset) : asset;
+  const winDays = (window._wrPayload && window._wrPayload.window != null)
+    ? window._wrPayload.window : 7;
+  const winLabel = winDays === 0 ? 'সব সময়' : 'শেষ ' + winDays + ' দিন';
+  const p = _wrPairFromPayload(asset);
+  if(!p){
+    hero.innerHTML = '<div class="wr-empty">এই পেয়ারের উইন রেট ডেটা পাওয়া যায়নি — '
+      + 'রিফ্রেশ চাপুন বা অন্য সময়-উইন্ডো দেখুন</div>';
+    return;
+  }
+  const wrCls  = (window._wrDebug && window._wrDebug.wrClass)  || function(){ return ''; };
+  const fmtPct = (window._wrDebug && window._wrDebug.fmtPct)
+    || function(x){ return (x == null ? '—' : x.toFixed(1) + '%'); };
+  hero.innerHTML = ''
+    + '<div class="wrph-head">'
+    +   '<span class="wrph-name">' + esc(name) + '</span>'
+    +   '<span class="wr-pair-tags">'
+    +     '<span class="wr-tag ' + esc(p.category) + '">' + esc(p.category === 'otc' ? 'OTC' : 'REAL') + '</span>'
+    +     (p.streak_type ? '<span class="wr-streak ' + esc(p.streak_type) + '">'
+    +       (p.streak_type === 'win' ? 'W' : 'L') + p.streak_count + '</span>' : '')
+    +   '</span>'
+    + '</div>'
+    + '<div class="wrph-grid">'
+    +   '<div class="wrph-cell call">'
+    +     '<span class="wrph-label">▲ CALL</span>'
+    +     '<span class="wrph-val ' + wrCls(p.call && p.call.win_pct) + '">' + fmtPct(p.call && p.call.win_pct) + '</span>'
+    +     '<span class="wrph-cnt">' + (p.call ? p.call.correct + '/' + p.call.total : '—') + '</span>'
+    +   '</div>'
+    +   '<div class="wrph-cell put">'
+    +     '<span class="wrph-label">▼ PUT</span>'
+    +     '<span class="wrph-val ' + wrCls(p.put && p.put.win_pct) + '">' + fmtPct(p.put && p.put.win_pct) + '</span>'
+    +     '<span class="wrph-cnt">' + (p.put ? p.put.correct + '/' + p.put.total : '—') + '</span>'
+    +   '</div>'
+    +   '<div class="wrph-cell all">'
+    +     '<span class="wrph-label">সর্বমোট</span>'
+    +     '<span class="wrph-val ' + wrCls(p.win_pct) + '">' + fmtPct(p.win_pct) + '</span>'
+    +     '<span class="wrph-cnt">' + (p.graded || 0) + ' গ্রেডেড</span>'
+    +   '</div>'
+    + '</div>'
+    + '<div class="wrph-foot">' + esc(winLabel)
+    +   (p.last_signal
+        ? ' · শেষ সিগন্যাল: <b class="' + esc((p.last_signal || '').toLowerCase()) + '">'
+          + esc(p.last_signal) + '</b>'
+          + (p.last_accuracy === 'correct' ? ' ✅' : p.last_accuracy === 'wrong' ? ' ❌' : '')
+        : '')
+    + '</div>';
+}
+// winrate.js refreshes its data every 20s while the pane is visible — hook
+// View B's hero into that cycle so the drilled pair's numbers never go stale.
+window._wrPairHeroRefresh = function(){ _renderPairHero(); };
+
+function _resetHistoryChips(){
+  // Reflect filter reset on the actual chip buttons (dir + result groups).
+  ['history-dir-chips', 'history-result-chips'].forEach(id => {
+    const box = $(id);
+    if(!box) return;
+    box.querySelectorAll('.wr-chip').forEach(c => {
+      c.classList.toggle('active', (c.dataset.filter || 'all') === 'all');
     });
   });
-  // Quick diff: if same length + same values + same selected, skip rebuild.
-  // (historyAsset scope switch always forces a rebuild via selected change.)
-  const sameCount = histPairSelect.options.length === newOptions.length;
-  let sameContent = sameCount;
-  if(sameCount){
-    for(let i = 0; i < newOptions.length; i++){
-      const opt = histPairSelect.options[i];
-      if(opt.value !== newOptions[i].value
-         || opt.textContent !== newOptions[i].text
-         || opt.disabled !== newOptions[i].locked){
-        sameContent = false; break;
-      }
+}
+
+function _setPairLiveNote(text){
+  const note = $('wr-live-note');
+  if(!note) return;
+  if(text){ note.textContent = text; note.hidden = false; }
+  else    { note.textContent = '';     note.hidden = true;  }
+}
+
+function _resetPairLiveCard(asset){
+  _setText('wr-live-pair', (window._wrDebug && window._wrDebug.displayFor)
+    ? window._wrDebug.displayFor(asset) : asset);
+  const dirEl = $('wr-live-dir');
+  if(dirEl){ dirEl.textContent = 'লোড হচ্ছে…'; dirEl.className = 'wr-live-dir neutral'; }
+  _setText('wr-live-strength', '—');
+  _setText('wr-live-score', '—');
+  _setText('wr-live-conf', '—');
+  _setText('wr-live-time', '—');
+  const bar = $('wr-live-conf-bar');
+  if(bar){ bar.style.width = '0%'; bar.style.background = ''; }
+  const dot = $('wr-live-dot');
+  if(dot) dot.className = 'wr-live-dot';
+  _setPairLiveNote('');
+}
+
+/* _switchLivePair(asset): re-subscribe the live WS stream to the drilled
+   pair by reusing the topbar #pair-select machinery. Returns:
+     true       → pair is now the live-subscribed pair
+     'jumping'  → pair belongs to ANOTHER market — a setCategory page jump
+                  was initiated; the drill-in reopens after boot via the
+                  sessionStorage 'wrDrillAsset' intent
+     false      → can't go live (locked Real pair on weekends, list empty) */
+function _switchLivePair(asset){
+  const sel = $('pair-select');
+  if(!sel || !asset) return false;
+  let opt = null;
+  for(const o of sel.options){ if(o.value === asset){ opt = o; break; } }
+  if(opt && !opt.disabled){
+    if(sel.value === asset) return true;
+    sel.value = asset;
+    try{ sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    catch(_){ if(sel.onchange) sel.onchange(); }
+    return true;
+  }
+  // Not in the current market's dropdown → maybe it lives on the OTHER
+  // market (the Result list is cross-category; the topbar isn't). Jump to
+  // the pair's own market page — same navigation the app's own market
+  // switch uses — and reopen this drill-in once the page boots there.
+  if(!opt){
+    const p = _wrPairFromPayload(asset);
+    const targetCat = (p && p.category === 'real') ? 'real' : 'otc';
+    if(typeof currentCategory === 'string' && currentCategory !== targetCat){
+      try{ sessionStorage.setItem('wrDrillAsset', asset); }catch(_){}
+      setCategory(targetCat);            // navigates away
+      return 'jumping';
     }
   }
-  if(sameContent){
-    // Just ensure the selected state is right.
-    const wantVal = (historyAsset === HISTORY_ALL) ? HISTORY_ALL : currentAsset;
-    if(histPairSelect.value !== wantVal) histPairSelect.value = wantVal;
+  return false;
+}
+
+/* _checkDrillIntent(): after a setCategory page jump, reopen the pair
+   drill-in that started it (sessionStorage 'wrDrillAsset'). Called from
+   boot once the topbar #pair-select has been populated. If the pair
+   can't go live on this page (Real market closed → locked/missing), the
+   drill-in STILL opens — in static mode (latest-log card + note). */
+function _checkDrillIntent(){
+  let asset = null;
+  try{ asset = sessionStorage.getItem('wrDrillAsset'); }catch(_){ return; }
+  if(!asset) return;
+  const sel = $('pair-select');
+  if(!sel || !sel.options.length) return;   // pairs not rendered yet
+  try{ sessionStorage.removeItem('wrDrillAsset'); }catch(_){}
+  openPairResult(asset);
+}
+
+/* _updatePairLiveCard(pred): called from renderSignal on every live
+   prediction — mirrors it into View B's live card, but ONLY when the
+   drilled pair IS the live-subscribed pair (otherwise the card is fed
+   from the logs by _renderPairLiveFromLogs). */
+function _updatePairLiveCard(pred){
+  if(!wrPairViewAsset || !pred) return;
+  const view = $('wr-view-pair');
+  if(!view || view.hidden) return;
+  if(wrPairViewAsset !== currentAsset) return;
+  const s = pred.signal || 'NEUTRAL';
+  const dirEl = $('wr-live-dir');
+  if(dirEl){
+    dirEl.textContent = s === 'CALL' ? '▲ CALL' : s === 'PUT' ? '▼ PUT' : '➖ NEUTRAL';
+    dirEl.className = 'wr-live-dir ' + (s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral');
+  }
+  const str = (pred.strength || '').toUpperCase();
+  _setText('wr-live-strength', str || '—');
+  const score = pred.score || 0;
+  const scoreEl = $('wr-live-score');
+  if(scoreEl){
+    scoreEl.textContent = (score > 0 ? '+' : '') + score;
+    scoreEl.style.color = score > 0 ? 'var(--green)'
+                        : score < 0 ? 'var(--red)' : 'var(--text-dim)';
+  }
+  const conf = pred.confidence || 0;
+  _setText('wr-live-conf', Math.round(conf) + '%');
+  const bar = $('wr-live-conf-bar');
+  if(bar){
+    bar.style.width = conf + '%';
+    bar.style.background = s === 'CALL' ? 'var(--green)'
+                         : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
+  }
+  _setText('wr-live-time', new Date().toLocaleTimeString('en-US',
+    { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false }));
+  const dot = $('wr-live-dot');
+  if(dot){
+    dot.className = 'wr-live-dot'
+      + (ws && ws.readyState === WebSocket.OPEN ? ' on' : '');
+  }
+  // A live prediction arriving for this pair makes any fallback note stale.
+  if(ws && ws.readyState === WebSocket.OPEN) _setPairLiveNote('');
+}
+
+/* _renderPairLiveFromLogs(): fallback feed for the live card when the
+   drilled pair could NOT go live (locked Real pair on weekends, list not
+   loaded yet, …). Shows the NEWEST log entry — for that pair — instead of
+   a fake "live" reading. Called from onServerSignals after logs merge. */
+function _renderPairLiveFromLogs(){
+  if(!wrPairViewAsset || !wrPairLiveStatic) return;
+  const newest = signalHistory.length ? signalHistory[signalHistory.length - 1] : null;
+  if(!newest || !newest.detail){
+    const dirEl = $('wr-live-dir');
+    if(dirEl){ dirEl.textContent = 'কোনো সিগন্যাল নেই'; dirEl.className = 'wr-live-dir neutral'; }
     return;
   }
-  // Rebuild.
-  histPairSelect.innerHTML = '';
-  if(newOptions.length === 0){
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = 'No pairs available';
-    opt.disabled = true;
-    histPairSelect.appendChild(opt);
+  const s = newest.signal || 'NEUTRAL';
+  const dirEl = $('wr-live-dir');
+  if(dirEl){
+    dirEl.textContent = s === 'CALL' ? '▲ CALL' : s === 'PUT' ? '▼ PUT' : '➖ NEUTRAL';
+    dirEl.className = 'wr-live-dir ' + (s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral');
+  }
+  const str = (newest.detail.strength || '').toUpperCase();
+  _setText('wr-live-strength', str || '—');
+  const score = newest.detail.score;
+  const scoreEl = $('wr-live-score');
+  if(scoreEl){
+    scoreEl.textContent = (score != null ? ((score > 0 ? '+' : '') + score) : '—');
+    scoreEl.style.color = score > 0 ? 'var(--green)'
+                        : score < 0 ? 'var(--red)' : 'var(--text-dim)';
+  }
+  _setText('wr-live-conf', '—');
+  const bar = $('wr-live-conf-bar');
+  if(bar) bar.style.width = '0%';
+  _setText('wr-live-time', newest.detail.ctime
+    ? new Date(newest.detail.ctime * 1000).toLocaleTimeString('en-US',
+        { hour:'2-digit', minute:'2-digit', hour12:false })
+    : '—');
+  const dot = $('wr-live-dot');
+  if(dot) dot.className = 'wr-live-dot';
+}
+
+/* openPairResult(asset): USER REQ 2026-09-07 — drill into ONE pair.
+   Shows ONLY that pair's logs (+ its WR hero + live signal card). */
+function openPairResult(asset){
+  if(!asset) return;
+  const listView = $('wr-view-list');
+  const pairView = $('wr-view-pair');
+  if(!listView || !pairView) return;
+  wrPairViewAsset = asset;
+  historyAsset = asset;             // log scope: THIS pair only
+  historyDirFilter = 'all';
+  historyResultFilter = 'all';
+  _resetHistoryChips();
+  signalHistory = [];
+  window._historyPagesLoaded = 1;
+  listView.hidden = true;
+  pairView.hidden = false;
+  const name = (window._wrDebug && window._wrDebug.displayFor)
+    ? window._wrDebug.displayFor(asset) : asset;
+  _setText('wr-title', name);
+  _setText('wr-subtitle', 'এই পেয়ারের লাইভ সিগন্যাল + সিগন্যাল লগ');
+  _renderPairHero();
+  _resetPairLiveCard(asset);
+  const liveState = _switchLivePair(asset);
+  if(liveState === 'jumping'){
+    // Page is navigating to the pair's own market; the drill-in reopens
+    // there via _checkDrillIntent(). Nothing else to do on this page-load.
     return;
   }
-  newOptions.forEach(o => {
-    const opt = document.createElement('option');
-    opt.value = o.value;
-    opt.textContent = o.text;
-    opt.disabled = o.locked;
-    if(o.selected) opt.selected = true;
-    histPairSelect.appendChild(opt);
-  });
+  wrPairLiveStatic = (liveState !== true);
+  if(liveState === true){
+    if(lastPrediction) _updatePairLiveCard(lastPrediction);
+  } else {
+    _setPairLiveNote('এই পেয়ারটি এখন লাইভ স্ট্রিমে নেই — কার্ডে সর্বশেষ লগের সিগন্যাল দেখানো হচ্ছে');
+  }
+  renderHistory();
+  renderAccuracyTab();
+  loadServerHistory();
+  // Open at the top of the drill-in, not wherever the list was scrolled.
+  try{ window.scrollTo({ top: 0, behavior: 'smooth' }); }catch(_){ window.scrollTo(0, 0); }
+}
+
+/* closePairResult(opts): back to View A (all-pairs list). opts.keepData
+   skips the re-render when the caller (switchTab) refreshes right after. */
+function closePairResult(opts){
+  const o = opts || {};
+  wrPairViewAsset = null;
+  wrPairLiveStatic = false;
+  historyAsset = '';                // logs back to live-pair scope
+  const listView = $('wr-view-list');
+  const pairView = $('wr-view-pair');
+  if(listView) listView.hidden = false;
+  if(pairView) pairView.hidden = true;
+  _setText('wr-title', 'রেজাল্ট');
+  _setText('wr-subtitle', 'সব পেয়ারের Call/Put উইন রেট — বিস্তারিত দেখতে পেয়ারে ক্লিক করুন');
+  if(!o.keepData){
+    renderHistory();
+    renderAccuracyTab();
+    try{ window.dispatchEvent(new CustomEvent('winrate:show')); }catch(_){}
+  }
 }
 
 /* ─── PAIRS ────────────────────────────────────────────────────────────────
@@ -1973,8 +2235,6 @@ function renderPairs(payload){
   // which market the user will switch to next.
   _updateSwitchButtonLabel();
 
-  // TAB BAR: keep the history tab's pair dropdown in sync with the topbar's.
-  renderHistoryPairSelect();
 }
 
 // FIX (DATA-FLOW-2026-07-22): update the switch button's label/title
@@ -2579,50 +2839,34 @@ function wireEvents(){
     });
   });
 
-  // ── History tab pair-select — mirrors the topbar #pair-select. When the
-  // user picks a different pair here, we sync the topbar select and dispatch
-  // its change event so the existing re-subscribe logic runs unchanged.
-  // FIX (ALL-PAIRS-HISTORY-2026-09-07): the new "★ সব পেয়ার (ALL)" option
-  // switches the History tab into cross-pair mode WITHOUT touching the
-  // topbar subscription — history is served from the DB, not the live feed.
-  const histPairSelect = $('history-pair-select');
-  if(histPairSelect){
-    histPairSelect.addEventListener('change', () => {
-      if(histPairSelect.value === HISTORY_ALL){
-        if(historyAsset !== HISTORY_ALL){
-          historyAsset = HISTORY_ALL;
-          signalHistory = [];
-          window._historyPagesLoaded = 1;
-          renderHistory();
-          loadServerHistory();
-        }
-        return;
-      }
-      // Leaving ALL mode (or normal pair switch) — reset scope.
-      const wasAll = (historyAsset === HISTORY_ALL);
-      historyAsset = '';
-      if(wasAll || !signalHistory.length){
-        signalHistory = [];
-        window._historyPagesLoaded = 1;
-        renderHistory();
-      }
-      const topbarSelect = $('pair-select');
-      if(!topbarSelect) return;
-      if(topbarSelect.value !== histPairSelect.value){
-        topbarSelect.value = histPairSelect.value;
-        // Dispatch a change event so the existing handler re-subscribes.
-        try{
-          topbarSelect.dispatchEvent(new Event('change', { bubbles: true }));
-        }catch(_){
-          // Fallback for older browsers — invoke the change handler directly.
-          if(topbarSelect.onchange) topbarSelect.onchange();
-        }
-      } else if(wasAll){
-        // Same pair as topbar but we left ALL mode — reload its history.
-        loadServerHistory();
-      }
-    });
+  // ── RESULT TAB: pair drill-in (View B) wiring.
+  // USER REQ 2026-09-07: tapping a pair row in the all-pairs result list
+  // opens ONLY that pair's logs + live signal (master-detail).
+  window.addEventListener('wr:openpair', (ev) => {
+    const asset = ev && ev.detail && ev.detail.asset;
+    if(asset) openPairResult(asset);
+  });
+  const wrBackBtn = $('wr-back-btn');
+  if(wrBackBtn && !wrBackBtn.dataset.wired){
+    wrBackBtn.dataset.wired = '1';
+    wrBackBtn.addEventListener('click', () => closePairResult());
   }
+  // RESULT-VIEW-FIX: after a cross-market setCategory jump, reopen the
+  // drill-in once the topbar #pair-select has been populated. If pairs
+  // never arrive (feed dead), give up AND drop the stale intent so it
+  // can't surprise a future boot.
+  let _drillTries = 0;
+  const _drillTimer = setInterval(() => {
+    _drillTries++;
+    const sel = $('pair-select');
+    if(sel && sel.options.length){
+      clearInterval(_drillTimer);
+      _checkDrillIntent();
+    } else if(_drillTries > 20){
+      clearInterval(_drillTimer);
+      try{ sessionStorage.removeItem('wrDrillAsset'); }catch(_){}
+    }
+  }, 500);
 
   // FIX (AURORA-V3-2026-08-31): history filter chips — direction + result.
   // One generic wiring helper; both chip groups live in the History tab.
