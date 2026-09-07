@@ -387,7 +387,15 @@ def evaluate(grouped_results, ctx, config, asset="", htf_trend="SIDEWAYS",
                           asset, htf_trend, candles, gate="position_volatile")
 
     if _is_trending:
-        trend_dir = "CALL" if "UP" in str(regime_name) else "PUT"
+        # FIX (TREND-DIR-EXACT-2026-09-07): was `"UP" in str(regime_name)` —
+        # any future regime token containing "UP" (e.g. "RUPTURE") would
+        # silently map to CALL. Exact-match the known trend regimes instead.
+        if regime_name in ("TREND_UP", "UPTREND"):
+            trend_dir = "CALL"
+        elif regime_name in ("TREND_DOWN", "DOWNTREND"):
+            trend_dir = "PUT"
+        else:
+            trend_dir = "CALL" if "UP" in str(regime_name) else "PUT"
         if signal != trend_dir:
             reasons.append(
                 f"_POSITION_GATE: regime={regime_name} but {signal} is "

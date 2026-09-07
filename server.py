@@ -1553,7 +1553,11 @@ async def module_analysis(min_samples: int = 30):
             """)
             pair_summary = [dict(r) for r in cur.fetchall()]
 
-        return {"global_modules": global_modules, "pair_modules": pair_modules, "pair_module_directions": pair_module_dirs, "pair_summary": pair_summary, "total_vote_records": sum(m['total'] for m in global_modules), "min_samples": min_samples, "breakeven_pct": 51.8}
+        return {"global_modules": global_modules, "pair_modules": pair_modules, "pair_module_directions": pair_module_dirs, "pair_summary": pair_summary, "total_vote_records": sum(m['total'] for m in global_modules), "min_samples": min_samples,
+                # FIX (BREAKEVEN-CONST-2026-09-07): was hardcoded 51.8 (=93%
+                # payout). The app's canonical payout is 85% → breakeven is
+                # 100/185 = 54.05% (matches core/breakeven.py and the UI).
+                "breakeven_pct": round(100.0 * 100.0 / (100.0 + 85), 2)}
     except Exception as e:
         _logger.exception("module analysis failed")
         return {"error": str(e), "hint": "module_votes table may not exist yet — new table added in DEEP_v2"}
@@ -2625,6 +2629,17 @@ async def ws_endpoint(ws: WebSocket):
                     await ws.send_text(json.dumps({"type": "error", "error": f"invalid period {period!r}; allowed: " f"{sorted(_ALLOWED_PERIODS)}"}))
                     continue
                 category = (msg.get("category") or "").lower().strip()
+                # FIX (ALLTIME-OTC-GATE-2026-09-07, CRITICAL): the frontend
+                # always sends category=currentCategory and the All-Time OTC
+                # page sends "alltime_otc" — which the gate below rejected,
+                # so EVERY subscribe on that page was answered with an error
+                # and ensure_stream() never ran. Result: the All-OTC page
+                # never received a snapshot or a single tick. The engines
+                # router already normalizes alltime_otc → otc
+                # (engines/__init__.py predict: "if category == 'alltime_otc':
+                # category = 'otc'"), so normalize here BEFORE validation.
+                if category == "alltime_otc":
+                    category = "otc"
                 if category and category not in ("real", "otc"):
                     await ws.send_text(json.dumps({"type": "error", "error": f"invalid category {category!r}; " f"expected 'real' or 'otc'"}))
                     continue

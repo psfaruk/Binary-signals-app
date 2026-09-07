@@ -228,6 +228,24 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         grouped_results, ctx, config, asset=asset, htf_trend=htf_trend,
         candles=candles, all_reasons=all_reasons)
 
+    # FIX (MODULE-LEARNING-REVIVAL-2026-09-07, HIGH): the CONFLUENCE-V1
+    # rewrite replaced the old per-module reason strings with gate strings
+    # (_CONFLUENCE_VOTE:, _EVERY_CANDLE_FALLBACK:, …), so signal_log.reasons
+    # no longer contained any "[module_name]" prefixes. Both DB parsers
+    # (db.per_module_accuracy and core/stats.parse_module_direction) key on
+    # that prefix — the per-module learning loop has been silently dead ever
+    # since (per-pair Wilson weight adaptation always saw total=0, so module
+    # weights could never adapt to demonstrated accuracy). Persist every
+    # module's net vote in the exact machine-readable format the parsers
+    # expect: "[<module>] <CALL|PUT> net=<score> ...". (Deliberately WITHOUT
+    # the "→" arrow so _extract_theory_votes keeps skipping these rows —
+    # only per_module_accuracy should consume them.)
+    for _r in grouped_results:
+        if _r.direction in ("CALL", "PUT"):
+            all_reasons.append(
+                f"[{_r.module_name}] {_r.direction} net={_r.score} "
+                f"(confidence={_r.confidence})")
+
     # Attach shared fields every caller expects.
     pair_profile = weight_adapter.get_profile(asset)
     result["reasons"] = all_reasons

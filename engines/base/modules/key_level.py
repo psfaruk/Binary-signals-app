@@ -79,13 +79,21 @@ def analyze(candles, ctx: MarketContext) -> list:
         # near prev HIGH had only a `pass` placeholder, leaving a structural
         # CALL bias in the MICRO_SR vote group. Close pinning to prev high
         # (resistance) is the exact mirror of close near prev low (support).
-        if abs(close - prev_low) < tol:
+        # FIX (MICRO-SR-TWO-SIDED-2026-09-07): the old elif chain meant a
+        # tiny candle closing within tolerance of BOTH prev low and prev high
+        # could only ever emit the CALL side (structural CALL bias again).
+        # Two-sided evidence is no information — the module now abstains.
+        _near_low  = abs(close - prev_low) < tol
+        _near_high = abs(close - prev_high) < tol
+        if _near_low and _near_high:
+            pass  # two-sided touch → abstain (split evidence is not a vote)
+        elif _near_low:
             if close > prev_low + eps:
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=1, confidence=52,
                     signal_type="REVERSAL", reliability="LEVEL", group="MICRO_SR",
                     reasons=[f"Close near prev low ({prev_low:.5f}) -> CALL bounce"]))
-        elif abs(close - prev_high) < tol:
+        elif _near_high:
             if close < prev_high - eps:
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=1, confidence=52,
@@ -117,6 +125,15 @@ def analyze(candles, ctx: MarketContext) -> list:
                     break
 
     # SIGNAL 7: Trendline Breakout
+    # FIX (TRENDLINE-FIRE-2026-09-07, HIGH): the breakout conditions compared
+    # `close` against max(highs[-2], highs[-1]) / min(lows[-2], lows[-1]) —
+    # but highs[-1]/lows[-1] ARE the current candle's own high/low, and an
+    # OHLC invariant (close ≤ high, close ≥ low) makes both conditions
+    # IMPOSSIBLE (verified: 0/200k random candles). The branch could never
+    # fire, so key_level lost its only breakout-following vote. Now the
+    # close is compared against the PRIOR candles' extremes only
+    # (highs[:-1] / lows[:-1] — the descending/ascending channel the market
+    # actually has to escape).
     if len(candles) >= 12 and atr > 0:
         window = candles[-12:]
         highs = [c["high"] for c in window[-TRENDLINE_WINDOW:]]
@@ -125,7 +142,7 @@ def analyze(candles, ctx: MarketContext) -> list:
         _tol = atr * 0.05
         if highs[0] > highs[-1] and all(highs[i] >= highs[i+1] - _tol
                                         for i in range(len(highs)-1)):
-            if close > max(highs[-2], highs[-1]):
+            if close > max(highs[:-1]):
                 _sig_type = "REVERSAL"
                 _score, _conf = 2, 56
                 if is_trending and trend_strength > 0.5:
@@ -140,7 +157,7 @@ def analyze(candles, ctx: MarketContext) -> list:
                     reasons=[f"Trendline breakout above descending highs -> CALL ({_sig_type})"]))
         elif lows[0] < lows[-1] and all(lows[i] <= lows[i+1] + _tol
                                         for i in range(len(lows)-1)):
-            if close < min(lows[-2], lows[-1]):
+            if close < min(lows[:-1]):
                 _sig_type = "REVERSAL"
                 _score, _conf = 2, 56
                 if is_trending and trend_strength > 0.5:

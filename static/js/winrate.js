@@ -96,7 +96,11 @@
       }
       if(winEl){
         winEl.textContent = (windowDays === 0 ? 'সব সময়'
-          : 'শেষ ' + windowDays + ' দিন') + ' · ব্রেকইভেন ~54% (85% পেআউট)';
+          // FIX (BREAKEVEN-TEXT-2026-09-07): said "~54%" while the true
+          // 85%-payout breakeven is 100/185 = 54.05% (core/breakeven.py).
+          // server.py:1556's hardcoded 51.8 (=93% payout) was also wrong —
+          // all surfaces now quote 54.05%.
+          : 'শেষ ' + windowDays + ' দিন') + ' · ব্রেকইভেন ৫৪.০৫% (৮৫% পেআউট)';
       }
     }
     // CALL / PUT split bars
@@ -254,9 +258,15 @@
     // First fetch (tab may be opened before any event fires on some flows).
     fetchWinrate();
 
-    // Background auto-refresh.
+    // FIX (WR-POLL-VISIBILITY-2026-09-07, LOW): the 20s background poll ran
+    // from page load whether the merged Results tab was visible or not —
+    // wasted DB load (the endpoint aggregates signal_log) for data nobody
+    // sees. Poll only while the pane is actually shown.
     if(wrTimer) clearInterval(wrTimer);
-    wrTimer = setInterval(fetchWinrate, WR_REFRESH_MS);
+    wrTimer = setInterval(function(){
+      var pane = document.getElementById('pane-winrate');
+      if(pane && pane.classList.contains('active')) fetchWinrate();
+    }, WR_REFRESH_MS);
   }
 
   if(document.readyState === 'loading'){

@@ -120,41 +120,71 @@
             const label = document.getElementById('token-status-label');
             const sub = document.getElementById('token-status-sub');
             if (!icon || !label) return;
-            if (data.has_token || data.active) {
+            // FIX (TOKEN-STATUS-KEYS-2026-09-07, MEDIUM): the old code read
+            // data.has_token / data.active / data.expires_at — keys the
+            // endpoint never returns (it sends live / token_dead / message /
+            // stored_token), so the row could never reflect reality. The
+            // function itself was also never invoked (now called from init()
+            // and exposed as window._refreshTokenStatus for common.js).
+            const live = !!data.live;
+            const dead = !!data.token_dead;
+            const stored = data.stored_token && data.stored_token.stored;
+            if (live) {
                 icon.textContent = '●';
                 icon.className = 'token-status-icon ok';
-                label.textContent = 'Token active';
-                sub.textContent = data.expires_at
-                    ? 'Expires: ' + new Date(data.expires_at).toLocaleString()
-                    : 'Live session';
+                label.textContent = 'টোকেন লাইভ — ডেটা আসছে';
+                sub.textContent = data.message
+                    || ('Streams: ' + (data.streams != null ? data.streams : '—'));
+            } else if (dead) {
+                icon.textContent = '●';
+                icon.className = 'token-status-icon warn';
+                label.textContent = 'টোকেন এক্সপায়ার্ড';
+                sub.textContent = data.message || 'নতুন টোকেন ইমপোর্ট করুন।';
+            } else if (stored) {
+                icon.textContent = '●';
+                icon.className = 'token-status-icon warn';
+                label.textContent = 'টোকেন সংরক্ষিত — কানেকশন চেষ্টারত';
+                sub.textContent = data.message || 'কিছুক্ষণ অপেক্ষা করুন।';
             } else {
                 icon.textContent = '●';
                 icon.className = 'token-status-icon warn';
-                label.textContent = 'No active token';
-                sub.textContent = 'Click "Manage token" to import one.';
+                label.textContent = 'কোনো টোকেন নেই';
+                sub.textContent = '"টোকেন ইমপোর্ট" চেপে টোকেন দিন।';
             }
         } catch (e) { /* ignore */ }
     }
 
     function openTokenPanel() {
         // FIX (AURORA-V3-2026-08-31): token-panel.js owns a fully-featured
-        // dynamic modal and now binds the static #token-btn itself. Prefer its
-        // open() — the old path (static #token-panel-modal + 'bst-open-token-    // panel' event nobody listened to) left the modal stuck on "Loading…".
+        // dynamic modal and binds the static #token-btn itself. Prefer its
+        // open() — exposed at init since TOKEN-OPEN-EXPOSURE-2026-09-07.
         if (typeof window.__tokenPanelOpen === 'function') {
             window.__tokenPanelOpen();
             return;
         }
-        const modal = document.getElementById('token-panel-modal');
-        const body = document.getElementById('token-panel-body');
-        if (!modal || !body) return;
-        body.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted)">Loading token panel…</div>';
-        modal.hidden = false;
-        setTimeout(() => {
-            window.dispatchEvent(new CustomEvent('bst-open-token-panel', { detail: { container: body } }));
-        }, 50);
+        // token-panel.js may still be building its modal (DOMContentLoaded
+        // race) — retry briefly, then ask it via the event it listens to.
+        var tries = 0;
+        var iv = setInterval(function () {
+            tries++;
+            if (typeof window.__tokenPanelOpen === 'function') {
+                clearInterval(iv);
+                window.__tokenPanelOpen();
+            } else if (tries >= 10) {
+                clearInterval(iv);
+                window.dispatchEvent(new CustomEvent('bst-open-token-panel'));
+            }
+        }, 100);
     }
 
     // ── Preferences ─────────────────────────────────────────────────────
+    // FIX (PREFS-WIRING-2026-09-07, HIGH): the four switches persisted their
+    // values but nothing consumed them — the sound checkbox said ON while
+    // the app stayed muted. Each change now drives the matching behavior in
+    // common.js (window.__setSoundEnabled / __setShareAutoRefresh /
+    // __setShowWeak), and the initial state is applied on load too. The
+    // default-market preference is consumed by the boot() script in
+    // app.html (localStorage bst_prefs_v2 → prefs.defaultMarket).
     function initPreferences() {
         const soundEl = document.getElementById('pref-sound');
         const autoEl = document.getElementById('pref-autorefresh');
@@ -163,23 +193,41 @@
 
         if (soundEl) {
             soundEl.checked = prefs.sound !== false;
+            if (typeof window.__setSoundEnabled === 'function') {
+                window.__setSoundEnabled(soundEl.checked);
+            }
             soundEl.addEventListener('change', () => {
                 prefs.sound = soundEl.checked;
                 savePrefs(prefs);
+                if (typeof window.__setSoundEnabled === 'function') {
+                    window.__setSoundEnabled(soundEl.checked);
+                }
             });
         }
         if (autoEl) {
             autoEl.checked = prefs.autoRefresh !== false;
+            if (typeof window.__setShareAutoRefresh === 'function') {
+                window.__setShareAutoRefresh(autoEl.checked);
+            }
             autoEl.addEventListener('change', () => {
                 prefs.autoRefresh = autoEl.checked;
                 savePrefs(prefs);
+                if (typeof window.__setShareAutoRefresh === 'function') {
+                    window.__setShareAutoRefresh(autoEl.checked);
+                }
             });
         }
         if (weakEl) {
             weakEl.checked = prefs.showWeak !== false;
+            if (typeof window.__setShowWeak === 'function') {
+                window.__setShowWeak(weakEl.checked);
+            }
             weakEl.addEventListener('change', () => {
                 prefs.showWeak = weakEl.checked;
                 savePrefs(prefs);
+                if (typeof window.__setShowWeak === 'function') {
+                    window.__setShowWeak(weakEl.checked);
+                }
             });
         }
         if (mktEl) {
@@ -232,39 +280,32 @@
             loadHomeData();
             return;
         }
-        // Modals close
-        if (e.target.closest('#token-panel-close')) {
-            e.preventDefault();
-            var m = document.getElementById('token-panel-modal');
-            if (m) m.hidden = true;
-            return;
-        }
-        // Token panel open
+        // FIX (DEAD-BRANCHES-2026-09-07): the #token-panel-close branch was
+        // removed — the static #token-panel-modal it referenced no longer
+        // exists (token-panel.js builds its own #token-modal).
+        // Token panel open (Settings row + topbar 🔑 button)
         if (e.target.closest('#token-manage-btn') || e.target.closest('#token-btn')) {
             e.preventDefault();
             openTokenPanel();
             return;
         }
-        // Signal detail close
-        var detailClose = e.target.closest('#signal-detail-close');
+        // Signal detail close — FIX (DETAIL-CLOSE-ID-2026-09-07): the real id
+        // is #detail-close (app.html); #signal-detail-close never matched, so
+        // this branch was dead. Also close via the .show class common.js uses
+        // (the hidden attribute alone doesn't hide a .modal-overlay.show).
+        var detailClose = e.target.closest('#detail-close');
         if (detailClose) {
             e.preventDefault();
             var overlay = document.getElementById('signal-detail-overlay');
-            if (overlay) overlay.hidden = true;
+            if (overlay) overlay.classList.remove('show');
             var app = document.getElementById('app');
             if (app) app.removeAttribute('inert');
             return;
         }
-        // Market switcher buttons (sidebar)
-        var mktBtn = e.target.closest('.mkt-btn');
-        if (mktBtn) {
-            e.preventDefault();
-            var mkt = mktBtn.dataset.mkt;
-            if (mkt && typeof window.setCategory === 'function') {
-                window.setCategory(mkt);
-            }
-            return;
-        }
+        // FIX (DOUBLE-SETCATEGORY-2026-09-07, LOW): the .mkt-btn branch was
+        // removed — common.js wireEvents() already binds every .mkt-btn, so
+        // both handlers fired per click and the market switch ran TWICE
+        // (double WS teardown + double navigation).
     });
 
     // ── Home tab auto-refresh ───────────────────────────────────────────
@@ -285,6 +326,11 @@
         initPreferences();
         loadHomeData();
         startHomeAutoRefresh();
+        // FIX (TOKEN-STATUS-NEVER-CALLED-2026-09-07, MEDIUM): loadTokenStatus
+        // existed but was never invoked — the Settings token row showed
+        // "চেক হচ্ছে…" forever. Run it at startup; common.js switchTab
+        // re-runs it whenever the Settings tab opens.
+        loadTokenStatus();
     }
 
     if (document.readyState === 'loading') {
@@ -296,4 +342,6 @@
     // Expose for external use
     window.bstRefreshHome = loadHomeData;
     window.bstLoadTokenStatus = loadTokenStatus;
+    // common.js switchTab('setting') calls this to refresh the token row.
+    window._refreshTokenStatus = loadTokenStatus;
 })();

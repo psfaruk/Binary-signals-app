@@ -9,11 +9,16 @@ USER REQUIREMENTS VERIFIED HERE (2026-09-07):
   3. "প্রত্যেকটি সিগন্যাল হিস্টোরি"               → every signal graded +
                                                     recorded with its ctime
 
-Method — walk-forward replay (no look-ahead):
+Method — walk-forward replay (FIXED 2026-09-07, was look-ahead biased):
   * Synthetic OHLC series per pair (GBM with mean reversion + regime drift;
     the SAME generator the repo's smoke test uses, extended with more seeds).
-  * At candle i (>= warmup), the engine sees candles[:i+1] ONLY and emits a
-    direction for candle i (this is exactly what _run_eoc does at EOC).
+  * At candle i (>= warmup), the engine sees candles[:i] ONLY — strictly
+    BEFORE candle i, mirroring the live pipeline: feed.py closes candle N-1,
+    then _run_eoc builds the prediction for candle N from the CLOSED candles
+    (< N). The old window (candles[:i+1]) handed the engine candle i
+    INCLUDING ITS CLOSE and then graded on that same candle — the 81.2%
+    result in backtest_every_candle_results.json was an artifact of reading
+    the answer, not engine edge.
   * The signal is graded against candle i's own open→close move
     (signal issued at candle open, settled at candle close = 1-minute expiry,
     identical to feed.py _accuracy()).
@@ -44,6 +49,7 @@ import os
 import random
 import sys
 import time
+import zlib
 from collections import defaultdict
 from typing import List, Dict
 
@@ -107,10 +113,20 @@ def run_pair(pair: str, n_candles: int):
     errors = 0
 
     for si, (label, drift) in enumerate(scenarios):
-        candles = gen_candles(n_candles, base_price, vol,
-                              seed=hash((pair, label)) % 100000, drift=drift)
+        # FIX (DETERMINISTIC-SEED-2026-09-07): `hash((pair, label))` uses
+        # Python's per-process randomized string hash (PYTHONHASHSEED), so
+        # two runs produced DIFFERENT series and unreproducible results.
+        # zlib.crc32 is stable across runs and platforms.
+        seed = zlib.crc32(f"{pair}|{label}".encode()) % 100000
+        candles = gen_candles(n_candles, base_price, vol, seed=seed, drift=drift)
         for i in range(WARMUP, len(candles)):
-            window = candles[max(0, i - WINDOW):i + 1]
+            # FIX (LOOKAHEAD-2026-09-07, CRITICAL): was candles[...:i+1] —
+            # the engine saw candle i's CLOSE (the answer) and was then
+            # graded on candle i's own open→close move. Live never does
+            # this: the prediction for candle N is made from CLOSED candles
+            # only (feed.py _close_running_and_start_new → _run_eoc). Use
+            # a strictly-preceding window: candles[:i].
+            window = candles[max(0, i - WINDOW):i]
             try:
                 pred = predict(candles=window, ticks=None, micro=None,
                                asset=pair, htf_trend="SIDEWAYS", period=60)
@@ -236,12 +252,28 @@ def main():
           f"(wr {overall['fallback']['win_pct']}%)")
 
     # ── Verdict ───────────────────────────────────────────────────────────
+    # FIX (HONEST-CHECKS-2026-09-07): "history_rows_match_signals" was
+    # hardcoded True and validated nothing. Now: every row must carry a
+    # ctime + signal + accuracy, and (asset, scenario, ctime) must be unique
+    # (mirrors the signal_log UPSERT contract).
+    seen_keys = set()
+    rows_complete = True
+    for h in all_histories:
+        if h.get("ctime") is None or not h.get("signal") or not h.get("accuracy"):
+            rows_complete = False
+            break
+        key = (h["asset"], h.get("scenario"), h["ctime"])
+        if key in seen_keys:
+            rows_complete = False
+            break
+        seen_keys.add(key)
     checks = {
         "coverage_100": coverage_all >= 99.9,
         "zero_errors": all(v["errors"] == 0 for v in report["pairs"].values()),
         "call_put_separated": (overall["call"]["graded"] > 0
                                and overall["put"]["graded"] > 0),
-        "history_rows_match_signals": True,
+        "history_rows_match_signals": (
+            rows_complete and len(seen_keys) == total_signal_rows),
     }
     report["checks"] = checks
     ok = all(checks.values())

@@ -67,7 +67,12 @@ def wilson_bounds(correct, total, z=1.96):
 
 
 def breakeven(payout):
-    return 100.0 / (100.0 + payout)
+    # FIX (UNIT-BUG-2026-09-07, CRITICAL): this returned a FRACTION (0.5405
+    # at 85% payout) while wilson_bounds() returns PERCENT (~30-60). Every
+    # comparison `lo > breakeven(payout)` was therefore always True — a
+    # 40%-win-rate sample printed "✅ PROFITABLE". Return percent so all
+    # call sites compare like with like.
+    return 100.0 * 100.0 / (100.0 + payout)
 
 
 def run(days=7, period=60, payout=85, min_samples=10):

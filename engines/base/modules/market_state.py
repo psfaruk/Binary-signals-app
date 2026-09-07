@@ -130,7 +130,10 @@ def analyze(candles, ctx: MarketContext) -> list:
             f"{_streak} same-color candles in a row")
     if len(candles) >= 3:
         _b3 = candles[-3:]
-        _dir3 = [1 if x["close"] >= x["open"] else -1 for x in _b3]
+        # FIX (DOJI-DIRECTION-2026-09-07): was `>=` — zero-body candles were
+        # padded with +1 (bull), so a 3-doji flat tape read as a bullish
+        # three-push and fired EXHAUSTION on noise. Dojis carry no direction.
+        _dir3 = [1 if x["close"] > x["open"] else -1 for x in _b3]
         _bod3 = [abs(x["close"] - x["open"]) for x in _b3]
         if _dir3[0] == _dir3[1] == _dir3[2] and _bod3[0] > _bod3[1] > _bod3[2] > 0:
             _st("EXHAUSTION", 2, -_dir3[2],
@@ -162,7 +165,10 @@ def analyze(candles, ctx: MarketContext) -> list:
             + (" - at support zone" if _anch else ""))
         _rev_conf += 1
     prev_body = abs(prev["close"] - prev["open"])
-    prev_bull = prev["close"] >= prev["open"]
+    # FIX (DOJI-DIRECTION-2026-09-07): was `>=` — a flat prev candle counted
+    # as bull, so a CALL doji after it looked like a "counter-trend engulfing"
+    # reversal. Engulfing requires both bodies to be real (prev strict bull).
+    prev_bull = prev["close"] > prev["open"]
     if (prev_body > 0 and is_bull != prev_bull and body / prev_body >= 1.0
             and _trend_dir and _cand_dir != _trend_dir):
         _st("REVERSAL", 2, _cand_dir,

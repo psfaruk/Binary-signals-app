@@ -109,7 +109,12 @@ def analyze(candles, ctx: MarketContext) -> list:
 
     results = []
     last = candles[-1]
-    is_bull = last["close"] >= last["open"]
+    # FIX (DOJI-DIRECTION-2026-09-07): was `>=` — a zero-body doji counted as
+    # bullish, so "RSI<30 + doji" fired CALL while the mirror "RSI>70 + doji"
+    # PUT check (not is_bull) stayed silent — an asymmetry that voted on flat
+    # candles. Zero-body candles carry no direction (strict `>`, matching the
+    # module's own overbought branch and market_state/bollinger_rsi rules).
+    is_bull = last["close"] > last["open"]
 
     # ── RSI Analysis ────────────────────────────────────────────────────
     rsi_val = _rsi(closes)

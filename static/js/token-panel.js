@@ -469,6 +469,14 @@
     el.importBtn.addEventListener('click', importToken);
     el.cookiesSave.addEventListener('click', saveCookies);
     el.refreshNow.addEventListener('click', refreshNow);
+    // FIX (TOKEN-OPEN-EXPOSURE-2026-09-07, HIGH): __tokenPanelOpen was only
+    // assigned INSIDE open() — i.e. it existed only AFTER the first open,
+    // so the Settings "টোকেন ইমপোর্ট" button (app-nav.js openTokenPanel)
+    // could never find it on first click and fell back to a dead static
+    // modal. Expose it as soon as the panel is built, and listen for the
+    // legacy 'bst-open-token-panel' event app-nav.js dispatches as fallback.
+    try { window.__tokenPanelOpen = open; } catch (_e) {}
+    document.addEventListener('bst-open-token-panel', function () { open(); });
     document.getElementById('tk-recheck').addEventListener('click', function () {
       result('busy', 'Re-checking…');
       refresh().then(function (s) {

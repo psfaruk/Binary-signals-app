@@ -96,6 +96,36 @@ function displayPairName(asset){
   return base + (a.endsWith('_otc') ? ' OTC' : '');
 }
 let soundEnabled = false, audioCtx = null;
+// FIX (PREFS-WIRING-2026-09-07, HIGH): the Settings switches persisted their
+// values to localStorage (bst_prefs_v2) but NOTHING ever read them — the
+// sound checkbox said ON while the app stayed muted, and the auto-refresh /
+// show-weak switches were pure decoration. Common helpers now expose the
+// setters so app-nav.js can drive real behavior from the toggles.
+window.__setSoundEnabled = function(on){
+  soundEnabled = !!on;
+  const btn = document.getElementById('sound-btn');
+  if(btn){
+    btn.textContent = soundEnabled ? '🔔' : '🔇';
+    btn.setAttribute('aria-pressed', String(soundEnabled));
+    btn.classList.toggle('on', soundEnabled);
+  }
+  if(soundEnabled){
+    try{
+      if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      if(audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
+    }catch(_){}
+  }
+};
+window.__setShareAutoRefresh = function(on){
+  if(_shareSignalInterval){ clearInterval(_shareSignalInterval); _shareSignalInterval = null; }
+  if(on){ _shareSignalInterval = setInterval(refreshShareSignals, 10000); }
+};
+// "WEAK সিগন্যাল দেখাও" — when OFF, WEAK-strength rows are hidden from the
+// share-signal table / home top-signals (the live signal panel itself keeps
+// showing every candle's signal — the every-candle requirement stands; this
+// only curates what gets shared/read at a glance).
+window.__showWeak = true;
+window.__setShowWeak = function(on){ window.__showWeak = !!on; };
 let realPairsList = [], otcPairsList = [], alltimeOtcPairsList = [], pairsList = [];
 let currentMicro = null, runningConf = null;
 let tapePrices = [], tapeDir = [];
@@ -871,7 +901,11 @@ function renderConfluenceChips(pred){
     chip.classList.remove('agree', 'oppose', 'abstain');
     if(!detail || !(cname in detail)){
       chip.classList.add('abstain');
-      chip.title = (chip.title || cname) + ' — no data';
+      // FIX (CHIP-TOOLTIP-2026-09-07, MEDIUM): was `chip.title = (chip.title ||
+      // cname) + ' — no data'` — APPENDED on every render (every tick), so
+      // within minutes the tooltip read "... — no data — no data — no data…".
+      // Assign, don't append.
+      chip.title = cname + ' — no data';
       return;
     }
     const v = detail[cname] || {};
@@ -1134,17 +1168,27 @@ function onServerSignals(sigs, asset, period){
   // FIX (AUDIT-CORE #106, 2026-07-21): also support pagination. If the
   // server response includes `before_ctime` (from a Load-more request),
   // the new sigs are PREPENDED to signalHistory instead of replacing.
-  const serverByCtime = {};
-  const orderedCtimes = [];
-  for(const s of sigs){
-    const key = s.ctime || ('idx_' + orderedCtimes.length);
-    serverByCtime[key] = s;
-    orderedCtimes.push(key);
-  }
+  // FIX (ALL-MERGE-KEY-2026-09-07, CRITICAL): in every-candle mode ~16
+  // pairs signal in the SAME minute, so ctime alone is NOT a unique key —
+  // the old `serverByCtime[s.ctime]` map kept only the LAST pair's row
+  // per timestamp and the pagination dedupe dropped the rest. The
+  // "সব পেয়ার" history could therefore show 1 of ~16 signals per minute.
+  // Key by asset|ctime (falling back to index when ctime is missing) and
+  // dedupe with the same composite key.
+  const keyOf = (s, i) => (s && s.ctime)
+    ? ((s.asset ? s.asset + '|' : '') + s.ctime)
+    : ('idx_' + i);
+  const serverByKey = {};
+  const orderedKeys = [];
+  sigs.forEach((s, i) => {
+    const key = keyOf(s, i);
+    serverByKey[key] = s;
+    orderedKeys.push(key);
+  });
   // Build the incoming server entries (oldest→newest).
   const incoming = [];
-  for(const key of orderedCtimes){
-    const s = serverByCtime[key];
+  for(const key of orderedKeys){
+    const s = serverByKey[key];
     incoming.push({ signal: s.signal, accuracy: s.accuracy, detail: s });
   }
   // Determine if this is a pagination response (server sent before_ctime
@@ -1162,19 +1206,23 @@ function onServerSignals(sigs, asset, period){
   let merged;
   if(isNewestIncomingOlder){
     // Pagination response — prepend incoming to existing history.
-    // Dedupe by ctime (in case of overlap at the boundary).
-    const existingCtimes = new Set(
+    // Dedupe by the composite asset|ctime key (in case of overlap at the
+    // boundary — the server now re-delivers the boundary ctime group).
+    const existingKeys = new Set(
       signalHistory.filter(h => h && h.detail && h.detail.ctime)
-                   .map(h => h.detail.ctime));
+                   .map(h => (h.detail.asset ? h.detail.asset + '|' : '') + h.detail.ctime));
     const uniqueIncoming = incoming.filter(
-      h => !h.detail || !h.detail.ctime || !existingCtimes.has(h.detail.ctime));
+      h => !h.detail || !h.detail.ctime || !existingKeys.has(
+        (h.detail.asset ? h.detail.asset + '|' : '') + h.detail.ctime));
     merged = uniqueIncoming.concat(signalHistory);
   } else {
-    // Normal refresh — preserve local entries whose ctime isn't in the
+    // Normal refresh — preserve local entries whose key isn't in the
     // server response (they're newer than the server's snapshot).
     const preserved = [];
     for(const h of signalHistory){
-      if(h && h.detail && h.detail.ctime && !serverByCtime[h.detail.ctime]){
+      if(h && h.detail && h.detail.ctime
+         && !serverByKey[(h.detail.asset && historyAsset === HISTORY_ALL
+                           ? h.detail.asset + '|' : '') + h.detail.ctime]){
         preserved.push(h);
       }
     }
@@ -1663,8 +1711,11 @@ function switchTab(tabName){
   // Map old 'accuracy' to 'history' (accuracy grid now lives inside history tab).
   // Accept both old names (chart/history/accuracy) and new names (home/chart/history/setting).
   // FIX (AURORA-V3-2026-08-31): + 'winrate' — the new Win Rate dashboard tab.
-  if(tabName === 'accuracy') tabName = 'history';
-  if(tabName !== 'chart' && tabName !== 'history' && tabName !== 'home'
+  // FIX (MERGED-TAB-2026-09-07, USER REQ): the Win Rate tab and the History
+  // tab are now ONE merged tab ("রেজাল্ট ও হিস্টোরি"). 'history'/'accuracy'
+  // map onto 'winrate' so old deep-links and muscle memory keep working.
+  if(tabName === 'accuracy' || tabName === 'history') tabName = 'winrate';
+  if(tabName !== 'chart' && tabName !== 'home'
      && tabName !== 'setting' && tabName !== 'winrate') return;
   currentTab = (tabName === 'home' || tabName === 'setting' || tabName === 'winrate') ? 'chart' : tabName;
 
@@ -1680,16 +1731,21 @@ function switchTab(tabName){
   });
 
   // Tab-specific refresh — ensures the just-shown pane is current.
-  if(tabName === 'history'){
+  if(tabName === 'winrate'){
+    // Merged tab: refresh BOTH halves — the win-rate dashboard (via the
+    // winrate.js event) and the history list + accuracy breakdown (from
+    // in-memory state + a server fetch).
     renderHistoryPairSelect();
     loadServerHistory();
     renderHistory();
-    setTimeout(() => { const hl = $('history-list'); if(hl) hl.scrollTop = 0; }, 50);
     renderAccuracyTab();
-  } else if(tabName === 'winrate'){
-    // FIX (AURORA-V3-2026-08-31): notify winrate.js so it fetches fresh data
-    // when the user opens the Win Rate dashboard.
     try{ window.dispatchEvent(new CustomEvent('winrate:show')); }catch(_){}
+  } else if(tabName === 'setting'){
+    // FIX (TOKEN-STATUS-REFRESH-2026-09-07): the Settings token-status row
+    // was populated only by app-nav.js's loadTokenStatus() — which was never
+    // called. Refresh it every time the user opens the tab (defined in
+    // app-nav.js; null-safe if that file is absent).
+    try{ if(typeof window._refreshTokenStatus === 'function') window._refreshTokenStatus(); }catch(_){}
   } else if(tabName === 'chart'){
     if(chart){
       try{
@@ -2115,8 +2171,22 @@ function scheduleReconnect(){
 function setStatus(s){
   const connDot = $('conn-dot');
   const connLabel = $('conn-label');
-  if(connDot) connDot.className = s;
+  // FIX (CONN-DOT-CLASS-2026-09-07, HIGH): was `connDot.className = s` —
+  // clobbering the base class, so the dot lost its 9px size/shape and the
+  // state rules (`.status-dot.connected` etc. — compound selectors) never
+  // matched. The connection indicator was permanently invisible.
+  if(connDot) connDot.className = 'status-dot ' + s;
   if(connLabel) connLabel.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+  // FIX (HOME-CONN-STATUS-2026-09-07): the Home tab's connection row
+  // (#home-conn-status) was referenced by no code — it showed "কানেক্টিং…"
+  // forever. Drive it from the same source of truth.
+  const homeConn = $('home-conn-status');
+  if(homeConn){
+    homeConn.textContent = s === 'connected' ? 'লাইভ'
+      : s === 'connecting' ? 'কানেক্টিং…' : 'ডিসকানেক্টেড';
+    homeConn.className = 'status-badge ' + (s === 'connected' ? 'status-live'
+      : s === 'connecting' ? '' : 'status-off');
+  }
 }
 
 function handleMsg(msg){
@@ -2318,8 +2388,14 @@ function onEoc(msg){
   // from the prediction the client had in view (reconnect mid-candle etc.),
   // trust the server identity instead of guessing. The authoritative row
   // still arrives via loadServerHistory 500ms later.
+  // FIX (CANDLE-TIME-PHANTOM-2026-09-07, MEDIUM): the guard compared
+  // msg.ctime against lastPrediction.candle_time — a key NO code produces
+  // (the prediction carries candle.time). The identity check therefore
+  // degenerated to "signal differs" and could misfire. Compare against the
+  // prediction candle's open time, which IS the graded ctime in normal flow.
+  const _predCtime = lastPrediction && lastPrediction.candle && lastPrediction.candle.time;
   if(msg.signal && msg.ctime && lastPrediction
-     && msg.ctime !== lastPrediction.candle_time
+     && _predCtime && msg.ctime !== _predCtime
      && msg.signal !== (lastPrediction.signal || 'NEUTRAL')){
     // Misattributed — patch the just-added history entry to the true signal.
     for(let i = signalHistory.length - 1; i >= 0; i--){
@@ -2463,6 +2539,10 @@ function wireEvents(){
         }
       }
       signalHistory = []; totalCorrect = 0; totalSignals = 0;
+      // FIX (PAGES-LOADED-RESET-2026-09-07, LOW): the 10-page load-more cap
+      // was consumed cumulatively across pair switches — after switching
+      // pairs a few times the "আরও পুরোনো সিগন্যাল" button vanished early.
+      window._historyPagesLoaded = 1;
       renderHistory(); renderAccuracy();
       candleData = []; tapePrices = []; tapeDir = [];
       if(candleSeries) candleSeries.setData([]);
@@ -2972,6 +3052,9 @@ function renderShareSignalTable(data){
 
   let html = '';
   for(const row of data.rows){
+    // FIX (SHOW-WEAK-PREF-2026-09-07): honor the Settings switch — hide
+    // WEAK-strength rows when the user turned them off.
+    if(!window.__showWeak && row.strength === 'WEAK') continue;
     const typeClass = row.type === 'OTC' ? 'ss-type-otc' : 'ss-type-real';
     const signalClass = row.signal === 'CALL' ? 'ss-signal-call'
       : row.signal === 'PUT' ? 'ss-signal-put' : 'ss-signal-neutral';
@@ -3084,10 +3167,14 @@ function initShareSignalCollapse(){
 
   // One listener on the header — the toggle button lives inside it, so its
   // clicks bubble here (binding both would flip twice and cancel out).
+  // FIX (SHARE-GUARD-2026-09-07, MEDIUM): the guard checked for
+  // `.share-signal-btn` — a class NO button carries (the refresh/save/history
+  // buttons are `.icon-btn-sm`), so every action-button click ALSO toggled
+  // the panel collapse and yanked the chart height. Guard on the real class.
   const header = sec.querySelector('.share-signal-header');
   if(header) header.addEventListener('click', (ev) => {
     // Don't hijack the refresh / save / history buttons in the same bar.
-    if(ev.target.closest('.share-signal-btn')) return;
+    if(ev.target.closest('.icon-btn-sm')) return;
     ev.preventDefault();
     setShareSignalCollapsed(!sec.classList.contains('is-collapsed'), true);
   });

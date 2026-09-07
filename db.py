@@ -404,7 +404,15 @@ def init():
             if _php_cols:
                 for _new_col in ("call_total INT", "call_correct INT",
                                  "put_total INT", "put_correct INT",
-                                 "last_ctime INT"):
+                                 "last_ctime INT",
+                                 # FIX (HOURLY-DEDUP-2026-09-07, MEDIUM):
+                                 # the dedup ledger keyed (asset, hour_utc) on a
+                                 # single last_ctime — a 300s candle graded at the
+                                 # same ctime as a 60s candle was silently skipped,
+                                 # and out-of-order re-grades double-counted.
+                                 # counted_keys is a JSON map {"<period>": ctime}
+                                 # so every (period, ctime) is deduped exactly.
+                                 "counted_keys TEXT DEFAULT '{}'"):
                     _col_name = _new_col.split()[0]
                     if _col_name not in _php_cols:
                         c.execute(f"ALTER TABLE pair_hourly_patterns ADD COLUMN {_new_col}")
@@ -900,7 +908,7 @@ def log_signal(asset, period, ctime, signal, score, confidence,
         conn.close()
 
     try:
-        _update_hourly_pattern(asset, ctime, signal, accuracy, confidence)
+        _update_hourly_pattern(asset, period, ctime, signal, accuracy, confidence)
     except Exception as _hp_err:
         print(f"[db] hourly pattern update skipped: {_hp_err}")
 
@@ -917,15 +925,21 @@ def _get_session_name(hour_utc: int) -> str:
         return "off"
 
 
-def _update_hourly_pattern(asset: str, ctime: int, signal: str,
+def _update_hourly_pattern(asset: str, period: int, ctime: int, signal: str,
                            accuracy: str, confidence):
     """Update pair_hourly_patterns table after each graded signal.
 
-    FIX (CONFLUENCE-V1 2026-09-02): added a last_ctime dedup ledger.
+    FIX (CONFLUENCE-V1-2026-09-02): added a last_ctime dedup ledger.
     log_signal is an UPSERT keyed on (asset, period, ctime) — any re-grade of
     the same candle used to increment these counters a second time and
     silently corrupt every time-pattern win rate. A re-grade of the SAME
     candle is now a no-op for this table.
+
+    FIX (HOURLY-DEDUP-2026-09-07): the ledger is now PER (period, ctime) via
+    the counted_keys JSON column instead of one last_ctime per (asset, hour).
+    Previously a 300s candle graded at the same ctime as a 60s candle was
+    silently dropped (only one could be remembered), and a re-grade that was
+    not the latest write double-counted.
     """
     if not ctime or accuracy not in ('correct', 'wrong'):
         return
@@ -953,9 +967,30 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
         existing = cur.fetchone()
 
         # FIX (CONFLUENCE-V1): dedup ledger — same candle re-graded → skip.
-        if existing and existing['last_ctime'] and int(existing['last_ctime']) == int(ctime):
+        # FIX (HOURLY-DEDUP-2026-09-07): the ledger is per (period, ctime) —
+        # counted_keys JSON {"60": 1725…, "300": …} replaces the single
+        # last_ctime check so multi-period grades at one hour never collide.
+        _counted = {}
+        if existing:
+            try:
+                _counted = json.loads(existing['counted_keys'] or '{}')
+                if not isinstance(_counted, dict):
+                    _counted = {}
+            except Exception:
+                _counted = {}
+            # Legacy ledger fallback: rows written before counted_keys existed.
+            if (not _counted and existing['last_ctime']
+                    and int(existing['last_ctime']) == int(ctime)):
+                _counted = {'60': int(existing['last_ctime'])}
+        _ckey = str(period)
+        if _counted.get(_ckey) and int(_counted[_ckey]) == int(ctime):
             conn.close()
             return
+        _counted[_ckey] = int(ctime)
+        # Bound the ledger (a candle can only be re-graded, never travel back
+        # in time — keep the newest 8 period keys, always including current).
+        if len(_counted) > 8:
+            _counted = dict(sorted(_counted.items(), key=lambda kv: kv[1])[-8:])
 
         # FIX (TRUE-WR-2026-08-31): call/put win rates are now TRUE ratios
         # tracked via explicit counter columns (call_total/call_correct/
@@ -1008,11 +1043,13 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
                     best_direction = ?, call_win_pct = ?, put_win_pct = ?,
                     call_total = ?, call_correct = ?,
                     put_total = ?, put_correct = ?,
+                    counted_keys = ?,
                     last_ctime = ?, last_updated = ?, ts = ?
                 WHERE asset = ? AND hour_utc = ?
             """, (session, new_total, new_correct, new_wrong, new_win_pct,
                   new_avg_conf, best_dir, new_call_wr, new_put_wr,
                   ct, cc, pt, pc,
+                  json.dumps(_counted),
                   int(ctime), ts_val, ts_val, asset, hour_utc))
         else:
             win_pct = 100.0 if is_correct else 0.0
@@ -1032,11 +1069,11 @@ def _update_hourly_pattern(asset: str, ctime: int, signal: str,
                     (asset, hour_utc, session, total_signals, correct, wrong,
                      win_pct, avg_confidence, best_direction, call_win_pct,
                      put_win_pct, call_total, call_correct, put_total,
-                     put_correct, last_ctime, last_updated, ts)
-                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     put_correct, last_ctime, counted_keys, last_updated, ts)
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (asset, hour_utc, session, is_correct, 1 - is_correct,
                   win_pct, _conf_num, best_dir, call_wr, put_wr,
-                  ct, cc, pt, pc, int(ctime), ts_val, ts_val))
+                  ct, cc, pt, pc, int(ctime), json.dumps(_counted), ts_val, ts_val))
 
         conn.commit()
     except Exception as e:
@@ -1172,7 +1209,15 @@ def get_recent_signals_all(period, limit=100, before_ctime=None, category=None):
                    WHERE period=? AND signal IN ('CALL','PUT'){frag}"""
         params = [period] + list(pair_params)
         if before_ctime is not None:
-            base += " AND ctime < ?"
+            # FIX (ALL-CTIME-PAGINATION-2026-09-07, HIGH): cross-pair rows
+            # SHARE one ctime (up to 16 pairs signal in the same minute in
+            # every-candle mode). The old strict `ctime < before` cursor
+            # dropped every same-ctime row that didn't fit on the previous
+            # page — the "Load older" button silently lost signals forever.
+            # Using `ctime <= before` re-delivers the boundary group; the
+            # frontend dedupes by (asset|ctime) before merging, so the
+            # overlap is harmless and nothing is lost.
+            base += " AND ctime <= ?"
             params.append(before_ctime)
         base += " ORDER BY ctime DESC, id DESC LIMIT ?"
         params.append(limit)
@@ -1240,60 +1285,116 @@ def get_directional_winrate(period=60, days=None, category=None,
         params.extend(_allow)
     where_sql = " AND ".join(where)
 
+    # PERF-FIX (WINRATE-SQL-2026-09-07, HIGH): the old implementation loaded
+    # EVERY matching signal_log row into Python (every-candle mode × 16 pairs
+    # × 90-day retention ⇒ up to ~2M rows) and aggregated in a Python loop —
+    # and winrate.js polls this every 20 seconds. Now:
+    #   1. counts come from one SQL GROUP BY (≤ ~96 result rows), and
+    #   2. streaks / last-signal come from a bounded window (last 150 rows
+    #      per asset) via ROW_NUMBER() — with a graceful per-asset fallback
+    #      for SQLite builds without window-function support.
     with _read_cursor() as c:
-        rows = c.execute(
-            f"""SELECT asset, category, ctime, signal, accuracy
+        grouped = c.execute(
+            f"""SELECT asset, category, signal, accuracy, COUNT(*) AS n,
+                       MAX(ctime) AS max_ctime
                 FROM signal_log
                 WHERE {where_sql}
-                ORDER BY asset, ctime, id""",
+                GROUP BY asset, category, signal, accuracy""",
             params,
         ).fetchall()
 
-    # Aggregate per asset in chronological order (streaks need order).
+        recent = []
+        try:
+            recent = c.execute(
+                f"""SELECT asset, ctime, signal, accuracy FROM (
+                        SELECT asset, ctime, signal, accuracy,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY asset
+                                   ORDER BY ctime DESC, id DESC) AS rn
+                        FROM signal_log
+                        WHERE {where_sql})
+                    WHERE rn <= 150
+                    ORDER BY asset, ctime, id""",
+                params,
+            ).fetchall()
+        except sqlite3.Error:
+            recent = []
+
     per = {}
-    for r in rows:
-        a = r["asset"]
+    for g in grouped:
+        a = g["asset"]
         d = per.setdefault(a, {
-            "category": r["category"] or ('otc' if str(a).endswith('_otc') else 'real'),
+            "category": g["category"] or ('otc' if str(a).endswith('_otc') else 'real'),
             "total": 0, "correct": 0, "wrong": 0, "draws": 0, "graded": 0,
             "call_total": 0, "call_correct": 0,
             "put_total": 0, "put_correct": 0,
             "last_ctime": 0, "last_signal": None, "last_accuracy": None,
             "streak_type": None, "streak_count": 0,
         })
-        acc = r["accuracy"]
-        sig = r["signal"]
-        d["total"] += 1
-        d["last_ctime"] = r["ctime"]
-        d["last_signal"] = sig
-        d["last_accuracy"] = acc
+        n = g["n"] or 0
+        acc = g["accuracy"]
+        sig = g["signal"]
+        d["total"] += n
+        if g["max_ctime"] and g["max_ctime"] > d["last_ctime"]:
+            d["last_ctime"] = g["max_ctime"]
         if acc == "draw":
-            d["draws"] += 1
-            continue
-        # Only correct/wrong feed graded stats & streaks.
-        is_call = (sig == "CALL")
-        if is_call:
-            d["call_total"] += 1
-        else:
-            d["put_total"] += 1
-        if acc == "correct":
-            d["correct"] += 1
-            d["graded"] += 1
-            if is_call:
-                d["call_correct"] += 1
+            d["draws"] += n
+        elif acc == "correct":
+            d["correct"] += n
+            d["graded"] += n
+            if sig == "CALL":
+                d["call_total"] += n
+                d["call_correct"] += n
             else:
-                d["put_correct"] += 1
-            if d["streak_type"] == "win":
-                d["streak_count"] += 1
-            else:
-                d["streak_type"], d["streak_count"] = "win", 1
+                d["put_total"] += n
+                d["put_correct"] += n
         elif acc == "wrong":
-            d["wrong"] += 1
-            d["graded"] += 1
-            if d["streak_type"] == "loss":
+            d["wrong"] += n
+            d["graded"] += n
+            if sig == "CALL":
+                d["call_total"] += n
+            else:
+                d["put_total"] += n
+
+    # Fallback for SQLite builds without window functions: fetch the last
+    # 150 rows per asset with the classic LIMIT query (16 assets ⇒ 16 cheap
+    # indexed lookups — still vastly cheaper than the old full scan).
+    if not recent and per:
+        recent = []
+        with _read_cursor() as c:
+            for a in per:
+                recent_rows = c.execute(
+                    f"""SELECT asset, ctime, signal, accuracy
+                        FROM signal_log
+                        WHERE {where_sql} AND asset = ?
+                        ORDER BY ctime DESC, id DESC LIMIT 150""",
+                    params + [a],
+                ).fetchall()
+                recent.extend(reversed(recent_rows))
+        recent.sort(key=lambda r: (r["asset"], r["ctime"]))
+
+    # Streaks + last_signal/last_accuracy from the bounded recent rows
+    # (chronological order per asset; draws break nothing — they are skipped
+    # exactly like the old full-history loop did).
+    by_asset_recent = {}
+    for r in recent or []:
+        by_asset_recent.setdefault(r["asset"], []).append(r)
+    for a, d in per.items():
+        rows_a = by_asset_recent.get(a) or []
+        if rows_a:
+            last = rows_a[-1]
+            d["last_ctime"] = max(d["last_ctime"], last["ctime"] or 0)
+            d["last_signal"] = last["signal"]
+            d["last_accuracy"] = last["accuracy"]
+        for r in rows_a:
+            acc = r["accuracy"]
+            if acc not in ("correct", "wrong"):
+                continue
+            want = "win" if acc == "correct" else "loss"
+            if d["streak_type"] == want:
                 d["streak_count"] += 1
             else:
-                d["streak_type"], d["streak_count"] = "loss", 1
+                d["streak_type"], d["streak_count"] = want, 1
 
     def _finalize(d, asset=""):
         graded = d["graded"]

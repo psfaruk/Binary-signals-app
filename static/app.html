@@ -43,11 +43,7 @@
             </button>
             <button class="nav-item" data-tab="winrate" type="button">
                 <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg></span>
-                <span class="nav-label">উইন রেট</span>
-            </button>
-            <button class="nav-item" data-tab="history" type="button">
-                <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15.5 13.5"/></svg></span>
-                <span class="nav-label">হিস্টোরি</span>
+                <span class="nav-label">রেজাল্ট ও হিস্টোরি</span>
             </button>
             <button class="nav-item" data-tab="setting" type="button">
                 <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
@@ -139,7 +135,7 @@
                         <div class="stat-sub">স্ট্রিমিং চলছে</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">আজকের সিগন্যাল</div>
+                        <div class="stat-label">লাইভ সিগন্যাল</div>
                         <div class="stat-value" id="home-today-signals">0</div>
                         <div class="stat-sub" id="home-today-calls">CALL: 0 / PUT: 0</div>
                     </div>
@@ -334,11 +330,15 @@
                 </div>
             </section>
 
-            <!-- =========== WIN RATE TAB (NEW) =========== -->
+            <!-- =========== RESULTS TAB (WIN RATE + HISTORY MERGED) ===========
+                 USER REQ (2026-09-07): "Win rate ট্যাব ও হিস্টোরি ট্যাব আলাদা
+                 আলাদা করলেন কেনো, এই দুইটা কে মার্জ করে একটি ট্যাব এ সহজ করে
+                 দিলেই তো ভালো হয়" — one tab: per-pair CALL/PUT win rates on
+                 top, full signal history + accuracy breakdown below. -->
             <section class="tab-pane" data-pane="winrate" id="pane-winrate">
                 <div class="pane-header">
-                    <h2>উইন রেট ড্যাশবোর্ড</h2>
-                    <p class="pane-subtitle">প্রতি পেয়ার ও Call/Put আলাদা উইন রেট — রিয়েল গ্রেডেড রেজাল্ট থেকে</p>
+                    <h2>রেজাল্ট ও হিস্টোরি</h2>
+                    <p class="pane-subtitle">প্রতি পেয়ারে Call/Put আলাদা উইন রেট + কোন সময়ে কোন সিগন্যাল — সব এক ট্যাবে</p>
                 </div>
 
                 <div class="wr-toolbar">
@@ -398,42 +398,11 @@
                     Draw গুলো উইন রেটে গণনা হয় না। যে পেয়ারের CALL রেট ভালো সেখানে CALL সিগন্যাল
                     নিন, যেখানে PUT ভালো সেখানে PUT — ফিল্টার করে দেখুন।
                 </p>
-            </section>
 
-            <!-- =========== HISTORY TAB =========== -->
-            <section class="tab-pane" data-pane="history" id="pane-history">
-                <div class="pane-header">
-                    <h2>সিগন্যাল হিস্টোরি</h2>
-                    <p class="pane-subtitle">পাস্ট সিগন্যাল ও একুরেসি স্ট্যাটস</p>
-                </div>
-
-                <!-- Accuracy hero — common.js writes to #acc-hero-pct, #acc-hero-detail -->
-                <div class="accuracy-hero">
-                    <div class="acc-hero-pct" id="acc-hero-pct">—</div>
-                    <div class="acc-hero-detail" id="acc-hero-detail">এখনো কোনো গ্রেডেড সিগন্যাল নেই</div>
-                </div>
-
-                <!-- Stat grid — common.js writes to #acc-* -->
-                <div class="accuracy-grid">
-                    <div class="acc-card"><div class="acc-label">মোট</div><div class="acc-value" id="acc-total">0</div></div>
-                    <div class="acc-card"><div class="acc-label">উইন</div><div class="acc-value acc-wins" id="acc-wins">0</div></div>
-                    <div class="acc-card"><div class="acc-label">লস</div><div class="acc-value acc-losses" id="acc-losses">0</div></div>
-                    <div class="acc-card"><div class="acc-label">ড্র</div><div class="acc-value" id="acc-draws">0</div></div>
-                </div>
-
-                <!-- Breakdowns — common.js writes to #acc-strength-breakdown, #acc-regime-breakdown -->
-                <div class="breakdown-section">
-                    <h3>স্ট্রেংথ অনুযায়ী</h3>
-                    <div id="acc-strength-breakdown" class="breakdown-grid"></div>
-                </div>
-                <div class="breakdown-section">
-                    <h3>রেজিম অনুযায়ী</h3>
-                    <div id="acc-regime-breakdown" class="breakdown-grid"></div>
-                </div>
-
-                <!-- History list — common.js renderHistory() writes to #history-list -->
+                <!-- ─── SIGNAL HISTORY (moved from the old History tab) ─── -->
                 <div class="history-section">
-                    <h3>সাম্প্রতিক সিগন্যাল</h3>
+                    <h3>সিগন্যাল হিস্টোরি</h3>
+                    <p class="history-sub">কোন সময়ে কোন পেয়ারে কী সিগন্যাল দিলো — সব রেকর্ড</p>
                     <div class="history-controls">
                         <select id="history-pair-select" class="filter-select"><option value="">সব পেয়ার</option></select>
                         <div class="wr-chips" id="history-dir-chips">
@@ -450,6 +419,25 @@
                     <div id="history-list" class="history-list">
                         <div class="loading-row">এখনো কোনো সিগন্যাল নেই</div>
                     </div>
+                </div>
+
+                <!-- ─── ACCURACY BREAKDOWN ─── -->
+                <div class="breakdown-section">
+                    <h3>মোট ফলাফল</h3>
+                    <div class="accuracy-grid">
+                        <div class="acc-card"><div class="acc-label">মোট</div><div class="acc-value" id="acc-total">0</div></div>
+                        <div class="acc-card"><div class="acc-label">উইন</div><div class="acc-value acc-wins" id="acc-wins">0</div></div>
+                        <div class="acc-card"><div class="acc-label">লস</div><div class="acc-value acc-losses" id="acc-losses">0</div></div>
+                        <div class="acc-card"><div class="acc-label">ড্র</div><div class="acc-value" id="acc-draws">0</div></div>
+                    </div>
+                </div>
+                <div class="breakdown-section">
+                    <h3>স্ট্রেংথ অনুযায়ী</h3>
+                    <div id="acc-strength-breakdown" class="breakdown-grid"></div>
+                </div>
+                <div class="breakdown-section">
+                    <h3>রেজিম অনুযায়ী</h3>
+                    <div id="acc-regime-breakdown" class="breakdown-grid"></div>
                 </div>
             </section>
 
@@ -542,11 +530,7 @@
             </button>
             <button class="bn-item" data-tab="winrate" type="button">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
-                <span>উইন রেট</span>
-            </button>
-            <button class="bn-item" data-tab="history" type="button">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15.5 13.5"/></svg>
-                <span>হিস্টোরি</span>
+                <span>রেজাল্ট</span>
             </button>
             <button class="bn-item" data-tab="setting" type="button">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -556,13 +540,10 @@
     </main>
 </div><!-- /#app -->
 
-<!-- ============ TOKEN PANEL MODAL ============ -->
-<div id="token-panel-modal" class="modal-overlay" hidden>
-    <div class="modal-content token-panel-content">
-        <button class="modal-close" id="token-panel-close" type="button" aria-label="Close">×</button>
-        <div id="token-panel-body"></div>
-    </div>
-</div>
+<!-- DEAD STATIC TOKEN MODAL REMOVED (FIX F13-2026-09-07): token-panel.js
+     builds and owns its own #token-modal (tk-* nodes); this static markup was
+     unreachable — the only element that could ever display it (#token-panel-modal
+     + .show) was never toggled by any code path. -->
 
 <!-- ============ SIGNAL DETAIL MODAL — common.js writes to #detail-body, #detail-title ============ -->
 <div id="signal-detail-overlay" class="modal-overlay" hidden>
@@ -582,7 +563,18 @@
 <script>
 (function() {
     var params = new URLSearchParams(window.location.search);
-    var cat = params.get('market') || params.get('category') || localStorage.getItem('marketCategory') || 'otc';
+    var cat = params.get('market') || params.get('category') || null;
+    // FIX (DEFAULT-MARKET-PREF-2026-09-07, MEDIUM): the Settings
+    // "ডিফল্ট মার্কেট" switch persisted prefs.defaultMarket (bst_prefs_v2)
+    // but boot() never read it — startup always fell back to OTC. Honor it
+    // (URL param wins over the saved preference, which wins over OTC).
+    if (!cat) {
+        try {
+            var savedPrefs = JSON.parse(localStorage.getItem('bst_prefs_v2') || '{}');
+            cat = savedPrefs.defaultMarket || null;
+        } catch (_) {}
+    }
+    if (!cat) { try { cat = localStorage.getItem('marketCategory'); } catch (_) {} }
     var validCats = ['otc', 'real', 'alltime_otc'];
     var finalCat = validCats.indexOf(cat) >= 0 ? cat : 'otc';
     document.body.setAttribute('data-category', finalCat);
