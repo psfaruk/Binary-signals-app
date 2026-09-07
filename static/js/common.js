@@ -1726,7 +1726,7 @@ function _renderRegimeBreakdown(){
    switchTab(name): toggles the .active class on the 3 tab buttons and the
    3 tab panes. Also fires tab-specific refresh logic so the just-shown
    pane is up-to-date (cheap re-render from in-memory state). */
-function switchTab(tabName){
+function switchTab(tabName, opts){
   // FIX (UI-FIX-2026-08-13): new 4-tab system uses home/chart/history/setting.
   // Map old 'accuracy' to 'history' (accuracy grid now lives inside history tab).
   // Accept both old names (chart/history/accuracy) and new names (home/chart/history/setting).
@@ -1757,7 +1757,13 @@ function switchTab(tabName){
     // pair drill-in is closed so the tab behaves exactly as asked:
     // "রেজাল্ট ট্যাব এ ক্লিক করলেই সব গুলো পেয়ার এর call put এর রেজাল্ট
     //  উইন রেট গুলো দেখাবে"।
-    closePairResult({ keepData: true });
+    // ALIGN-FIX 2026-09-08: _checkDrillIntent() reopens a pair drill after a
+    // cross-market page jump and MUST land the user on that drill — it calls
+    // switchTab('winrate',{keepDrill:true}) AFTER openPairResult(). Without
+    // the opt, this closePairResult() undid the reopen and the user landed
+    // on the chart pane with the drill invisible behind it.
+    const o = opts || {};
+    if(!o.keepDrill) closePairResult({ keepData: true });
     loadServerHistory();
     renderHistory();
     renderAccuracyTab();
@@ -1929,6 +1935,16 @@ function _switchLivePair(asset){
     const p = _wrPairFromPayload(asset);
     const targetCat = (p && p.category === 'real') ? 'real' : 'otc';
     if(typeof currentCategory === 'string' && currentCategory !== targetCat){
+      /* ALIGN-FIX 2026-09-08: NEVER page-jump into a market whose pair list
+         is empty (Real on weekends). The reload used to land the user on a
+         closed market: dropdown blank, chart stuck on "market closed", and
+         (before the switchTab keepDrill fix) the drill-in hidden behind the
+         wrong pane. Staying put opens the drill in static mode instead —
+         the logs + hero still show, with an honest "not live" note. */
+      const targetList = targetCat === 'real' ? realPairsList
+                       : targetCat === 'alltime_otc' ? alltimeOtcPairsList
+                       : otcPairsList;
+      if(Array.isArray(targetList) && targetList.length === 0) return false;
       try{ sessionStorage.setItem('wrDrillAsset', asset); }catch(_){}
       setCategory(targetCat);            // navigates away
       return 'jumping';
@@ -1941,7 +1957,10 @@ function _switchLivePair(asset){
    drill-in that started it (sessionStorage 'wrDrillAsset'). Called from
    boot once the topbar #pair-select has been populated. If the pair
    can't go live on this page (Real market closed → locked/missing), the
-   drill-in STILL opens — in static mode (latest-log card + note). */
+   drill-in STILL opens — in static mode (latest-log card + note).
+   ALIGN-FIX 2026-09-08: also ACTIVATE the Result pane — openPairResult()
+   alone only unhides View B inside #pane-winrate, so after the reload the
+   user used to land on the chart pane with the drill invisible. */
 function _checkDrillIntent(){
   let asset = null;
   try{ asset = sessionStorage.getItem('wrDrillAsset'); }catch(_){ return; }
@@ -1950,6 +1969,7 @@ function _checkDrillIntent(){
   if(!sel || !sel.options.length) return;   // pairs not rendered yet
   try{ sessionStorage.removeItem('wrDrillAsset'); }catch(_){}
   openPairResult(asset);
+  switchTab('winrate', { keepDrill: true });
 }
 
 /* _updatePairLiveCard(pred): called from renderSignal on every live
@@ -2126,14 +2146,20 @@ function renderPairs(payload){
   if(activeList.length === 0){
     const opt = document.createElement('option');
     opt.value = '';
+    /* ALIGN-FIX 2026-09-08 (USER REQ: সব কিছু দৃশ্যমান থাকবে): a lone DISABLED
+       option is never selected → selectedIndex=-1 → the <select> rendered
+       BLANK and looked broken on every screen size. `selected` on a disabled
+       option is the standard empty-state pattern: the text shows, but the
+       option still can't be picked. Bengali text matches the app language. */
     if(currentCategory === 'real'){
-      opt.textContent = '⚠ Real Market closed (weekend/bank holiday)';
+      opt.textContent = '⚠ রিয়েল মার্কেট বন্ধ (সপ্তাহান্ত/ছুটি)';
     } else if(currentCategory === 'alltime_otc'){
-      opt.textContent = 'No All-Time OTC pairs available';
+      opt.textContent = 'কোনো All-Time OTC পেয়ার নেই';
     } else {
-      opt.textContent = 'No OTC pairs available';
+      opt.textContent = 'কোনো OTC পেয়ার নেই';
     }
     opt.disabled = true;
+    opt.selected = true;
     pairSelect.appendChild(opt);
     // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-17): when the active list is
     // empty (e.g., Real market on weekend, or alltime_otc list temporarily

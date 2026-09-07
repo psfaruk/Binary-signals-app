@@ -556,13 +556,20 @@ svg{display:block}
   .app-shell{display:block;min-height:100vh;min-height:100dvh}
   .app-sidebar{display:none}
   .app-main{padding:0 12px 26px}
-  .app-bottomnav{display:flex}
+  /* ALIGN-FIX 2026-09-08: keep the same 4-col grid as panels (order-proof). */
+  .app-bottomnav{display:grid;grid-template-columns:repeat(4,1fr)}
   .app-main{padding-bottom:calc(76px + env(safe-area-inset-bottom, 0px))}
 
   /* Chart: stack the side panel UNDER the chart */
   .chart-layout{grid-template-columns:minmax(0,1fr)}
   .chart-container{height:46vh;min-height:300px}
   .chart-panel{overflow:visible}
+
+  /* ALIGN-FIX 2026-09-08: the base .app-topbar edge-bleed (margin 0 -18px +
+     padding 18px) is tuned to the DESKTOP .app-main padding (18px). At
+     ≤1023px the main padding is 12px — re-tune the bleed so the topbar stays
+     flush with the screen edges instead of overflowing 6px past them. */
+  .app-topbar{margin:0 -12px 12px;padding-left:12px;padding-right:12px}
 
   /* Topbar: two-row wrap instead of overflow */
   .app-topbar{flex-wrap:wrap;row-gap:8px;padding-top:8px;padding-bottom:8px}
@@ -581,7 +588,13 @@ svg{display:block}
 
 /* ─── ≤779px: phone compression ─────────────────────────────────────────── */
 @media (max-width: 779px){
-  .app-main{padding:0 10px 26px}
+  /* ALIGN-FIX 2026-09-08: the shorthand below used to reset padding-bottom to
+     26px, letting the fixed bottom nav (≈70px tall) cover the last rows of
+     content on phones. Keep horizontal 10px but restore the nav clearance. */
+  .app-main{padding:0 10px 26px;padding-bottom:calc(76px + env(safe-area-inset-bottom, 0px))}
+  /* ALIGN-FIX 2026-09-08: match the topbar edge-bleed to the 10px main
+     padding (was inheriting the -18px desktop bleed → 8px right overflow). */
+  .app-topbar{margin:0 -10px 12px;padding-left:10px;padding-right:10px}
   .pane-header h2{font-size:19px}
   .topbar-left{gap:6px}
   .mobile-menu-toggle{padding:6px 9px;font-size:11.5px}
@@ -633,6 +646,14 @@ svg{display:block}
   .wrph-cnt{font-size:9px}
   .wr-live-dir{font-size:21px;min-width:92px}
   .wr-live-meta-row{font-size:10.5px}
+
+  /* ALIGN-FIX 2026-09-08: the home "টপ সিগন্যাল" table (6 columns) used to
+     carry panels' min-width:430px → always ~120px wider than a phone. Drop
+     the forced minimum and compress so all 6 columns FIT and stay visible
+     at 320px; the overflow-x wrap stays as a last-resort escape hatch. */
+  .share-signal-table{min-width:0;font-size:10px}
+  .share-signal-table th{padding:5px 4px;font-size:8px;letter-spacing:.05em}
+  .share-signal-table td{padding:5px 4px}
 }
 
 /* ─── Desktop sanity: bottom nav never shows ≥1024px ───────────────────── */

@@ -484,8 +484,10 @@
   .app-topbar{margin:0 -12px 12px;padding-left:12px;padding-right:12px}
   .mobile-menu-toggle{display:inline-flex}
   .topbar-brand-mobile{display:block}
+  /* ALIGN-FIX 2026-09-08: 4 tabs exist in the markup — repeat(5,1fr) left a
+     dead 5th column and packed the 4 items unevenly. */
   .app-bottomnav{
-    display:grid;grid-template-columns:repeat(5,1fr);
+    display:grid;grid-template-columns:repeat(4,1fr);
     position:fixed;left:0;right:0;bottom:0;z-index:900;
     padding:7px 6px calc(7px + env(safe-area-inset-bottom));
     background:rgba(6,10,20,.94);

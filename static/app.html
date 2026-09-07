@@ -8,8 +8,16 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/app-v3.css">
+    <!-- ALIGN-FIX 2026-09-08 (USER REQ: desktop+mobile সব কিছু ফিট ও দৃশ্যমান):
+         app-v3-panels.css (component BASES) MUST load BEFORE app-v3.css (shell +
+         responsive layer). In the previous order the panels base rules came
+         later in the cascade, so every @media compression in app-v3.css with
+         the same specificity silently LOST (e.g. .wr-pair-row stayed a 4-col
+         grid with a 390px minimum on phones → horizontal overflow). Both files
+         share ZERO base selectors (verified programmatically), so this swap is
+         safe and re-activates the whole responsive layer. -->
     <link rel="stylesheet" href="/static/css/app-v3-panels.css">
+    <link rel="stylesheet" href="/static/css/app-v3.css">
     <link rel="stylesheet" href="/static/css/token-panel.css">
     <link rel="stylesheet" href="/static/css/confluence.css">
 </head>
