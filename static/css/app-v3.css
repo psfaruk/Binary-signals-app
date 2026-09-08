@@ -95,7 +95,18 @@ svg{display:block}
   background:linear-gradient(180deg, rgba(9,14,26,.88), rgba(6,10,20,.92));
   border-right:1px solid var(--border-soft);
   backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  /* MKT-SWITCH-FIX 2026-09-08: on short desktop viewports (laptops ≈≤760px
+     tall) the sidebar footer — which holds the desktop .mkt-btn market
+     switcher — fell below the fold with overflow:visible and was
+     unreachable. Scroll the sidebar instead so every part of it stays
+     reachable at any viewport height. */
+  overflow-y:auto;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(148,163,184,.35) transparent;
 }
+.app-sidebar::-webkit-scrollbar{width:6px}
+.app-sidebar::-webkit-scrollbar-thumb{background:rgba(148,163,184,.3);border-radius:3px}
+.app-sidebar::-webkit-scrollbar-track{background:transparent}
 .sidebar-brand{display:flex;align-items:center;gap:11px;padding:2px 6px 18px}
 .brand-icon{
   width:40px;height:40px;border-radius:12px;flex:0 0 auto;
@@ -162,8 +173,15 @@ svg{display:block}
 }
 .topbar-left{display:flex;align-items:center;gap:10px;min-width:0}
 .mkt-dropdown{position:relative}
+/* MKT-SWITCH-FIX 2026-09-08: was display:none. The cascade reorder
+   (app-v3-panels.css BEFORE app-v3.css) made the panels @media show-rule
+   dead, so the market switch button vanished at EVERY viewport — and on
+   mobile (≤1023px) the sidebar is hidden too, leaving NO way to switch
+   market at all (user report: "মার্কেট সুইচ বাটন টি দেখতে পাচ্ছি না").
+   It is now a persistent topbar chip on desktop AND mobile — one
+   always-visible way to switch market, independent of viewport height. */
 .mobile-menu-toggle{
-  display:none;align-items:center;gap:7px;
+  display:inline-flex;align-items:center;gap:7px;
   padding:7px 11px;border-radius:10px;
   background:var(--glass);border:1px solid var(--border);
   color:var(--text);font-size:12px;font-weight:800;letter-spacing:.06em;
@@ -558,6 +576,14 @@ svg{display:block}
   .app-main{padding:0 12px 26px}
   /* ALIGN-FIX 2026-09-08: keep the same 4-col grid as panels (order-proof). */
   .app-bottomnav{display:grid;grid-template-columns:repeat(4,1fr)}
+  /* MKT-SWITCH-FIX 2026-09-08: cascade-order-proof resurrects. app-v3.css
+     loads AFTER app-v3-panels.css, so a v3 base display:none beats every
+     panels @media show-rule at equal specificity (the panels rules are
+     dead). The `body ` prefix (0,1,1 > 0,1,0) makes these winners no
+     matter how the sheets are ordered in the future. */
+  body .mobile-menu-toggle{display:inline-flex}
+  body .topbar-brand-mobile{display:block}
+  body .app-bottomnav{display:grid;grid-template-columns:repeat(4,1fr)}
   .app-main{padding-bottom:calc(76px + env(safe-area-inset-bottom, 0px))}
 
   /* Chart: stack the side panel UNDER the chart */
