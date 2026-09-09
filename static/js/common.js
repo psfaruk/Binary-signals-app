@@ -736,7 +736,10 @@ function renderSignal(pred){
   // any missing element crashed the entire tick handler.
   const cls = s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral';
   _setClass('signal-box', cls + (shouldAlert ? ' signal-pop' : ''));
-  _setText('signal-label', s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT' : '➖ NEUTRAL');
+  // TARGET-75 (2026-09-09): a gate-blocked candle is a deliberate WAIT — the
+  // pair's conviction bar was not met. Showing 'WAIT' (not 'NEUTRAL') makes
+  // the no-trade decision legible; the WHY is in the strength badge/reasons.
+  _setText('signal-label', s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT' : (pred.target_gate ? '⏸ WAIT' : '➖ NEUTRAL'));
 
   const score = pred.score || 0;
   // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-18): when score===0 (NEUTRAL
@@ -1984,7 +1987,7 @@ function _updatePairLiveCard(pred){
   const s = pred.signal || 'NEUTRAL';
   const dirEl = $('wr-live-dir');
   if(dirEl){
-    dirEl.textContent = s === 'CALL' ? '▲ CALL' : s === 'PUT' ? '▼ PUT' : '➖ NEUTRAL';
+    dirEl.textContent = s === 'CALL' ? '▲ CALL' : s === 'PUT' ? '▼ PUT' : (pred.target_gate ? '⏸ WAIT' : '➖ NEUTRAL');
     dirEl.className = 'wr-live-dir ' + (s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral');
   }
   const str = (pred.strength || '').toUpperCase();
@@ -2030,7 +2033,7 @@ function _renderPairLiveFromLogs(){
   const s = newest.signal || 'NEUTRAL';
   const dirEl = $('wr-live-dir');
   if(dirEl){
-    dirEl.textContent = s === 'CALL' ? '▲ CALL' : s === 'PUT' ? '▼ PUT' : '➖ NEUTRAL';
+    dirEl.textContent = s === 'CALL' ? '▲ CALL' : s === 'PUT' ? '▼ PUT' : (newest.target_gate ? '⏸ WAIT' : '➖ NEUTRAL');
     dirEl.className = 'wr-live-dir ' + (s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral');
   }
   const str = (newest.detail.strength || '').toUpperCase();

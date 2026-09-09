@@ -57,6 +57,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 os.environ.setdefault("QX_SIGNAL_MODE", "every_candle")
+# TARGET-75 note (2026-09-09): this harness verifies MECHANICS (100% candle
+# coverage / per-direction split / grading) of the every-candle pipeline, so
+# the production-default TARGET gate must be OFF here — otherwise the gate's
+# WAIT conversions would (correctly, in live) cut coverage below 100%.
+# Use scripts/backtest_deep.py for gate-on quality measurement.
+os.environ["QX_TARGET_GATE"] = "0"
 
 from engines import predict
 from engines.base import confluence as cf_mod

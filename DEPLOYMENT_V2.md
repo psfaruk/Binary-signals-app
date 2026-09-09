@@ -305,3 +305,44 @@ Binary-signals-app/
 2. **Quotex Token:** লাইভ ডাটার জন্য `QX_TOKEN` প্রয়োজন। ~২৪ ঘন্টায় expire হয়।
 3. **Railway Volume:** `/app/data` mount করা থাকতে হবে, নাহলে signals.db মুছে যাবে।
 4. **ADMIN_KEY:** API key management এর জন্য একটি শক্তিশালী secret সেট করুন।
+
+---
+
+## 💾 Persistence (PERSISTENCE-FIX 2026-09-09) — অবশ্যই পড়ুন
+
+**কী ঘটেছিল:** 2026-09-09 তারিখে Railway-এ deploy হওয়ার পর ১৪,০০০+ সিগন্যাল হিস্টোরি এবং ৭৯,১৮৪টি শেখা ভোট (learned votes) **মুছে গিয়েছিল**। কারণ: Railway-এর container filesystem হলো **ephemeral** — Volume ছাড়া প্রতিবার deploy-এ `signals.db` মুছে নতুন খালি ফাইল তৈরি হয়।
+
+**Code-side ফিক্স (এই deploy-এ আসছে):**
+1. **Volume auto-detect** — `db.py` এখন boot-এ `/app/data/signals.db` (বা `/data/signals.db`) খুঁজে দেখে; Volume mounted থাকলে DB সেখানে থাকবে এবং deploy-এ মুছবে না।
+2. **Legacy migration** — Volume পরে attach করলে পুরনো repo-local `signals.db`-এর ডেটা স্বয়ংক্রিয়ভাবে Volume-এ কপি হবে।
+3. **Boot-restore from backup** — DB খালি কিন্তু `backups/`-এ সাম্প্রতিক ব্যাকআপ আছে → স্বয়ংক্রিয় রিস্টোর।
+4. **Periodic backup** — প্রতি ১৫ মিনিটে (`QX_DB_BACKUP_SECS`) SQLite online backup → `<db_dir>/backups/` (সর্বশেষ ৮টি, `QX_DB_BACKUP_KEEP`)।
+5. **Loud warning** — Volume ছাড়া Railway-এ চাললে boot log-এ ⚠️ warning আসবে।
+6. **Single source of truth** — `/api/db-info`, `/api/db-export`, `/api/db-download` এখন `db.DB_PATH` ব্যবহার করে (আগে আলাদা candidate list ভুল ফাইল পড়ত)।
+
+**আপনাকে যা করতে হবে (একবার, ২ মিনিট):**
+1. Railway Dashboard → আপনার service → **Volumes** tab
+2. **Create Volume** → Mount path: `/app/data` → Attach
+3. Redeploy → এখন থেকে signals.db + backups সব deploy-এ টিকে থাকবে
+
+**যাচাই:** Deploy-এর পর `/api/db-info` খুলুন → `"resolved_db_path": "/app/data/signals.db"` এবং boot log-এ `boot_count=2+` দেখলেই নিশ্চিত যে ডেটা টিকছে।
+
+---
+
+## 🎯 TARGET-75 (2026-09-09) — প্রতি পেয়ারে CALL/PUT উইন রেট ৭৫%+ কন্ট্রোলার
+
+**লক্ষ্য:** "প্রত্যেক পেয়ার এর উইন রেট call put signals ৭৫ এর উপরে থাকে।"
+
+**যেভাবে কাজ করে (core/target_gate.py):**
+- প্রতি (pair, direction)-এর জন্য একটি **confidence bar** (শুরু ৬৮) রাখা হয়
+- প্রতিটি গ্রেডেড সিগন্যালের পর সেই pair+direction-এর rolling win rate (শেষ ৩০টি) দেখা হয়:
+  - WR < ৭৫% → bar **ওঠে** (কম কিন্তু ভালো সিগন্যাল)
+  - WR ≥ ৭৮% → bar ১ করে **নামে** (ভলিউম ফেরত)
+  - ৬০ candle পরপর WAIT → bar ১ করে নামে (anti-silence)
+- Bar-এর নিচের সিগন্যাল → **WAIT** দেখায় (NEUTRAL — কখনো গ্রেড হয় না, তাই উইন রেট কখনো নষ্ট করতে পারে না)
+- Bar কখনো ৬২-এর নিচে বা ৮৮-এর উপরে যায় না
+- **নিষ্ক্রিয় করতে:** env `QX_TARGET_GATE=0` (পুরনো every-candle আচরণ)
+
+**ট্রান্সপারেন্সি:** `/api/target-gate` — প্রতি pair+direction-এর বর্তমান bar, rolling WR, শেষ পরিবর্তন দেখুন।
+
+**সৎ সত্যটা (important):** কোনো pair-এর মধ্যে সত্যিকারের edge না থাকলে (coin-flip market), কন্ট্রোলার সেটাকে ধীরে ধীরে **SILENT** করে দেবে — কারণ লস করার চেয়ে trade না করা ভালো। Edge থাকা pair-গুলো নিজে থেকেই ৭৫%+ এ সেটেল হবে এবং সেখানে ভলিউম বাড়বে। এটাই গণিতের সৎ পথ — কোনো ইঞ্জিন i-ই প্রতিটি candle-এ ৭৫% দিতে পারে না।

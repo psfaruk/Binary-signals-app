@@ -204,6 +204,25 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     except Exception as _tier_exc:
         print(f"[engines] tiered-filter failed for {asset}: {_tier_exc}")
 
+    # ── TARGET-75 GATE (2026-09-09, default ON) ───────────────────────────
+    # User directive: "প্রত্যেক পেয়ার এর উইন রেট call put signals 75 এর
+    # উপরে থাকে" — every pair's CALL/PUT win rate must stay above 75%.
+    # This supersedes the older "every candle must be tradeable" rule from
+    # PHASE-2-FIX: a candle below the per-pair adaptive conviction bar is
+    # shown as an honest WAIT (NEUTRAL — never graded, never pollutes the
+    # win rate) instead of a forced coin-flip trade. The bar itself is a
+    # closed-loop controller in core/target_gate.py: rolling per-direction
+    # win rate < 75% raises the bar; sustained ≥ target+margin eases it;
+    # starvation relief prevents permanent silence. QX_TARGET_GATE=0
+    # restores the legacy every-candle behaviour.
+    if os.environ.get("QX_TARGET_GATE", "1") == "1" and asset:
+        try:
+            from core.target_gate import apply_gate as _apply_target_gate
+            result = _apply_target_gate(result, asset, period)
+        except Exception as _tg_exc:
+            # Fail-open: gate problems must never break predictions.
+            print(f"[engines] target-gate failed for {asset}: {_tg_exc}")
+
     return result
 
 

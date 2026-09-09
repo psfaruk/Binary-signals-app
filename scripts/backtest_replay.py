@@ -64,10 +64,15 @@ sys.path.insert(0, REPO)
 os.environ.setdefault("DB_PATH", os.path.join(REPO, "backtest_replay_tmp.db"))
 # Backtest must run with production-default gates (all OFF) — force-clear any
 # local overrides so the replay measures the code users actually get.
+# NOTE (2026-09-09): QX_TARGET_GATE defaults to "1" in production now, so it
+# must be explicitly set to "0" here — os.environ.pop would let the ON
+# default leak into this baseline harness. Use scripts/backtest_deep.py for
+# the gate-on (TARGET-75) deep backtest.
 for _gate in ("QX_BREAKEVEN_GATE", "QX_PAIR_HEALTH_GATE", "QX_TRAP_HOUR",
               "QX_TIERED_FILTER", "QX_LOSS_COOLDOWN", "QX_CHOP_GUARD",
               "QX_WEAK_NEUTRAL", "QX_PAIR_PENALTY_NEUTRAL"):
     os.environ.pop(_gate, None)
+os.environ["QX_TARGET_GATE"] = "0"
 
 from engines import predict as engine_predict          # noqa: E402
 from core.backtest import _wilson_bounds               # noqa: E402

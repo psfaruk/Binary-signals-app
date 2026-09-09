@@ -3134,6 +3134,22 @@ class QuotexFeed:
             self._grade_and_log, stream.asset, stream.period, closed,
             old_prediction, _micro_snap, stream.candles)
 
+        # TARGET-75 controller feed (2026-09-09): every GRADED outcome moves
+        # the per-pair per-direction rolling win rate, which raises/lowers
+        # the emission bar in core/target_gate.py. Draws/skips don't count
+        # (they're excluded from win-rate math too). Fail-open by design.
+        if accuracy in ("correct", "wrong") and old_prediction:
+            try:
+                _tg_dir = old_prediction.get("signal")
+                if _tg_dir in ("CALL", "PUT"):
+                    from core.target_gate import note_graded as _tg_note
+                    await asyncio.to_thread(
+                        _tg_note, stream.asset, _tg_dir,
+                        accuracy == "correct", stream.period)
+            except Exception as _tg_exc:
+                print(f"[feed] target-gate note failed for {stream.asset}: {_tg_exc}")
+
+
         # BRAIN-LEARNED (2026-07-20): loss cluster protection.
         # If a pair has 5+ consecutive losses, skip predictions for 30 min.
         # FIX: wrap in try/except to ensure this NEVER breaks the feed pipeline.

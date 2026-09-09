@@ -4,6 +4,7 @@ Tables: candle_micro, signal_log
 """
 import json
 import re
+import shutil
 import sqlite3
 import os
 import time
@@ -11,10 +12,31 @@ from datetime import timedelta
 import threading
 from contextlib import contextmanager
 
-DB_PATH = os.environ.get(
-    "DB_PATH",
-    os.path.abspath(os.path.join(os.path.dirname(__file__) or ".", "signals.db")),
-)
+def _resolve_db_path() -> str:
+    """PERSISTENCE-FIX (2026-09-09): choose the DB location.
+
+    Order:
+      1. explicit DB_PATH env (backtests, custom deploys) — untouched.
+      2. Railway Volume mount points (/app/data, /data) when they exist and
+         are writable. Railway containers are EPHEMERAL: without a Volume
+         every redeploy WIPES the repo-local signals.db — the 2026-09-09
+         incident destroyed 14k+ real signal rows and 79k learned votes
+         exactly this way (fresh 288KB signals.db after redeploy).
+      3. legacy repo-local signals.db (local dev).
+    """
+    env = os.environ.get("DB_PATH")
+    if env:
+        return env
+    for _d in ("/app/data", "/data"):
+        try:
+            if os.path.isdir(_d) and os.access(_d, os.W_OK):
+                return os.path.join(_d, "signals.db")
+        except Exception:
+            pass
+    return os.path.abspath(os.path.join(os.path.dirname(__file__) or ".", "signals.db"))
+
+
+DB_PATH = _resolve_db_path()
 
 try:
     _db_dir = os.path.dirname(DB_PATH)
@@ -22,6 +44,149 @@ try:
         os.makedirs(_db_dir, exist_ok=True)
 except Exception as _mkdir_exc:
     print(f"[db] WARNING: could not create DB_PATH directory {DB_PATH!r}: {_mkdir_exc}")
+
+
+_BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH) or ".", "backups")
+_BACKUP_KEEP = int(os.environ.get("QX_DB_BACKUP_KEEP", "8"))
+_BACKUP_INTERVAL = int(os.environ.get("QX_DB_BACKUP_SECS", "900"))   # 15 min; 0 = off
+
+
+def _db_is_empty(path: str) -> bool:
+    """True when the file is missing / not a DB / has no signal_log rows."""
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return True
+        c = sqlite3.connect(path, timeout=5)
+        try:
+            try:
+                n = c.execute("SELECT COUNT(*) FROM signal_log").fetchone()[0]
+            except sqlite3.OperationalError:
+                return True          # table missing → fresh schema file
+            return n == 0
+        finally:
+            c.close()
+    except Exception:
+        return True
+
+
+def _restore_from_backup() -> None:
+    """PERSISTENCE-FIX: on boot, if the live DB has NO graded history but a
+    newer backup exists in <db_dir>/backups/, restore it. This rescues the
+    history when a Volume is mounted but the DB file itself was lost/corrupted
+    (or a deploy reset the file while backups survived on the Volume).
+    Skipped entirely when DB_PATH was set explicitly (backtests etc.)."""
+    if os.environ.get("DB_PATH"):
+        return
+    try:
+        if not os.path.isdir(_BACKUP_DIR):
+            return
+        backups = sorted(
+            (f for f in os.listdir(_BACKUP_DIR)
+             if f.startswith("signals_") and f.endswith(".db")),
+            reverse=True)
+        if not backups:
+            return
+        newest = os.path.join(_BACKUP_DIR, backups[0])
+        if _db_is_empty(DB_PATH) and not _db_is_empty(newest):
+            shutil.copy2(newest, DB_PATH)
+            print(f"[db] PERSISTENCE-RESTORE: {DB_PATH!r} was empty → restored "
+                  f"history from backup {newest!r} ({os.path.getsize(DB_PATH)} bytes)")
+    except Exception as exc:
+        print(f"[db] backup-restore check failed (non-fatal): {exc}")
+
+
+def _migrate_legacy_into_volume() -> None:
+    """One-time copy of the legacy repo-local signals.db into the Volume DB
+    when the Volume DB is still empty. Preserves history for users who attach
+    a Railway Volume AFTER signals already accumulated repo-locally."""
+    try:
+        if os.environ.get("DB_PATH"):
+            return                                   # explicit path → respect it
+        legacy = os.path.abspath(os.path.join(os.path.dirname(__file__), "signals.db"))
+        if os.path.abspath(DB_PATH) == legacy or not os.path.exists(legacy):
+            return
+        if _db_is_empty(DB_PATH) and not _db_is_empty(legacy):
+            shutil.copy2(legacy, DB_PATH)
+            print(f"[db] PERSISTENCE-MIGRATE: copied legacy {legacy!r} → {DB_PATH!r}")
+    except Exception as exc:
+        print(f"[db] legacy migration check failed (non-fatal): {exc}")
+
+
+_restore_from_backup()
+_migrate_legacy_into_volume()
+
+
+def _backup_once() -> str | None:
+    """SQLite-safe online backup → <db_dir>/backups/signals_YYYYmmdd_HHMMSS.db.
+    Keeps the newest _BACKUP_KEEP files. Returns the backup path or None."""
+    try:
+        os.makedirs(_BACKUP_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+        dest_path = os.path.join(_BACKUP_DIR, f"signals_{stamp}.db")
+        src = sqlite3.connect(DB_PATH, timeout=10)
+        dst = sqlite3.connect(dest_path)
+        try:
+            src.backup(dst)                          # online API, no locks held
+        finally:
+            dst.close()
+            src.close()
+        olds = sorted(
+            (f for f in os.listdir(_BACKUP_DIR)
+             if f.startswith("signals_") and f.endswith(".db")),
+            reverse=True)
+        for old in olds[_BACKUP_KEEP:]:
+            try:
+                os.unlink(os.path.join(_BACKUP_DIR, old))
+            except Exception:
+                pass
+        return dest_path
+    except Exception as exc:
+        print(f"[db] backup failed (non-fatal): {exc}")
+        return None
+
+
+_backup_thread_started = False
+
+
+def start_backup_scheduler(interval_sec: int | None = None) -> None:
+    """Start the periodic DB backup daemon thread (idempotent)."""
+    global _backup_thread_started
+    interval = int(interval_sec if interval_sec is not None else _BACKUP_INTERVAL)
+    if _backup_thread_started or interval <= 0:
+        return
+    # Never schedule backups for throwaway backtest DBs.
+    base = os.path.basename(DB_PATH)
+    if os.environ.get("DB_PATH") and ("backtest" in base or "tmp" in base):
+        return
+
+    def _loop():
+        # small initial delay so boot-time migrations finish first
+        time.sleep(min(120, max(30, interval // 10)))
+        while True:
+            path = _backup_once()
+            if path:
+                print(f"[db] backup → {path}")
+            time.sleep(interval)
+
+    try:
+        _t = threading.Thread(target=_loop, name="db-backup", daemon=True)
+        _t.start()
+        _backup_thread_started = True
+        print(f"[db] backup scheduler ON: every {interval}s → {_BACKUP_DIR} "
+              f"(keep {_BACKUP_KEEP})")
+    except Exception as exc:
+        print(f"[db] backup scheduler failed to start: {exc}")
+
+
+# Ephemeral-filesystem loud warning (Railway without a Volume).
+if not os.environ.get("DB_PATH") and not any(
+        os.path.isdir(_d) for _d in ("/app/data", "/data")) \
+        and os.environ.get("RAILWAY_ENVIRONMENT"):
+    print("[db] ⚠️ NO PERSISTENT VOLUME DETECTED — signals.db lives on an "
+          "ephemeral Railway filesystem and WILL BE WIPED on the next deploy. "
+          "Attach a Railway Volume mounted at /app/data to keep signal "
+          "history, learned weights and TARGET-75 gate state. "
+          "See DEPLOYMENT_V2.md § Persistence.")
 
 
 def _log_persistence_status() -> None:

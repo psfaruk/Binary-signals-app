@@ -1,0 +1,807 @@
+{
+  "generated_at": "2026-09-09T05:37:44.538045+00:00",
+  "mode": "synthetic",
+  "target_wr": 75.0,
+  "gate": {
+    "init": 68,
+    "floor": 62,
+    "cap": 88
+  },
+  "pairs": [
+    "AUDUSD#seed1337",
+    "AUDUSD#seed42",
+    "AUDUSD#seed7",
+    "BRLUSD_otc#seed1337",
+    "BRLUSD_otc#seed42",
+    "BRLUSD_otc#seed7",
+    "EURGBP#seed1337",
+    "EURGBP#seed42",
+    "EURGBP#seed7",
+    "EURUSD#seed1337",
+    "EURUSD#seed42",
+    "EURUSD#seed7",
+    "NZDUSD_otc#seed1337",
+    "NZDUSD_otc#seed42",
+    "NZDUSD_otc#seed7",
+    "USDBDT_otc#seed1337",
+    "USDBDT_otc#seed42",
+    "USDBDT_otc#seed7",
+    "USDCOP_otc#seed1337",
+    "USDCOP_otc#seed42",
+    "USDCOP_otc#seed7",
+    "USDDZD_otc#seed1337",
+    "USDDZD_otc#seed42",
+    "USDDZD_otc#seed7",
+    "USDIDR_otc#seed1337",
+    "USDIDR_otc#seed42",
+    "USDIDR_otc#seed7",
+    "USDINR_otc#seed1337",
+    "USDINR_otc#seed42",
+    "USDINR_otc#seed7",
+    "USDJPY#seed1337",
+    "USDJPY#seed42",
+    "USDJPY#seed7",
+    "USDMXN_otc#seed1337",
+    "USDMXN_otc#seed42",
+    "USDMXN_otc#seed7",
+    "USDPHP_otc#seed1337",
+    "USDPHP_otc#seed42",
+    "USDPHP_otc#seed7",
+    "USDPKR_otc#seed1337",
+    "USDPKR_otc#seed42",
+    "USDPKR_otc#seed7",
+    "USDZAR_otc#seed1337",
+    "USDZAR_otc#seed42",
+    "USDZAR_otc#seed7"
+  ],
+  "totals": {
+    "graded": 548,
+    "correct": 301,
+    "win_pct": 54.93,
+    "wait_candles": 42648,
+    "pass": 0,
+    "near": 0,
+    "fail": 8,
+    "silent": 22
+  },
+  "rows": [
+    {
+      "asset": "AUDUSD",
+      "direction": "CALL",
+      "emitted": 20,
+      "graded": 20,
+      "correct": 12,
+      "wrong": 8,
+      "draw": 0,
+      "wait": 1548,
+      "win_pct": 60.0,
+      "verdict": "FAIL"
+    },
+    {
+      "asset": "AUDUSD",
+      "direction": "PUT",
+      "emitted": 14,
+      "graded": 14,
+      "correct": 5,
+      "wrong": 9,
+      "draw": 0,
+      "wait": 1298,
+      "win_pct": 35.71,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "BRLUSD_otc",
+      "direction": "CALL",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 10,
+      "wrong": 7,
+      "draw": 0,
+      "wait": 1579,
+      "win_pct": 58.82,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "BRLUSD_otc",
+      "direction": "PUT",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 9,
+      "wrong": 8,
+      "draw": 1,
+      "wait": 1266,
+      "win_pct": 52.94,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "EURGBP",
+      "direction": "CALL",
+      "emitted": 22,
+      "graded": 22,
+      "correct": 15,
+      "wrong": 7,
+      "draw": 0,
+      "wait": 1340,
+      "win_pct": 68.18,
+      "verdict": "FAIL"
+    },
+    {
+      "asset": "EURGBP",
+      "direction": "PUT",
+      "emitted": 21,
+      "graded": 21,
+      "correct": 12,
+      "wrong": 9,
+      "draw": 0,
+      "wait": 1497,
+      "win_pct": 57.14,
+      "verdict": "FAIL"
+    },
+    {
+      "asset": "EURUSD",
+      "direction": "CALL",
+      "emitted": 15,
+      "graded": 15,
+      "correct": 8,
+      "wrong": 7,
+      "draw": 0,
+      "wait": 1333,
+      "win_pct": 53.33,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "EURUSD",
+      "direction": "PUT",
+      "emitted": 18,
+      "graded": 18,
+      "correct": 10,
+      "wrong": 8,
+      "draw": 0,
+      "wait": 1514,
+      "win_pct": 55.56,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "NZDUSD_otc",
+      "direction": "CALL",
+      "emitted": 27,
+      "graded": 27,
+      "correct": 17,
+      "wrong": 10,
+      "draw": 0,
+      "wait": 1309,
+      "win_pct": 62.96,
+      "verdict": "FAIL"
+    },
+    {
+      "asset": "NZDUSD_otc",
+      "direction": "PUT",
+      "emitted": 18,
+      "graded": 18,
+      "correct": 9,
+      "wrong": 9,
+      "draw": 0,
+      "wait": 1526,
+      "win_pct": 50.0,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDBDT_otc",
+      "direction": "CALL",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 9,
+      "wrong": 8,
+      "draw": 1,
+      "wait": 1370,
+      "win_pct": 52.94,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDBDT_otc",
+      "direction": "PUT",
+      "emitted": 18,
+      "graded": 18,
+      "correct": 10,
+      "wrong": 8,
+      "draw": 0,
+      "wait": 1474,
+      "win_pct": 55.56,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDCOP_otc",
+      "direction": "CALL",
+      "emitted": 20,
+      "graded": 20,
+      "correct": 13,
+      "wrong": 7,
+      "draw": 0,
+      "wait": 1500,
+      "win_pct": 65.0,
+      "verdict": "FAIL"
+    },
+    {
+      "asset": "USDCOP_otc",
+      "direction": "PUT",
+      "emitted": 16,
+      "graded": 16,
+      "correct": 7,
+      "wrong": 9,
+      "draw": 0,
+      "wait": 1344,
+      "win_pct": 43.75,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDDZD_otc",
+      "direction": "CALL",
+      "emitted": 20,
+      "graded": 20,
+      "correct": 13,
+      "wrong": 7,
+      "draw": 0,
+      "wait": 1503,
+      "win_pct": 65.0,
+      "verdict": "FAIL"
+    },
+    {
+      "asset": "USDDZD_otc",
+      "direction": "PUT",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 9,
+      "wrong": 8,
+      "draw": 0,
+      "wait": 1340,
+      "win_pct": 52.94,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDIDR_otc",
+      "direction": "CALL",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 10,
+      "wrong": 7,
+      "draw": 0,
+      "wait": 1434,
+      "win_pct": 58.82,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDIDR_otc",
+      "direction": "PUT",
+      "emitted": 22,
+      "graded": 22,
+      "correct": 14,
+      "wrong": 8,
+      "draw": 0,
+      "wait": 1407,
+      "win_pct": 63.64,
+      "verdict": "FAIL"
+    },
+    {
+      "asset": "USDINR_otc",
+      "direction": "CALL",
+      "emitted": 16,
+      "graded": 16,
+      "correct": 7,
+      "wrong": 9,
+      "draw": 0,
+      "wait": 1488,
+      "win_pct": 43.75,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDINR_otc",
+      "direction": "PUT",
+      "emitted": 18,
+      "graded": 18,
+      "correct": 9,
+      "wrong": 9,
+      "draw": 0,
+      "wait": 1358,
+      "win_pct": 50.0,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDJPY",
+      "direction": "CALL",
+      "emitted": 18,
+      "graded": 18,
+      "correct": 8,
+      "wrong": 10,
+      "draw": 0,
+      "wait": 1509,
+      "win_pct": 44.44,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDJPY",
+      "direction": "PUT",
+      "emitted": 16,
+      "graded": 16,
+      "correct": 8,
+      "wrong": 8,
+      "draw": 0,
+      "wait": 1337,
+      "win_pct": 50.0,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDMXN_otc",
+      "direction": "CALL",
+      "emitted": 28,
+      "graded": 28,
+      "correct": 18,
+      "wrong": 10,
+      "draw": 0,
+      "wait": 1418,
+      "win_pct": 64.29,
+      "verdict": "FAIL"
+    },
+    {
+      "asset": "USDMXN_otc",
+      "direction": "PUT",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 11,
+      "wrong": 6,
+      "draw": 0,
+      "wait": 1417,
+      "win_pct": 64.71,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDPHP_otc",
+      "direction": "CALL",
+      "emitted": 15,
+      "graded": 15,
+      "correct": 6,
+      "wrong": 9,
+      "draw": 0,
+      "wait": 1533,
+      "win_pct": 40.0,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDPHP_otc",
+      "direction": "PUT",
+      "emitted": 16,
+      "graded": 16,
+      "correct": 7,
+      "wrong": 9,
+      "draw": 0,
+      "wait": 1316,
+      "win_pct": 43.75,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDPKR_otc",
+      "direction": "CALL",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 9,
+      "wrong": 8,
+      "draw": 0,
+      "wait": 1360,
+      "win_pct": 52.94,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDPKR_otc",
+      "direction": "PUT",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 9,
+      "wrong": 8,
+      "draw": 1,
+      "wait": 1485,
+      "win_pct": 52.94,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDZAR_otc",
+      "direction": "CALL",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 9,
+      "wrong": 8,
+      "draw": 0,
+      "wait": 1356,
+      "win_pct": 52.94,
+      "verdict": "SILENT"
+    },
+    {
+      "asset": "USDZAR_otc",
+      "direction": "PUT",
+      "emitted": 17,
+      "graded": 17,
+      "correct": 8,
+      "wrong": 9,
+      "draw": 1,
+      "wait": 1489,
+      "win_pct": 47.06,
+      "verdict": "SILENT"
+    }
+  ],
+  "api_winrate_pairs": [
+    {
+      "asset": "USDMXN_otc",
+      "category": "otc",
+      "total": 45,
+      "correct": 29,
+      "wrong": 16,
+      "draws": 0,
+      "graded": 45,
+      "win_pct": 64.4,
+      "call": {
+        "total": 28,
+        "correct": 18,
+        "win_pct": 64.3
+      },
+      "put": {
+        "total": 17,
+        "correct": 11,
+        "win_pct": 64.7
+      },
+      "last_ctime": 1788324780,
+      "last_signal": "CALL",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 1
+    },
+    {
+      "asset": "NZDUSD_otc",
+      "category": "otc",
+      "total": 45,
+      "correct": 26,
+      "wrong": 19,
+      "draws": 0,
+      "graded": 45,
+      "win_pct": 57.8,
+      "call": {
+        "total": 27,
+        "correct": 17,
+        "win_pct": 63.0
+      },
+      "put": {
+        "total": 18,
+        "correct": 9,
+        "win_pct": 50.0
+      },
+      "last_ctime": 1788332880,
+      "last_signal": "PUT",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 2
+    },
+    {
+      "asset": "EURGBP",
+      "category": "real",
+      "total": 43,
+      "correct": 27,
+      "wrong": 16,
+      "draws": 0,
+      "graded": 43,
+      "win_pct": 62.8,
+      "call": {
+        "total": 22,
+        "correct": 15,
+        "win_pct": 68.2
+      },
+      "put": {
+        "total": 21,
+        "correct": 12,
+        "win_pct": 57.1
+      },
+      "last_ctime": 1788356460,
+      "last_signal": "PUT",
+      "last_accuracy": "wrong",
+      "streak_type": "loss",
+      "streak_count": 1
+    },
+    {
+      "asset": "USDIDR_otc",
+      "category": "otc",
+      "total": 39,
+      "correct": 24,
+      "wrong": 15,
+      "draws": 0,
+      "graded": 39,
+      "win_pct": 61.5,
+      "call": {
+        "total": 17,
+        "correct": 10,
+        "win_pct": 58.8
+      },
+      "put": {
+        "total": 22,
+        "correct": 14,
+        "win_pct": 63.6
+      },
+      "last_ctime": 1788331260,
+      "last_signal": "PUT",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 2
+    },
+    {
+      "asset": "USDDZD_otc",
+      "category": "otc",
+      "total": 37,
+      "correct": 22,
+      "wrong": 15,
+      "draws": 0,
+      "graded": 37,
+      "win_pct": 59.5,
+      "call": {
+        "total": 20,
+        "correct": 13,
+        "win_pct": 65.0
+      },
+      "put": {
+        "total": 17,
+        "correct": 9,
+        "win_pct": 52.9
+      },
+      "last_ctime": 1788331620,
+      "last_signal": "CALL",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 5
+    },
+    {
+      "asset": "USDCOP_otc",
+      "category": "otc",
+      "total": 36,
+      "correct": 20,
+      "wrong": 16,
+      "draws": 0,
+      "graded": 36,
+      "win_pct": 55.6,
+      "call": {
+        "total": 20,
+        "correct": 13,
+        "win_pct": 65.0
+      },
+      "put": {
+        "total": 16,
+        "correct": 7,
+        "win_pct": 43.8
+      },
+      "last_ctime": 1788331620,
+      "last_signal": "CALL",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 4
+    },
+    {
+      "asset": "USDBDT_otc",
+      "category": "otc",
+      "total": 36,
+      "correct": 19,
+      "wrong": 16,
+      "draws": 1,
+      "graded": 35,
+      "win_pct": 54.3,
+      "call": {
+        "total": 17,
+        "correct": 9,
+        "win_pct": 52.9
+      },
+      "put": {
+        "total": 18,
+        "correct": 10,
+        "win_pct": 55.6
+      },
+      "last_ctime": 1788317400,
+      "last_signal": "PUT",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 1
+    },
+    {
+      "asset": "BRLUSD_otc",
+      "category": "otc",
+      "total": 35,
+      "correct": 19,
+      "wrong": 15,
+      "draws": 1,
+      "graded": 34,
+      "win_pct": 55.9,
+      "call": {
+        "total": 17,
+        "correct": 10,
+        "win_pct": 58.8
+      },
+      "put": {
+        "total": 17,
+        "correct": 9,
+        "win_pct": 52.9
+      },
+      "last_ctime": 1788322140,
+      "last_signal": "PUT",
+      "last_accuracy": "wrong",
+      "streak_type": "loss",
+      "streak_count": 2
+    },
+    {
+      "asset": "USDPKR_otc",
+      "category": "otc",
+      "total": 35,
+      "correct": 18,
+      "wrong": 16,
+      "draws": 1,
+      "graded": 34,
+      "win_pct": 52.9,
+      "call": {
+        "total": 17,
+        "correct": 9,
+        "win_pct": 52.9
+      },
+      "put": {
+        "total": 17,
+        "correct": 9,
+        "win_pct": 52.9
+      },
+      "last_ctime": 1788312840,
+      "last_signal": "PUT",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 1
+    },
+    {
+      "asset": "AUDUSD",
+      "category": "real",
+      "total": 34,
+      "correct": 17,
+      "wrong": 17,
+      "draws": 0,
+      "graded": 34,
+      "win_pct": 50.0,
+      "call": {
+        "total": 20,
+        "correct": 12,
+        "win_pct": 60.0
+      },
+      "put": {
+        "total": 14,
+        "correct": 5,
+        "win_pct": 35.7
+      },
+      "last_ctime": 1788337200,
+      "last_signal": "PUT",
+      "last_accuracy": "wrong",
+      "streak_type": "loss",
+      "streak_count": 2
+    },
+    {
+      "asset": "USDZAR_otc",
+      "category": "otc",
+      "total": 35,
+      "correct": 17,
+      "wrong": 17,
+      "draws": 1,
+      "graded": 34,
+      "win_pct": 50.0,
+      "call": {
+        "total": 17,
+        "correct": 9,
+        "win_pct": 52.9
+      },
+      "put": {
+        "total": 17,
+        "correct": 8,
+        "win_pct": 47.1
+      },
+      "last_ctime": 1788312840,
+      "last_signal": "PUT",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 1
+    },
+    {
+      "asset": "USDINR_otc",
+      "category": "otc",
+      "total": 34,
+      "correct": 16,
+      "wrong": 18,
+      "draws": 0,
+      "graded": 34,
+      "win_pct": 47.1,
+      "call": {
+        "total": 16,
+        "correct": 7,
+        "win_pct": 43.8
+      },
+      "put": {
+        "total": 18,
+        "correct": 9,
+        "win_pct": 50.0
+      },
+      "last_ctime": 1788328620,
+      "last_signal": "PUT",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 1
+    },
+    {
+      "asset": "USDJPY",
+      "category": "real",
+      "total": 34,
+      "correct": 16,
+      "wrong": 18,
+      "draws": 0,
+      "graded": 34,
+      "win_pct": 47.1,
+      "call": {
+        "total": 18,
+        "correct": 8,
+        "win_pct": 44.4
+      },
+      "put": {
+        "total": 16,
+        "correct": 8,
+        "win_pct": 50.0
+      },
+      "last_ctime": 1788351900,
+      "last_signal": "CALL",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 1
+    },
+    {
+      "asset": "EURUSD",
+      "category": "real",
+      "total": 33,
+      "correct": 18,
+      "wrong": 15,
+      "draws": 0,
+      "graded": 33,
+      "win_pct": 54.5,
+      "call": {
+        "total": 15,
+        "correct": 8,
+        "win_pct": 53.3
+      },
+      "put": {
+        "total": 18,
+        "correct": 10,
+        "win_pct": 55.6
+      },
+      "last_ctime": 1788340680,
+      "last_signal": "PUT",
+      "last_accuracy": "correct",
+      "streak_type": "win",
+      "streak_count": 1
+    },
+    {
+      "asset": "USDPHP_otc",
+      "category": "otc",
+      "total": 31,
+      "correct": 13,
+      "wrong": 18,
+      "draws": 0,
+      "graded": 31,
+      "win_pct": 41.9,
+      "call": {
+        "total": 15,
+        "correct": 6,
+        "win_pct": 40.0
+      },
+      "put": {
+        "total": 16,
+        "correct": 7,
+        "win_pct": 43.8
+      },
+      "last_ctime": 1788333120,
+      "last_signal": "PUT",
+      "last_accuracy": "wrong",
+      "streak_type": "loss",
+      "streak_count": 3
+    }
+  ],
+  "runtime_sec": 80.0
+}

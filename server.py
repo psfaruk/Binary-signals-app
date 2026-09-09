@@ -262,6 +262,22 @@ async def lifespan(app: FastAPI):
 
     def _sync_init():
         _db.init()
+        # PERSISTENCE-FIX (2026-09-09): periodic online backup of signals.db
+        # (volume-backed or repo-local) + TARGET-75 gate table init.
+        try:
+            _db.start_backup_scheduler()
+        except Exception as _bk_exc:
+            print(f"[server] backup scheduler init failed (non-fatal): {_bk_exc}")
+        try:
+            from core.target_gate import _ensure_table as _tg_ensure
+            _conn = _db._conn()
+            try:
+                _tg_ensure(_conn)
+            finally:
+                _conn.close()
+            print("[server] TARGET-75 gate table ready")
+        except Exception as _tg_exc:
+            print(f"[server] target-gate table init failed (non-fatal): {_tg_exc}")
         # Initialize brain tables
         from core.brain import init_brain
         init_brain()
@@ -1118,14 +1134,9 @@ async def download_db(request: Request):
     import tempfile
     import time as _time
 
-    db_path = os.environ.get("DB_PATH", "signals.db")
-    # Search common locations if DB_PATH doesn't exist.
-    candidates = [db_path, "/app/data/signals.db", "signals.db", "./signals.db"]
-    found_path = None
-    for p in candidates:
-        if p and os.path.exists(p):
-            found_path = p
-            break
+    # PERSISTENCE-FIX (2026-09-09): use db.DB_PATH (the file the feed
+    # actually writes) — never a private candidate list again.
+    found_path = _db.DB_PATH if os.path.exists(_db.DB_PATH) else None
     if not found_path:
         raise HTTPException(
             status_code=404,
@@ -1176,17 +1187,14 @@ async def export_db_json():
     import traceback
 
     try:
-        db_path = os.environ.get("DB_PATH", "signals.db")
-        candidates = [db_path, "/app/data/signals.db", "signals.db", "./signals.db"]
-        found_path = None
-        for p in candidates:
-            if p and os.path.exists(p):
-                found_path = p
-                break
+        # PERSISTENCE-FIX (2026-09-09): single source of truth = db.DB_PATH
+        # (the file the feed actually writes to). The old private candidate
+        # list served an EMPTY DB while 14k real records lived elsewhere.
+        found_path = _db.DB_PATH if os.path.exists(_db.DB_PATH) else None
         if not found_path:
             raise HTTPException(
                 status_code=404,
-                detail=f"DB file not found. Checked: {candidates}")
+                detail=f"DB file not found at resolved path {_db.DB_PATH!r}")
 
         conn = sqlite3.connect(found_path, timeout=10)
         conn.row_factory = sqlite3.Row
@@ -1249,27 +1257,33 @@ async def db_info():
     import time as _time_mod
     import traceback
 
-    db_path = os.environ.get("DB_PATH", "signals.db")
-    result = {"db_path_env": db_path, "cwd": os.getcwd()}
-
-    # Check if DB_PATH exists; if not, search common locations.
-    candidates = [
-        db_path,
-        "/app/data/signals.db",
-        "signals.db",
-        "./signals.db",
-        os.path.join(os.getcwd(), "signals.db"),
-    ]
+    # PERSISTENCE-FIX (2026-09-09): db.py resolves the REAL live DB path
+    # (env > Railway Volume /app/data > repo-local). The old private
+    # candidate list here could point at a DIFFERENT file than the one the
+    # feed writes to (that is exactly how /api/db-export served an empty
+    # DB while 14k real records lived elsewhere). Single source of truth.
+    result = {"db_path_env": os.environ.get("DB_PATH"), "cwd": os.getcwd()}
     found_path = None
-    for p in candidates:
-        if p and os.path.exists(p):
-            found_path = p
-            break
+    try:
+        if os.path.exists(_db.DB_PATH):
+            found_path = _db.DB_PATH
+    except Exception:
+        found_path = None
+    result["resolved_db_path"] = _db.DB_PATH
 
+    # Diagnostics: what the resolver considered (kept for support parity).
+    _legacy_local = os.path.abspath(os.path.join(os.path.dirname(_db.__file__)
+                                                 or ".", "signals.db"))
     result["checked_paths"] = [
-        {"path": p, "exists": bool(p and os.path.exists(p)),
-         "size": (os.path.getsize(p) if p and os.path.exists(p) else 0)}
-        for p in candidates
+        {"path": _db.DB_PATH, "exists": os.path.exists(_db.DB_PATH),
+         "size": (os.path.getsize(_db.DB_PATH)
+                  if os.path.exists(_db.DB_PATH) else 0)},
+        {"path": "/app/data/signals.db", "exists": os.path.exists("/app/data/signals.db"),
+         "size": (os.path.getsize("/app/data/signals.db")
+                  if os.path.exists("/app/data/signals.db") else 0)},
+        {"path": _legacy_local, "exists": os.path.exists(_legacy_local),
+         "size": (os.path.getsize(_legacy_local)
+                  if os.path.exists(_legacy_local) else 0)},
     ]
     result["found_path"] = found_path
 
@@ -1725,6 +1739,30 @@ async def api_winrate(period: int = 60, days: Optional[int] = None,
         return {"ok": True, **data}
     except Exception as e:
         _logger.exception("winrate endpoint failed")
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+@app.get("/api/target-gate")
+async def api_target_gate():
+    """TARGET-75 controller transparency (2026-09-09).
+
+    Shows, for every (pair, direction): the current confidence bar, the
+    rolling win rate the controller sees, and when the bar last moved.
+    A pair whose rolling WR < 75% gets a higher bar (fewer but better
+    signals); WAIT candles are never graded so they can't drag the WR down.
+    """
+    try:
+        from core import target_gate as _tg
+        return {
+            "ok": True,
+            "target_wr": _tg.TARGET_WR,
+            "gate_init": _tg.GATE_INIT,
+            "gate_floor": _tg.GATE_FLOOR,
+            "gate_cap": _tg.GATE_CAP,
+            "rolling_n": _tg.ROLLING_N,
+            "gates": _tg.gate_report(),
+        }
+    except Exception as e:
+        _logger.exception("target-gate endpoint failed")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 @app.get("/api/pair-deep-stats/{asset}")
