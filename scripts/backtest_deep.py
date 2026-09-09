@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-scripts/backtest_deep.py — DEEP backtest with the TARGET-75 gate closed-loop.
+scripts/backtest_deep.py — DEEP backtest of the SHIPPED pipeline.
 
-WHY (user directive 2026-09-09)
-===============================
-"আরও deeply Backtest করেন, যেনো প্রত্যেক পেয়ার এর উইন রেট call put
-signals 75 এর উপরে থাকে। সব গুলো রেকর্ড backtest করেন। তার পর লাইন বাই
-লাইন ফিক্স করেন।"
+HISTORY
+=======
+Originally built for the 2026-09-09 TARGET-75 directive (gate-on closed
+loop). After FREQ-FIRST-FIX (same day) the user re-affirmed EVERY-CANDLE
+emission ("প্রত্যেক ক্যান্ডেল এ সিগন্যাল লাগবে। যে কোনো একটি স্ট্রাটেজি
+একমত হলেই সিগন্যাল আসবে। অবশ্য বেস্ট stradegy টি সিগন্যাল দিবে।") so the
+SHIPPED default is QX_TARGET_GATE=0 — this harness now measures that
+shipped behaviour by default. Set QX_DEEP_GATE=1 to re-run the historical
+gate-on experiment.
 
 backtest_replay.py measures the RAW engine (gates cleared). This harness
-measures the SHIPPED behaviour: engines.predict with QX_TARGET_GATE=1, the
-per-pair per-direction adaptive controller live, graded rows written to
-signal_log exactly like feed does, and controller updates via
-core.target_gate.note_graded after every graded candle.
+measures the SHIPPED behaviour: engines.predict exactly as deployed,
+graded rows written to signal_log exactly like feed does, and (opt-in,
+QX_DEEP_GATE=1) controller updates via core.target_gate.note_graded after
+every graded candle.
 
 WHAT IT REPORTS
 ===============
@@ -49,7 +53,9 @@ sys.path.insert(0, REPO)
 
 TMP_DB = os.path.join(REPO, "backtest_deep_tmp.db")
 os.environ["DB_PATH"] = TMP_DB
-os.environ["QX_TARGET_GATE"] = "1"          # the behaviour we ship
+# FREQ-FIRST-FIX: shipped default is gate-OFF (every-candle). Opt back in
+# with QX_DEEP_GATE=1 for the historical TARGET-75 experiment.
+os.environ["QX_TARGET_GATE"] = os.environ.get("QX_DEEP_GATE", "0")
 for _g in ("QX_BREAKEVEN_GATE", "QX_PAIR_HEALTH_GATE", "QX_TRAP_HOUR",
            "QX_TIERED_FILTER", "QX_LOSS_COOLDOWN", "QX_CHOP_GUARD",
            "QX_WEAK_NEUTRAL", "QX_PAIR_PENALTY_NEUTRAL"):
@@ -66,9 +72,9 @@ from core.target_gate import (                  # noqa: E402
 )
 
 # IMPORT-ORDER FIX (2026-09-09): backtest_replay module-level config sets
-# QX_TARGET_GATE="0" for its own baseline semantics — re-assert "1" here so
-# THIS harness measures the shipped gate-on behaviour.
-os.environ["QX_TARGET_GATE"] = "1"
+# QX_TARGET_GATE="0" for its own baseline semantics — re-assert the SHIPPED
+# value here so THIS harness always measures deployed behaviour.
+os.environ["QX_TARGET_GATE"] = os.environ.get("QX_DEEP_GATE", "0")
 
 MIN_VOLUME = int(os.environ.get("QX_DEEP_MIN_VOLUME", "20"))
 

@@ -52,7 +52,11 @@ never crash or silently block the live pipeline; a broken gate degrades
 to the pre-gate behaviour (every-candle), never to a dead app.
 
 Env switches:
-    QX_TARGET_GATE           "1" (default) enable, "0" = legacy behaviour
+    QX_TARGET_GATE           "0" (default since FREQ-FIRST-FIX 2026-09-09 —
+                             the user re-affirmed every-candle emission:
+                             "প্রত্যেক ক্যান্ডেল এ সিগন্যাল লাগবে। যে কোনো
+                             একটি স্ট্রাটেজি একমত হলেই সিগন্যাল আসবে।"),
+                             "1" = opt-in selective mode
     QX_TARGET_WR             75   target win rate % per pair+direction
     QX_TARGET_GATE_INIT      68   initial confidence bar (confluence-pass
                                   signals start at 65; fallback-capped

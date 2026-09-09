@@ -204,18 +204,19 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     except Exception as _tier_exc:
         print(f"[engines] tiered-filter failed for {asset}: {_tier_exc}")
 
-    # ── TARGET-75 GATE (2026-09-09, default ON) ───────────────────────────
-    # User directive: "প্রত্যেক পেয়ার এর উইন রেট call put signals 75 এর
-    # উপরে থাকে" — every pair's CALL/PUT win rate must stay above 75%.
-    # This supersedes the older "every candle must be tradeable" rule from
-    # PHASE-2-FIX: a candle below the per-pair adaptive conviction bar is
-    # shown as an honest WAIT (NEUTRAL — never graded, never pollutes the
-    # win rate) instead of a forced coin-flip trade. The bar itself is a
-    # closed-loop controller in core/target_gate.py: rolling per-direction
-    # win rate < 75% raises the bar; sustained ≥ target+margin eases it;
-    # starvation relief prevents permanent silence. QX_TARGET_GATE=0
-    # restores the legacy every-candle behaviour.
-    if os.environ.get("QX_TARGET_GATE", "1") == "1" and asset:
+    # ── TARGET-75 GATE (default OFF — FREQ-FIRST-FIX 2026-09-09) ──────────
+    # LATEST USER DIRECTIVE (2026-09-09, supersedes TARGET-75):
+    #   "এত পরিমাণে টাইট দিয়েছেন, 6 ঘণ্টায় সিগন্যাল আসলো সক পেয়ার থেকে
+    #    মাত্র 12 টি ... আমার প্রত্যেক ক্যান্ডেল এ সিগন্যাল লাগবে। যে কোনো
+    #    একটি স্ট্রাটেজি একমত হলেই সিগন্যাল আসবে। অবশ্য বেস্ট stradegy টি
+    #    সিগন্যাল দিবে।"
+    # = every candle MUST emit, ANY ONE agreeing strategy is enough, and the
+    # BEST strategy decides the direction. The gate's WAIT semantics directly
+    # violate the first two clauses (it produced 12 signals / 6h across ALL
+    # pairs), so the shipped default is now "0" (legacy every-candle).
+    # The controller stays fully functional for opt-in deployments:
+    # QX_TARGET_GATE=1 re-enables the per-pair adaptive conviction bar.
+    if os.environ.get("QX_TARGET_GATE", "0") == "1" and asset:
         try:
             from core.target_gate import apply_gate as _apply_target_gate
             result = _apply_target_gate(result, asset, period)

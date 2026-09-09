@@ -805,11 +805,17 @@ function renderSignal(pred){
   // unhide the parent row when a non-default strategy is present.
   const stratName = pred.strategy || '';
   const stratReason = pred.strategy_reason || '';
+  // FREQ-FIRST-FIX (2026-09-09): show WHICH strategy decided the signal
+  // ("অবশ্য বেস্ট stradegy টি সিগন্যাল দিবে") — e.g.
+  // "confluence_v1_fallback → momentum".
+  const stratDisplay = pred.best_strategy
+    ? `${stratName} → ${pred.best_strategy}`
+    : stratName;
   const stratEl = $('sig-strategy');
   const stratRow = $('sig-strategy-row');
   if(stratEl){
-    if(stratName && stratName !== 'default'){
-      stratEl.textContent = stratName;
+    if(stratDisplay && stratDisplay !== 'default'){
+      stratEl.textContent = stratDisplay;
       stratEl.title = stratReason;
       stratEl.style.display = 'block';
       if(stratRow) stratRow.style.display = '';
@@ -1520,7 +1526,20 @@ function showSignalDetail(idx){
   // show the row's OWN pair (not the currently-selected topbar pair).
   rows += detailRow('Asset', d.asset || currentAsset);
   // CONFLUENCE-V1 (2026-09-02): prove which strategy produced this signal.
-  rows += detailRow('Strategy', d.strategy || 'confluence_v1');
+  // FREQ-FIRST-FIX: also name the BEST strategy that decided the direction.
+  // New rows carry "_BEST_STRATEGY_VOTE: <module> ..." in the persisted
+  // reasons JSON — parse it out for rows served before the field existed.
+  let _bestStrat = d.best_strategy;
+  if(!_bestStrat && d.reasons){
+    try{
+      const _rlist = typeof d.reasons === 'string' ? JSON.parse(d.reasons) : d.reasons;
+      const _bsLine = (Array.isArray(_rlist) ? _rlist : []).find(r => typeof r === 'string' && r.startsWith('_BEST_STRATEGY_VOTE:'));
+      if(_bsLine) _bestStrat = _bsLine.slice('_BEST_STRATEGY_VOTE:'.length).trim().split(' ')[0];
+    }catch(_e){ /* malformed reasons — ignore */ }
+  }
+  rows += detailRow('Strategy', _bestStrat
+    ? `${d.strategy || 'confluence_v1'} → ${_bestStrat}`
+    : (d.strategy || 'confluence_v1'));
   rows += detailRow('Score', d.score != null ? (d.score >= 0 ? '+' : '') + d.score : '—');
   rows += detailRow('Confidence', d.confidence != null ? Math.round(d.confidence) + '%' : '—');
   rows += detailRow('Strength', d.strength || '—');

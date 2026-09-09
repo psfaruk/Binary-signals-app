@@ -28,8 +28,21 @@ THE FIX — six INDEPENDENT evidence clusters; a signal only exists when:
   * the candle is not sub-noise (range ≥ 0.20 × ATR — coin-flip territory)
   * honest confidence ≥ MIN_CONFIDENCE (no manufactured numbers)
 
-If ANY gate fails → NEUTRAL. There is NO fallback path. Abstaining is a
-first-class outcome: fewer signals, higher quality.
+FREQ-FIRST-FIX (2026-09-09) — user's LATEST directive supersedes selectivity:
+
+  "আমার প্রত্যেক ক্যান্ডেল এ সিগন্যাল লাগবে। যে কোনো একটি স্ট্রাটেজি
+   একমত হলেই সিগন্যাল আসবে। অবশ্য বেস্ট stradegy টি সিগন্যাল দিবে।"
+
+  = EVERY candle emits CALL/PUT; if ANY ONE strategy has a directional
+    vote the signal is emitted from that vote; the BEST strategy (highest
+    learned-weighted score for this pair+direction) decides the direction.
+    When a strict gate rejects the setup, _fallback_result() emits the
+    best-strategy direction with honest FALLBACK labeling (confidence
+    50-63, strategy "confluence_v1_fallback", best_strategy=<module>) so
+    the UI, history and win-rate stats can always separate strict
+    high-confidence signals from fallback coverage signals. The TARGET-75
+    gate (core/target_gate.py) that previously converted these into WAIT
+    is now default-OFF.
 
 Cluster definitions (independence-by-design, de-duplicating the correlated
 modules found in the audit):
@@ -155,39 +168,75 @@ def _fallback_direction(module_votes, cluster_votes, htf_trend,
                         candles=None):
     """Deterministic best-effort direction for EVERY-CANDLE mode.
 
-    Priority chain (first non-tied signal wins):
-      1. Net weighted module evidence (scores are already scaled by
-         reliability × per-pair weights in blender.py) — the single most
-         informative aggregate available at this point.
-      2. Cluster-count majority (when module scores tie exactly).
-      3. HTF (5-minute) trend direction.
-      4. Last candle body direction (momentum continuation).
-      5. Absolute last resort: CALL (deterministic, never random).
+    USER DIRECTIVE (FREQ-FIRST-FIX 2026-09-09):
+      "যে কোনো একটি স্ট্রাটেজি একমত হলেই সিগন্যাল আসবে। অবশ্য বেস্ট
+       stradegy টি সিগন্যাল দিবে।"
+    = if ANY ONE strategy has a directional vote, a signal MUST be emitted,
+      and the BEST strategy's vote decides the direction.
 
-    Returns (direction, net_evidence, basis_label).
+    Priority chain (first non-tied step wins):
+      1. BEST-STRATEGY VOTE — the single highest-scoring directional module
+         decides (scores are already scaled by reliability × per-pair
+         LEARNED weights in blender.py, so "best" = the strategy with the
+         strongest learned evidence for THIS pair+direction). A mob of
+         weak modules can no longer outvote the best one.
+      2. Exact score tie between two best modules → net weighted evidence
+         (sum of all module scores per direction).
+      3. Cluster-count majority.
+      4. HTF (5-minute) trend direction.
+      5. Last candle body direction (momentum continuation).
+      6. Absolute last resort: CALL (deterministic, never random).
+
+    Returns (direction, net_evidence, basis_label, best_module_name|None).
     """
-    call_score = sum(v["score"] for v in module_votes.values()
-                     if v["direction"] == "CALL")
-    put_score = sum(v["score"] for v in module_votes.values()
-                    if v["direction"] == "PUT")
-    if call_score > put_score:
-        return "CALL", call_score - put_score, "module_evidence"
-    if put_score > call_score:
-        return "PUT", put_score - call_score, "module_evidence"
+    best_mod = None
+    best_score = 0
+    tie_directions = set()
+    for mname, v in module_votes.items():
+        if v["score"] > best_score:
+            best_score = v["score"]
+            best_mod = mname
+            tie_directions = {v["direction"]}
+        elif v["score"] == best_score and best_mod is not None:
+            tie_directions.add(v["direction"])
 
-    # Exact score tie → cluster majority
+    if best_mod is not None and len(tie_directions) == 1:
+        # ANY-ONE-AGREES: at least one strategy voted, and the top-score
+        # tier agrees on ONE direction → its best representative decides.
+        direction = module_votes[best_mod]["direction"]
+        call_score = sum(v["score"] for v in module_votes.values()
+                         if v["direction"] == "CALL")
+        put_score = sum(v["score"] for v in module_votes.values()
+                        if v["direction"] == "PUT")
+        net = abs(call_score - put_score)
+        return direction, net, "best_strategy_vote", best_mod
+
+    if best_mod is not None:
+        # Top-score tier is SPLIT (e.g. momentum 5 CALL vs pattern 5 PUT):
+        # documented step 2 — net weighted evidence of ALL votes decides.
+        call_score = sum(v["score"] for v in module_votes.values()
+                         if v["direction"] == "CALL")
+        put_score = sum(v["score"] for v in module_votes.values()
+                        if v["direction"] == "PUT")
+        if call_score > put_score:
+            return "CALL", call_score - put_score, "module_evidence", None
+        if put_score > call_score:
+            return "PUT", put_score - call_score, "module_evidence", None
+        # still tied → fall through to the deterministic chain below.
+
+    # No directional module vote at all → deterministic tie-break chain.
     n_call = sum(1 for v in cluster_votes.values() if v["direction"] == "CALL")
     n_put = sum(1 for v in cluster_votes.values() if v["direction"] == "PUT")
     if n_call > n_put:
-        return "CALL", 0, "cluster_majority"
+        return "CALL", 0, "cluster_majority", None
     if n_put > n_call:
-        return "PUT", 0, "cluster_majority"
+        return "PUT", 0, "cluster_majority", None
 
     # Still tied → HTF trend
     if htf_trend == "UPTREND":
-        return "CALL", 0, "htf_trend"
+        return "CALL", 0, "htf_trend", None
     if htf_trend == "DOWNTREND":
-        return "PUT", 0, "htf_trend"
+        return "PUT", 0, "htf_trend", None
 
     # Still tied → last candle body direction (momentum continuation)
     if candles:
@@ -196,13 +245,13 @@ def _fallback_direction(module_votes, cluster_votes, htf_trend,
             o = float(last.get("open", 0.0))
             c = float(last.get("close", 0.0))
             if c > o:
-                return "CALL", 0, "body_direction"
+                return "CALL", 0, "body_direction", None
             if c < o:
-                return "PUT", 0, "body_direction"
+                return "PUT", 0, "body_direction", None
         except Exception:
             pass
 
-    return "CALL", 0, "default"
+    return "CALL", 0, "default", None
 
 
 def _fallback_result(reasons, module_votes, cluster_votes, ctx, asset,
@@ -214,10 +263,14 @@ def _fallback_result(reasons, module_votes, cluster_votes, ctx, asset,
       * signal_quality  = "FALLBACK"
       * confidence      = 50..FALLBACK_CONF_CAP (below MIN_CONFIDENCE)
       * confluence_reject_gate = which strict gate rejected the setup
+      * best_strategy   = the strategy module whose vote DECIDED the
+        direction (FREQ-FIRST-FIX 2026-09-09: "বেস্ট stradegy টি সিগন্যাল
+        দিবে") — surfaced in reasons + UI so the user always sees WHICH
+        strategy gave the signal and why.
     The direction is deterministic (see _fallback_direction) — same input
     data always yields the same signal, so backtests are reproducible.
     """
-    direction, net, basis = _fallback_direction(
+    direction, net, basis, best_mod = _fallback_direction(
         module_votes, cluster_votes, htf_trend, candles)
 
     n_agree = sum(1 for v in cluster_votes.values()
@@ -244,6 +297,17 @@ def _fallback_result(reasons, module_votes, cluster_votes, ctx, asset,
             confidence += 2
     confidence = max(FALLBACK_CONF_BASE, min(FALLBACK_CONF_CAP, confidence))
 
+    n_voted = len(module_votes)
+    if best_mod is not None:
+        best_score = module_votes[best_mod]["score"]
+        n_same_dir = sum(1 for v in module_votes.values()
+                         if v["direction"] == direction)
+        n_opp_dir = n_voted - n_same_dir
+        reasons.append(
+            f"_BEST_STRATEGY_VOTE: {best_mod} (learned-weighted score "
+            f"{best_score}) decided {direction} — {n_voted} strategy "
+            f"module(s) voted ({n_same_dir} {direction}, {n_opp_dir} "
+            f"opposed); any-one-agrees rule satisfied.")
     reasons.append(
         f"_EVERY_CANDLE_FALLBACK: strict gate '{gate}' rejected the setup — "
         f"emitting {direction} (basis={basis}, net={net}, conf={confidence}) "
@@ -259,9 +323,12 @@ def _fallback_result(reasons, module_votes, cluster_votes, ctx, asset,
         "total": len(cluster_votes) or n_agree,
         "signals_fired": sum(len(v["members"]) for v in cluster_votes.values()),
         "strategy": "confluence_v1_fallback",
+        "best_strategy": best_mod,
         "strategy_reason": (
             f"every-candle fallback — strict gate '{gate}' rejected; "
-            f"direction from {basis}"),
+            + (f"best strategy {best_mod} (score "
+               f"{module_votes[best_mod]['score']}) voted {direction}"
+               if best_mod is not None else f"direction from {basis}")),
         "signal_quality": "FALLBACK",
         "fallback": True,
         "fallback_basis": basis,
