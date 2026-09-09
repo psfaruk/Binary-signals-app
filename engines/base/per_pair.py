@@ -7,14 +7,25 @@ import time
 _ADAPT_CAP = float(os.environ.get("ADAPT_CAP", "0.30"))
 _ADAPT_CACHE_TTL = float(os.environ.get("ADAPT_CACHE_TTL", "60"))
 
-_HARD_DISABLE_WIN_RATE = 0.30
-_HARD_DISABLE_SAMPLES = 50      # need this many samples to hard-disable
-_DB_STATS_FULL_SAMPLES = 50.0   # adapt_fraction saturates at this sample count
+# STRAT-FIX 2026-09-09 — the OLD adaptation was mathematically unable to
+# react to the production ledger: deviation×1.5 capped ±0.30 gave a 47.2%-WR
+# module (sr_bounce, 1095 real votes) a ×0.958 weight — a 4% nudge for a
+# measurably ANTI-predictive strategy — and the hard-disable threshold
+# (<30% WR) is below the worst module ever observed (37%). The new response
+# curve is centered on the coin-flip (0.50) and the 85%-payout breakeven
+# (100/185 ≈ 0.5405):
+#   ≥ 0.60    → scale +0.50 (×1.5)
+#   ≥ 0.5405  → scale 0 … +0.50 linear (above breakeven = profitable)
+#   0.50–BE   → scale −0.10 … 0 linear (no edge, keep for structure)
+#   0.47–0.50 → scale −0.10 … −0.60 linear (negative edge)
+#   < 0.47    → scale −0.60 … −0.85 linear (anti-predictive → near-mute)
+_DB_STATS_FULL_SAMPLES = 200.0  # adapt_fraction saturates at this sample count
+_MIN_DIR_SAMPLES = 30           # per-direction adaptation needs this many votes
+_MIN_DIR_GAP = 0.10             # |call_wr-put_wr| above which direction split applies
+_MIN_DIR_WILSON_N = 60          # direction weights also need this aggregate n
 _BRAIN_MIN_SAMPLES = 30         # brain_learning blend activates above this
 _BRAIN_FULL_SAMPLES = 200.0     # brain_fraction saturates at this sample count
 _WIN_RATE_BASELINE = 0.50       # deviation center (win_rate - baseline)
-_DEVIATION_MULTIPLIER = 1.5     # scale = deviation * multiplier (capped)
-_DISABLED_MODULE_WEIGHT = 0.05  # hard-disabled modules get this weight
 _MAX_CACHE_ENTRIES = 512        # 40 assets x ~10 periods; evict oldest if exceeded
 _SQLITE_TIMEOUT = 10
 
@@ -43,6 +54,37 @@ def _wilson_lo(correct: int, total: int, z: float = 1.96) -> float:
     centre = p + z * z / (2 * total)
     margin = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total))
     return max(0.0, min(1.0, (centre - margin) / denom))
+
+
+# 85% payout breakeven: a module must win >100/(100+85) ≈ 54.05% to profit.
+_BREAKEVEN_WR = 100.0 / 185.0
+
+
+def _response_scale(effective_wr: float) -> float:
+    """STRAT-FIX 2026-09-09: piecewise win-rate → weight-scale response.
+
+    Replaces deviation×1.5 (which produced ×0.958 for a 47% module — i.e.
+    no reaction at all). Piecewise linear, centered on the coin-flip and
+    the payout breakeven:
+      wr ≥ 0.60     → +0.50            (×1.5 ceiling)
+      wr ≥ breakeven → 0 … +0.50       (linear reward above breakeven)
+      0.50–breakeven → −0.10 … 0       (unproven: slight drag, keep structure)
+      0.47–0.50     → −0.10 … −0.60    (negative edge)
+      wr < 0.47     → −0.60 … −0.85    (anti-predictive: near-mute, floor ×0.15)
+    """
+    if effective_wr >= 0.60:
+        return 0.50
+    if effective_wr >= _BREAKEVEN_WR:
+        frac = (effective_wr - _BREAKEVEN_WR) / (0.60 - _BREAKEVEN_WR)
+        return 0.50 * frac
+    if effective_wr >= _WIN_RATE_BASELINE:
+        frac = (effective_wr - _WIN_RATE_BASELINE) / (_BREAKEVEN_WR - _WIN_RATE_BASELINE)
+        return -0.10 * (1.0 - frac)
+    if effective_wr >= 0.47:
+        frac = (effective_wr - 0.47) / (0.50 - 0.47)
+        return -0.10 - 0.50 * (1.0 - frac)
+    frac = max(0.0, (effective_wr - 0.40) / (0.47 - 0.40))
+    return -0.60 - 0.25 * (1.0 - frac)
 
 
 class PairWeightAdapter:
@@ -129,7 +171,7 @@ class PairWeightAdapter:
             return static_weights.copy()
 
         try:
-            stats = _db.per_module_accuracy(asset, period=period, n=200)
+            stats = _db.per_module_accuracy(asset, period=period, n=1000)
         except Exception:
             return static_weights.copy()
 
@@ -144,23 +186,38 @@ class PairWeightAdapter:
                 adapted[module] = static_w
                 continue
 
-            # Use Wilson lower bound for more conservative adaptation.
-            # A module with 8/10 correct (80%) has Wilson lo ~49% — still
-            # treated as neutral until it has enough samples to prove itself.
             correct_est = int(round(win_rate * total))
             wilson_lo = _wilson_lo(correct_est, total)
+            # Small-sample shrink toward the coin-flip: half Wilson-lo, half
+            # point estimate (floored at 70% of the point estimate) — a
+            # lucky 8/10 streak cannot buy a boost.
             effective_wr = max(win_rate * 0.5 + wilson_lo * 0.5, win_rate * 0.7)
 
-            # Hard-disable catastrophically bad modules (using Wilson lo).
-            if effective_wr < _HARD_DISABLE_WIN_RATE and total >= _HARD_DISABLE_SAMPLES:
-                adapted[module] = _DISABLED_MODULE_WEIGHT
-                continue
+            base_scale = _response_scale(effective_wr)
 
-            # Map win_rate to a scaling factor centered at 1.0.
-            deviation = effective_wr - _WIN_RATE_BASELINE
-            scale = max(-_ADAPT_CAP, min(_ADAPT_CAP, deviation * _DEVIATION_MULTIPLIER))
-            learned_w = static_w * (1.0 + scale)
-            # Smooth blend: 0% adapted at total=0, 100% adapted at total>=50.
+            # Direction-aware split: when BOTH directions have enough votes
+            # and genuinely divergent win rates, weight each side by its own
+            # measured edge instead of the aggregate. Real production case:
+            # USDCOP_otc sr_bounce CALL 53.6% (n=56) vs PUT 30.3% (n=33).
+            c_total = s.get("call_total", 0) or 0
+            p_total = s.get("put_total", 0) or 0
+            c_wr = s.get("call_win_rate")
+            p_wr = s.get("put_win_rate")
+            dir_weights = None
+            if (c_total >= _MIN_DIR_SAMPLES and p_total >= _MIN_DIR_SAMPLES
+                    and total >= _MIN_DIR_WILSON_N and c_wr is not None and p_wr is not None
+                    and abs(c_wr - p_wr) >= _MIN_DIR_GAP):
+                c_eff = max(c_wr * 0.5 + _wilson_lo(int(round(c_wr * c_total)), c_total) * 0.5,
+                            c_wr * 0.7)
+                p_eff = max(p_wr * 0.5 + _wilson_lo(int(round(p_wr * p_total)), p_total) * 0.5,
+                            p_wr * 0.7)
+                dir_weights = {
+                    "CALL": static_w * (1.0 + _response_scale(c_eff)),
+                    "PUT": static_w * (1.0 + _response_scale(p_eff)),
+                }
+
+            learned_w = static_w * (1.0 + base_scale)
+            # Smooth blend: 0% adapted at total=0, 100% at total>=200.
             adapt_fraction = min(1.0, total / _DB_STATS_FULL_SAMPLES)
             blended = (1.0 - adapt_fraction) * static_w + adapt_fraction * learned_w
 
@@ -173,8 +230,24 @@ class PairWeightAdapter:
                     brain_w = static_w * brain_mult
                     brain_fraction = min(1.0, brain_total / _BRAIN_FULL_SAMPLES)
                     blended = (1.0 - brain_fraction) * blended + brain_fraction * brain_w
+                    # Per-direction brain recommendations win where present.
+                    for dir_key, col in (("CALL", "recommended_weight_call"),
+                                         ("PUT", "recommended_weight_put")):
+                        rec = brain_rec.get(col)
+                        if rec is not None and dir_weights is not None:
+                            dir_weights[dir_key] = (
+                                (1.0 - brain_fraction) * dir_weights[dir_key]
+                                + brain_fraction * static_w * rec)
 
-            adapted[module] = round(blended, 2)
+            if dir_weights is not None:
+                # Carry the aggregate blend only where a direction lacks its
+                # own evidence (kept None-safe by the _MIN_DIR_SAMPLES gate).
+                adapted[module] = {
+                    "CALL": round(dir_weights["CALL"], 3),
+                    "PUT": round(dir_weights["PUT"], 3),
+                }
+            else:
+                adapted[module] = round(blended, 3)
 
         return adapted
 
@@ -191,12 +264,23 @@ class PairWeightAdapter:
             conn.row_factory = sqlite3.Row
             try:
                 # Filter by period so multi-period rows don't collide.
-                rows = conn.execute(
-                    """SELECT module_name, recommended_weight, win_rate, total
-                       FROM brain_learning
-                       WHERE asset = ? AND period = ?""",
-                    (asset, period)
-                ).fetchall()
+                # STRAT-FIX 2026-09-09: also read per-direction weights when
+                # present (older DBs lack the columns → fallback query).
+                try:
+                    rows = conn.execute(
+                        """SELECT module_name, recommended_weight, win_rate, total,
+                                  recommended_weight_call, recommended_weight_put
+                           FROM brain_learning
+                           WHERE asset = ? AND period = ?""",
+                        (asset, period)
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = conn.execute(
+                        """SELECT module_name, recommended_weight, win_rate, total
+                           FROM brain_learning
+                           WHERE asset = ? AND period = ?""",
+                        (asset, period)
+                    ).fetchall()
                 return {r["module_name"]: dict(r) for r in rows}
             except sqlite3.OperationalError as e:
                 msg = str(e).lower()

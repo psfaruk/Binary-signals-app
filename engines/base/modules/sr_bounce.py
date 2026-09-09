@@ -171,10 +171,41 @@ def analyze(candles, ctx: MarketContext) -> list:
     bull_reversals = {"BULL_HAMMER", "BULL_ENGULF", "BULL_PIN", "BULL_DRAGONFLY"}
     bear_reversals = {"BEAR_STAR", "BEAR_ENGULF", "BEAR_PIN", "BEAR_GRAVESTONE"}
 
+    # STRAT-FIX 2026-09-09: TREND GUARD against catching falling knives.
+    # Production ledger: sr_bounce = 47.2% WR overall (1095 votes), with the
+    # losses concentrated in direction-against-regime bounces — e.g.
+    # USDCOP_otc PUT 30.3% (resistance bounces in an uptrend), USDIDR_otc
+    # PUT 32.6%. A bounce is a counter-trend bet by nature; when the
+    # regime detector says a STRONG trend is running against the bounce,
+    # the "rejection" is statistically just a pause in the trend. Abstain
+    # instead of voting (mirrors key_level's TRENDLINE regime handling).
+    regime = ctx.regime or {}
+    trend_regime = regime.get("regime", "RANGE")
+    trend_strength = float(regime.get("trend_strength", 0.0) or 0.0)
+    strong_trend = trend_strength > 0.5
+
     # ── SUPPORT BOUNCE + BULLISH REVERSAL CANDLE ────────────────────────
     if nearest_support is not None and reversal in bull_reversals:
+        # STRAT-FIX 2026-09-09: strong TREND_DOWN → support bounces are
+        # falling-knife catches; abstain with an honest reason.
+        if strong_trend and trend_regime == "TREND_DOWN":
+            results.append(ModuleResult(
+                module_name="sr_bounce",
+                direction="NEUTRAL",
+                score=0,
+                confidence=0,
+                signal_type="REVERSAL",
+                reliability="CANDLE",
+                group="SR_BOUNCE",
+                reasons=[
+                    f"SR bounce CALL suppressed: support {nearest_support:.5f} "
+                    f"touched with {reversal}, but regime={trend_regime} "
+                    f"(strength {trend_strength:.2f}) — counter-trend bounce "
+                    f"is a falling-knife catch, no vote"
+                ],
+            ))
         # Close back above support (bounce confirmed)
-        if close > nearest_support:
+        elif close > nearest_support:
             results.append(ModuleResult(
                 module_name="sr_bounce",
                 direction="CALL",
@@ -210,7 +241,25 @@ def analyze(candles, ctx: MarketContext) -> list:
 
     # ── RESISTANCE BOUNCE + BEARISH REVERSAL CANDLE ─────────────────────
     elif nearest_resistance is not None and reversal in bear_reversals:
-        if close < nearest_resistance:
+        # STRAT-FIX 2026-09-09: strong TREND_UP → resistance bounces are
+        # breakout-pause misreads (the 30% PUT bucket in the ledger).
+        if strong_trend and trend_regime == "TREND_UP":
+            results.append(ModuleResult(
+                module_name="sr_bounce",
+                direction="NEUTRAL",
+                score=0,
+                confidence=0,
+                signal_type="REVERSAL",
+                reliability="CANDLE",
+                group="SR_BOUNCE",
+                reasons=[
+                    f"SR bounce PUT suppressed: resistance {nearest_resistance:.5f} "
+                    f"touched with {reversal}, but regime={trend_regime} "
+                    f"(strength {trend_strength:.2f}) — counter-trend rejection "
+                    f"is a breakout misread, no vote"
+                ],
+            ))
+        elif close < nearest_resistance:
             results.append(ModuleResult(
                 module_name="sr_bounce",
                 direction="PUT",

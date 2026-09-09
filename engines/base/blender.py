@@ -214,13 +214,32 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # ── Step 4: apply reliability + per-pair weights as SCORE scalers ──────
     # Weights scale evidence strength (used only for the honest-confidence
     # score-quality bonus) — they can no longer inflate the cluster count.
+    # STRAT-FIX 2026-09-09: weights are now DIRECTION-AWARE — the adapter
+    # may return either a float (module-level) or a {"CALL": w, "PUT": w}
+    # dict (per-direction learned weights, e.g. USDCOP_otc sr_bounce
+    # CALL 53.6% vs PUT 30.3%). A vote whose learned weight collapsed below
+    # 0.20 is MUTED entirely instead of being rounded up to a fake score 1
+    # (the old `max(1, round(score*w))` kept a disabled module voting!).
     pair_weights = weight_adapter.get_weights(asset, period=period)
     for r in grouped_results:
         if r.direction == "NEUTRAL":
             continue
         t_mult = reliability.get(r.reliability, 1.0)
-        p_mult = pair_weights.get(r.module_name, 1.0)
-        r.score = max(1, int(round(r.score * t_mult * p_mult)))
+        w = pair_weights.get(r.module_name, 1.0)
+        if isinstance(w, dict):
+            w = w.get(r.direction, 1.0)
+        new_score = r.score * t_mult * w
+        if new_score < 0.20:
+            _orig_dir = r.direction
+            r.direction = "NEUTRAL"
+            r.score = 0
+            r.confidence = 0
+            r.reasons.append(
+                f"[LEARNED-MUTE] per-pair learned win rate for "
+                f"{r.module_name}/{_orig_dir} is in the anti-predictive "
+                f"band — vote suppressed (weight={w:.2f})")
+            continue
+        r.score = max(1, int(round(new_score)))
 
     # ── Step 5: STRICT CONFLUENCE — the single decision authority ──────────
     all_reasons = []

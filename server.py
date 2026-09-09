@@ -1479,7 +1479,14 @@ async def patterns_for_asset(asset: str):
 
 @app.get("/api/module-analysis")
 async def module_analysis(min_samples: int = 30):
-    """Deep per-module per-pair per-direction analysis from module_votes table."""
+    """Deep per-module per-pair per-direction analysis.
+
+    STRAT-FIX 2026-09-09: the queries read the EMPTY `module_votes` table
+    (always 0 rows on production), so this endpoint returned blank lists
+    forever. Repointed to `brain_module_votes` — the REAL ledger (79k+
+    graded votes on production). Also added worst-first views + explicit
+    loss counts ("একই স্ট্র্যাটেজি দিয়ে কত গুলো সিগন্যাল লস হয়েছে").
+    """
     def _decorate(rows):
         """Attach Wilson bounds + reliability, then sort by the lower bound."""
         out = []
@@ -1490,77 +1497,75 @@ async def module_analysis(min_samples: int = 30):
             d["wilson_lo"] = lo
             d["wilson_hi"] = hi
             d["reliable"] = total >= min_samples and (lo > 50.0 or hi < 50.0)
+            d["profitable"] = total >= min_samples and lo > 54.05
             out.append(d)
         out.sort(key=lambda x: x["wilson_lo"], reverse=True)
         return out
 
+    # Rolling 30-day window: the ledger accumulates forever; stale votes
+    # from removed strategies would pollute the current analysis.
+    lookback_ts = time.time() - 30 * 86400
+
     try:
         with _db._read_cursor() as cur:
-            # Global per-module accuracy
+            # Global per-module accuracy (real ledger: brain_module_votes)
             cur.execute("""
                 SELECT module_name,
-                       SUM(vote_correct) as correct,
-                       COUNT(vote_correct) as total,
-                       ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
-                FROM module_votes
-                WHERE vote_correct IS NOT NULL
+                       SUM(module_correct) as correct,
+                       COUNT(module_correct) as total,
+                       COUNT(module_correct) - SUM(module_correct) as wrong,
+                       ROUND(100.0 * SUM(module_correct) / NULLIF(COUNT(module_correct), 0), 1) as win_pct
+                FROM brain_module_votes
+                WHERE module_correct IS NOT NULL AND ts >= ?
                 GROUP BY module_name
-            """)
+            """, (lookback_ts,))
             global_modules = _decorate(cur.fetchall())
 
             # Per-pair per-module accuracy
             cur.execute("""
                 SELECT asset, module_name,
-                       SUM(vote_correct) as correct,
-                       COUNT(vote_correct) as total,
-                       ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
-                FROM module_votes
-                WHERE vote_correct IS NOT NULL
+                       SUM(module_correct) as correct,
+                       COUNT(module_correct) as total,
+                       COUNT(module_correct) - SUM(module_correct) as wrong,
+                       ROUND(100.0 * SUM(module_correct) / NULLIF(COUNT(module_correct), 0), 1) as win_pct
+                FROM brain_module_votes
+                WHERE module_correct IS NOT NULL AND ts >= ?
                 GROUP BY asset, module_name
                 HAVING total >= ?
-            """, (min_samples,))
+            """, (lookback_ts, min_samples))
             pair_modules = _decorate(cur.fetchall())
 
             # Per-pair per-module per-direction
             cur.execute("""
                 SELECT asset, module_name, direction,
-                       SUM(vote_correct) as correct,
-                       COUNT(vote_correct) as total,
-                       ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
-                FROM module_votes
-                WHERE vote_correct IS NOT NULL
+                       SUM(module_correct) as correct,
+                       COUNT(module_correct) as total,
+                       COUNT(module_correct) - SUM(module_correct) as wrong,
+                       ROUND(100.0 * SUM(module_correct) / NULLIF(COUNT(module_correct), 0), 1) as win_pct
+                FROM brain_module_votes
+                WHERE module_correct IS NOT NULL AND ts >= ?
                 GROUP BY asset, module_name, direction
                 HAVING total >= 2
                 ORDER BY asset, module_name, direction
-            """)
+            """, (lookback_ts,))
             pair_module_dirs = [dict(r) for r in cur.fetchall()]
 
-            # Best/worst per pair
-            cur.execute("""
-                SELECT asset,
-                       MAX(CASE WHEN win_pct IS NOT NULL THEN module_name END) as sample_module,
-                       COUNT(*) as vote_count
-                FROM (
-                    SELECT asset, module_name,
-                           ROUND(100.0 * SUM(vote_correct) / NULLIF(COUNT(vote_correct), 0), 1) as win_pct
-                    FROM module_votes
-                    WHERE vote_correct IS NOT NULL
-                    GROUP BY asset, module_name
-                    HAVING COUNT(vote_correct) >= 3
-                )
-                GROUP BY asset
-                ORDER BY vote_count DESC
-            """)
-            pair_summary = [dict(r) for r in cur.fetchall()]
+        worst_modules = sorted(global_modules, key=lambda x: x["wilson_lo"])
+        worst_pairs = sorted(pair_modules, key=lambda x: x["wilson_lo"])
 
-        return {"global_modules": global_modules, "pair_modules": pair_modules, "pair_module_directions": pair_module_dirs, "pair_summary": pair_summary, "total_vote_records": sum(m['total'] for m in global_modules), "min_samples": min_samples,
+        return {"global_modules": global_modules, "pair_modules": pair_modules, "pair_module_directions": pair_module_dirs,
+                "worst_modules": worst_modules, "worst_pairs": worst_pairs,
+                "pair_summary": [{"asset": a, "vote_count": sum(1 for p in pair_modules if p["asset"] == a)}
+                                 for a in sorted({p["asset"] for p in pair_modules})],
+                "total_vote_records": sum(m['total'] for m in global_modules), "min_samples": min_samples,
+                "lookback_days": 30,
                 # FIX (BREAKEVEN-CONST-2026-09-07): was hardcoded 51.8 (=93%
                 # payout). The app's canonical payout is 85% → breakeven is
                 # 100/185 = 54.05% (matches core/breakeven.py and the UI).
                 "breakeven_pct": round(100.0 * 100.0 / (100.0 + 85), 2)}
     except Exception as e:
         _logger.exception("module analysis failed")
-        return {"error": str(e), "hint": "module_votes table may not exist yet — new table added in DEEP_v2"}
+        return {"error": str(e), "hint": "brain_module_votes table missing or unreadable"}
 
 def _wilson_bounds(correct: int, total: int, z: float = 1.96):
     """95% Wilson score interval for a win rate, returned as (lo, hi) percent."""

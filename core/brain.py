@@ -16,10 +16,32 @@ _DB_TIMEOUT_SEC = 10
 
 _INSIGHT_DEDUP_WINDOW_SEC = 24 * 3600  # 24 hours
 
-_WR_BOOST_STRONG = 0.60   # win rate above which module weight ×1.5
-_WR_BOOST = 0.55          # win rate above which module weight ×1.3
-_WR_DAMPEN = 0.45         # win rate below which module weight ×0.7
-_WR_DAMPEN_SEVERE = 0.40  # win rate below which module weight ×0.5
+# STRAT-FIX 2026-09-09 — bands recentered on the REAL economics of an 85%
+# payout binary option (breakeven = 100/185 ≈ 54.05%), informed by the
+# production brain_module_votes ledger (79,184 graded votes, 2026-09-08):
+#
+#   multi_tf 14185 votes 49.4% | ema_ribbon 14001 49.5% | pattern 8356 49.3%
+#   key_level  1991 votes 49.2% | sr_bounce 1095 47.2%  | tickrun 1062 51.3%
+#
+# The OLD bands (_WR_BOOST=0.55, _WR_DAMPEN=0.45) treated the ENTIRE
+# 45–50% anti-predictive band as "normal ×1.0" — the modules that lose the
+# most kept full voting power, which is exactly why the ledger stayed at
+# ~50% while the app needed >54.05% to break even. New bands:
+#   ≥ 60%      → ×1.5  (strong edge)
+#   ≥ 54.05%   → ×1.3  (above breakeven = profitable, boost)
+#   50–54.05%  → ×1.0  (no evidence of edge — neutral, structure only)
+#   47–50%     → ×0.6  (below coin-flip = NEGATIVE edge, dampen)
+#   < 47%      → ×0.4  (anti-predictive, severe dampen)
+_WR_BOOST_STRONG = 0.60     # win rate above which module weight ×1.5
+_WR_BOOST = 0.5405          # breakeven (85% payout): 100/185 — above this the module MAKES money
+_WR_DAMPEN = 0.50           # below coin-flip: negative edge → ×0.6 (was 0.45 → ×0.7, never fired)
+_WR_DAMPEN_SEVERE = 0.47    # anti-predictive band → ×0.4 (was 0.40 → ×0.5, never fired)
+# Direction-split thresholds: with enough per-direction samples and a real
+# gap, recommend DIFFERENT weights per direction. Real production case:
+# USDCOP_otc sr_bounce CALL 53.6% (n=56) vs PUT 30.3% (n=33) — the old
+# single ×1.0 recommendation kept funding a 30% PUT vote.
+_WR_DIR_SPLIT_MIN_SAMPLES = 30
+_WR_DIR_SPLIT_GAP = 0.10
 _WR_DIRECTION_BIAS = 0.15  # |call_wr - put_wr| above which a bias note fires
 _WR_LOW_REGIME = 0.45     # regime/session/HTF win rate below which we warn
 _OVERCONFIDENCE_MARGIN = 0.10  # how far below bin midpoint = "overconfident"
@@ -184,6 +206,13 @@ def init_brain():
             notes TEXT
         )""")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_bl_asset_module ON brain_learning(asset, module_name)")
+        # STRAT-FIX 2026-09-09: per-direction recommended weights. Existing
+        # DBs (incl. the 175MB production volume) need the ALTER migration.
+        for _col_def in ("recommended_weight_call REAL", "recommended_weight_put REAL"):
+            try:
+                cur.execute(f"ALTER TABLE brain_learning ADD COLUMN {_col_def}")
+            except Exception:
+                pass  # column already exists
         try:
             cur.execute("""
                 DELETE FROM brain_learning WHERE id IN (
@@ -582,32 +611,46 @@ def _analyze_module_performance(cur, min_samples):
         call_wr = row["call_correct"] / row["call_total"] if row["call_total"] > 0 else 0
         put_wr = row["put_correct"] / row["put_total"] if row["put_total"] > 0 else 0
 
-        # Recommended weight adjustment.
-        if wr > _WR_BOOST_STRONG:
-            rec_weight = 1.5
-            action = "BOOST_STRONG"
-            priority = "HIGH"
+        def _band_weight(w):
+            """STRAT-FIX 2026-09-09: breakeven-centered weight bands.
+            (see the constants block for the production-data rationale)"""
+            if w > _WR_BOOST_STRONG:
+                return 1.5, "BOOST_STRONG", "HIGH"
+            if w > _WR_BOOST:
+                return 1.3, "BOOST", "MEDIUM"
+            if w < _WR_DAMPEN_SEVERE:
+                return 0.4, "DAMPEN_SEVERE", "HIGH"
+            if w < _WR_DAMPEN:
+                return 0.6, "DAMPEN", "MEDIUM"
+            return 1.0, "NORMAL", "LOW"
+
+        rec_weight, action, priority = _band_weight(wr)
+        if action == "BOOST_STRONG":
             notes = f"Module excellent ({wr:.0%}). Recommend weight ×1.5."
-        elif wr > _WR_BOOST:
-            rec_weight = 1.3
-            action = "BOOST"
-            priority = "MEDIUM"
-            notes = f"Module overperforming ({wr:.0%}). Recommend weight ×1.3."
-        elif wr < _WR_DAMPEN_SEVERE:
-            rec_weight = 0.5
-            action = "DAMPEN_SEVERE"
-            priority = "HIGH"
-            notes = f"Module performing badly ({wr:.0%}). Recommend weight ×0.5."
-        elif wr < _WR_DAMPEN:
-            rec_weight = 0.7
-            action = "DAMPEN"
-            priority = "MEDIUM"
-            notes = f"Module underperforming ({wr:.0%}). Recommend weight ×0.7."
+        elif action == "BOOST":
+            notes = f"Module above breakeven ({wr:.0%} > 54.05%). Recommend weight ×1.3."
+        elif action == "DAMPEN_SEVERE":
+            notes = f"Module ANTI-predictive ({wr:.0%} < 47%). Recommend weight ×0.4."
+        elif action == "DAMPEN":
+            notes = f"Module below coin-flip ({wr:.0%} < 50%). Recommend weight ×0.6."
         else:
-            rec_weight = 1.0
-            action = "NORMAL"
-            priority = "LOW"
             notes = f"Module normal ({wr:.0%})."
+
+        # STRAT-FIX 2026-09-09: direction-conditional recommendations. When
+        # BOTH directions have enough samples and their win rates genuinely
+        # diverge, the module is not uniformly good/bad — one side has edge
+        # and the other is anti-predictive (e.g. USDCOP_otc sr_bounce:
+        # CALL 53.6% vs PUT 30.3%). Recommend a weight PER DIRECTION so the
+        # engine can keep the profitable side and mute the losing side.
+        rec_weight_call = None
+        rec_weight_put = None
+        if (row["call_total"] >= _WR_DIR_SPLIT_MIN_SAMPLES
+                and row["put_total"] >= _WR_DIR_SPLIT_MIN_SAMPLES
+                and abs(call_wr - put_wr) >= _WR_DIR_SPLIT_GAP):
+            rec_weight_call, call_action, _ = _band_weight(call_wr)
+            rec_weight_put, put_action, _ = _band_weight(put_wr)
+            notes += (f" DIRECTION-SPLIT: CALL {call_wr:.0%} → ×{rec_weight_call} ({call_action}), "
+                      f"PUT {put_wr:.0%} → ×{rec_weight_put} ({put_action}).")
 
         # Direction bias note
         if (row["call_total"] > 0 and row["put_total"] > 0 and
@@ -623,8 +666,9 @@ def _analyze_module_performance(cur, min_samples):
                 win_rate, call_total, call_correct,
                 put_total, put_correct,
                 recommended_weight, recommended_score_adjustment,
+                recommended_weight_call, recommended_weight_put,
                 notes
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(asset, module_name, period) DO UPDATE SET
                 ts=excluded.ts, total=excluded.total, correct=excluded.correct,
                 wrong=excluded.wrong, win_rate=excluded.win_rate,
@@ -632,12 +676,15 @@ def _analyze_module_performance(cur, min_samples):
                 put_total=excluded.put_total, put_correct=excluded.put_correct,
                 recommended_weight=excluded.recommended_weight,
                 recommended_score_adjustment=excluded.recommended_score_adjustment,
+                recommended_weight_call=excluded.recommended_weight_call,
+                recommended_weight_put=excluded.recommended_weight_put,
                 notes=excluded.notes""",
                 (time.time(), row["asset"], row["period"], row["module_name"],
                  row["total"], row["correct"], row["total"] - row["correct"],
                  wr, row["call_total"], row["call_correct"],
                  row["put_total"], row["put_correct"],
-                 rec_weight, rec_weight - 1.0, notes))
+                 rec_weight, rec_weight - 1.0,
+                 rec_weight_call, rec_weight_put, notes))
         except Exception as _e:
             print(f"[brain] brain_learning ON CONFLICT failed ({row['asset']}/{row['module_name']}): {_e}")
             cur.execute("""INSERT OR REPLACE INTO brain_learning (
@@ -646,13 +693,15 @@ def _analyze_module_performance(cur, min_samples):
                 win_rate, call_total, call_correct,
                 put_total, put_correct,
                 recommended_weight, recommended_score_adjustment,
+                recommended_weight_call, recommended_weight_put,
                 notes
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (time.time(), row["asset"], row["period"], row["module_name"],
                  row["total"], row["correct"], row["total"] - row["correct"],
                  wr, row["call_total"], row["call_correct"],
                  row["put_total"], row["put_correct"],
-                 rec_weight, rec_weight - 1.0, notes))
+                 rec_weight, rec_weight - 1.0,
+                 rec_weight_call, rec_weight_put, notes))
 
         # Generate insight for severe cases
         if wr < _WR_DAMPEN_SEVERE or wr > _WR_BOOST_STRONG:

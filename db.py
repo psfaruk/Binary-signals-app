@@ -1498,18 +1498,34 @@ def recent_accuracy(asset, period, n=20):
     return correct / total, total
 
 
-def per_module_accuracy(asset, period=60, n=200):
-    """Return per-module accuracy for a given (asset, period)."""
-    out = {m: {"correct": 0, "wrong": 0, "total": 0, "win_rate": None}
+def per_module_accuracy(asset, period=60, n=1000):
+    """Return per-module accuracy for a given (asset, period).
+
+    STRAT-FIX 2026-09-09:
+    * TIME WINDOW: the old query had NO time filter despite the adapter's
+      "7-day rolling window" doc — LIMIT alone made the window ~3 hours on
+      production (every-candle mode logs ~1 signal/minute). Now bounded to
+      the last QX_WIN_RATE_WINDOW_DAYS days (default 7) AND n rows.
+    * DIRECTION SPLITS: returns call/put sub-stats so the engine can apply
+      per-DIRECTION module weights (production case: USDCOP_otc sr_bounce
+      CALL 53.6% vs PUT 30.3% — a single aggregate weight destroys this
+      information).
+    """
+    import time as _time
+    window_days = int(os.environ.get("QX_WIN_RATE_WINDOW_DAYS", "7"))
+    cutoff = _time.time() - window_days * 86400
+    out = {m: {"correct": 0, "wrong": 0, "total": 0, "win_rate": None,
+               "call_correct": 0, "call_total": 0, "call_win_rate": None,
+               "put_correct": 0, "put_total": 0, "put_win_rate": None}
            for m in _MODULE_NAMES}
 
     with _read_cursor() as c:
         rows = c.execute("""SELECT signal, accuracy, reasons
                    FROM signal_log
                    WHERE asset=? AND period=? AND signal IN ('CALL','PUT')
-                     AND accuracy IN ('correct','wrong')
+                     AND accuracy IN ('correct','wrong') AND ctime >= ?
                    ORDER BY ctime DESC, id DESC LIMIT ?""",
-                   (asset, period, n)).fetchall()
+                   (asset, period, cutoff, n)).fetchall()
 
     if not rows:
         return out
@@ -1548,18 +1564,31 @@ def per_module_accuracy(asset, period=60, n=200):
 
             if accuracy not in ("correct", "wrong"):
                 continue
-            out[module]["total"] += 1
-            if module_dir == final_signal and accuracy == "correct":
-                out[module]["correct"] += 1
-            elif module_dir != final_signal and accuracy == "wrong":
-                out[module]["correct"] += 1
+            slot = out[module]
+            slot["total"] += 1
+            hit = ((module_dir == final_signal and accuracy == "correct")
+                   or (module_dir != final_signal and accuracy == "wrong"))
+            if hit:
+                slot["correct"] += 1
             else:
-                out[module]["wrong"] += 1
+                slot["wrong"] += 1
+            if module_dir == "CALL":
+                slot["call_total"] += 1
+                if hit:
+                    slot["call_correct"] += 1
+            else:
+                slot["put_total"] += 1
+                if hit:
+                    slot["put_correct"] += 1
 
     for m in _MODULE_NAMES:
         s = out[m]
         if s["total"] > 0:
             s["win_rate"] = min(1.0, max(0.0, s["correct"] / s["total"]))
+        if s["call_total"] > 0:
+            s["call_win_rate"] = min(1.0, max(0.0, s["call_correct"] / s["call_total"]))
+        if s["put_total"] > 0:
+            s["put_win_rate"] = min(1.0, max(0.0, s["put_correct"] / s["put_total"]))
 
     return out
 

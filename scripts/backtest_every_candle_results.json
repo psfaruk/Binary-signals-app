@@ -6,32 +6,32 @@
       "summary": {
         "signals": 795,
         "graded": 791,
-        "correct": 386,
+        "correct": 388,
         "draws": 4,
-        "win_pct": 48.8,
+        "win_pct": 49.1,
         "call": {
-          "total": 418,
-          "graded": 416,
-          "correct": 199,
-          "win_pct": 47.8
+          "total": 420,
+          "graded": 418,
+          "correct": 201,
+          "win_pct": 48.1
         },
         "put": {
-          "total": 377,
-          "graded": 375,
+          "total": 375,
+          "graded": 373,
           "correct": 187,
-          "win_pct": 49.9
+          "win_pct": 50.1
         },
         "strict": {
-          "total": 1,
-          "graded": 1,
+          "total": 0,
+          "graded": 0,
           "correct": 0,
-          "win_pct": 0.0
+          "win_pct": null
         },
         "fallback": {
-          "total": 794,
-          "graded": 790,
-          "correct": 386,
-          "win_pct": 48.9
+          "total": 795,
+          "graded": 791,
+          "correct": 388,
+          "win_pct": 49.1
         }
       },
       "errors": 0,
@@ -41,20 +41,20 @@
       "summary": {
         "signals": 795,
         "graded": 792,
-        "correct": 395,
+        "correct": 401,
         "draws": 3,
-        "win_pct": 49.9,
+        "win_pct": 50.6,
         "call": {
-          "total": 410,
-          "graded": 409,
-          "correct": 202,
-          "win_pct": 49.4
+          "total": 418,
+          "graded": 417,
+          "correct": 209,
+          "win_pct": 50.1
         },
         "put": {
-          "total": 385,
-          "graded": 383,
-          "correct": 193,
-          "win_pct": 50.4
+          "total": 377,
+          "graded": 375,
+          "correct": 192,
+          "win_pct": 51.2
         },
         "strict": {
           "total": 1,
@@ -65,8 +65,8 @@
         "fallback": {
           "total": 794,
           "graded": 791,
-          "correct": 394,
-          "win_pct": 49.8
+          "correct": 400,
+          "win_pct": 50.6
         }
       },
       "errors": 0,
@@ -76,32 +76,32 @@
       "summary": {
         "signals": 795,
         "graded": 792,
-        "correct": 403,
+        "correct": 407,
         "draws": 3,
-        "win_pct": 50.9,
+        "win_pct": 51.4,
         "call": {
-          "total": 388,
-          "graded": 385,
-          "correct": 189,
-          "win_pct": 49.1
+          "total": 394,
+          "graded": 391,
+          "correct": 194,
+          "win_pct": 49.6
         },
         "put": {
-          "total": 407,
-          "graded": 407,
-          "correct": 214,
-          "win_pct": 52.6
+          "total": 401,
+          "graded": 401,
+          "correct": 213,
+          "win_pct": 53.1
         },
         "strict": {
-          "total": 1,
-          "graded": 1,
+          "total": 2,
+          "graded": 2,
           "correct": 0,
           "win_pct": 0.0
         },
         "fallback": {
-          "total": 794,
-          "graded": 791,
-          "correct": 403,
-          "win_pct": 50.9
+          "total": 793,
+          "graded": 790,
+          "correct": 407,
+          "win_pct": 51.5
         }
       },
       "errors": 0,
@@ -111,20 +111,20 @@
       "summary": {
         "signals": 795,
         "graded": 791,
-        "correct": 365,
+        "correct": 372,
         "draws": 4,
-        "win_pct": 46.1,
+        "win_pct": 47.0,
         "call": {
-          "total": 356,
-          "graded": 355,
-          "correct": 153,
-          "win_pct": 43.1
+          "total": 357,
+          "graded": 356,
+          "correct": 157,
+          "win_pct": 44.1
         },
         "put": {
-          "total": 439,
-          "graded": 436,
-          "correct": 212,
-          "win_pct": 48.6
+          "total": 438,
+          "graded": 435,
+          "correct": 215,
+          "win_pct": 49.4
         },
         "strict": {
           "total": 2,
@@ -135,8 +135,8 @@
         "fallback": {
           "total": 793,
           "graded": 789,
-          "correct": 364,
-          "win_pct": 46.1
+          "correct": 371,
+          "win_pct": 47.0
         }
       },
       "errors": 0,
@@ -146,20 +146,20 @@
       "summary": {
         "signals": 795,
         "graded": 794,
-        "correct": 382,
+        "correct": 380,
         "draws": 1,
-        "win_pct": 48.1,
+        "win_pct": 47.9,
         "call": {
-          "total": 423,
-          "graded": 423,
+          "total": 425,
+          "graded": 425,
           "correct": 205,
-          "win_pct": 48.5
+          "win_pct": 48.2
         },
         "put": {
-          "total": 372,
-          "graded": 371,
-          "correct": 177,
-          "win_pct": 47.7
+          "total": 370,
+          "graded": 369,
+          "correct": 175,
+          "win_pct": 47.4
         },
         "strict": {
           "total": 0,
@@ -170,8 +170,8 @@
         "fallback": {
           "total": 795,
           "graded": 794,
-          "correct": 382,
-          "win_pct": 48.1
+          "correct": 380,
+          "win_pct": 47.9
         }
       },
       "errors": 0,
@@ -181,32 +181,32 @@
       "summary": {
         "signals": 795,
         "graded": 795,
-        "correct": 382,
+        "correct": 387,
         "draws": 0,
-        "win_pct": 48.1,
+        "win_pct": 48.7,
         "call": {
-          "total": 408,
-          "graded": 408,
-          "correct": 199,
-          "win_pct": 48.8
+          "total": 419,
+          "graded": 419,
+          "correct": 207,
+          "win_pct": 49.4
         },
         "put": {
-          "total": 387,
-          "graded": 387,
-          "correct": 183,
-          "win_pct": 47.3
+          "total": 376,
+          "graded": 376,
+          "correct": 180,
+          "win_pct": 47.9
         },
         "strict": {
-          "total": 3,
-          "graded": 3,
-          "correct": 2,
-          "win_pct": 66.7
+          "total": 2,
+          "graded": 2,
+          "correct": 1,
+          "win_pct": 50.0
         },
         "fallback": {
-          "total": 792,
-          "graded": 792,
-          "correct": 380,
-          "win_pct": 48.0
+          "total": 793,
+          "graded": 793,
+          "correct": 386,
+          "win_pct": 48.7
         }
       },
       "errors": 0,
@@ -216,32 +216,32 @@
   "overall": {
     "signals": 4770,
     "graded": 4755,
-    "correct": 2313,
+    "correct": 2335,
     "draws": 15,
-    "win_pct": 48.6,
+    "win_pct": 49.1,
     "call": {
-      "total": 2403,
-      "graded": 2396,
-      "correct": 1147,
-      "win_pct": 47.9
+      "total": 2433,
+      "graded": 2426,
+      "correct": 1173,
+      "win_pct": 48.4
     },
     "put": {
-      "total": 2367,
-      "graded": 2359,
-      "correct": 1166,
-      "win_pct": 49.4
+      "total": 2337,
+      "graded": 2329,
+      "correct": 1162,
+      "win_pct": 49.9
     },
     "strict": {
-      "total": 8,
-      "graded": 8,
-      "correct": 4,
-      "win_pct": 50.0
+      "total": 7,
+      "graded": 7,
+      "correct": 3,
+      "win_pct": 42.9
     },
     "fallback": {
-      "total": 4762,
-      "graded": 4747,
-      "correct": 2309,
-      "win_pct": 48.6
+      "total": 4763,
+      "graded": 4748,
+      "correct": 2332,
+      "win_pct": 49.1
     }
   },
   "coverage_pct": 100.0,
