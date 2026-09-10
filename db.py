@@ -1663,6 +1663,78 @@ def recent_accuracy(asset, period, n=20):
     return correct / total, total
 
 
+def consecutive_wrong_streak(asset=None, period=60, window_days=7):
+    """PSYCHOLOGY-FIX (2026-09-11): current + max consecutive-wrong streaks.
+
+    Traders revenge-trade precisely during loss streaks — surfacing the live
+    streak (per pair, or global when asset=None) plus the worst streak in the
+    window gives the UI the two numbers the discipline rules are built on.
+
+    Returns {"current": int, "max": int, "n_graded": int}.
+    """
+    cutoff = time.time() - window_days * _SECONDS_PER_DAY
+    q = """SELECT accuracy, asset FROM signal_log
+           WHERE period=? AND signal IN ('CALL','PUT')
+             AND accuracy IN ('correct','wrong') AND ctime >= ?"""
+    args = [period, cutoff]
+    if asset is not None:
+        q += " AND asset=?"
+        args.append(asset)
+    q += " ORDER BY ctime ASC, id ASC"
+    with _read_cursor() as c:
+        rows = c.execute(q, args).fetchall()
+    current = worst = run = 0
+    for r in rows:
+        if r["accuracy"] == "wrong":
+            run += 1
+            worst = max(worst, run)
+        else:
+            run = 0
+    current = run
+    return {"current": current, "max": worst, "n_graded": len(rows)}
+
+
+def calibration_by_confidence(period=60, window_days=7):
+    """HONESTY-FIX (2026-09-11): predicted confidence vs actual win rate.
+
+    The live audit measured conf~70 signals winning 50.0% (-21.3pp) and
+    conf~60 winning 48.4% (-12.1pp) — the confidence number was fiction.
+    This exposes the calibration table so the UI (and the operator) can see
+    exactly how honest each confidence band currently is.
+    Returns list of {bucket, n, predicted_pct, actual_pct, gap_pp} sorted.
+    """
+    cutoff = time.time() - window_days * _SECONDS_PER_DAY
+    with _read_cursor() as c:
+        rows = c.execute("""SELECT confidence, accuracy FROM signal_log
+                            WHERE period=? AND signal IN ('CALL','PUT')
+                              AND accuracy IN ('correct','wrong')
+                              AND ctime >= ? AND confidence IS NOT NULL""",
+                         (period, cutoff)).fetchall()
+    buckets = {}
+    for r in rows:
+        conf = int(r["confidence"] or 0)
+        b = conf // 5 * 5
+        rec = buckets.setdefault(b, {"n": 0, "wins": 0, "conf_sum": 0})
+        rec["n"] += 1
+        rec["conf_sum"] += conf
+        rec["wins"] += (r["accuracy"] == "correct")
+    out = []
+    for b in sorted(buckets):
+        rec = buckets[b]
+        if rec["n"] < 20:
+            continue
+        predicted = rec["conf_sum"] / rec["n"]
+        actual = 100.0 * rec["wins"] / rec["n"]
+        out.append({
+            "bucket": b,
+            "n": rec["n"],
+            "predicted_pct": round(predicted, 1),
+            "actual_pct": round(actual, 1),
+            "gap_pp": round(actual - predicted, 1),
+        })
+    return out
+
+
 def per_module_accuracy(asset, period=60, n=1000):
     """Return per-module accuracy for a given (asset, period).
 

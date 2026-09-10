@@ -224,20 +224,124 @@
     });
   }
 
+  /* ─── PSYCHOLOGY-FIX (2026-09-11): discipline panel ────────────────────
+     Renders /api/psychology — the trading-psychology rules computed from
+     THIS app's own ledger. Fails silently (panel stays hidden). */
+  function fmtHour(h, pct, n){
+    return esc(String(h).padStart(2, '0') + ':00 · ' + pct.toFixed(1) + '% (n=' + n + ')');
+  }
+
+  function fmtPairRow(p){
+    var line = esc(displayFor(p.asset)) + ' · ' + fmtPct(p.win_pct)
+      + ' · Wilson LB ' + fmtPct(p.wilson_lb_pct) + ' (n=' + p.graded + ')';
+    if(p.call_win_pct != null && p.put_win_pct != null){
+      line += '<br><span class="psy-dir-split">CALL ' + fmtPct(p.call_win_pct)
+        + ' / PUT ' + fmtPct(p.put_win_pct) + '</span>';
+    }
+    return line;
+  }
+
+  function renderPsychology(data){
+    var panel = $('psy-panel');
+    if(!panel || !data || !data.ok) return;
+    panel.hidden = false;
+
+    var econ = $('psy-economics');
+    if(econ){
+      var eco = data.economics || {};
+      var otc = eco.otc || {}, real = eco.real || {};
+      econ.innerHTML =
+        'OTC পেআউট ~' + (otc.typical_payout_pct != null ? otc.typical_payout_pct : '—')
+        + '% → ব্রেকইভেন উইন রেট <b>' + (otc.breakeven_win_pct != null ? otc.breakeven_win_pct : '54.05') + '%</b><br>'
+        + 'Real পেআউট ~' + (real.typical_payout_pct != null ? real.typical_payout_pct : '—')
+        + '% → ব্রেকইভেন <b>' + (real.breakeven_win_pct != null ? real.breakeven_win_pct : '58.82') + '%</b><br>'
+        + '<span class="psy-warn">৫০.২% উইন রেট = লস — "প্রায় প্রফিটেবল" বলে কিছু নেই</span>';
+    }
+
+    var stk = $('psy-streaks');
+    if(stk){
+      var s = data.streaks || {};
+      stk.innerHTML =
+        'চলতি স্ট্রিক: <b class="psy-bad">' + (s.current || 0) + ' লস</b><br>'
+        + 'সর্বোচ্চ স্ট্রিক (৭ দিন): <b>' + (s.max || 0) + ' লস</b><br>'
+        + '<span class="psy-warn">৩ লসের পর ৩০ মিনিট বিরতি — রেভেঞ্জ ট্রেড = ধ্বংস</span>';
+    }
+
+    var hrs = $('psy-hours');
+    if(hrs){
+      var best = (data.best_hours || []).map(function(h){
+        return fmtHour(h.utc_hour, h.win_pct, h.n);
+      }).join('<br>');
+      var worst = (data.worst_hours || []).map(function(h){
+        return fmtHour(h.utc_hour, h.win_pct, h.n);
+      }).join('<br>');
+      hrs.innerHTML = 'সেরা:<br>' + (best || '—') + '<br>খারাপ:<br>'
+        + (worst || '—') + '<br><span class="psy-dir-split">বাংলাদেশ সময় = UTC+6</span>';
+    }
+
+    var rec = $('psy-rec');
+    if(rec){
+      var rl = (data.recommended_pairs || []).map(fmtPairRow);
+      rec.innerHTML = rl.length ? rl.join('<br>')
+        : '<span class="psy-warn">এখনো কোনো পেয়ার Wilson-verified প্রফিটেবল নয় — সিলেক্টিভ থাকুন</span>';
+    }
+
+    var av = $('psy-avoid');
+    if(av){
+      var al = (data.avoid_pairs || []).map(fmtPairRow);
+      av.innerHTML = al.length ? al.join('<br>') : '—';
+    }
+
+    var st = $('psy-stake');
+    if(st){
+      var sr = data.stake_rules || {};
+      st.innerHTML =
+        'প্রতি ট্রেড: <b>' + esc(sr.fixed_stake_pct || '1–2%') + '</b><br>'
+        + 'মার্টিঙ্গেল: <b class="psy-bad">' + esc(sr.martingale || 'কখনোই না') + '</b><br>'
+        + 'দৈনিক লস লিমিট: <b>' + esc(sr.daily_loss_limit_pct || 10) + '%</b>';
+    }
+
+    var rules = $('psy-rules');
+    if(rules){
+      var rs = data.psychology_rules || [];
+      rules.innerHTML = rs.map(function(r){
+        return '<div class="psy-rule"><b>' + esc(r.title) + '</b> — '
+          + esc(r.detail) + '</div>';
+      }).join('');
+    }
+
+    var honest = $('psy-honest');
+    if(honest){ honest.textContent = data.honest_summary || ''; }
+  }
+
+  var psyLoading = false;
+  function fetchPsychology(){
+    if(psyLoading) return;
+    psyLoading = true;
+    fetch('/api/psychology?period=60&days=7')
+      .then(function(r){ return r.json(); })
+      .then(function(data){ psyLoading = false; renderPsychology(data); })
+      .catch(function(){ psyLoading = false; });
+  }
+
   function initWinrate(){
     if($('wr-pairlist') === null) return;   // not on a page with this tab
     wireChips('wr-market-filter', 'mkt', function(v){ wrState.market = v; });
     wireChips('wr-window-filter', 'window', function(v){ wrState.window = parseInt(v, 10) || 0; });
     wirePairRows();
+    fetchPsychology();   // PSYCHOLOGY-FIX 2026-09-11
 
     var refreshBtn = $('wr-refresh-btn');
     if(refreshBtn && !refreshBtn.dataset.wired){
       refreshBtn.dataset.wired = '1';
-      refreshBtn.addEventListener('click', fetchWinrate);
+      refreshBtn.addEventListener('click', function(){
+        fetchWinrate();
+        fetchPsychology();
+      });
     }
 
     // Refresh when the tab becomes visible (fired by common.js switchTab).
-    global.addEventListener('winrate:show', function(){ fetchWinrate(); });
+    global.addEventListener('winrate:show', function(){ fetchWinrate(); fetchPsychology(); });
 
     // First fetch (tab may be opened before any event fires on some flows).
     fetchWinrate();

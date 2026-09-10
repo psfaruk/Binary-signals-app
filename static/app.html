@@ -406,6 +406,46 @@
                         <div class="wr-empty">ডেটা লোড হচ্ছে…</div>
                     </div>
 
+                    <!-- ═══ PSYCHOLOGY-FIX 2026-09-11: discipline panel ═══
+                         Binary-trading psychology rules computed from THIS
+                         app's own ledger (breakeven math, loss streaks,
+                         Wilson-verified pair selectivity, best/worst hours,
+                         stake rules). Data: /api/psychology -->
+                    <div class="psy-panel" id="psy-panel" hidden>
+                        <div class="psy-head">
+                            <h3>🧠 ট্রেডিং সাইকোলজি ও ডিসিপ্লিন</h3>
+                            <p class="psy-sub">নিয়মগুলো এই অ্যাপের নিজের ডেটা থেকে হিসাব করা — এই মুহূর্তের লাইভ সংখ্যা</p>
+                        </div>
+                        <div class="psy-grid" id="psy-grid">
+                            <div class="psy-card">
+                                <div class="psy-card-title">💰 ব্রেকইভেন ম্যাথ</div>
+                                <div class="psy-card-body" id="psy-economics">—</div>
+                            </div>
+                            <div class="psy-card">
+                                <div class="psy-card-title">🔥 লস স্ট্রিক</div>
+                                <div class="psy-card-body" id="psy-streaks">—</div>
+                            </div>
+                            <div class="psy-card">
+                                <div class="psy-card-title">⏰ সেরা/খারাপ ঘণ্টা (UTC)</div>
+                                <div class="psy-card-body" id="psy-hours">—</div>
+                            </div>
+                            <div class="psy-card">
+                                <div class="psy-card-title">✅ রেকমেন্ডেড পেয়ার</div>
+                                <div class="psy-card-body" id="psy-rec">—</div>
+                            </div>
+                            <div class="psy-card">
+                                <div class="psy-card-title">⛔ এভয়েড পেয়ার</div>
+                                <div class="psy-card-body" id="psy-avoid">—</div>
+                            </div>
+                            <div class="psy-card">
+                                <div class="psy-card-title">📊 স্টেক রুল</div>
+                                <div class="psy-card-body" id="psy-stake">—</div>
+                            </div>
+                        </div>
+                        <div class="psy-rules" id="psy-rules"></div>
+                        <p class="psy-honest" id="psy-honest"></p>
+                    </div>
+
                     <p class="wr-note">
                         💡 উইন রেট হিসাব হয় <b>গ্রেডেড</b> সিগন্যাল থেকে (ক্যান্ডেল ক্লোজে যাচাইকৃত)।
                         Draw গুলো উইন রেটে গণনা হয় না। যে পেয়ারের CALL রেট ভালো সেখানে CALL সিগন্যাল

@@ -101,27 +101,42 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         # the modules) with the honest fallback labeling.
         if _cf.SIGNAL_MODE == "every_candle" and candles:
             n = len(candles)
-            direction = "CALL"
-            basis = "default"
-            if n >= 1:
-                try:
-                    o = float(candles[-1].get("open", 0.0))
-                    c = float(candles[-1].get("close", 0.0))
-                    if c > o:
-                        direction, basis = "CALL", "body_direction"
-                    elif c < o:
-                        direction, basis = "PUT", "body_direction"
-                except Exception:
-                    pass
+            # ACCURACY-FIX (2026-09-11): try the measured persistence edge
+            # first (per-pair, strictly from closed history), then the
+            # anti-momentum fade. The old chain FOLLOWED the last body
+            # (body_direction basis) which measured 45.5% win live — the
+            # faded direction is the honest default before warmup completes.
+            persist = _cf._persistence_stats(candles)
+            if persist is not None:
+                direction = persist["dir"]
+                basis = f"persistence_{persist['kind']}"
+            else:
+                direction = "CALL"
+                basis = "default"
+                if n >= 1:
+                    try:
+                        o = float(candles[-1].get("open", 0.0))
+                        c = float(candles[-1].get("close", 0.0))
+                        if c > o:
+                            direction, basis = "PUT", "body_fade"
+                        elif c < o:
+                            direction, basis = "CALL", "body_fade"
+                    except Exception:
+                        pass
             if basis == "default":
                 if htf_trend == "UPTREND":
-                    direction, basis = "CALL", "htf_trend"
+                    direction, basis = "PUT", "htf_fade"
                 elif htf_trend == "DOWNTREND":
-                    direction, basis = "PUT", "htf_trend"
+                    direction, basis = "CALL", "htf_fade"
             conf = _cf.FALLBACK_CONF_BASE
-            if (htf_trend == "UPTREND" and direction == "CALL") or (
+            if persist is not None:
+                conf = _cf.FALLBACK_CONF_BASE + int(round(
+                    persist["edge_pp"] * _cf.PERSIST_CONF_PER_PP))
+            elif (htf_trend == "UPTREND" and direction == "CALL") or (
                     htf_trend == "DOWNTREND" and direction == "PUT"):
                 conf += 2
+            conf = max(_cf.FALLBACK_CONF_BASE,
+                       min(_cf.FALLBACK_CONF_CAP, conf))
             result = _neutral(
                 [f"INSUFFICIENT_DATA: need >= {MIN_CANDLES_FOR_PREDICTION} "
                  f"closed candles (got {n}) — every-candle fallback active"],

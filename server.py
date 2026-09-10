@@ -1397,7 +1397,18 @@ async def debug_info(request: Request):
 
 @app.get("/api/stats")
 async def module_stats():
-    """Per-module performance report from signal_log."""
+    """Per-module performance report from signal_log.
+
+    HONESTY-FIX (2026-09-11): the payload now also carries the economics and
+    calibration context every trader NEEDS but the old payload hid:
+      • breakeven_wr / payout economics — a 50.x% win rate is NOT "almost
+        profitable": at 85% payout you need 54.05% just to break even.
+      • current + worst consecutive-wrong streaks (revenge-trading guard).
+      • calibration_by_confidence — predicted vs actual win rate per
+        confidence bucket (the old conf~70 → 50% actual gap, made visible).
+      • coverage_note — every-candle mode means most signals are honest
+        fallback coverage, not high-confidence trades.
+    """
     def _compute_stats_with_adaptation():
         from core.stats import compute_module_stats
         stats = compute_module_stats(_db.DB_PATH)
@@ -1432,6 +1443,33 @@ async def module_stats():
         except Exception as e:
             _logger.exception("adaptation status computation failed")
             stats["adaptation_error"] = "internal error"
+        # ── HONESTY-FIX fields (2026-09-11) ─────────────────────────────
+        try:
+            from feed import _payout_floor_for as _pfloor
+            payouts = {}
+            for cat, floor in (("otc", _pfloor("EURUSD_otc")),
+                               ("real", _pfloor("EURUSD"))):
+                payouts[cat] = {
+                    "typical_payout_pct": floor,
+                    "breakeven_win_pct": round(10000.0 / (100 + floor), 2),
+                }
+            stats["payout_economics"] = payouts
+        except Exception as _pe:
+            stats["payout_economics_error"] = str(_pe)
+        try:
+            stats["streaks"] = _db.consecutive_wrong_streak(period=60)
+        except Exception as _se:
+            stats["streaks_error"] = str(_se)
+        try:
+            stats["calibration_by_confidence"] = _db.calibration_by_confidence(
+                period=60)
+        except Exception as _ce:
+            stats["calibration_error"] = str(_ce)
+        stats["coverage_note"] = (
+            "every-candle mode: most signals are FALLBACK coverage signals "
+            "(strict high-confidence gates reject ~98% of candles). Treat "
+            "fallback signals as information, not trade advice; check "
+            "/api/psychology for the discipline rules.")
         return stats
 
     return await asyncio.to_thread(_compute_stats_with_adaptation)
@@ -1764,6 +1802,156 @@ async def api_target_gate():
     except Exception as e:
         _logger.exception("target-gate endpoint failed")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+@app.get("/api/psychology")
+async def api_psychology(period: int = 60, days: int = 7):
+    """PSYCHOLOGY-FIX (2026-09-11) — binary-trading discipline, data-driven.
+
+    The live audit (7,098 graded signals, 50.23% WR) proved the predictions
+    themselves carry almost no edge in every-candle mode — which makes the
+    TRADER'S behaviour the dominant PnL variable. This endpoint computes the
+    discipline rules FROM THE APP'S OWN LEDGER instead of generic advice:
+
+      1. BREAKEVEN MATH     — actual WR vs the WR each payout requires
+      2. STREAK GUARD       — live + worst loss streak, stop-after-N rule
+      3. PAIR SELECTIVITY   — only pairs whose Wilson-LB win rate beats the
+                              payout breakeven are recommended (with CALL/PUT
+                              split so the trader takes the proven side)
+      4. HOUR AWARENESS     — measured best/worst UTC hours for this ledger
+      5. STAKE / MATH RULES — fixed fractional staking, no martingale
+      6. PSYCHOLOGY RULES   — the five failure modes binary traders die of,
+                              each tied to a live number from this payload
+    """
+    def _compute():
+        out = {"ok": True, "period": period, "window_days": days}
+        # 1. economics
+        try:
+            from feed import _payout_floor_for as _pfloor
+            be = {}
+            for cat, probe in (("otc", "EURUSD_otc"), ("real", "EURUSD")):
+                floor = _pfloor(probe)
+                be[cat] = {"typical_payout_pct": floor,
+                           "breakeven_win_pct": round(10000.0 / (100 + floor), 2)}
+            out["economics"] = be
+        except Exception as _e:
+            out["economics_error"] = str(_e)
+        # 2. streaks
+        try:
+            out["streaks"] = _db.consecutive_wrong_streak(period=period,
+                                                          window_days=days)
+        except Exception as _e:
+            out["streaks_error"] = str(_e)
+        # 3. pair selectivity (Wilson-gated)
+        try:
+            import math as _math
+
+            def _wlb(k, n, z=1.96):
+                if n <= 0:
+                    return 0.0
+                p = k / n
+                d = 1 + z * z / n
+                c = p + z * z / (2 * n)
+                m = z * _math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+                return max(0.0, min(1.0, (c - m) / d))
+
+            data = _db.get_directional_winrate(period=period, days=days,
+                                               category=None)
+            breakeven = 0.5405  # 85% payout floor default
+            try:
+                breakeven = out.get("economics", {}).get(
+                    "otc", {}).get("breakeven_win_pct", 54.05) / 100.0
+            except Exception:
+                pass
+            rec, avoid = [], []
+            for p in (data or {}).get("pairs", []):
+                n = p.get("graded") or 0
+                wr = p.get("win_pct")
+                if n < 50 or wr is None:
+                    continue
+                wlb = _wlb(round(wr / 100.0 * n), n)
+                row = {
+                    "asset": p.get("asset"),
+                    "graded": n,
+                    "win_pct": wr,
+                    "wilson_lb_pct": round(wlb * 100, 2),
+                    "call_win_pct": (p.get("call") or {}).get("win_pct"),
+                    "put_win_pct": (p.get("put") or {}).get("win_pct"),
+                }
+                if wlb >= breakeven:
+                    rec.append(row)
+                elif wlb < 0.45 and n >= 100:
+                    avoid.append(row)
+            out["recommended_pairs"] = sorted(
+                rec, key=lambda r: -(r["wilson_lb_pct"]))[:10]
+            out["avoid_pairs"] = sorted(
+                avoid, key=lambda r: r["wilson_lb_pct"])[:10]
+            out["selectivity_rule"] = (
+                f"Only trade pairs whose Wilson lower-bound win rate beats the "
+                f"payout breakeven ({breakeven*100:.2f}% at the floor payout). "
+                f"Everything else is entertainment, not edge.")
+        except Exception as _e:
+            out["selectivity_error"] = str(_e)
+        # 4. hour awareness (measured from the ledger)
+        try:
+            rows_by_hour = {}
+            with _db._read_cursor() as c:
+                cutoff = time.time() - days * 86400
+                rows = c.execute(
+                    """SELECT CAST(strftime('%H', ctime, 'unixepoch') AS INT) h,
+                              accuracy FROM signal_log
+                       WHERE period=? AND signal IN ('CALL','PUT')
+                         AND accuracy IN ('correct','wrong') AND ctime >= ?""",
+                    (period, cutoff)).fetchall()
+            for r in rows:
+                rec = rows_by_hour.setdefault(r["h"], [0, 0])
+                rec[0] += 1
+                rec[1] += (r["accuracy"] == "correct")
+            hours = [{"utc_hour": h, "n": n, "win_pct": round(100 * w / n, 2)}
+                     for h, (n, w) in rows_by_hour.items() if n >= 60]
+            hours.sort(key=lambda x: -x["win_pct"])
+            out["best_hours"] = hours[:3]
+            out["worst_hours"] = sorted(hours, key=lambda x: x["win_pct"])[:3]
+            out["hour_note"] = (
+                "UTC ঘণ্টা অনুযায়ী মাপা উইন রেট — খারাপ ঘণ্টায় সিগন্যাল দেখলেও "
+                "ট্রেড না নেওয়াই ডিসিপ্লিন। (বাংলাদেশ সময় = UTC+6)")
+        except Exception as _e:
+            out["hours_error"] = str(_e)
+        # 5-6. fixed rules (universal binary-trading math + psychology)
+        out["stake_rules"] = {
+            "fixed_stake_pct": "1–2% of balance per trade, never more",
+            "martingale": "কখনোই না — লসের পর স্টেক বাড়ালে ৫ লসের স্ট্রিকেই "
+                          "অ্যাকাউন্ট শূন্য হয় (মাপা সর্বোচ্চ স্ট্রিক দেখুন উপরে)",
+            "stop_after_consecutive_losses": 3,
+            "daily_loss_limit_pct": 10,
+            "note": "binary-তে প্রতি ট্রেড সম্পূর্ণ স্টেকের ঝুঁকি — ফরেক্সের "
+                    "স্টপ-লস নেই, তাই পজিশন সাইজিংই একমাত্র রক্ষা",
+        }
+        out["psychology_rules"] = [
+            {"title": "প্রতিশোধের ট্রেড (Revenge Trading)",
+             "detail": ("লসের পরপর বড় স্টেক = মাপা সর্বোচ্চ স্ট্রিক "
+                        f"{out.get('streaks', {}).get('max', '?')} লস। ৩ লসের পর "
+                        "৩০ মিনিট বিরতি নিন।")},
+            {"title": "ওভারট্রেডিং (Every Candle Trading)",
+             "detail": ("প্রতিটি ১-মিনিট ক্যান্ডেলে সিগন্যাল আসে (কভারেজ ১০০%) "
+                        "কিন্তু ৯৮% ফলব্যাক — সব সিগন্যাল ট্রেড করা মানে কয়েন-"
+                        "ফ্লিপ খেলা। শুধু recommended_pairs + ভালো ঘণ্টায় ট্রেড।")},
+            {"title": "কনফিডেন্স ফাঁদ (Fake Confidence)",
+             "detail": ("কনফিডেন্স ৭০% দেখালেও আসল উইন রেট দেখুন calibration টেবিলে "
+                        "(/api/stats) — এখন থেকে ফলব্যাক কনফিডেন্স মাপা এজ "
+                        "থেকে হিসাব হয়।")},
+            {"title": "মার্টিঙ্গেল (Doubling Down)",
+             "detail": ("৮৫% পেআউটে ৫৪.০৫% উইন রেট লাগবে ব্রেকইভেনের জন্য — "
+                        "ডাবল-ডাউন এই গ্যাপ বন্ধ করে না, শুধু ধ্বংস ত্বরান্বিত করে।")},
+            {"title": "টিল্ট ও ক্লান্তি (Tilt / Fatigue)",
+             "detail": ("দিনে ১০% লস লিমিট — লিমিট ছুঁলে অ্যাপ বন্ধ করুন। "
+                        "রাত ৩টায় ট্রেড করা মানে সিদ্ধান্তহীনতায় টাকা দাগানো।")},
+        ]
+        out["honest_summary"] = (
+            "সত্য কথা: প্রতি ক্যান্ডেল সিগন্যাল দিতে হলে ১-মিনিটের বাইনারি "
+            "মার্কেটে ৫০%±এজ অনিবার্য। লাভজনক হওয়ার একমাত্র পথ: সিলেক্টিভিটি "
+            "(Wilson-verified পেয়ার+দিক+ঘণ্টা), পেআউট ≥৮৫%, আর ডিসিপ্লিন।")
+        return out
+    return await asyncio.to_thread(_compute)
 
 @app.get("/api/pair-deep-stats/{asset}")
 async def pair_deep_stats(asset: str, period: int = 60):

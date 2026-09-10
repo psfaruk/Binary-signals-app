@@ -245,6 +245,14 @@ _PUBLIC_READ_PREFIXES = (
     "/api/history",
     "/api/signals",
     "/api/stats",
+    # PSYCHOLOGY-FIX 2026-09-11: discipline rules computed from the public
+    # signal ledger — same read-only sensitivity as /api/stats.
+    "/api/psychology",
+    # WINRATE (2026-08-31) + TARGET-GATE (2026-09-09): read-only dashboards
+    # fed from signal_log — explicitly public instead of falling through to
+    # the QX_PUBLIC_READ-dependent "unknown" bucket.
+    "/api/winrate",
+    "/api/target-gate",
     "/api/brain",
     "/api/patterns",
     "/api/time-patterns",
