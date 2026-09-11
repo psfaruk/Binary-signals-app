@@ -343,6 +343,58 @@ def init():
         except Exception as _e:
             print(f"[db] ix_sl_quality index creation skipped: {_e}")
 
+        # ── OTC-PREDICT-ENGINE (2026-09-11, PART 17 + PART 16 freeze) ────
+        # Frozen T+1/T+2 predictions. PART 16 "Prediction Freeze":
+        # UNIQUE(asset, period, target_time, horizon) + INSERT OR IGNORE in
+        # tracker.insert_prediction makes re-prediction / late editing of a
+        # signal structurally impossible — the first frozen row for a target
+        # candle wins forever; only settlement columns are filled later.
+        c.execute("""CREATE TABLE IF NOT EXISTS otc_predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset TEXT, period INT,
+            signal_time INT,          -- prediction moment (candle-i close, epoch s)
+            target_time INT,          -- T+1 / T+2 candle open time (epoch s)
+            horizon INT,              -- 1 or 2
+            prediction TEXT,          -- CALL / PUT
+            probability REAL,         -- calibrated P(UP), PART 13
+            tier TEXT,                -- HIGH / GOOD / WATCH / NO_SIGNAL
+            score INT,                -- PART 14 100-point score
+            emit INT,                 -- 1 = tradeable signal, 0 = tracked only
+            components TEXT,          -- score breakdown JSON
+            regime TEXT,
+            pa_agreed INT,
+            quality TEXT,             -- PART 24 gate states JSON
+            reason TEXT,
+            model_version TEXT,
+            feature_json TEXT,        -- frozen feature row (audit/retraining)
+            close_i REAL,             -- entry reference (candle-i close)
+            created_at REAL,
+            actual_result TEXT,       -- UP / DOWN / DRAW (target candle)
+            actual_open REAL, actual_close REAL,
+            win_loss TEXT,            -- win / loss / draw
+            settled_at REAL,
+            UNIQUE (asset, period, target_time, horizon))""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_pred_settle
+            ON otc_predictions(asset, target_time, settled_at)""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_pred_emit
+            ON otc_predictions(emit, tier, signal_time)""")
+
+        # PART 25/28: model registry — which bundle is allowed to predict.
+        # A redeploy never serves an unregistered file; training scripts
+        # insert a row and flip `active`.
+        c.execute("""CREATE TABLE IF NOT EXISTS model_registry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,                -- bundle scope: 'global' or asset name
+            version TEXT,
+            scope TEXT,               -- global | pair
+            asset TEXT,
+            trained_at REAL,
+            metrics TEXT,             -- walk-forward metrics JSON
+            path TEXT,
+            active INT DEFAULT 0,
+            created_at REAL,
+            UNIQUE (name, version))""")
+
         # FIX (TRUE-WR-MIGRATION-2026-08-31): pair_hourly_patterns historically
         # stored call/put win rates as an EMA approximation (old*0.8 + x*0.2)
         # which never converges to the real ratio and is skewed by recency.
@@ -1888,6 +1940,7 @@ def cleanup(days=None):
 
     deleted_cm = 0
     deleted_sl = 0
+    deleted_pred = 0
     conn = _conn()
     try:
         cur = conn.cursor()
@@ -1915,12 +1968,27 @@ def cleanup(days=None):
             deleted_sl += n
             if n < BATCH:
                 break
+        # OTC-PREDICT-ENGINE (2026-09-11): frozen predictions age out with
+        # the same retention window (signal_time is the freeze epoch).
+        while True:
+            cur.execute(
+                "DELETE FROM otc_predictions WHERE id IN ("
+                "    SELECT id FROM otc_predictions WHERE signal_time < ? LIMIT ?"
+                ")",
+                (cutoff_int, BATCH),
+            )
+            n = cur.rowcount
+            conn.commit()
+            deleted_pred += n
+            if n < BATCH:
+                break
     finally:
         conn.close()
 
-    if deleted_cm or deleted_sl:
+    if deleted_cm or deleted_sl or deleted_pred:
         print(f"[db] cleanup: removed {deleted_cm} candle_micro + "
-              f"{deleted_sl} signal_log rows older than {days}d")
+              f"{deleted_sl} signal_log + {deleted_pred} otc_predictions "
+              f"older than {days}d")
     return deleted_cm, deleted_sl
 
 

@@ -164,9 +164,16 @@ def _gapfree_runs(candles, period=60):
 
 
 def build_dataset(candles_by_asset, window=DEFAULT_WINDOW, micro=True,
-                  period=60):
+                  period=60, feature_fn=None):
     """Build the T+1 / T+2 prediction dataset (Phase 3) under the
     prediction lock (Phase 8).
+
+    feature_fn (2026-09-11 OTC-PREDICT-ENGINE): injectable feature engine.
+    Default = core.otc_features.build_feature_row (the 24 Phase-2 features);
+    the prediction engine passes
+    core.otc_predict.features_ext.build_extended_row (PART 6 superset).
+    The LOCK invariants below apply to ANY injected engine — the builder
+    still only ever hands it the past slice candles[i-window+1 .. i].
 
     For every closed candle index i (0-based) with enough history:
         X  = build_feature_row(candles[i-window+1 .. i], micro_i)
@@ -187,6 +194,7 @@ def build_dataset(candles_by_asset, window=DEFAULT_WINDOW, micro=True,
     """
     if window < MIN_WINDOW:
         raise ValueError(f"window {window} < MIN_WINDOW {MIN_WINDOW}")
+    feature_fn = feature_fn or build_feature_row
     rows = []
     stats = {"assets": 0, "rows": 0, "dropped_doji_t1": 0,
              "dropped_doji_t2": 0, "skipped_short": 0,
@@ -213,8 +221,8 @@ def build_dataset(candles_by_asset, window=DEFAULT_WINDOW, micro=True,
                 # PHASE 8 LOCK — structural, not conventional:
                 # the feature engine sees ONLY candles[0..i].
                 past_slice = candles[i - window + 1: i + 1]
-                feats = build_feature_row(past_slice,
-                                          micro=t0 if micro else None)
+                feats = feature_fn(past_slice,
+                                   micro=t0 if micro else None)
 
                 # doji targets carry no direction — drop the row honestly
                 if t1["close"] == t1["open"]:

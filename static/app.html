@@ -257,6 +257,25 @@
                             </div>
                         </div>
 
+                        <!-- OTC-PREDICT-ENGINE (2026-09-11, PART 30):
+                             NEXT CANDLE / 2ND CANDLE probability card.
+                             common.js renderPredictionCard() writes here;
+                             data comes from FROZEN otc_predictions rows
+                             (WS 'otc_pred' + /api/prediction/<asset>). -->
+                        <div class="pred-card" id="pred-card">
+                            <div class="pred-header">
+                                <span class="pred-title">ভবিষ্যৎ ক্যান্ডেল প্রেডিকশন</span>
+                            </div>
+                            <div class="pred-row pred-row-wait">
+                                <span class="pred-row-label">পরবর্তী ক্যান্ডেল</span>
+                                <span class="pred-row-value">সংগ্রহ চলছে…</span>
+                            </div>
+                            <div class="pred-row pred-row-wait">
+                                <span class="pred-row-label">দ্বিতীয় ক্যান্ডেল</span>
+                                <span class="pred-row-value">সংগ্রহ চলছে…</span>
+                            </div>
+                        </div>
+
                         <!-- Module breakdown — common.js renderModuleBreakdown() writes to #theories-list -->
                         <div class="module-panel">
                             <div class="panel-section-header">

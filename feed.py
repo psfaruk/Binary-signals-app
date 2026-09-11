@@ -3297,6 +3297,29 @@ class QuotexFeed:
                 self._save_micro, stream.asset, stream.period, closed,
                 _micro_snap, stream.candles, list(stream.ticks))
 
+        # ── OTC-PREDICT-ENGINE (2026-09-11, PART 15/16/27) ────────────────
+        # The just-closed candle is now fully CLOSED. Freeze the T+1/T+2
+        # predictions for the NEXT two candles (features use closed candles
+        # only — zero future information), settle any earlier predictions
+        # whose target candle just closed, and broadcast the card payload.
+        # Failures are swallowed: the live feed's health outranks predictions.
+        _otc_pred_payload = None
+        try:
+            from core.otc_predict.predictor import on_candle_closed
+            _otc_pred_payload = await asyncio.to_thread(
+                on_candle_closed, stream.asset, stream.period,
+                list(stream.candles), dict(closed), _micro_snap)
+        except Exception as _pred_exc:
+            print(f"[feed] otc-predict failed for {stream.asset}: "
+                  f"{type(_pred_exc).__name__}: {_pred_exc}")
+        if _otc_pred_payload and self._broadcast:
+            try:
+                await self._broadcast(
+                    {"type": "otc_pred", **_otc_pred_payload})
+            except Exception as _pred_exc:
+                print(f"[silent-except] feed.py otc_pred broadcast "
+                      f"{type(_pred_exc).__name__}: {_pred_exc}")
+
         # FIX (DATA-FLOW-2026-07-22): record this candle with the algorithm
         # monitor. It maintains a rolling 30-candle window per asset and
         # detects payout-driven algorithm switches (Quotex's behavior of

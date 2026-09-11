@@ -2688,6 +2688,83 @@ async def get_signal_detail(asset: str, period: int, ctime: int):
         return detail
     raise HTTPException(status_code=404, detail="not found")
 
+# ── OTC-PREDICT-ENGINE endpoints (2026-09-11, PART 17/21/25/28) ──────────
+
+# NOTE: specific routes MUST be registered before the parametric
+# /api/prediction/{asset} route or FastAPI captures "models" as an asset.
+
+@app.get("/api/prediction/models")
+async def get_prediction_models():
+    """Model registry state — which bundle version is allowed to predict."""
+    import sqlite3 as _sql
+    conn = _db._conn()
+    try:
+        rows = conn.execute(
+            "SELECT name, version, scope, asset, trained_at, active "
+            "FROM model_registry ORDER BY created_at DESC LIMIT 50").fetchall()
+        return {"models": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+@app.post("/api/prediction/reload-models")
+async def reload_prediction_models(request: Request):
+    """Admin: force the predictor cache to re-check the registry now."""
+    await _require_admin(request)
+    from core.otc_predict import predictor as _pred
+    _pred._cache["checked_at"] = 0.0
+    bundle = await asyncio.to_thread(_pred._get_bundle)
+    return {"reloaded": True,
+            "model_version": bundle.version if bundle else None}
+
+@app.get("/api/prediction-analytics")
+async def get_prediction_analytics(days: Optional[int] = None):
+    """PART 21 performance dashboard metrics (settled predictions only)."""
+    from core.otc_predict import tracker as _pred_tracker
+    data = await asyncio.to_thread(_pred_tracker.prediction_analytics, days)
+    return data
+
+@app.get("/api/prediction/{asset}")
+async def get_prediction_card(asset: str):
+    """Latest frozen T+1/T+2 predictions for a pair (PART 30 card payload).
+
+    Reads the otc_predictions table — the same frozen rows the live engine
+    writes at candle close, so a fresh page load sees exactly what was
+    locked (never a re-computed/fabricated state).
+    """
+    from core.otc_predict import tracker as _pred_tracker
+    from core.otc_predict.predictor import describe_status
+    rows = await asyncio.to_thread(
+        _pred_tracker.latest_predictions, asset, 12)
+    status = await asyncio.to_thread(describe_status)
+
+    def _row_out(r):
+        return {
+            "horizon": r["horizon"],
+            "target_time": r["target_time"],
+            "prediction": r["prediction"],
+            "probability": r["probability"],
+            "tier": r["tier"], "score": r["score"],
+            "emit": bool(r["emit"]),
+            "signal_time": r["signal_time"],
+            "model_version": r["model_version"],
+            "actual_result": r["actual_result"],
+            "win_loss": r["win_loss"],
+            "locked": True,
+        }
+
+    # pick the most recent signal_time group (one candle-close snapshot)
+    last_t = rows[0]["signal_time"] if rows else None
+    group = [r for r in rows if r["signal_time"] == last_t] if last_t else []
+    return {
+        "endpoint": "/api/prediction",
+        "asset": asset,
+        "engine": status,
+        "locked": True,
+        "current": [_row_out(r) for r in sorted(group, key=lambda x: x["horizon"])],
+        "history": [_row_out(r) for r in rows],
+    }
+
+
 @app.delete("/api/signals/{asset}/{period}/{ctime}")
 async def delete_signal_endpoint(asset: str, period: int, ctime: int):
     """Delete a single signal by (asset, period, ctime)."""

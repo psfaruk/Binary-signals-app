@@ -76,3 +76,72 @@ python3 scripts/test_otc_pipeline.py
 সৎভাবে মাপা; আগের অডিটে (AUDIT_2026-09-11.md) পাওয়া candle-color
 persistence এজ-টাইপ প্যাটার্ন এই ফিচার সেটে ধরা পড়বে — বাস্তব ডেটা জমার
 পরেই walk-forward এ তার প্রমাণ হবে।
+
+---
+
+# PHASE 4 COMPLETE — বাস্তব ডেটায় সৎ বিচার (2026-09-11, OTC-PREDICT-ENGINE)
+
+## যা তৈরি হলো (PART 6-29 ইঞ্জিন)
+
+- `core/otc_predict/` — features_ext (PART 6+7: ৪৪ ফিচার), regime (PART 23),
+  price_action (PART 12), signal_filter (PART 14+24), models (PART 10+13:
+  logreg/rf/histgb + Platt calibration), walk_forward (PART 18+19),
+  predictor (PART 15+16+27), tracker (PART 16+17+21+25 — freeze +
+  settlement + model registry)
+- `db.py` — `otc_predictions` (UNIQUE freeze key) + `model_registry` টেবিল
+- `feed.py` — candle-close হলেই prediction freeze + settle + WS broadcast
+- `server.py` — `/api/prediction/{asset}`, `/api/prediction-analytics`,
+  `/api/prediction/models`, `/api/prediction/reload-models`
+- UI — "ভবিষ্যৎ ক্যান্ডেল প্রেডিকশন" কার্ড (PART 30): NEXT CANDLE / 2ND
+  CANDLE / Signal Quality / 🔒 প্রেডিকশন লক — frozen rows থেকেই রেন্ডার
+
+## বাস্তব ডেটা ব্যাকটেস্ট (QX টোকেন দিয়ে)
+
+- `scripts/fetch_otc_history.py` → **১২ pair × ১০ দিন × ১ মিনিট =
+  ১,৭২,৭৬৯টি আসল OTC ক্যান্ডেল, gap = ০** (data/otc_history.db, gitignored)
+- `scripts/backtest_otc_predictor.py` → ১,৬৭,১২৫টি leak-free row;
+  walk-forward (expanding, EMBARGO=2) × ৩ candidate × T+1/T+2
+- `scripts/analyze_otc_edges.py` — conditional-edge scan
+
+### ফলাফল (সত্যি কথা)
+
+| প্রশ্ন (PART 29) | উত্তর |
+|---|---|
+| মডেল কি unseen ডেটায় baseline-কে হারায়? | **না** — best candidate (RF) T+1 acc **৫০.১১%**, T+2 **৪৯.৯৮%**, logloss ≈ ln2 |
+| লিকেজ আছে? | **নেই** — shuffle-probe ৫০.১%; perturbation lock CLEAN; ১০০% NO-SIGNAL সৎ আচরণ |
+| Emitted WR breakeven (৫৪.০৫%)-এর উপরে? | **না** — গেট সব আটকে দিয়েছে (২,২২,১৯২ decision-এ **০টি emit** — score সর্বোচ্চ ৫৩ < ৬০) |
+| Candle-color persistence এজ? | **নেই** — pooled follow-rate **৪৯.১৩%** (CI95 ৪৮.৮৯–৪৯.৩৬), কোনো ঘণ্টায় >±1.4% নেই |
+
+**রায়:** ১০ দিনের 1m OTC ডেটায় breakeven-উর্ধ্ব কোনো সৎ edge নেই — মডেল
+নিজেই সেটা বুঝে প্রায় সব ক্ষেত্রে NO TRADE দিচ্ছে (এটাই সিস্টেমের সঠিক
+আচরণ)। `scripts/train_otc_model.py`-এর PART-29 gate জালিয়াতি মডেলকে
+registry-তে ঢুকতে দেবে না; production-এ যতদিন না কোনো bundle gate PASS
+করে, ততদিন কার্ডে সৎ "মডেল প্রস্তুত নয়" দেখাবে।
+
+## চালানোর নিয়ম (production)
+
+```bash
+# বাস্তব ডেটা আনুন (QX_TOKEN লাগবে)
+QX_TOKEN=... python3 scripts/fetch_otc_history.py --days 10
+# ব্যাকটেস্ট (resumable ফেজ)
+python3 scripts/backtest_otc_predictor.py --phase dataset
+python3 scripts/backtest_otc_predictor.py --phase models
+python3 scripts/backtest_otc_predictor.py --phase signals --model rf
+python3 scripts/backtest_otc_predictor.py --phase report
+# ট্রেন + গেট + রেজিস্টার (শুধুমাত্র gate PASS হলেই register হবে)
+python3 scripts/train_otc_model.py --db data/signals.db --register
+# টেস্ট
+python3 scripts/test_otc_predict.py    # 42 PASS / 0 FAIL
+```
+
+## পরের ধাপ
+
+1. পেয়ারপ্রতি **≥ ১৪ দিন** ডেটা জমুক (Railway Volume লাগানো আছে) —
+   তারপর সপ্তাহ-প্রতি এই ব্যাকটেস্ট রিপিট করুন; যেদিন কোনো pair/সেট
+   breakeven+margin পার করবে, `--register` সেদিনই মডেল লাইভ করবে।
+2. Microstructure ফিচারগুলো (buy_pct/tick_count) ইতিহাসে নেই বলে
+   ট্রেনিংয়ে constant — production `candle_micro` জমলে সেগুলো সক্রিয়
+   হবে (PART 1-এর সম্পূর্ণ সুবিধা)।
+3. Threshold টিউনিং (PART 14): বর্তমান ৮০/৭০/৬০ লাইনে emit হতে হলে
+   calibrated P(UP) ≥ ~৭২% দরকার (perfect PA তে) — এটা walk-forward
+   evidence দিয়েই কমানো হবে, আগভাঙা নয়।

@@ -2516,6 +2516,7 @@ function handleMsg(msg){
     case 'signals':  onServerSignals(msg.signals, msg.asset, msg.period); break;
     case 'pairs':    renderPairs(msg); break;             // ← BUG-1 FIX: pass msg, not msg.pairs
     case 'stale':    onStale(msg); break;
+    case 'otc_pred': onOtcPred(msg); break;   // OTC-PREDICT-ENGINE (PART 30)
     case 'status':   break;   // keepalive pong — silently consume
     case 'error':
       showError(msg.error || 'Unknown error');
@@ -2551,6 +2552,140 @@ function showError(text){
   console.error('[ws error]', text);
 }
 
+// ── OTC-PREDICT-ENGINE (2026-09-11) — NEXT CANDLE / 2ND CANDLE card ──────
+// USER SPEC PART 30: EURUSD OTC → NEXT CANDLE ↑ CALL 76% | 2ND CANDLE ↑
+// CALL 64% | Signal Quality: HIGH | Prediction locked: YES.
+// DATA SOURCE: the frozen otc_predictions rows (server broadcasts type
+// 'otc_pred' at every candle close; fresh page loads fetch
+// /api/prediction/<asset> which reads the SAME frozen rows — the card can
+// never show a re-computed or edited prediction, PART 16).
+let _predCardAsset = '';
+
+function onOtcPred(msg){
+  if(!msg || !msg.asset) return;
+  // server scopes by subscription; defensive filter keeps a late frame from
+  // painting the previous pair's card during a switch
+  if(msg.asset !== currentAsset) return;
+  _predCardAsset = msg.asset;
+  renderPredictionCard({
+    status: msg.status,
+    model_version: msg.model_version,
+    signal_time: msg.signal_time,
+    t1: msg.t1, t2: msg.t2,
+    quality: msg.quality || null,
+    locked: msg.locked !== false,
+  });
+}
+
+function ensurePredictionCard(asset){
+  if(!asset || _predCardAsset === asset) return;
+  fetchPredictionCard(asset);
+}
+
+function fetchPredictionCard(asset){
+  // REST fallback for fresh page loads / pair switches: reads the frozen
+  // rows so the card shows exactly what was locked at candle close.
+  if(!asset) return;
+  fetch('/api/prediction/' + encodeURIComponent(asset))
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {
+      if(!data || currentAsset !== asset) return;
+      _predCardAsset = asset;
+      const cur = data.current || [];
+      const byH = {};
+      cur.forEach(r => { byH[r.horizon] = r; });
+      renderPredictionCard({
+        status: (data.engine && data.engine.model_version) ? 'ok' : 'no_model',
+        model_version: data.engine && data.engine.model_version,
+        signal_time: cur.length ? cur[0].signal_time : null,
+        t1: byH[1] ? _predRowToSlot(byH[1]) : null,
+        t2: byH[2] ? _predRowToSlot(byH[2]) : null,
+        quality: null,
+        locked: true,
+      });
+    })
+    .catch(() => {}); // card stays in its honest "collecting" state
+}
+
+function _predRowToSlot(r){
+  return {
+    prediction: r.prediction, probability: r.probability,
+    tier: r.tier, score: r.score, emit: r.emit ? 1 : 0,
+    target_time: r.target_time,
+    win_loss: r.win_loss, actual_result: r.actual_result,
+    reason: '' ,
+  };
+}
+
+function _predSlotHTML(labelBn, labelEn, slot){
+  if(!slot){
+    return '<div class="pred-row pred-row-wait">' +
+      '<span class="pred-row-label">' + esc(labelBn) + '</span>' +
+      '<span class="pred-row-value">সংগ্রহ চলছে…</span></div>';
+  }
+  const pct = Math.round((slot.probability || 0.5) * 100) + '%';
+  const isCall = slot.prediction === 'CALL';
+  const arrow = isCall ? '↑' : '↓';
+  const dirClass = isCall ? 'call' : 'put';
+  const tierBadge = slot.tier && slot.tier !== 'NO_SIGNAL'
+    ? '<span class="pred-tier-badge tier-' + esc(slot.tier) + '">' + esc(slot.tier) + '</span>'
+    : '';
+  // PART 16 proof-of-life: settled rows show the honest result chip
+  let resultChip = '';
+  if(slot.win_loss === 'win')  resultChip = '<span class="pred-result win">✓ জয়</span>';
+  if(slot.win_loss === 'loss') resultChip = '<span class="pred-result loss">✗ লস</span>';
+  if(slot.win_loss === 'draw') resultChip = '<span class="pred-result draw">◆ ড্র</span>';
+  if(!slot.emit){
+    return '<div class="pred-row pred-row-notrade">' +
+      '<span class="pred-row-label">' + esc(labelBn) + ' <small>(' + esc(labelEn) + ')</small></span>' +
+      '<span class="pred-row-value notrade">NO TRADE' + resultChip + '</span>' +
+      '</div>' +
+      '<div class="pred-sub">অবিশ্বাস্য মাত্রা — সিগন্যাল নেই (' + pct + ')</div>';
+  }
+  return '<div class="pred-row">' +
+    '<span class="pred-row-label">' + esc(labelBn) + ' <small>(' + esc(labelEn) + ')</small></span>' +
+    '<span class="pred-row-value dir-' + dirClass + '">' + arrow + ' ' +
+      (isCall ? 'CALL' : 'PUT') + ' <b>' + pct + '</b></span>' +
+    tierBadge + resultChip +
+    '</div>';
+}
+
+function renderPredictionCard(data){
+  const card = $('pred-card');
+  if(!card) return;
+  const vchip = data.model_version
+    ? '<span class="pred-model-chip">' + esc(String(data.model_version).slice(0, 18)) + '</span>'
+    : '';
+  let body;
+  if(data.status === 'no_model' || !data.t1 && !data.t2){
+    body = '<div class="pred-nomodel">🤖 মডেল এখনো প্রস্তুত নয় — ' +
+           'OTC ডেটা সংগ্রহ ও ট্রেনিং চলছে। সততার স্বার্থে কোনো ভুয়া সিগন্যাল দেখানো হচ্ছে না।</div>';
+  } else {
+    const t1 = data.t1, t2 = data.t2;
+    const bestTier = [t1, t2].filter(s => s && s.emit)
+      .sort((a, b) => (b.score || 0) - (a.score || 0))[0];
+    const qualityTxt = bestTier ? bestTier.tier : 'NO SIGNAL';
+    const qClass = bestTier ? ('tier-' + bestTier.tier) : 'tier-none';
+    body = _predSlotHTML('পরবর্তী ক্যান্ডেল', 'NEXT CANDLE', t1) +
+           _predSlotHTML('দ্বিতীয় ক্যান্ডেল', '2ND CANDLE', t2) +
+           '<div class="pred-footer">' +
+           '<span class="pred-quality">সিগন্যাল কোয়ালিটি: ' +
+             '<b class="' + qClass + '">' + esc(qualityTxt) + '</b></span>' +
+           '<span class="pred-lock">🔒 প্রেডিকশন লক: ' +
+             (data.locked ? 'হ্যাঁ' : 'না') + '</span>' +
+           '</div>' +
+           (t1 && t1.reason && !t1.emit && t1.reason.indexOf('quality_fail') === 0
+             ? '<div class="pred-gate">🛡 কোয়ালিটি গেট: ডেটা/ভোলাটিলিটি শর্ত পূরণ হয়নি</div>'
+             : '');
+  }
+  card.innerHTML =
+    '<div class="pred-header">' +
+      '<span class="pred-title">ভবিষ্যৎ ক্যান্ডেল প্রেডিকশন</span>' + vchip +
+    '</div>' + body;
+  card.classList.toggle('has-signal',
+    !!(data.t1 && data.t1.emit) || !!(data.t2 && data.t2.emit));
+}
+
 function onSnapshot(msg){
   const c = msg.candles || [];
   updateChart(c, (msg.prediction && msg.prediction.candle) || null, true);
@@ -2573,6 +2708,9 @@ function onSnapshot(msg){
     lastPrediction = msg.prediction;
     renderSignal(msg.prediction);
   }
+  // OTC-PREDICT-ENGINE: fresh subscribe → pull the frozen prediction card
+  // for this pair (WS 'otc_pred' frames keep it live afterwards).
+  if(msg.asset) ensurePredictionCard(msg.asset);
 }
 
 function onTick(msg){
@@ -2813,6 +2951,12 @@ function wireEvents(){
       // candleData, etc.) ran unnecessarily — wiping the chart and history.
       if(pairSelect.value === currentAsset) return;
       currentAsset = pairSelect.value;
+      // OTC-PREDICT-ENGINE: pair switched → reset the card and pull the new
+      // pair's frozen predictions (snapshot will also refresh it).
+      _predCardAsset = '';
+      const _predCardEl = $('pred-card');
+      if(_predCardEl){ _predCardEl.innerHTML = ''; }
+      fetchPredictionCard(currentAsset);
       const cur = pairsList.find(p => p.asset === currentAsset);
       const payoutLabel = $('payout-label');
       if(cur && payoutLabel){

@@ -534,3 +534,90 @@
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;transition-duration:.01ms !important}
 }
+
+/* ── OTC-PREDICT-ENGINE (2026-09-11, PART 30) — prediction card ───────── */
+.pred-card{
+  background:var(--card);
+  border:1px solid var(--border-soft);
+  border-radius:14px;
+  padding:14px 16px;
+  display:flex;flex-direction:column;gap:8px;
+  margin-top:12px;
+}
+.pred-card.has-signal{border-color:rgba(56,189,248,.35)}
+.pred-header{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+}
+.pred-title{
+  font-size:12px;font-weight:700;letter-spacing:.4px;
+  color:var(--text-dim);text-transform:uppercase;
+}
+.pred-model-chip{
+  font-family:var(--mono);font-size:10px;color:var(--text-faint);
+  border:1px solid var(--border-soft);border-radius:6px;padding:2px 6px;
+  max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.pred-row{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:8px 10px;border-radius:10px;
+  background:var(--glass);border:1px solid var(--border-soft);
+}
+.pred-row-label{font-size:12.5px;color:var(--text-dim)}
+.pred-row-label small{color:var(--text-faint);font-size:10px}
+.pred-row-value{font-family:var(--mono);font-size:13.5px;font-weight:600}
+.pred-row-value.dir-call{color:var(--green)}
+.pred-row-value.dir-put{color:var(--red)}
+.pred-row-value b{font-size:15px;margin-left:2px}
+.pred-row-value.notrade{color:var(--text-faint);font-weight:700;letter-spacing:.5px}
+.pred-sub{
+  font-size:10.5px;color:var(--text-faint);margin:-4px 2px 0;
+  text-align:right;
+}
+.pred-row-wait .pred-row-value{color:var(--text-faint);font-weight:400;font-size:12px}
+.pred-row-notrade{opacity:.75}
+.pred-tier-badge{
+  font-size:9.5px;font-weight:800;letter-spacing:.5px;
+  border-radius:6px;padding:2px 7px;margin-left:6px;
+}
+.pred-tier-badge.tier-HIGH{background:var(--green-bg);color:var(--green)}
+.pred-tier-badge.tier-GOOD{background:var(--accent-bg);color:var(--accent)}
+.pred-tier-badge.tier-WATCH{background:var(--yellow-bg);color:var(--yellow)}
+.pred-result{
+  font-size:10px;font-weight:700;border-radius:6px;padding:2px 6px;margin-left:6px;
+}
+.pred-result.win{background:var(--green-bg);color:var(--green)}
+.pred-result.loss{background:var(--red-bg);color:var(--red)}
+.pred-result.draw{background:var(--glass);color:var(--text-dim)}
+.pred-footer{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding-top:6px;border-top:1px solid var(--border-soft);
+  font-size:11.5px;color:var(--text-dim);
+}
+.pred-quality b{font-family:var(--mono);font-size:11.5px}
+.pred-quality b.tier-HIGH{color:var(--green)}
+.pred-quality b.tier-GOOD{color:var(--accent)}
+.pred-quality b.tier-WATCH{color:var(--yellow)}
+.pred-quality b.tier-none{color:var(--text-faint)}
+.pred-lock{font-size:11px;color:var(--text-faint)}
+.pred-gate{
+  font-size:10.5px;color:var(--text-faint);
+  padding:6px 8px;border-radius:8px;background:var(--glass);
+}
+.pred-nomodel{
+  font-size:12px;line-height:1.6;color:var(--text-dim);
+  padding:10px;border-radius:10px;
+  background:var(--glass);border:1px dashed var(--border);
+}
+@media (max-width:779px){
+  .pred-card{padding:11px 12px;gap:6px;margin-top:10px}
+  .pred-row{padding:7px 9px}
+  .pred-row-value{font-size:12.5px}
+  .pred-row-value b{font-size:13.5px}
+  .pred-title{font-size:11px}
+  .pred-model-chip{max-width:92px}
+}
+@media (max-width:479px){
+  .pred-row{flex-wrap:wrap;row-gap:2px}
+  .pred-row-label small{display:none}
+  .pred-footer{flex-direction:column;align-items:flex-start;gap:3px}
+}

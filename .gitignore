@@ -53,3 +53,4 @@ settings/
 .mypy_cache/
 .coverage
 htmlcov/
+data/
