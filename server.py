@@ -2693,6 +2693,31 @@ async def get_signal_detail(asset: str, period: int, ctime: int):
 # NOTE: specific routes MUST be registered before the parametric
 # /api/prediction/{asset} route or FastAPI captures "models" as an asset.
 
+# FAST-TRAIN (2026-09-12): the bootstrap daemon — user req "5/7 মিনিটের
+# মধ্যে মডেল ট্রেইন হবে, রান হবে". Trains on whatever history each pair
+# already has (topped up from the same platform) instead of waiting 14 days.
+try:
+    from core.otc_predict import fast_train as _fast_train
+    _fast_train.start_daemon()
+except Exception as _ft_exc:  # the feed's health outranks predictions
+    print(f"[server] fast-train daemon failed to start: "
+          f"{type(_ft_exc).__name__}: {_ft_exc}")
+
+@app.get("/api/prediction/bootstrap")
+async def get_prediction_bootstrap():
+    """Fast-train bootstrap state (runs, config, last result)."""
+    return await asyncio.to_thread(_fast_train.bootstrap_status)
+
+@app.post("/api/prediction/bootstrap")
+async def post_prediction_bootstrap():
+    """Force a fast-train run right now (non-blocking; one at a time)."""
+    st = await asyncio.to_thread(_fast_train.bootstrap_status)
+    if st.get("running"):
+        return {"started": False, "reason": "already_running", "status": st}
+    threading.Thread(target=_fast_train.run_bootstrap,
+                     kwargs={"force": True}, daemon=True).start()
+    return {"started": True, "status": st}
+
 @app.get("/api/prediction/models")
 async def get_prediction_models():
     """Model registry state — which bundle version is allowed to predict."""
@@ -2735,7 +2760,7 @@ async def get_prediction_card(asset: str):
     from core.otc_predict.predictor import describe_status
     rows = await asyncio.to_thread(
         _pred_tracker.latest_predictions, asset, 12)
-    status = await asyncio.to_thread(describe_status)
+    status = await asyncio.to_thread(describe_status, asset)
 
     def _row_out(r):
         return {

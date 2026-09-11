@@ -90,7 +90,7 @@ def _get_bundle(asset=None):
             return None
         bundle = load_bundle(path)
         _cache["bundles"][key] = bundle
-        print(f"[predictor] loaded model bundle v{row['version']} "
+        print(f"[predictor] loaded model bundle {row['version']} "
               f"({row['name']})")
         return bundle
     except Exception as exc:
@@ -145,6 +145,10 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
         payload = {"asset": asset, "period": period,
                    "signal_time": closed_candle["time"],
                    "model_version": bundle.version if bundle else None,
+                   # FAST-TRAIN (2026-09-12): "verified" | "provisional" —
+                   # the UI shows a প্রোভিশনাল badge for unproven models.
+                   "model_status": (bundle.meta.get("status", "verified")
+                                    if bundle else None),
                    "status": status, "locked": True,
                    "t1": None, "t2": None}
 
@@ -202,14 +206,55 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
         return None
 
 
-def describe_status():
-    """For /api/prediction endpoints: engine + registry state."""
-    bundle = _get_bundle()
+def describe_status(asset=None):
+    """For /api/prediction endpoints: engine + registry + bootstrap state.
+
+    `asset` resolves the SAME model the live predictor would use for that
+    pair (per-pair → global fallback), so the UI card shows the honest
+    status of the model actually behind the pair's predictions.
+    """
+    bundle = _get_bundle(asset)
     try:
         from core.otc_predict.models import SKLEARN_OK
     except Exception:
         SKLEARN_OK = False
+
+    # FAST-TRAIN (2026-09-12): resolve the active registry row's recorded
+    # status (verified/provisional) + the bootstrap daemon state, so the UI
+    # can show an honest "মডেল ট্রেইন হচ্ছে…" instead of a dead end.
+    model_status = None
+    trained_rows = None
+    if bundle is not None:
+        model_status = bundle.meta.get("status", "verified")
+        trained_rows = bundle.meta.get("trained_rows")
+    else:
+        reg = _cache.get("reg") or {}
+        row = reg.get(asset) if (asset and asset in reg) else reg.get("global")
+        if row:
+            try:
+                m = json.loads(row.get("metrics") or "{}")
+                model_status = m.get("status")
+                trained_rows = m.get("rows")
+            except Exception:
+                pass
+
+    fast = {}
+    try:
+        from core.otc_predict import fast_train
+        st = fast_train.bootstrap_status()
+        fast = {"enabled": st.get("enabled"), "running": st.get("running"),
+                "runs": st.get("runs"), "last_run_ago": st.get("last_run_ago"),
+                "last_error": st.get("last_error")}
+        res = st.get("result") or {}
+        if res:
+            fast["pairs_registered"] = res.get("pairs_registered")
+    except Exception:
+        fast = {}
+
     return {"engine_enabled": _engine_on,
             "sklearn_ok": bool(SKLEARN_OK),
             "model_version": bundle.version if bundle else None,
+            "model_status": model_status,
+            "trained_rows": trained_rows,
+            "fast_train": fast,
             "window": PRED_WINDOW}

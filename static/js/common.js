@@ -2570,6 +2570,7 @@ function onOtcPred(msg){
   renderPredictionCard({
     status: msg.status,
     model_version: msg.model_version,
+    model_status: msg.model_status || null,
     signal_time: msg.signal_time,
     t1: msg.t1, t2: msg.t2,
     quality: msg.quality || null,
@@ -2597,6 +2598,8 @@ function fetchPredictionCard(asset){
       renderPredictionCard({
         status: (data.engine && data.engine.model_version) ? 'ok' : 'no_model',
         model_version: data.engine && data.engine.model_version,
+        model_status: (data.engine && data.engine.model_status) || null,
+        fast_train: (data.engine && data.engine.fast_train) || null,
         signal_time: cur.length ? cur[0].signal_time : null,
         t1: byH[1] ? _predRowToSlot(byH[1]) : null,
         t2: byH[2] ? _predRowToSlot(byH[2]) : null,
@@ -2656,10 +2659,22 @@ function renderPredictionCard(data){
   const vchip = data.model_version
     ? '<span class="pred-model-chip">' + esc(String(data.model_version).slice(0, 18)) + '</span>'
     : '';
+  // FAST-TRAIN (2026-09-12): provisional models RUN, but the card must say
+  // honestly that their edge is not proven yet (PART 29 transparency).
+  const provChip = data.model_status === 'provisional'
+    ? '<span class="pred-model-chip provisional" title="মডেল চলছে, তবে unseen ডেটায় এখনো baseline ছাড়িনি — ফলাফল ট্র্যাক হচ্ছে">প্রোভিশনাল</span>'
+    : '';
   let body;
   if(data.status === 'no_model' || !data.t1 && !data.t2){
-    body = '<div class="pred-nomodel">🤖 মডেল এখনো প্রস্তুত নয় — ' +
-           'OTC ডেটা সংগ্রহ ও ট্রেনিং চলছে। সততার স্বার্থে কোনো ভুয়া সিগন্যাল দেখানো হচ্ছে না।</div>';
+    const ft = data.fast_train || {};
+    const training = ft.running
+      ? '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন চলছে (কয়েক মিনিটে প্রস্তুত হবে)। '
+      : '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন সার্ভার চালু হওয়ার ৫–৭ মিনিটের মধ্যে মডেল বানাবে। ';
+    const ftErr = ft.last_error
+      ? '<div class="pred-gate">⚠ শেষ ট্রেইনিং চেষ্টা ব্যর্থ: ' + esc(String(ft.last_error).slice(0, 120)) + '</div>'
+      : '';
+    body = '<div class="pred-nomodel">' + training +
+           'সততার স্বার্থে কোনো ভুয়া সিগন্যাল দেখানো হচ্ছে না।</div>' + ftErr;
   } else {
     const t1 = data.t1, t2 = data.t2;
     const bestTier = [t1, t2].filter(s => s && s.emit)
@@ -2680,7 +2695,7 @@ function renderPredictionCard(data){
   }
   card.innerHTML =
     '<div class="pred-header">' +
-      '<span class="pred-title">ভবিষ্যৎ ক্যান্ডেল প্রেডিকশন</span>' + vchip +
+      '<span class="pred-title">ভবিষ্যৎ ক্যান্ডেল প্রেডিকশন</span>' + vchip + provChip +
     '</div>' + body;
   card.classList.toggle('has-signal',
     !!(data.t1 && data.t1.emit) || !!(data.t2 && data.t2.emit));

@@ -27,12 +27,102 @@
   'use strict';
 
   var POLL_MS = 20000;               // idle status refresh
-  var NAG_DELAY_MS = 12000;          // grace period before "no live data" nag
   var WATCH_MS = 2000;               // post-import status polling
   var WATCH_TIMEOUT_MS = 75000;
 
+  /* ── Auto-open policy (TOKEN-NAG-FIX-2026-09-12) ───────────────────────
+     USER REQ: "frontend এ যেখানে টোকেন পেষ্ট করি, সেই উইন্ডো টি বার বার
+     খুলে… টোকেন expire হলেই বা ডেটা না আসলেই যেনো এটা ওপেন হয়।"
+
+     The panel opens ONLY in these cases:
+       (a) token DEAD (expired / rejected by Quotex) — immediately,
+           re-nagged at most once per NAG_RETRY_MS while it stays dead;
+       (b) NO token stored at all — once per tab session (sessionStorage),
+           after a short grace;
+       (c) data does NOT come — a stored, not-dead token that stays
+           non-live for NO_DATA_GRACE_MS (transient "Connecting…" NEVER
+           opens the panel), at most once per NAG_RETRY_MS.
+     Closing an auto-opened panel is remembered for NAG_RETRY_MS so it
+     stops popping up on every reload (the old code opened it after just
+     12s on EVERY page load — the "বার বার খুলে" complaint).
+     Importing a token clears the memory so a REAL later failure re-nags. */
+  var NAG_RETRY_MS = 30 * 60 * 1000;      // 30 min between auto-opens
+  var NO_DATA_GRACE_MS = 3 * 60 * 1000;   // 3 min sustained no-data
+  var NO_TOKEN_GRACE_MS = 12000;          // 12s before the "no token" nag
+  var SS_NAG = 'bst_tok_nag_tab';         // once-per-tab-session flag
+  var LS_DISMISS = 'bst_tok_nag_dismissed_at';
+
   var el = {};
-  var state = { status: null, watching: false, pollTimer: null };
+  var state = { status: null, watching: false, pollTimer: null,
+                autoOpened: false, notLiveSince: 0, lastDeadNag: 0,
+                lastNodataNag: 0 };
+
+  function dismissedRecently() {
+    try {
+      var t = parseInt(localStorage.getItem(LS_DISMISS) || '0', 10);
+      return t && (Date.now() - t) < NAG_RETRY_MS;
+    } catch (_e) { return false; }
+  }
+
+  function clearDismissMemory() {
+    try { localStorage.removeItem(LS_DISMISS); } catch (_e) {}
+    state.notLiveSince = 0;
+    state.lastNodataNag = 0;
+  }
+
+  /* Central auto-open decision — runs after EVERY status refresh. */
+  function maybeAutoOpen(s) {
+    if (!s) return;
+    var now = Date.now();
+    if (s.live) {                       // healthy — reset everything
+      state.notLiveSince = 0;
+      return;
+    }
+    var stored = s.stored_token && s.stored_token.stored;
+
+    // (a) token expired / rejected → open immediately (USER REQ)
+    if (s.token_dead) {
+      if (now - state.lastDeadNag > NAG_RETRY_MS) {
+        state.lastDeadNag = now;
+        open(true);
+        result('err', '⛔ টোকেন এক্সপায়ার্ড — Quotex আর অথরাইজ করছে না। ' +
+                      'নতুন টোকেন পেস্ট করুন।');
+      }
+      return;
+    }
+
+    // (b) no token at all → once per tab session, short grace
+    if (!stored) {
+      var seen = false;
+      try { seen = !!sessionStorage.getItem(SS_NAG); } catch (_e) {}
+      if (!seen) {
+        try { sessionStorage.setItem(SS_NAG, '1'); } catch (_e) {}
+        setTimeout(function () {
+          refresh().then(function (s2) {
+            if (!s2 || s2.live || s2.token_dead) return; // dead path opened it
+            if (s2.stored_token && s2.stored_token.stored) return; // race
+            open(true);
+            result('err', 'কোনো টোকেন সংরক্ষিত নেই — লাইভ ডেটার জন্য ' +
+                          'Quotex টোকেন পেস্ট করুন।');
+          });
+        }, NO_TOKEN_GRACE_MS);
+      }
+      return;
+    }
+
+    // (c) stored token, still not live → only after a SUSTAINED outage
+    if (!state.notLiveSince) state.notLiveSince = now;
+    if (now - state.notLiveSince < NO_DATA_GRACE_MS) return; // transient
+    if (dismissedRecently()) return;                         // user closed it
+    if (now - state.lastNodataNag > NAG_RETRY_MS) {
+      state.lastNodataNag = now;
+      open(true);
+      result('err', '⚠ দীর্ঘক্ষণ লাইভ ডেটা আসছে না (' +
+                    Math.max(1, Math.round((now - state.notLiveSince) / 60000)) +
+                    ' মিনিট)। টোকেন সংরক্ষিত আছে — নতুন টোকেন দিন বা ' +
+                    'auto-refresh (🔁) সেট আপ করুন।');
+    }
+  }
 
   /* ─── helpers ──────────────────────────────────────────────────────────── */
 
@@ -306,6 +396,7 @@
     result('busy', 'Sending token to the server…');
 
     // NOTE: NO X-App-Pin / X-Admin-Key header. USER REQ 2026-08-17.
+    clearDismissMemory();               // a fresh token re-arms the nagging
     fetchJSON('/api/set-token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -428,9 +519,12 @@
 
   /* ─── open / close ─────────────────────────────────────────────────────── */
 
-  function open() {
+  function open(auto) {
     if (!el.modal) return;
     el.modal.hidden = false;
+    // auto=true marks an AUTO-OPENED panel: closing it now records a
+    // dismissal so the policy stops re-opening (manual opens never do).
+    state.autoOpened = auto === true;
     // FIX (AURORA-V3-2026-08-31): expose for app-nav.js openTokenPanel() so
     // BOTH the static topbar button and the sidebar "টোকেন ইমপোর্ট" button
     // open this same canonical modal.
@@ -444,6 +538,11 @@
     if (!el.modal) return;
     el.modal.hidden = true;
     el.btn.setAttribute('aria-expanded', 'false');
+    if (state.autoOpened) {
+      state.autoOpened = false;
+      try { localStorage.setItem(LS_DISMISS, String(Date.now())); }
+      catch (_e) {}
+    }
   }
 
   /* ─── boot ─────────────────────────────────────────────────────────────── */
@@ -494,27 +593,17 @@
     });
 
     // Direct link support: .../#token opens the panel straight away.
-    if (location.hash === '#token') { refresh().then(open); return; }
+    // (open() takes an `auto` flag — swallow the status arg so this counts
+    // as a MANUAL open, not an auto-open.)
+    if (location.hash === '#token') { refresh().then(function () { open(); }); return; }
 
-    refresh().then(function (s) {
-      if (s && s.live) return;
-      setTimeout(function () {
-        refresh().then(function (s2) {
-          if (s2 && s2.live) return;
-          var auto = s2 && s2.auto_session;
-          if (auto && auto.enabled && auto.configured &&
-              auto.consecutive_failures < 3) return;
-          // Auto-open the panel once per tab when there's no live data.
-          // (Removed the sessionStorage gate so the panel is reachable
-          // even on a returning tab — USER REQ: token-only flow.)
-          open();
-          result('err', 'No live Quotex data right now — paste a fresh token ' +
-                        'below, or set up auto-refresh (🔁 section) so this ' +
-                        'never happens again.');
-        });
-      }, NAG_DELAY_MS);
-    });
-    state.pollTimer = setInterval(function () { if (!state.watching) refresh(); }, POLL_MS);
+    // TOKEN-NAG-FIX-2026-09-12: ALL auto-open decisions flow through
+    // maybeAutoOpen() — the panel no longer pops up after every reload.
+    refresh().then(maybeAutoOpen);
+    state.pollTimer = setInterval(function () {
+      if (state.watching) return;   // import watcher is polling already
+      refresh().then(maybeAutoOpen);
+    }, POLL_MS);
   }
 
   if (document.readyState === 'loading') {
