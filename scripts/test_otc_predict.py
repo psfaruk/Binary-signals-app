@@ -307,5 +307,72 @@ check("bundle round-trips through disk",
       and b2.feature_names == ["a", "b"]
       and b2.predict_up(1, {"a": 0.3, "b": -0.2}) is not None)
 
+print("── 10. PRED-VISIBILITY: live_predictions + describe_status ──")
+from core.otc_predict.tracker import (register_model, active_models,
+                                      live_predictions)  # noqa: E402
+from core.otc_predict import predictor as _pv_pred     # noqa: E402
+
+# registry: per-pair model for TEST_otc + a global fallback pool row
+register_model(name="TEST_otc", version="vlive1", scope="pair",
+               asset="TEST_otc", metrics={"status": "provisional",
+                                          "rows": 4321},
+               path="/nonexistent/vlive1.joblib", activate=True)
+register_model(name="global", version="vglob1", scope="global",
+               asset="__global__", metrics={"status": "provisional",
+                                            "rows": 999},
+               path="/nonexistent/vglob1.joblib", activate=True)
+check("registry has 2 active rows", len(active_models()) == 2)
+live = live_predictions()
+lv = [e for e in live if e["asset"] == "TEST_otc"]
+check("live_predictions covers the active pair", len(lv) == 1)
+lv = lv[0]
+check("live entry carries registry version/status",
+      lv["model_version"] == "vlive1"
+      and lv["model_status"] == "provisional")
+check("latest frozen snapshot grouped by signal_time",
+      lv["signal_time"] == sig_t and lv["t1"] is not None
+      and lv["t2"] is not None, str(lv))
+check("t1 slot carries frozen direction + graded result",
+      lv["t1"]["prediction"] == "CALL" and lv["t1"]["win_loss"] == "win"
+      and lv["t1"]["emit"] is True)
+check("t2 slot carries non-emitted graded result",
+      lv["t2"]["prediction"] == "PUT" and lv["t2"]["win_loss"] == "loss"
+      and lv["t2"]["emit"] is False)
+check("frozen row count surfaced", lv["n_frozen"] >= 2)
+# every OTHER OTC pair is covered by the global pool → must be listed too
+fb = [e for e in live if e.get("scope") == "global_fallback"]
+check("global-fallback pairs listed with the pool's model",
+      len(fb) >= 5 and all(e["model_version"] == "vglob1" for e in fb),
+      f"fallback_n={len(fb)}")
+check("fallback entries have no frozen rows of their own",
+      all(e["t1"] is None and e["t2"] is None for e in fb))
+
+_pv_pred._cache["reg"] = {}
+_pv_pred._cache["checked_at"] = 0.0
+desc = _pv_pred.describe_status("TEST_otc")
+check("describe_status names registered pairs",
+      "TEST_otc" in (desc.get("registered_assets") or []),
+      str(desc.get("registered_assets")))
+check("describe_status sees frozen rows for the pair",
+      desc.get("has_predictions") is True)
+check("bundle file missing → honest model_version=None",
+      desc.get("model_version") is None)
+check("describe_status keeps model_status from registry metrics",
+      desc.get("model_status") == "provisional"
+      and desc.get("trained_rows") == 4321)
+desc2 = _pv_pred.describe_status("NOTRAINED_otc")
+check("untrained pair: no frozen rows, still sees the registry",
+      desc2.get("has_predictions") is False
+      and "TEST_otc" in (desc2.get("registered_assets") or []))
+
+# fast-train self-heal: missing bundle file must force the SHORT retry
+from core.otc_predict.fast_train import (_missing_bundle_paths,
+                                         _next_sleep_secs)  # noqa: E402
+miss = _missing_bundle_paths()
+check("missing bundle paths detected",
+      "TEST_otc" in miss and "global" in miss, str(miss))
+check("missing bundles → fast retry (not 6h sleep)",
+      _next_sleep_secs({"pairs_registered": ["x"]}, None) <= 601)
+
 print(f"\n══ RESULT: {PASS} PASS, {FAIL} FAIL ══")
 sys.exit(1 if FAIL else 0)

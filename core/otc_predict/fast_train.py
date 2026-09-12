@@ -780,6 +780,26 @@ def _run_bootstrap_inner():
 
 # ─────────────────────────── the daemon thread ────────────────────────────
 
+def _missing_bundle_paths():
+    """PRED-VISIBILITY guard (2026-09-12): active registry rows whose
+    bundle FILE has vanished (ephemeral-FS redeploy with a persisted DB,
+    manual cleanup). A registry row without its .joblib can never predict
+    — describe_status honestly reports no model while the daemon would
+    normally sleep the full refresh interval. Detecting it here forces a
+    fast retrain instead of a silent multi-hour dead zone."""
+    try:
+        from core.otc_predict.tracker import active_models
+        reg = active_models()
+    except Exception:
+        return []
+    missing = []
+    for name, row in (reg or {}).items():
+        p = (row or {}).get("path")
+        if p and not os.path.exists(p):
+            missing.append(name)
+    return missing
+
+
 def _next_sleep_secs(last_summary, last_error):
     """MODEL-RUN-FIX: adaptive cadence.
 
@@ -791,6 +811,8 @@ def _next_sleep_secs(last_summary, last_error):
     MODEL-RUN-FIX-2: a run that trained on the small live dataset AND
     just landed fresh history also retries in 10 minutes — the next run
     consolidates the bundles on the much bigger merged dataset.
+    PRED-VISIBILITY: registered rows whose bundle file went missing also
+    retry in 10 minutes — the retrain re-registers them with fresh files.
     """
     if last_error:
         return FAST_RETRY_SECS
@@ -798,6 +820,8 @@ def _next_sleep_secs(last_summary, last_error):
     if s.get("pairs_registered"):
         if s.get("fetch_added"):
             return FAST_RETRY_SECS      # consolidation retrain soon
+        if _missing_bundle_paths():
+            return FAST_RETRY_SECS      # dead bundle files → retrain fast
         return FAST_RETRAIN_SECS
     return FAST_RETRY_SECS
 

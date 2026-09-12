@@ -283,6 +283,72 @@
         txt.textContent = 'লাইভ ইঞ্জিন: ' + bits.join(' · ') + tail;
     }
 
+    // ── PRED-VISIBILITY (2026-09-12): সব পেয়ারের লাইভ প্রেডিকশন ─────────
+    // USER ASK: "প্রেডিকশন T+1 T+2 এই ক্যান্ডেল গুলো কোথায় দেখানো হচ্ছে।
+    // কোন পেয়ার এ প্রেডিকশন দিচ্ছে?" — this table answers it directly:
+    // every active pair's latest FROZEN T+1/T+2 (direction + probability +
+    // graded result), no pair-switching needed.
+    function predSlotCell(slot){
+        if (!slot) return '<td class="mdl-pred-cell">অপেক্ষায়…</td>';
+        var pct = Math.round((slot.probability || 0.5) * 100) + '%';
+        var isCall = slot.prediction === 'CALL';
+        var chip = '';
+        if (slot.win_loss === 'win') chip = ' <span class="pred-result win">✓</span>';
+        else if (slot.win_loss === 'loss') chip = ' <span class="pred-result loss">✗</span>';
+        else if (slot.win_loss === 'draw') chip = ' <span class="pred-result draw">◆</span>';
+        if (!slot.emit) {
+            return '<td class="mdl-pred-cell notrade">NO TRADE (' + esc(pct) + ')' + chip + '</td>';
+        }
+        var txt = (isCall ? '↑ CALL ' : '↓ PUT ') + pct;
+        return '<td class="mdl-pred-cell ' + (isCall ? 'dir-up' : 'dir-down') + '">' +
+            esc(txt) + chip + '</td>';
+    }
+
+    function renderLivePreds(d) {
+        var tbody = $('mdl-live-tbody');
+        if (!tbody) return;
+        var live = d.live;
+        if (live && live.error) {
+            tbody.innerHTML = '<tr><td colspan="5" class="mdl-loading">পড়া যায়নি: ' +
+                esc(live.error) + '</td></tr>';
+            return;
+        }
+        var rows = Array.isArray(live) ? live : [];
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="5" class="mdl-loading">' +
+                'এখনো কোনো active মডেল নেই — ট্রেইন হওয়ার পর প্রতি ক্যান্ডেলে ' +
+                'T+1/T+2 ফ্রিজ হবে</td></tr>';
+            return;
+        }
+        var html = '';
+        var anyFrozen = false;
+        rows.forEach(function(r) {
+            var when = r.signal_time ? agoStr(r.signal_time) : '—';
+            var model = r.model_version ? esc(String(r.model_version).slice(0, 16)) : '—';
+            if (r.model_status === 'provisional') model += ' · প্রোভিশনাল';
+            var note = '';
+            if (!r.t1 && !r.t2) {
+                note = r.live_reason || r.live_error ||
+                    'ক্যান্ডেল-ক্লোজ অপেক্ষায়';
+            }
+            if (r.t1 || r.t2) anyFrozen = true;
+            html += '<tr>' +
+                '<td class="mdl-pair-name">' + esc(String(r.asset || '').replace('_otc', '')) + '</td>' +
+                predSlotCell(r.t1) + predSlotCell(r.t2) +
+                '<td>' + when + '</td>' +
+                '<td class="mdl-ver">' + model +
+                    (note ? '<div class="mdl-base">' + esc(note) + '</div>' : '') +
+                '</td>' +
+                '</tr>';
+        });
+        if (!anyFrozen) {
+            html += '<tr class="mdl-global-row"><td colspan="5" class="mdl-loading">' +
+                'মডেল আছে, কিন্তু এখনো কোনো ক্যান্ডেল-ক্লোজে প্রেডিকশন ফ্রিজ হয়নি — ' +
+                'লাইভ ফিড চালু হলে প্রতি মিনিটে ফ্রিজ হবে</td></tr>';
+        }
+        tbody.innerHTML = html;
+    }
+
     function renderAnalytics(d) {
         var a = d.analytics || {};
         $('mdl-a-total').textContent = a.dir_total != null
@@ -324,6 +390,7 @@
                 _lastData = d;
                 renderDaemon(d);
                 renderPairs(d);
+                renderLivePreds(d);
                 renderAnalytics(d);
             })
             .catch(function() { /* transient — next poll retries */ })

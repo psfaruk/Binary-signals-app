@@ -2794,9 +2794,18 @@ async def get_prediction_overview():
             pred_table = _pred_tracker.prediction_table_stats()
         except Exception as exc:
             pred_table = {"error": f"{type(exc).__name__}: {exc}"}
+        # PRED-VISIBILITY (2026-09-12): every active pair's latest FROZEN
+        # T+1/T+2 in one array — the মডেল tab's "সব পেয়ারের লাইভ
+        # প্রেডিকশন" table answers "কোন পেয়ার এ প্রেডিকশন দিচ্ছে?" at a
+        # glance, without switching pairs on the chart.
+        try:
+            live = _pred_tracker.live_predictions()
+        except Exception as exc:
+            live = {"error": f"{type(exc).__name__}: {exc}"}
         return {"daemon": st, "models": models,
                 "candles": counts, "analytics": analytics,
                 "predictor": predictor, "pred_table": pred_table,
+                "live": live,
                 "generated_at": time.time()}
 
     return await asyncio.to_thread(_build)

@@ -2565,6 +2565,13 @@ function showError(text){
 // /api/prediction/<asset> which reads the SAME frozen rows — the card can
 // never show a re-computed or edited prediction, PART 16).
 let _predCardAsset = '';
+// PRED-VISIBILITY: last WS otc_pred paint time — a fresh WS frame outranks
+// an in-flight REST enrichment so the enrichment can never overwrite a
+// just-frozen prediction with an older snapshot.
+let _predCardWsAt = 0;
+// signal_time of the snapshot currently painted on the card (for the
+// countdown line's "ফ্রিজ হয়েছে X আগে" prefix).
+let _predCardSignalTime = 0;
 
 function onOtcPred(msg){
   if(!msg || !msg.asset) return;
@@ -2572,6 +2579,7 @@ function onOtcPred(msg){
   // painting the previous pair's card during a switch
   if(msg.asset !== currentAsset) return;
   _predCardAsset = msg.asset;
+  _predCardWsAt = Date.now();
   renderPredictionCard({
     status: msg.status,
     model_version: msg.model_version,
@@ -2581,6 +2589,10 @@ function onOtcPred(msg){
     quality: msg.quality || null,
     locked: msg.locked !== false,
   });
+  // no_model frames carry no registry context — pull the rich describe_status
+  // payload so the card can name WHICH pairs do have models instead of a
+  // bare "model not ready" (PRED-VISIBILITY).
+  if(msg.status === 'no_model') fetchPredictionCard(msg.asset);
 }
 
 function ensurePredictionCard(asset){
@@ -2596,6 +2608,9 @@ function fetchPredictionCard(asset){
     .then(r => r.ok ? r.json() : null)
     .then(data => {
       if(!data || currentAsset !== asset) return;
+      // a WS otc_pred frame painted the card within the last 6s — it is
+      // strictly fresher than this REST snapshot; don't clobber it
+      if(Date.now() - _predCardWsAt < 6000) return;
       _predCardAsset = asset;
       const cur = data.current || [];
       const byH = {};
@@ -2605,6 +2620,9 @@ function fetchPredictionCard(asset){
         model_version: data.engine && data.engine.model_version,
         model_status: (data.engine && data.engine.model_status) || null,
         fast_train: (data.engine && data.engine.fast_train) || null,
+        // PRED-VISIBILITY: honest-state inputs (which pairs have models,
+        // does THIS pair have any frozen rows yet)
+        registered_assets: (data.engine && data.engine.registered_assets) || [],
         signal_time: cur.length ? cur[0].signal_time : null,
         t1: byH[1] ? _predRowToSlot(byH[1]) : null,
         t2: byH[2] ? _predRowToSlot(byH[2]) : null,
@@ -2658,6 +2676,35 @@ function _predSlotHTML(labelBn, labelEn, slot){
     '</div>';
 }
 
+// PRED-VISIBILITY (2026-09-12): 1s ticker for the card's countdown line —
+// answers "কখন নতুন প্রেডিকশন আসবে?" while the user watches. Lazily started;
+// touches the DOM only while the element exists.
+let _predCdStarted = false;
+function _predAgoBn(secs){
+  if(secs < 60) return Math.max(0, Math.round(secs)) + ' সেকেন্ড';
+  if(secs < 3600) return Math.round(secs / 60) + ' মিনিট';
+  if(secs < 86400) return Math.round(secs / 3600) + ' ঘণ্টা';
+  return Math.round(secs / 86400) + ' দিন';
+}
+function _predCountdownTick(){
+  const el = $('pred-countdown');
+  if(!el) return;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const toClose = 60 - (nowSec % 60);   // OTC 1m candles: freeze fires at :00
+  let txt = '⏱ চলমান ক্যান্ডেল বন্ধ হবে ~' + toClose +
+            ' সেকেন্ডে — তখনই নতুন T+1/T+2 ফ্রিজ হবে';
+  if(_predCardSignalTime){
+    const age = nowSec - _predCardSignalTime;
+    if(age > 90) txt = 'ফ্রিজ হয়েছে ' + _predAgoBn(age) + ' আগে · ' + txt;
+  }
+  el.textContent = txt;
+}
+function _ensurePredCountdown(){
+  if(_predCdStarted) return;
+  _predCdStarted = true;
+  setInterval(_predCountdownTick, 1000);
+}
+
 function renderPredictionCard(data){
   const card = $('pred-card');
   if(!card) return;
@@ -2669,17 +2716,49 @@ function renderPredictionCard(data){
   const provChip = data.model_status === 'provisional'
     ? '<span class="pred-model-chip provisional" title="মডেল চলছে, তবে unseen ডেটায় এখনো baseline ছাড়িনি — ফলাফল ট্র্যাক হচ্ছে">প্রোভিশনাল</span>'
     : '';
+  _predCardSignalTime = Number(data.signal_time) || 0;
   let body;
-  if(data.status === 'no_model' || !data.t1 && !data.t2){
+  const noSlots = !data.t1 && !data.t2;
+  if(noSlots){
+    // PRED-VISIBILITY: the old card collapsed EVERY empty state into
+    // "মডেল এখনো প্রস্তুত নয়" — a lie when models were already running
+    // and this pair simply had no frozen rows yet, and a dead end when the
+    // pair genuinely had no model (WHICH pairs do?). Four distinct,
+    // honest states now.
     const ft = data.fast_train || {};
-    const training = ft.running
-      ? '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন চলছে (কয়েক মিনিটে প্রস্তুত হবে)। '
-      : '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন সার্ভার চালু হওয়ার ৫–৭ মিনিটের মধ্যে মডেল বানাবে। ';
-    const ftErr = ft.last_error
-      ? '<div class="pred-gate">⚠ শেষ ট্রেইনিং চেষ্টা ব্যর্থ: ' + esc(String(ft.last_error).slice(0, 120)) + '</div>'
-      : '';
-    body = '<div class="pred-nomodel">' + training +
-           'সততার স্বার্থে কোনো ভুয়া সিগন্যাল দেখানো হচ্ছে না।</div>' + ftErr;
+    const regd = data.registered_assets || [];
+    let msg;
+    if(data.model_version){
+      // model IS running — the next candle close freezes rows here
+      msg = '<div class="pred-nomodel pred-ready">✅ এই পেয়ারের মডেল প্রস্তুত (' +
+        esc(String(data.model_version).slice(0, 18)) +
+        (data.model_status === 'provisional' ? ' · প্রোভিশনাল' : '') +
+        ') — চলমান ক্যান্ডেল বন্ধ হওয়ার মুহূর্তে এখানে T+1/T+2 প্রেডিকশন ' +
+        'ফ্রিজ হয়ে দেখাবে।</div>';
+    } else if(regd.length){
+      msg = '<div class="pred-nomodel">এই পেয়ারের জন্য এখনো মডেল নেই। মডেল ' +
+        'ট্রেইন হয়েছে এই পেয়ারগুলোর জন্য: <b>' +
+        esc(regd.slice(0, 14).map(a => String(a).replace('_otc', '')).join(', ')) +
+        (regd.length > 14 ? ' …' : '') + '</b>। ' +
+        '"মডেল" ট্যাবে সব পেয়ারের লাইভ T+1/T+2 প্রেডিকশন টেবিল আছে।</div>';
+    } else if(ft.blocked || ft.last_error){
+      const why = ft.blocked || ft.last_error;
+      msg = '<div class="pred-nomodel">⛔ মডেল ট্রেইন হতে পারেনি — ' +
+        esc(String(why).slice(0, 160)) +
+        '। সিস্টেম ১০ মিনিটে আবার চেষ্টা করবে।</div>';
+    } else {
+      const training = ft.running
+        ? '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন চলছে (কয়েক মিনিটে প্রস্তুত হবে)। '
+        : '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন সার্ভার চালু হওয়ার ৫–৭ মিনিটের মধ্যে মডেল বানাবে। ';
+      const ftErr = ft.last_error
+        ? '<div class="pred-gate">⚠ শেষ ট্রেইনিং চেষ্টা ব্যর্থ: ' + esc(String(ft.last_error).slice(0, 120)) + '</div>'
+        : '';
+      msg = '<div class="pred-nomodel">' + training +
+            'সততার স্বার্থে কোনো ভুয়া সিগন্যাল দেখানো হচ্ছে না।</div>' + ftErr;
+    }
+    body = msg +
+      '<div class="pred-countdown" id="pred-countdown"></div>' +
+      '<div class="pred-sub">কোনো পেয়ারের প্রেডিকশন দেখতে: চার্টে সেই পেয়ার সিলেক্ট করুন, বা "মডেল" ট্যাব → লাইভ প্রেডিকশন</div>';
   } else {
     const t1 = data.t1, t2 = data.t2;
     const bestTier = [t1, t2].filter(s => s && s.emit)
@@ -2694,6 +2773,7 @@ function renderPredictionCard(data){
            '<span class="pred-lock">🔒 প্রেডিকশন লক: ' +
              (data.locked ? 'হ্যাঁ' : 'না') + '</span>' +
            '</div>' +
+           '<div class="pred-countdown" id="pred-countdown"></div>' +
            (t1 && t1.reason && !t1.emit && t1.reason.indexOf('quality_fail') === 0
              ? '<div class="pred-gate">🛡 কোয়ালিটি গেট: ডেটা/ভোলাটিলিটি শর্ত পূরণ হয়নি</div>'
              : '');
@@ -2704,6 +2784,8 @@ function renderPredictionCard(data){
     '</div>' + body;
   card.classList.toggle('has-signal',
     !!(data.t1 && data.t1.emit) || !!(data.t2 && data.t2.emit));
+  _ensurePredCountdown();
+  _predCountdownTick();
 }
 
 function onSnapshot(msg){

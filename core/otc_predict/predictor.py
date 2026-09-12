@@ -393,10 +393,37 @@ def describe_status(asset=None):
     except Exception:
         fast = {}
 
+    # PRED-VISIBILITY (2026-09-12): the card must never again show a bare
+    # "মডেল এখনো প্রস্তুত নয়" when models ARE running. Two extra facts:
+    #   registered_assets → which pairs DO have an active model (so a pair
+    #     without one can name them instead of dead-ending), and
+    #   has_predictions   → whether THIS pair has any frozen rows yet (so
+    #     "model ready, first freeze at the next candle close" is distinct
+    #     from "no model at all").
+    registered_assets = []
+    try:
+        reg = _cache.get("reg") or {}
+        if not reg:
+            from core.otc_predict.tracker import active_models as _am
+            reg = _am() or {}
+        registered_assets = sorted(
+            n for n in reg.keys() if n and n != "global")
+    except Exception:
+        registered_assets = []
+    has_predictions = False
+    try:
+        if asset:
+            from core.otc_predict.tracker import latest_predictions as _lp
+            has_predictions = bool(_lp(asset, 1))
+    except Exception:
+        has_predictions = False
+
     return {"engine_enabled": _engine_on,
             "sklearn_ok": bool(SKLEARN_OK),
             "model_version": bundle.version if bundle else None,
             "model_status": model_status,
             "trained_rows": trained_rows,
+            "registered_assets": registered_assets,
+            "has_predictions": bool(has_predictions),
             "fast_train": fast,
             "window": PRED_WINDOW}

@@ -596,6 +596,27 @@
                 </div>
 
                 <div class="mdl-section">
+                    <h3>সব পেয়ারের লাইভ প্রেডিকশন</h3>
+                    <p class="mdl-note">প্রতিটি পেয়ারের সর্বশেষ ফ্রিজ করা T+1 (পরের ক্যান্ডেল) ও T+2
+                        (তার পরের ক্যান্ডেল) প্রেডিকশন — কোন পেয়ারে প্রেডিকশন হচ্ছে এক নজরে।
+                        চার্ট ট্যাবে পেয়ার সিলেক্ট করলে "ভবিষ্যৎ ক্যান্ডেল প্রেডিকশন" কার্ডেও
+                        সেই পেয়ারের প্রেডিকশন দেখা যায়।</p>
+                    <div class="mdl-table-wrap">
+                        <table class="mdl-table" id="mdl-live-pred-table">
+                            <thead>
+                                <tr>
+                                    <th>পেয়ার</th><th>T+1 (পরের ক্যান্ডেল)</th><th>T+2 (দ্বিতীয়)</th>
+                                    <th>ফ্রিজ হয়েছে</th><th>মডেল</th>
+                                </tr>
+                            </thead>
+                            <tbody id="mdl-live-tbody">
+                                <tr><td colspan="5" class="mdl-loading">লোড হচ্ছে…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="mdl-section">
                     <h3>মডেলের আসল রেজাল্ট (প্রতিটি প্রেডিকশন গ্রেড করা)</h3>
                     <div class="mdl-analytics" id="mdl-analytics">
                         <div class="mdl-stat"><span class="mdl-stat-label">প্রেডিকশন</span><span class="mdl-stat-value" id="mdl-a-total">—</span></div>

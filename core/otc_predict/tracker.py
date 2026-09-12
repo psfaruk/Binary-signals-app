@@ -32,7 +32,8 @@ from db import _cursor
 
 __all__ = ["insert_prediction", "settle_target", "settle_from_history",
            "latest_predictions", "prediction_analytics", "register_model",
-           "active_models", "prediction_count", "prediction_table_stats"]
+           "active_models", "prediction_count", "prediction_table_stats",
+           "live_predictions"]
 
 
 def insert_prediction(*, asset, period, signal_time, target_time, horizon,
@@ -201,6 +202,107 @@ def latest_predictions(asset, limit=20, emit_only=False):
 def prediction_count():
     with _cursor() as c:
         return c.execute("SELECT COUNT(*) FROM otc_predictions").fetchone()[0]
+
+
+def live_predictions(period=60, max_assets=60):
+    """PRED-VISIBILITY (2026-09-12): সব active পেয়ারের সর্বশেষ ফ্রিজ করা
+    T+1/T+2 এক পে-লোডে।
+
+    USER ASK (verbatim): "প্রেডিকশন T+1 T+2 এই ক্যান্ডেল গুলো কোথায়
+    দেখানো হচ্ছে। কোন পেয়ার এ প্রেডিকশন দিচ্ছে?" — this powers the
+    মডেল tab's "সব পেয়ারের লাইভ প্রেডিকশন" table: for every ACTIVE
+    registry asset (per-pair scope, plus any global fallback row) it
+    returns the newest candle-close snapshot from the FROZEN table —
+    exactly what /api/prediction/<asset> renders, for all pairs at once.
+
+    Assets with a model but no frozen rows yet come back with
+    t1/t2=None + the live predictor's last status/reason, so "কোন
+    পেয়ারে প্রেডিকশন হচ্ছে, কোনটায় হচ্ছে না কেন" is always answerable.
+    Read-only: never writes, never recomputes — frozen rows only (PART 16).
+    """
+    try:
+        reg = active_models()
+    except Exception:
+        reg = {}
+    try:
+        from core.otc_predict.predictor import runtime_status
+        per = (runtime_status().get("per_asset") or {})
+    except Exception:
+        per = {}
+
+    out = []
+    g_row = reg.get("global") or {}
+    try:
+        g_m = json.loads(g_row.get("metrics") or "{}")
+    except Exception:
+        g_m = {}
+
+    def _entry(name, row, m, fallback=False):
+        e = {"asset": name,
+             "model_version": row.get("version"),
+             "model_status": m.get("status"),
+             "signal_time": None, "t1": None, "t2": None,
+             "n_frozen": 0}
+        if fallback:
+            e["scope"] = "global_fallback"
+        try:
+            rows = latest_predictions(name, 6)
+        except Exception:
+            rows = []
+        if rows:
+            last_t = rows[0]["signal_time"]
+            e["signal_time"] = last_t
+            e["n_frozen"] = len(rows)
+            for r in rows:
+                if r["signal_time"] != last_t:
+                    continue
+                slot = {"prediction": r["prediction"],
+                        "probability": r["probability"],
+                        "tier": r["tier"], "emit": bool(r["emit"]),
+                        "win_loss": r["win_loss"],
+                        "target_time": r["target_time"],
+                        "model_version": r["model_version"]}
+                if r["horizon"] == 1:
+                    e["t1"] = slot
+                elif r["horizon"] == 2:
+                    e["t2"] = slot
+        lv = per.get(name) or {}
+        if lv.get("last_status"):
+            e["live_status"] = lv["last_status"]
+        if lv.get("last_reason"):
+            e["live_reason"] = lv["last_reason"]
+        if lv.get("last_error"):
+            e["live_error"] = lv["last_error"]
+        return e
+
+    seen = set()
+    for name in sorted(reg):
+        if not name or name == "global":
+            continue
+        row = reg.get(name) or {}
+        try:
+            m = json.loads(row.get("metrics") or "{}")
+        except Exception:
+            m = {}
+        out.append(_entry(name, row, m))
+        seen.add(name)
+        if len(out) >= max_assets:
+            return out
+    # Pairs with NO per-pair model but covered by the active GLOBAL pool
+    # still get an entry (the live predictor falls back to that pool for
+    # them) — "কোন পেয়ার এ প্রেডিকশন দিচ্ছে?" must list them too.
+    if g_row:
+        try:
+            from core.constants import ALLOWED_PAIRS_OTC
+        except Exception:
+            ALLOWED_PAIRS_OTC = []
+        for a in sorted(ALLOWED_PAIRS_OTC):
+            if a in seen:
+                continue
+            out.append(_entry(a, g_row, g_m, fallback=True))
+            if len(out) >= max_assets:
+                break
+    return out
 
 
 def prediction_analytics(days=None):
