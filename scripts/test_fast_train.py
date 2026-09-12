@@ -309,5 +309,217 @@ check("small-data gate carries honest test volume",
 check("registerable outcome yields a usable bundle",
       b3 is None or (b3.t1 is not None and b3.t2 is not None))
 
+# ══ PREDICT-FLOW-FIX (2026-09-12) — guards for the THIRD production
+#    report: 11 models trained (v20260912-1108·rf) but the "মডেলের আসল
+#    রেজাল্ট" card showed only "—" (predictions 0). Root causes: settle
+#    only fired on an EXACT target-time match (a restart/redeploy between
+#    freeze and target-close orphans the row forever) + a registry read
+#    failure wiped the predictor's cache for a full TTL + zero runtime
+#    telemetry made every failure invisible.
+
+print("── T18 restart-proof settlement (missed closes get graded) ──")
+from core.otc_predict.tracker import (insert_prediction,          # noqa: E402
+                                      settle_from_history,
+                                      prediction_table_stats)
+from core.otc_predict import predictor as _pred                    # noqa: E402
+cs_nzd = candles["NZDUSD_otc"]
+stats0 = prediction_table_stats()
+_pred._cache["checked_at"] = 0.0        # pick up the registry NOW
+payload = _pred.on_candle_closed("NZDUSD_otc", 60, cs_nzd, cs_nzd[-1], None)
+check("live freeze produced T+1/T+2", bool(payload and payload.get("t1")
+                                           and payload.get("t2")),
+      str(payload)[:160] if payload else "None")
+t1_t = payload["t1"]["target_time"]
+t2_t = payload["t2"]["target_time"]
+stats1 = prediction_table_stats()
+check("freeze wrote 2 pending rows",
+      stats1["total"] == stats0["total"] + 2 and
+      stats1["pending"] == stats0["pending"] + 2, str(stats1))
+# ── the downtime: T+1/T+2 close WITHOUT the app running (redeploy) ──
+# 1) a history window that does NOT contain the targets grades nothing
+n0 = settle_from_history("NZDUSD_otc", 60, cs_nzd[:-5])
+check("targets outside history stay unsettled (never invented)", n0 == 0)
+# 2) after 'restart' the reloaded stream history CONTAINS the real candles
+#    for the missed targets (the platform serves them on reconnect)
+t1_open = cs_nzd[-1]["close"]
+extended = cs_nzd + [
+    {"time": t1_t, "open": t1_open, "high": t1_open + 0.0004,
+     "low": t1_open - 0.0002, "close": t1_open + 0.0002},        # UP
+    {"time": t2_t, "open": t1_open + 0.0002,
+     "high": t1_open + 0.0004, "low": t1_open - 0.0002,
+     "close": t1_open - 0.0001},                                  # DOWN
+]
+n1 = settle_from_history("NZDUSD_otc", 60, extended)
+check("both missed targets graded from history", n1 == 2, f"n={n1}")
+conn2 = sqlite3.connect(_db.DB_PATH, timeout=30)
+conn2.row_factory = sqlite3.Row
+graded = {r["horizon"]: dict(r) for r in conn2.execute(
+    "SELECT * FROM otc_predictions WHERE asset='NZDUSD_otc' AND "
+    "target_time IN (?,?)", (t1_t, t2_t)).fetchall()}
+conn2.close()
+ok_grade = all(
+    h in graded and graded[h]["settled_at"] and
+    graded[h]["actual_result"] in ("UP", "DOWN", "DRAW") and
+    graded[h]["win_loss"] in ("win", "loss", "draw")
+    for h in (1, 2))
+check("graded rows carry real OHLC outcome + win/loss", ok_grade,
+      str({h: (graded.get(h, {}).get('actual_result'),
+               graded.get(h, {}).get('win_loss')) for h in (1, 2)}))
+h1 = graded.get(1, {})
+_expected = ("UP" if h1.get("actual_close", 0) > h1.get("actual_open", 0)
+             else "DOWN" if h1.get("actual_close", 0) < h1.get("actual_open", 0)
+             else "DRAW")
+check("grade matches the real candle direction",
+      bool(h1) and h1["actual_result"] == _expected,
+      f"pred={h1.get('prediction')} actual={h1.get('actual_result')}")
+_wl_ok = all(
+    graded[h]["win_loss"] == (
+        "draw" if graded[h]["actual_result"] == "DRAW" else
+        ("win" if (graded[h]["prediction"] == "CALL") ==
+         (graded[h]["actual_result"] == "UP") else "loss"))
+    for h in (1, 2) if h in graded)
+check("win/loss consistent with prediction vs actual",
+      _wl_ok,
+      str({h: (graded.get(h, {}).get('prediction'),
+               graded.get(h, {}).get('actual_result'),
+               graded.get(h, {}).get('win_loss')) for h in (1, 2)}))
+stats2 = prediction_table_stats()
+check("stats consistent after restart-settle",
+      stats2["total"] == stats2["settled"] + stats2["pending"] and
+      stats2["pending"] == stats0["pending"], str(stats2))
+
+# Scenario B — the LIVE-path restart simulation: the app was down for the
+# T+1/T+2 closes of the prediction frozen at candle 2500, reconnects at
+# candle 2504, and on_candle_closed must grade BOTH from the reloaded
+# history (this is what ticks the settle_history telemetry counter).
+_cut = 2500
+pA = _pred.on_candle_closed("NZDUSD_otc", 60, cs_nzd[:_cut + 1],
+                            cs_nzd[_cut], None)
+check("freeze at candle 2500 produced t1+t2",
+      bool(pA and pA.get("t1") and pA.get("t2")))
+pB = _pred.on_candle_closed("NZDUSD_otc", 60, cs_nzd[:_cut + 5],
+                            cs_nzd[_cut + 4], None)
+check("reconnect close (2504) still predicts",
+      bool(pB and pB.get("t1")))
+rs_b = _pred.runtime_status()
+check("live path graded missed closes from history",
+      rs_b.get("settle_history", 0) >= 2, str(rs_b.get("settle_history")))
+conn3 = sqlite3.connect(_db.DB_PATH, timeout=30)
+conn3.row_factory = sqlite3.Row
+gB = conn3.execute(
+    "SELECT COUNT(*) AS n FROM otc_predictions WHERE asset='NZDUSD_otc' "
+    "AND signal_time=? AND settled_at IS NOT NULL",
+    (cs_nzd[_cut]["time"],)).fetchone()[0]
+conn3.close()
+check("both missed predictions of candle-2500 settled", gB == 2, f"n={gB}")
+
+print("── T19 predictor runtime telemetry contract ──")
+rs = _pred.runtime_status()
+try:
+    json.dumps(rs)
+    check("runtime_status JSON-safe", True)
+except Exception as exc:
+    check("runtime_status JSON-safe", False, str(exc))
+check("closes_seen counted", rs.get("closes_seen", 0) >= 1,
+      str(rs.get("closes_seen")))
+check("predicted+frozen counted",
+      rs.get("predicted", 0) >= 1 and rs.get("frozen", 0) >= 2,
+      f"predicted={rs.get('predicted')} frozen={rs.get('frozen')}")
+lv = (rs.get("per_asset") or {}).get("NZDUSD_otc") or {}
+check("per-asset live state recorded",
+      lv.get("last_status") == "ok" and lv.get("frozen", 0) >= 2,
+      str(lv))
+check("settle_history counter ticked",
+      rs.get("settle_history", 0) >= 2, str(rs.get("settle_history")))
+
+print("── T20 registry read failure keeps the stale registry ──")
+import core.otc_predict.tracker as _trk                # noqa: E402
+_saved_checked = _pred._cache["checked_at"]
+_saved_reg = dict(_pred._cache.get("reg") or {})
+_orig_active = _trk.active_models
+
+
+def _boom():
+    raise RuntimeError("database is locked (simulated)")
+
+
+try:
+    _pred._cache["checked_at"] = 0.0                   # force refresh
+    _trk.active_models = _boom
+    b = _pred._get_bundle("NZDUSD_otc")
+finally:
+    _trk.active_models = _orig_active
+check("bundle still resolves from stale registry", b is not None)
+check("cache NOT wiped to {} on read failure",
+      len(_pred._cache.get("reg") or {}) == len(_saved_reg) and
+      bool(_pred._cache.get("reg")))
+_pred._cache["checked_at"] = _saved_checked            # restore cadence
+
+print("── T21 no-model close is honest AND visible ──")
+_unknown = "ZZZZZZ_otc"                    # no model registered for this
+p2 = _pred.on_candle_closed(_unknown, 60, gen_synthetic(80, seed=7),
+                            gen_synthetic(80, seed=7)[-1], None)
+check("no-model payload honest", bool(p2) and
+      p2.get("status") == "no_model" and
+      p2.get("reason") == "no_model_registered" and p2.get("t1") is None,
+      str(p2)[:140])
+rs2 = _pred.runtime_status()
+lv2 = (rs2.get("per_asset") or {}).get(_unknown) or {}
+check("no-model close visible in runtime state",
+      lv2.get("last_status") == "no_model", str(lv2))
+st21 = _trk.prediction_table_stats() if hasattr(_trk, "prediction_table_stats") \
+    else prediction_table_stats()
+check("table stats endpoint-safe", all(k in st21 for k in
+                                       ("total", "settled", "pending")))
+
+print("── T22 prediction_analytics survives SETTLED rows (dir_ KeyError guard) ──")
+# MODEL-RUN-FIX added dir_* aggregation with the key expression
+# "dir_" + win_loss → "dir_win"/"dir_loss"/"dir_draw" — but the blanks
+# define dir_wins/dir_losses/dir_draws → KeyError on the FIRST settled
+# row → the overview results card could never render. Never again.
+# ALSO: per_pair/per_tier blanks lacked "draws" — an EMITTED prediction
+# graded on a doji (open==close) crashed the same payload.
+from core.otc_predict.tracker import (prediction_analytics,       # noqa: E402
+                                      settle_target)
+_t_draw = cs_nzd[-1]["time"] - 86400 * 3          # far from other targets
+insert_prediction(asset="NZDUSD_otc", period=60,
+                  signal_time=_t_draw - 60, target_time=_t_draw, horizon=1,
+                  prediction="CALL", probability=0.55, tier="HIGH",
+                  score=90, emit=True, model_version="t22-draw-probe")
+settle_target("NZDUSD_otc", 60, _t_draw, 1.2500, 1.2500)   # doji → DRAW
+# emitted WIN probe — hour_stats used hs["win"] (KeyError) on the first
+# emitted win; exactly what the E2E caught in the server process
+_t_win = cs_nzd[-1]["time"] - 86400 * 4
+insert_prediction(asset="NZDUSD_otc", period=60,
+                  signal_time=_t_win - 60, target_time=_t_win, horizon=2,
+                  prediction="PUT", probability=0.58, tier="GOOD",
+                  score=80, emit=True, model_version="t22-win-probe")
+settle_target("NZDUSD_otc", 60, _t_win, 1.2500, 1.2490)    # DOWN → PUT wins
+an = prediction_analytics()
+try:
+    json.dumps(an)
+    check("analytics JSON-safe with settled rows", True)
+except Exception as exc:
+    check("analytics JSON-safe with settled rows", False, str(exc))
+check("draw-graded emitted row survived aggregation",
+      an.get("dir_draws", 0) >= 1 and an.get("total_signals", 0) >= 1,
+      f"draws={an.get('dir_draws')} signals={an.get('total_signals')}")
+check("emitted-win hour stats survived",
+      an.get("wins", 0) >= 1 and bool(an.get("per_hour")),
+      f"wins={an.get('wins')} hours={list((an.get('per_hour') or {}).keys())}")
+check("dir_total counts the graded rows", an.get("dir_total", 0) >= 4,
+      str(an.get("dir_total")))
+check("per-horizon dir buckets populated",
+      (an.get("t1") or {}).get("dir_n", 0) >= 2 and
+      (an.get("t2") or {}).get("dir_n", 0) >= 2,
+      str({"t1": (an.get("t1") or {}).get("dir_n"),
+           "t2": (an.get("t2") or {}).get("dir_n")}))
+check("dir_win_rate computed", an.get("dir_win_rate") is not None,
+      str(an.get("dir_win_rate")))
+check("per_pair block intact", bool(an.get("per_pair")),
+      str(list((an.get("per_pair") or {}).keys())))
+check("per_pair carries the draw", (an["per_pair"].get("NZDUSD_otc") or {})
+      .get("draws", 0) >= 1, str(an["per_pair"].get("NZDUSD_otc")))
+
 print(f"\n══ {len(PASS)} PASS / {len(FAIL)} FAIL ══")
 sys.exit(1 if FAIL else 0)

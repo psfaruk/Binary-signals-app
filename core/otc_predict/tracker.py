@@ -30,9 +30,9 @@ import time
 
 from db import _cursor
 
-__all__ = ["insert_prediction", "settle_target", "latest_predictions",
-           "prediction_analytics", "register_model", "active_models",
-           "prediction_count"]
+__all__ = ["insert_prediction", "settle_target", "settle_from_history",
+           "latest_predictions", "prediction_analytics", "register_model",
+           "active_models", "prediction_count", "prediction_table_stats"]
 
 
 def insert_prediction(*, asset, period, signal_time, target_time, horizon,
@@ -104,6 +104,90 @@ def settle_target(asset, period, target_ctime, open_, close_):
     return n
 
 
+def settle_from_history(asset, period, candles):
+    """PREDICT-FLOW-FIX (2026-09-12): RESTART-PROOF settlement.
+
+    Why this exists — the production sequence the user actually lives
+    through on Railway:
+      1. a prediction is frozen at candle-T close for targets T+1/T+2;
+      2. the service redeploys/restarts (Railway does this constantly) or
+         the feed drops, so candle T+1 / T+2 closes are NEVER seen by
+         on_candle_closed;
+      3. settle_target() only fires on an EXACT target_time match at close
+         time → those frozen rows stay unsettled FOREVER → the মডেল tab's
+         "মডেলের আসল রেজাল্ট" card shows "—" no matter how many
+         predictions were made. This is exactly the state the user
+         screenshotted (11 models trained, predictions = —).
+
+    Fix: when a stream (re)loads platform history, the REAL closed candles
+    for the missed targets are right there in the window. Grade every
+    unsettled row of this pair whose target_time maps to one of those
+    candles — same grading rule as settle_target, same honesty: a target
+    not present in the history stays unsettled (never invented).
+
+    `candles` — closed candles oldest→newest ({time, open, close, ...}),
+    exactly what the feed holds in stream.candles after a history bootstrap.
+    Returns the number of rows graded.
+    """
+    if not candles:
+        return 0
+    by_time = {}
+    for c in candles:
+        try:
+            by_time[int(c["time"])] = (float(c["open"]), float(c["close"]))
+        except Exception:
+            continue
+    if not by_time:
+        return 0
+    now = time.time()
+    n = 0
+    with _cursor() as c:
+        rows = c.execute(
+            """SELECT id, prediction, target_time FROM otc_predictions
+               WHERE asset=? AND period=? AND settled_at IS NULL""",
+            (asset, int(period))).fetchall()
+        for r in rows:
+            tt = int(r["target_time"])
+            if tt not in by_time:
+                continue
+            open_, close_ = by_time[tt]
+            if close_ > open_:
+                actual = "UP"
+            elif close_ < open_:
+                actual = "DOWN"
+            else:
+                actual = "DRAW"
+            if actual == "DRAW":
+                wl = "draw"
+            elif (r["prediction"] == "CALL" and actual == "UP") or \
+                 (r["prediction"] == "PUT" and actual == "DOWN"):
+                wl = "win"
+            else:
+                wl = "loss"
+            c.execute(
+                """UPDATE otc_predictions
+                   SET actual_result=?, actual_open=?, actual_close=?,
+                       win_loss=?, settled_at=?
+                   WHERE id=? AND settled_at IS NULL""",
+                (actual, open_, close_, wl, now, r["id"]))
+            n += 1
+    return n
+
+
+def prediction_table_stats():
+    """Small counts block for the overview payload — total / settled /
+    pending frozen rows. Makes 'why is the results card empty' answerable
+    at a glance (pending>0 + settled=0 ⇒ grades are on their way; total=0
+    ⇒ the live predictor never froze anything yet)."""
+    with _cursor() as c:
+        total = c.execute("SELECT COUNT(*) FROM otc_predictions").fetchone()[0]
+        settled = c.execute(
+            "SELECT COUNT(*) FROM otc_predictions "
+            "WHERE settled_at IS NOT NULL").fetchone()[0]
+    return {"total": int(total), "settled": int(settled),
+            "pending": int(total) - int(settled)}
+
+
 def latest_predictions(asset, limit=20, emit_only=False):
     """Newest frozen predictions for a pair (UI card + drill-in)."""
     q = ("SELECT * FROM otc_predictions WHERE asset=? AND period=60"
@@ -154,11 +238,26 @@ def prediction_analytics(days=None):
     for r in rows:
         slot = out["t1"] if r["horizon"] == 1 else out["t2"]
         slot["n"] += 1
-        # directional accuracy counts EVERY settled row (emit or not)
+        # directional accuracy counts EVERY settled row (emit or not).
+        # PREDICT-FLOW-FIX: this used to be `slot["dir_" + (win_loss…)]`
+        # which built keys "dir_win"/"dir_loss"/"dir_draw" — but the blanks
+        # define "dir_wins"/"dir_losses"/"dir_draws" → KeyError on the
+        # FIRST settled row → prediction_analytics() crashed → the মডেল
+        # tab's results card could never show a single number even when
+        # predictions existed. (The old E2E never had a settled row, so it
+        # sailed through — the production payload did not.)
+        _wl = r["win_loss"] or "draw"
         slot["dir_n"] += 1
-        slot["dir_" + (r["win_loss"] or "draw")] += 1
         out["dir_total"] += 1
-        out["dir_" + (r["win_loss"] or "draw")] += 1
+        if _wl == "win":
+            slot["dir_wins"] += 1
+            out["dir_wins"] += 1
+        elif _wl == "loss":
+            slot["dir_losses"] += 1
+            out["dir_losses"] += 1
+        else:
+            slot["dir_draws"] += 1
+            out["dir_draws"] += 1
         if r["emit"]:
             slot["wins" if r["win_loss"] == "win" else
                  "losses" if r["win_loss"] == "loss" else "draws"] += 1
@@ -167,6 +266,11 @@ def prediction_analytics(days=None):
 
         pp = out["per_pair"].setdefault(
             r["asset"], {"n": 0, "emit": 0, "wins": 0, "losses": 0,
+                         # PREDICT-FLOW-FIX: "draws" was missing — an EMITTED
+                         # prediction graded on a doji candle (open==close)
+                         # raised KeyError here and crashed the whole
+                         # analytics payload the same way as the dir_ bug.
+                         "draws": 0,
                          "dir_n": 0, "dir_wins": 0, "dir_losses": 0})
         pp["n"] += 1
         pp["dir_n"] += 1
@@ -181,10 +285,13 @@ def prediction_analytics(days=None):
             if r["win_loss"] in ("win", "loss"):
                 h = time.strftime("%H", time.gmtime(r["signal_time"]))
                 hs = hour_stats.setdefault(h, {"wins": 0, "losses": 0})
-                hs[r["win_loss"]] += 1
+                # PREDICT-FLOW-FIX: was hs[r["win_loss"]] → KeyError('win')
+                # on the first emitted win — same bug family as dir_.
+                hs["wins" if r["win_loss"] == "win" else "losses"] += 1
 
         tier = out["per_tier"].setdefault(
-            r["tier"] or "?", {"n": 0, "emit": 0, "wins": 0, "losses": 0})
+            r["tier"] or "?", {"n": 0, "emit": 0, "wins": 0, "losses": 0,
+                               "draws": 0})
         tier["n"] += 1
         if r["emit"]:
             tier["emit"] += 1
@@ -234,6 +341,11 @@ def prediction_analytics(days=None):
                             "n": best[1]["wins"] + best[1]["losses"]}
         out["worst_pair"] = {"asset": worst[0], "win_rate": round(worst[2], 2),
                              "n": worst[1]["wins"] + worst[1]["losses"]}
+    # PREDICT-FLOW-FIX: per_hour was computed into hour_stats but never
+    # copied into the payload (PART 21's Best/Worst-Time analysis data was
+    # silently dropped). Expose it raw; best/worst_time below still use the
+    # ≥5-decisions honesty filter.
+    out["per_hour"] = hour_stats
     if hour_stats:
         hrows = [(h, 100.0 * v["wins"] / (v["wins"] + v["losses"]), v)
                  for h, v in hour_stats.items()

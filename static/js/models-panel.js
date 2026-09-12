@@ -168,6 +168,7 @@
         }
 
         var html = '';
+        var livePer = (d.predictor && d.predictor.per_asset) || {};
         names.forEach(function(a) {
             if (a === '__global__') return;
             var p = pairs[a] || {};
@@ -181,6 +182,17 @@
             if (p.reason) noteBits.push(esc(p.reason));
             if (p.fetch_error) noteBits.push('fetch: ' + esc(p.fetch_error));
             if (p.candles != null && !status) noteBits.push('রান অপেক্ষায়');
+            // PREDICT-FLOW-FIX: show the pair's LIVE prediction state too —
+            // training status alone hid the 'trained but never predicts' gap.
+            var lv = livePer[a];
+            if (lv) {
+                var liveTxt = 'লাইভ: ' + liveStatusText(lv.last_status);
+                if (lv.last_status === 'ok' && lv.frozen) liveTxt += ' · ফ্রিজ ' + lv.frozen;
+                if (lv.last_error) liveTxt += ' (' + esc(lv.last_error) + ')';
+                else if (lv.last_status === 'window_short' && lv.last_reason)
+                    liveTxt += ' (' + esc(lv.last_reason) + ')';
+                noteBits.push(liveTxt);
+            }
             var modelTxt = version ? esc(version) : '—';
             if (m && m.t1 && m.t1.model) modelTxt += ' · ' + esc(m.t1.model);
             else if (m && m.t2 && m.t2.model) modelTxt += ' · ' + esc(m.t2.model);
@@ -210,6 +222,67 @@
         tbody.innerHTML = html;
     }
 
+    // ── PREDICT-FLOW-FIX: live engine status strip ──────────────────────
+    // Every failure that used to be a hidden print() now has a Bengali
+    // sentence here — the user must never see a bare "—" again without
+    // knowing why.
+    function liveStatusText(st) {
+        var map = {
+            ok:                 'ok',
+            no_model:           'মডেল লোড হয়নি',
+            window_short:       'ক্যান্ডেল সংগ্রহ চলছে',
+            bundle_missing:     'বান্ডেল ফাইল পাওয়া যায়নি',
+            bundle_load_failed: 'বান্ডেল লোড ব্যর্থ',
+            error:              'ত্রুটি'
+        };
+        return map[st] || st || '—';
+    }
+
+    function renderLiveEngine(d) {
+        var box = $('mdl-live-engine');
+        var dot = $('mdl-live-dot');
+        var txt = $('mdl-live-text');
+        if (!box || !txt) return;
+        var p = d.predictor || {};
+        var pt = d.pred_table || {};
+        if (p.error) {
+            box.className = 'mdl-live-engine mdl-live-warn';
+            if (dot) dot.className = 'mdl-live-dot dot-warn';
+            txt.textContent = 'লাইভ ইঞ্জিন স্ট্যাটাস পড়া যায়নি: ' + p.error;
+            return;
+        }
+        if (p.engine_enabled === false) {
+            box.className = 'mdl-live-engine mdl-live-bad';
+            if (dot) dot.className = 'mdl-live-dot dot-bad';
+            txt.textContent = '⛔ প্রেডিকশন ইঞ্জিন বন্ধ আছে (env QX_PREDICT=0) — ' +
+                'সেটিংসে এটি সক্রিয় করতে হবে';
+            return;
+        }
+        var bits = ['ক্লোজ দেখেছে ' + (p.closes_seen || 0),
+                    'ফ্রিজ ' + (p.frozen || 0),
+                    'গ্রেড হয়েছে ' + (pt.settled != null ? pt.settled : '—'),
+                    'পেন্ডিং ' + (pt.pending != null ? pt.pending : '—')];
+        if (p.window_short) bits.push('উইন্ডো ছোট ' + p.window_short);
+        if (p.no_model) bits.push('মডেলহীন ' + p.no_model);
+        if (p.errors) bits.push('ত্রুটি ' + p.errors);
+        var cls = 'mdl-live-off', dotCls = 'dot-off', tail = '';
+        if (!p.closes_seen) {
+            tail = ' — লাইভ ফিড এখনো কোনো ক্যান্ডেল-ক্লোজ দেখেনি (টোকেন/ফিড স্ট্যাটাস চেক করুন)';
+        } else if ((p.frozen || 0) > 0 && !p.errors) {
+            cls = 'mdl-live-ok'; dotCls = 'dot-ok';
+            tail = ' — প্রতিটি ক্যান্ডেল-ক্লোজে T+1/T+2 ফ্রিজ হচ্ছে';
+        } else if (p.errors) {
+            cls = 'mdl-live-bad'; dotCls = 'dot-bad';
+            tail = ' — শেষ ত্রুটি: ' + (p.last_error || 'অজানা');
+        } else if (p.no_model) {
+            cls = 'mdl-live-warn'; dotCls = 'dot-warn';
+            tail = ' — কিছু পেয়ারে সক্রিয় মডেল পাওয়া যায়নি';
+        }
+        box.className = 'mdl-live-engine ' + cls;
+        if (dot) dot.className = 'mdl-live-dot ' + dotCls;
+        txt.textContent = 'লাইভ ইঞ্জিন: ' + bits.join(' · ') + tail;
+    }
+
     function renderAnalytics(d) {
         var a = d.analytics || {};
         $('mdl-a-total').textContent = a.dir_total != null
@@ -223,12 +296,15 @@
         $('mdl-a-wr').textContent = a.win_rate != null
             ? a.win_rate + '% (' + (a.wins || 0) + 'W/' + (a.losses || 0) + 'L)'
             : (a.total_signals ? '—' : 'সিগন্যাল নেই');
+        renderLiveEngine(d);
 
         var noteEl = $('mdl-analytics-note');
         if (!a.dir_total) {
             noteEl.textContent = 'এখনো কোনো প্রেডিকশন সেটেল হয়নি। মডেল রেজিস্টার ' +
                 'হওয়ার পর প্রতিটি ক্যান্ডেলে T+1/T+2 প্রেডিকশন ফ্রিজ হয় এবং ' +
-                'ক্যান্ডেল ক্লোজে গ্রেড হয় — তখন এখানে সত্যিকারের অ্যাকুরেসি দেখা যাবে।';
+                'ক্যান্ডেল ক্লোজে গ্রেড হয় — তখন এখানে সত্যিকারের অ্যাকুরেসি দেখা যাবে। ' +
+                'সার্ভার রিস্টার্ট/রিডিপ্লোয়ের পরেও মিস হওয়া ক্যান্ডেল হিস্টোরি থেকে ' +
+                'গ্রেড হয়ে যাবে (restart-proof settlement)।';
         } else {
             noteEl.textContent = 'ট্র্যাক করা প্রেডিকশনের দিক-নির্ভুলতা ' +
                 '(সিগন্যাল এমিট হোক বা না হোক — প্রতিটি প্রেডিকশন ফ্রিজ ও ' +

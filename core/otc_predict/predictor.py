@@ -27,6 +27,7 @@ logs every failure (the live feed's health outranks predictions).
 
 import json
 import os
+import threading
 import time
 
 from core.otc_predict.features_ext import (build_extended_row,
@@ -36,7 +37,8 @@ from core.otc_predict.regime import detect_regime
 from core.otc_predict.price_action import price_action_confirm
 from core.otc_predict.signal_filter import score_signal
 
-__all__ = ["on_candle_closed", "engine_enabled", "PRED_WINDOW"]
+__all__ = ["on_candle_closed", "engine_enabled", "PRED_WINDOW",
+           "runtime_status"]
 
 PRED_WINDOW = int(os.environ.get("QX_PRED_WINDOW", "50"))  # PART 7: 20-50
 
@@ -46,6 +48,53 @@ _engine_on = os.environ.get("QX_PREDICT", "1") not in ("0", "false", "no")
 # Per-registry-entry cache: key "<name>:<version>" → ModelBundle.
 _cache = {"bundles": {}, "reg": {}, "checked_at": 0.0}
 _TTL = float(os.environ.get("QX_PREDICT_MODELS_TTL", "300"))
+
+# ── PREDICT-FLOW-FIX (2026-09-12): live runtime telemetry ────────────────
+# The user waited an hour with 11 models registered and ZERO predictions
+# and the UI could only show "—" — every failure in this module used to be
+# a print() that nobody sees. Now every candle close records what happened
+# (window short? no model? bundle load error? frozen? settled?) and the
+# মডেল tab shows it in plain Bengali.
+_runtime = {
+    "started_at": time.time(),
+    "closes_seen": 0,      # candle closes handed to on_candle_closed
+    "predicted": 0,        # closes that produced a T+1/T+2 payload
+    "frozen": 0,           # NEW prediction rows actually written
+    "no_model": 0,         # closes with no usable bundle for the pair
+    "window_short": 0,     # closes skipped: stream has < PRED_WINDOW candles
+    "errors": 0,           # unexpected exceptions in the predict path
+    "settle_graded": 0,    # rows graded at exact-close (settle_target)
+    "settle_history": 0,   # rows graded from reloaded history (restart-proof)
+    "registry_rows": 0,    # active registry rows at last refresh
+    "bundles_loaded": 0,   # distinct bundles successfully loaded this run
+    "last_error": None,
+    "last_close_at": 0.0,
+    "per_asset": {},       # asset → live counters + last status/reason
+}
+_runtime_lock = threading.Lock()
+
+
+def _note(asset, **fields):
+    """Merge fields into per-asset runtime state (bounded, JSON-safe)."""
+    with _runtime_lock:
+        st = _runtime["per_asset"].setdefault(
+            asset, {"closes": 0, "frozen": 0, "last_status": None,
+                    "last_reason": None, "last_error": None,
+                    "last_at": 0.0})
+        st.update(fields)
+        st["last_at"] = time.time()
+
+
+def runtime_status():
+    """JSON-safe snapshot for /api/prediction/overview (মডেল tab)."""
+    with _runtime_lock:
+        per = {a: dict(s) for a, s in _runtime["per_asset"].items()}
+    snap = {k: v for k, v in _runtime.items() if k != "per_asset"}
+    snap["per_asset"] = per
+    snap["uptime_secs"] = round(time.time() - _runtime["started_at"], 1)
+    snap["engine_enabled"] = bool(_engine_on)
+    snap["pred_window"] = PRED_WINDOW
+    return snap
 
 
 def engine_enabled():
@@ -58,16 +107,28 @@ def _get_bundle(asset=None):
     Lookup order: registry row named `asset` (per-pair model) → row named
     "global" (pooled model). Re-checks the registry on TTL so a newly
     registered bundle is picked up without a redeploy.
+
+    PREDICT-FLOW-FIX: a registry READ FAILURE no longer wipes the cache —
+    the previous registry keeps serving (stale-but-good) for the next TTL
+    window. The old code cached `{}` on a transient sqlite lock (the fast-
+    train daemon writes the registry from another thread every few minutes)
+    and silently predicted NOTHING for up to 5 minutes — every such candle
+    close is a prediction that can never be graded later.
     """
     now = time.time()
     if now - _cache["checked_at"] >= _TTL or _cache["checked_at"] <= 0:
         try:
             from core.otc_predict.tracker import active_models
-            _cache["reg"] = active_models()
+            reg = active_models()
+            _cache["reg"] = reg
+            with _runtime_lock:
+                _runtime["registry_rows"] = len(reg)
         except Exception as exc:
-            print(f"[predictor] registry read failed: "
+            print(f"[predictor] registry read failed (keeping stale): "
                   f"{type(exc).__name__}: {exc}")
-            _cache["reg"] = {}
+            with _runtime_lock:
+                _runtime["last_error"] = (
+                    f"registry read: {type(exc).__name__}: {exc}")
         _cache["checked_at"] = now
     reg = _cache.get("reg") or {}
     row = reg.get(asset) if asset else None
@@ -82,19 +143,29 @@ def _get_bundle(asset=None):
     try:
         from core.otc_predict.models import SKLEARN_OK, load_bundle
         if not SKLEARN_OK:
+            with _runtime_lock:
+                _runtime["last_error"] = "sklearn unavailable at bundle load"
             return None
         import os as _os
         path = row["path"]
         if not path or not _os.path.exists(path):
             print(f"[predictor] registered bundle missing on disk: {path}")
+            if asset:
+                _note(asset, last_status="bundle_missing",
+                      last_reason=f"bundle file missing: {path}")
             return None
         bundle = load_bundle(path)
         _cache["bundles"][key] = bundle
+        with _runtime_lock:
+            _runtime["bundles_loaded"] += 1
         print(f"[predictor] loaded model bundle {row['version']} "
               f"({row['name']})")
         return bundle
     except Exception as exc:
         print(f"[predictor] bundle load failed: {type(exc).__name__}: {exc}")
+        if asset:
+            _note(asset, last_status="bundle_load_failed",
+                  last_error=f"{type(exc).__name__}: {exc}")
         return None
 
 
@@ -117,21 +188,57 @@ def _quality_gates(window, period, bundle, reg_info, pa):
 def on_candle_closed(asset, period, candles, closed_candle, micro):
     """Called by feed the moment a candle closes (before new-candle ticks).
 
-    1. Settles every frozen prediction whose target_time == closed time.
+    1. Settles every frozen prediction whose target_time == closed time,
+       THEN grades any older prediction whose close was missed while the
+       app was down/redeploying — the reloaded stream history still holds
+       those REAL candles (PREDICT-FLOW-FIX, restart-proof settlement).
     2. If the engine is enabled and models exist: predicts T+1/T+2 from
        CLOSED candles only, applies PART 24 gates + PART 14 score, freezes
        both rows, returns the WS payload (None when nothing to broadcast).
+
+    Every branch records runtime telemetry — the মডেল tab can always answer
+    "কেন প্রেডিকশন শূন্য?" in plain words instead of a silent "—".
     """
     if not _engine_on:
         return None
 
-    # 1) settlement first — the closed candle IS some earlier T+1/T+2 target
+    with _runtime_lock:
+        _runtime["closes_seen"] += 1
+        _runtime["last_close_at"] = time.time()
+    if asset:
+        with _runtime_lock:
+            st = _runtime["per_asset"].setdefault(
+                asset, {"closes": 0, "frozen": 0, "last_status": None,
+                        "last_reason": None, "last_error": None,
+                        "last_at": 0.0})
+            st["closes"] = st.get("closes", 0) + 1
+
+    # 1a) settlement first — the closed candle IS some earlier T+1/T+2 target
     try:
         from core.otc_predict.tracker import settle_target
-        settle_target(asset, period, closed_candle["time"],
-                      closed_candle["open"], closed_candle["close"])
+        n = settle_target(asset, period, closed_candle["time"],
+                          closed_candle["open"], closed_candle["close"])
+        if n:
+            with _runtime_lock:
+                _runtime["settle_graded"] += n
     except Exception as exc:
         print(f"[predictor] settle failed {asset}: {type(exc).__name__}: {exc}")
+        _note(asset, last_error=f"settle: {type(exc).__name__}: {exc}")
+
+    # 1b) restart-proof settlement — grade predictions whose target candle
+    # closed while the app was down; the stream history window still holds
+    # those real candles. Cheap: dict lookup over ≤400-500 closed candles.
+    try:
+        from core.otc_predict.tracker import settle_from_history
+        n = settle_from_history(asset, period, list(candles))
+        if n:
+            with _runtime_lock:
+                _runtime["settle_history"] += n
+            print(f"[predictor] {asset}: settled {n} missed-close "
+                  f"prediction(s) from reloaded history")
+    except Exception as exc:
+        print(f"[predictor] settle-from-history failed {asset}: "
+              f"{type(exc).__name__}: {exc}")
 
     # 2) live prediction for the NEXT two candles
     try:
@@ -139,6 +246,11 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
         bundle = _get_bundle(asset)
         window = list(candles[-PRED_WINDOW:])
         if len(window) < PRED_WINDOW or window[-1]["time"] != closed_candle["time"]:
+            with _runtime_lock:
+                _runtime["window_short"] += 1
+            _note(asset, last_status="window_short",
+                  last_reason=f"স্ট্রিমে {len(window)} ক্যান্ডেল — "
+                              f"{PRED_WINDOW} লাগবে")
             return None  # not enough history yet — honest no-op
 
         status = "ok" if bundle else "no_model"
@@ -154,10 +266,15 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
 
         if bundle is None:
             payload["reason"] = "no_model_registered"
+            with _runtime_lock:
+                _runtime["no_model"] += 1
+            _note(asset, last_status="no_model",
+                  last_reason="রেজিস্ট্রিতে সক্রিয় মডেল নেই")
             return payload
 
         feats = build_extended_row(window, micro=micro)
 
+        frozen_here = 0
         for horizon, key in ((1, "t1"), (2, "t2")):
             # horizon-scoped pass: PA first, then the PART 24 gates with the
             # REAL per-horizon conflict state (not a placeholder)
@@ -185,6 +302,8 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 # signals only (bounded storage); tracked-only rows skip it.
                 feature_json=(feats if filt["emit"] else None),
                 close_i=closed_candle["close"])
+            if inserted:
+                frozen_here += 1
             payload[key] = {
                 "target_time": target_time,
                 "prediction": filt["prediction"],
@@ -199,10 +318,27 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 # PART 16 doing its job.
             }
         payload["quality"] = quality
+        with _runtime_lock:
+            _runtime["predicted"] += 1
+            _runtime["frozen"] += frozen_here
+            st = _runtime["per_asset"].setdefault(
+                asset, {"closes": 0, "frozen": 0, "last_status": None,
+                        "last_reason": None, "last_error": None,
+                        "last_at": 0.0})
+            st["frozen"] = st.get("frozen", 0) + frozen_here
+            st["last_status"] = "ok"
+            st["last_reason"] = None
+            st["last_error"] = None
+            st["last_at"] = time.time()
         return payload
     except Exception as exc:
         print(f"[predictor] predict failed {asset}: "
               f"{type(exc).__name__}: {exc}")
+        with _runtime_lock:
+            _runtime["errors"] += 1
+            _runtime["last_error"] = f"{asset}: {type(exc).__name__}: {exc}"
+        _note(asset, last_status="error",
+              last_error=f"{type(exc).__name__}: {exc}")
         return None
 
 

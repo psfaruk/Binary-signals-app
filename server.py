@@ -2779,8 +2779,24 @@ async def get_prediction_overview():
             analytics = _pred_tracker.prediction_analytics()
         except Exception as exc:
             analytics = {"error": f"{type(exc).__name__}: {exc}"}
+        # PREDICT-FLOW-FIX (2026-09-12): the user waited an hour with 11
+        # models registered and the results card showing only "—" — with no
+        # way to see WHY. Now the overview carries the live predictor's
+        # runtime truth (candle closes seen / frozen / no-model / errors +
+        # per-pair last status) and the frozen-table counts, so "কেন
+        # প্রেডিকশন শূন্য" is always answerable from the UI.
+        try:
+            from core.otc_predict import predictor as _pred_runtime
+            predictor = _pred_runtime.runtime_status()
+        except Exception as exc:
+            predictor = {"error": f"{type(exc).__name__}: {exc}"}
+        try:
+            pred_table = _pred_tracker.prediction_table_stats()
+        except Exception as exc:
+            pred_table = {"error": f"{type(exc).__name__}: {exc}"}
         return {"daemon": st, "models": models,
                 "candles": counts, "analytics": analytics,
+                "predictor": predictor, "pred_table": pred_table,
                 "generated_at": time.time()}
 
     return await asyncio.to_thread(_build)
