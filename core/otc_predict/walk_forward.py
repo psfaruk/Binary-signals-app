@@ -88,8 +88,18 @@ def _fit_predict_fold(rows, feature_names, horizon_key, cand_names,
     Xte = np.array([[r[k] for k in feature_names] for r in rows[test_lo:test_end]])
     yte = [1 if r[horizon_key] else 0 for r in rows[test_lo:test_end]]
 
-    val_n = max(200, int(len(Xtr) * VAL_FRAC))
+    # MODEL-RUN-FIX-2: small-data val tail. The old max(200, 20%) sliced
+    # the FIT set to EMPTY whenever the fold's train part had <200 rows
+    # (split ≤ 0 → fit_candidate on an empty matrix → crash that aborted
+    # the whole bootstrap run). Big-data behaviour (≥1000 rows) is
+    # bit-for-bit unchanged; below that the tail is a bounded 20%.
+    if len(Xtr) >= 1000:
+        val_n = max(200, int(len(Xtr) * VAL_FRAC))
+    else:
+        val_n = max(8, int(len(Xtr) * VAL_FRAC))
     split = len(Xtr) - val_n
+    if split <= 0:                       # belt-and-braces: never fit on []
+        split = max(1, len(Xtr) - 8)
 
     out = []
     for name in cand_names:

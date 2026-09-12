@@ -31,6 +31,10 @@ ALL knobs are HARDCODED below (user's explicit ask). The only kill switch
 is QX_FAST_TRAIN=0.
 """
 
+import asyncio               # MODEL-RUN-FIX-2: was only imported inside
+                             # _fetch_pairs() — the module-level _fetch_batch()
+                             # raised "NameError: name 'asyncio' is not
+                             # defined" on EVERY pair → +0 candles forever
 import math
 import os
 import random
@@ -65,13 +69,35 @@ FAST_DAYS = 2                   # max history depth fetched per short pair
                                 # the old 3-day pull; 10-min retry self-heals
                                 # any short fetch)
 FAST_MIN_CANDLES = 2500         # pair with ≥ this many micro candles skips fetch
-FAST_MIN_PAIR_ROWS = 2000       # dataset rows needed to train one pair
+                                # (fetch TARGET only — training NEVER blocks
+                                # on it any more, see FAST_MIN_PAIR_ROWS)
+
+# MODEL-RUN-FIX-2 (2026-09-12): the user waited 10 runs × 10 min with ZERO
+# models because the old floor (2000 rows) can NEVER be met by live candles
+# alone (~90-130 rows) while the asyncio bug killed every fetch. New
+# hardcoded floors — the SAME leak-proof walk-forward now runs on the small
+# live dataset the moment the server boots, exactly the user's ask:
+# "কয়েকটি ক্যান্ডেল দিয়েই ৫-৭ মিনিটের মধ্যে মডেল ট্রেইন হবে, রান হবে".
+# The gates (expanding folds, EMBARGO, shuffle probe, honest statuses) are
+# untouched — only the VOLUME requirements moved into the small-data regime.
+FAST_MIN_PAIR_ROWS = 80         # was 2000 — 80 rows ≈ 130+ live candles;
+                                # below this even one honest walk-forward
+                                # fold cannot exist
 FAST_MAX_ROWS_PER_PAIR = 12000  # newest-rows cap — retrain stays bounded
-FAST_POOL_MIN_ROWS = 8000       # pooled rows needed for the global fallback
+FAST_POOL_MIN_ROWS = 400        # was 8000 — pooled global fallback now
+                                # reachable from ~11 pairs × ~40+ rows
 FAST_POOL_MAX_ROWS = 40000      # pooled cap — the global fit stays bounded
 FAST_CANDIDATES = ("logreg", "rf")   # histgb off — speed (PART 10 family kept)
-FAST_N_FOLDS = 3                # expanding walk-forward folds
-FAST_MIN_TEST_PRED = 150        # pooled unseen predictions per horizon
+FAST_N_FOLDS = 3                # expanding walk-forward folds (auto-trims to
+                                # 2 honest folds on small data, see
+                                # _fast_folds below)
+FAST_MIN_TEST_PRED = 40         # was 150 — pooled unseen predictions per
+                                # horizon; 40 is the smallest sample that
+                                # still makes the smoke gate meaningful
+FAST_SMALL_N = 550              # below this row count the shared _folds()
+                                # emits INVALID cuts (train_end > n) and
+                                # _fit_predict_fold fits on an EMPTY train
+                                # set — _fast_folds() handles this regime
 FAST_SHUFFLE_MAX = 0.53         # HARD gate — leakage signature = never register
 FAST_BASELINE_MARGIN_PP = 1.5   # VERIFIED bar (PROVISIONAL sits below it)
 FAST_VAL_FRAC = 0.2             # Platt calibration tail
@@ -103,6 +129,33 @@ _pair_lock = threading.Lock()   # guards _state["pairs"] only — MUST be a
 _wake = threading.Event()       # MODEL-RUN-FIX: token import / admin force
                                 # can wake the sleeping daemon instantly
 _force_requested = False
+
+
+def _fast_folds(n):
+    """Expanding walk-forward cuts for the SMALL-DATA regime.
+
+    The shared _folds() (walk_forward.py) assumes n ≥ ~550: below that it
+    returns cuts like (200, 130) — train_end BEYOND the dataset — which
+    made every small pair end "rejected: no test rows". Same contract as
+    the big regime: train strictly before test, EMBARGO gap (2 rows = the
+    T+2 overlap), last fold reaches n. Returns [] when even one honest
+    fold is impossible.
+    """
+    if n >= FAST_SMALL_N:
+        return _folds(n, FAST_N_FOLDS, None)
+    cuts = []
+    t1 = int(n * 0.4)                       # fold 1: train on the first 40%
+    if t1 >= 25 and (n - (t1 + EMBARGO)) >= 15:
+        cuts.append((t1, int(n * 0.7)))
+    t2 = int(n * 0.7)                       # fold 2: train on the first 70%
+    if t2 >= 25 and (n - (t2 + EMBARGO)) >= 15 and \
+            (not cuts or t2 > cuts[-1][0]):
+        cuts.append((t2, n))
+    if not cuts:                            # single-fold fallback: 60/40
+        t1 = int(n * 0.6)
+        if t1 >= 25 and (n - (t1 + EMBARGO)) >= 10:
+            cuts.append((t1, n))
+    return cuts
 
 
 def _sklearn_ok():
@@ -387,14 +440,15 @@ def fast_train_one(rows, seed=13):
 
     n = len(rows)
     # Guard: the first expanding fold must leave a real train split after
-    # the Platt val tail (VAL_FRAC/max-200) — below this, folds fit on
-    # empty/near-empty sets. The caller normally filters, this is the
-    # structural guarantee for direct calls.
+    # the Platt val tail — below this, folds fit on empty/near-empty sets.
+    # The caller normally filters, this is the structural guarantee for
+    # direct calls. (MODEL-RUN-FIX-2: floor is now 80, not 2000 — small
+    # live datasets train immediately instead of never.)
     if n < FAST_MIN_PAIR_ROWS:
         return {"error": f"n={n} < FAST_MIN_PAIR_ROWS={FAST_MIN_PAIR_ROWS}",
                 "rows": n}, None, "rejected"
 
-    cuts = _folds(n, FAST_N_FOLDS, None)
+    cuts = _fast_folds(n)
     if not cuts:
         return {"error": f"not enough rows for folds (n={n})"}, None, "rejected"
 
@@ -499,7 +553,13 @@ def fast_train_one(rows, seed=13):
     Xall = np.array([[r[k] for k in EXTENDED_FEATURE_NAMES] for r in rows])
     for h, slot in (("y1_up", "t1"), ("y2_up", "t2")):
         yall = np.array([1 if r[h] else 0 for r in rows])
-        val_n = max(200, int(len(Xall) * FAST_VAL_FRAC))
+        # MODEL-RUN-FIX-2: small-data val tail — max(200, …) sliced the
+        # production fit set to EMPTY for n<1000 (Xall[:-200] on 130 rows)
+        # and crashed the whole bundle build.
+        if len(Xall) >= 1000:
+            val_n = max(200, int(len(Xall) * FAST_VAL_FRAC))
+        else:
+            val_n = max(10, int(len(Xall) * FAST_VAL_FRAC))
         model = fit_candidate(best_overall[2], Xall[:-val_n], yall[:-val_n])
         coefs = platt_calibrate(model, Xall[-val_n:], yall[-val_n:])
         setattr(bundle, slot, {"model": model, "platt": coefs,
@@ -574,7 +634,118 @@ def _run_bootstrap_inner():
     _log("candle_micro counts: " + ", ".join(
         f"{a.split('_')[0]}={n}" for a, n in sorted(counts.items())))
 
-    # phase 1 — top up short pairs from the SAME platform
+    # ── phase 1 — TRAIN on what candle_micro ALREADY has ────────────────
+    # MODEL-RUN-FIX-2 REORDER: the (slow) platform history pull used to run
+    # FIRST and training sat behind it — with 11 short pairs the fetch alone
+    # eats the whole 5-7 min budget before a single model exists. Now the
+    # small real dataset trains and registers IMMEDIATELY (the user sees
+    # models + predictions within the first minute), and the fetch runs
+    # after; the next 10-min run consolidates on the bigger merged data.
+    candles_by_asset = {a: cs for a, cs in
+                        load_candles_from_db(_db_path()).items()
+                        if a in set(ALLOWED_PAIRS_OTC)}
+    registered = []
+    details = {}
+    pooled_rows = []
+    dstats = {"rows": 0, "dropped_doji_t1": 0, "dropped_doji_t2": 0}
+    if not candles_by_asset:
+        _log("no candle data at all — nothing to train on yet")
+        for a in sorted(ALLOWED_PAIRS_OTC):
+            _record_pair(a, status="no_data",
+                         reason="candle_micro খালি — ফিড/টোকেন চেক করুন")
+    else:
+        rows, dstats = build_dataset(candles_by_asset, window=WINDOW,
+                                     micro=True,
+                                     feature_fn=build_extended_row)
+        _log(f"dataset: {dstats['rows']} rows from "
+             f"{len(candles_by_asset)} pairs "
+             f"(doji t1={dstats['dropped_doji_t1']} "
+             f"t2={dstats['dropped_doji_t2']})")
+
+        by_asset = {}
+        for r in rows:
+            by_asset.setdefault(r["asset"], []).append(r)
+        # newest-rows caps keep the retrain time bounded as history
+        # accumulates (90d retention could otherwise push one RF fit
+        # into minutes)
+        for a in list(by_asset):
+            if len(by_asset[a]) > FAST_MAX_ROWS_PER_PAIR:
+                by_asset[a] = by_asset[a][-FAST_MAX_ROWS_PER_PAIR:]
+        pooled_rows = [r for a in sorted(by_asset) for r in by_asset[a]]
+
+        def _gate_summary(gate, h):
+            g = gate.get(h) or {}
+            if not g:
+                return None
+            return {"acc": g.get("acc_pct"),
+                    "baseline": (g.get("baselines") or {}).get("prev_dir"),
+                    "shuffle": g.get("shuffle_acc"),
+                    "model": g.get("selected"),
+                    "test_n": g.get("n")}
+
+        for asset, arows in sorted(by_asset.items()):
+            if blocked:
+                details[asset] = {"status": "blocked", "rows": len(arows),
+                                  "reason": blocked}
+                _record_pair(asset, status="blocked", rows=len(arows),
+                             reason=blocked)
+                continue
+            if len(arows) < FAST_MIN_PAIR_ROWS:
+                details[asset] = {"status": "skipped",
+                                  "rows": len(arows),
+                                  "reason": f"< {FAST_MIN_PAIR_ROWS} rows"}
+                _record_pair(asset, status="skipped", rows=len(arows),
+                             reason=f"ডেটা কম: {len(arows)} rows < "
+                                    f"{FAST_MIN_PAIR_ROWS}")
+                continue
+            report, bundle, status = fast_train_one(arows)
+            gate = report.get("gate", {})
+            details[asset] = {"status": status, "rows": len(arows),
+                              "gate": gate}
+            _record_pair(asset, status=status, rows=len(arows),
+                         reason=report.get("error"),
+                         t1=_gate_summary(gate, "y1_up"),
+                         t2=_gate_summary(gate, "y2_up"),
+                         error=report.get("error"))
+            if bundle is None:
+                continue
+            path = save_bundle(bundle)
+            from core.otc_predict.tracker import register_model
+            register_model(asset, bundle.version, "pair", asset,
+                           {"status": status, "rows": len(arows),
+                            "walk_forward": report.get("gate", {})},
+                           path, activate=True)
+            registered.append(asset)
+            _record_pair(asset, version=bundle.version,
+                         registered_at=time.time())
+            _log(f"{asset}: {status} bundle {bundle.version} registered "
+                 f"({len(arows)} rows)")
+
+        # pooled global fallback when NO per-pair bundle registered
+        if not registered and len(pooled_rows) >= FAST_POOL_MIN_ROWS:
+            if len(pooled_rows) > FAST_POOL_MAX_ROWS:
+                pooled_rows = pooled_rows[-FAST_POOL_MAX_ROWS:]
+            report, bundle, status = fast_train_one(pooled_rows, seed=17)
+            details["__global__"] = {"status": status,
+                                     "rows": len(pooled_rows)}
+            _record_pair("__global__", status=status,
+                         rows=len(pooled_rows),
+                         reason=report.get("error"))
+            if bundle is not None:
+                path = save_bundle(bundle)
+                from core.otc_predict.tracker import register_model
+                register_model("global", bundle.version, "global", "",
+                               {"status": status,
+                                "rows": len(pooled_rows),
+                                "walk_forward": report.get("gate", {})},
+                               path, activate=True)
+                registered.append("global")
+                _record_pair("__global__", version=bundle.version,
+                             registered_at=time.time())
+                _log(f"global: {status} bundle {bundle.version} registered "
+                     f"({len(pooled_rows)} pooled rows)")
+
+    # ── phase 2 — history top-up AFTER registration (slow, background) ──
     fetch = ensure_history(counts)
     for a, res in (fetch.get("results") or {}).items():
         if res.get("status") == "ok":
@@ -587,104 +758,10 @@ def _run_bootstrap_inner():
     counts = _micro_counts()
     for a in sorted(ALLOWED_PAIRS_OTC):
         _record_pair(a, candles=counts.get(a, 0))
-
-    # phase 2 — dataset from the merged (history + live) same-feed data
-    candles_by_asset = {a: cs for a, cs in
-                        load_candles_from_db(_db_path()).items()
-                        if a in set(ALLOWED_PAIRS_OTC)}
-    if not candles_by_asset:
-        _log("no candle data at all — nothing to train on yet")
-        for a in sorted(ALLOWED_PAIRS_OTC):
-            _record_pair(a, status="no_data",
-                         reason="candle_micro খালি — ফিড/টোকেন চেক করুন")
-        return {"fetch": fetch, "pairs_registered": [],
-                "note": "no candle data yet"}
-
-    rows, dstats = build_dataset(candles_by_asset, window=WINDOW, micro=True,
-                                 feature_fn=build_extended_row)
-    _log(f"dataset: {dstats['rows']} rows from {len(candles_by_asset)} pairs "
-         f"(doji t1={dstats['dropped_doji_t1']} t2={dstats['dropped_doji_t2']})")
-
-    by_asset = {}
-    for r in rows:
-        by_asset.setdefault(r["asset"], []).append(r)
-    # newest-rows caps keep the retrain time bounded as history accumulates
-    # (90d retention could otherwise push one RF fit into minutes)
-    for a in list(by_asset):
-        if len(by_asset[a]) > FAST_MAX_ROWS_PER_PAIR:
-            by_asset[a] = by_asset[a][-FAST_MAX_ROWS_PER_PAIR:]
-    pooled_rows = [r for a in sorted(by_asset) for r in by_asset[a]]
-
-    def _gate_summary(gate, h):
-        g = gate.get(h) or {}
-        if not g:
-            return None
-        return {"acc": g.get("acc_pct"),
-                "baseline": (g.get("baselines") or {}).get("prev_dir"),
-                "shuffle": g.get("shuffle_acc"),
-                "model": g.get("selected"),
-                "test_n": g.get("n")}
-
-    registered = []
-    details = {}
-    for asset, arows in sorted(by_asset.items()):
-        if blocked:
-            details[asset] = {"status": "blocked", "rows": len(arows),
-                              "reason": blocked}
-            _record_pair(asset, status="blocked", rows=len(arows),
-                         reason=blocked)
-            continue
-        if len(arows) < FAST_MIN_PAIR_ROWS:
-            details[asset] = {"status": "skipped",
-                              "rows": len(arows),
-                              "reason": f"< {FAST_MIN_PAIR_ROWS} rows"}
-            _record_pair(asset, status="skipped", rows=len(arows),
-                         reason=f"ডেটা কম: {len(arows)} rows < "
-                                f"{FAST_MIN_PAIR_ROWS}")
-            continue
-        report, bundle, status = fast_train_one(arows)
-        gate = report.get("gate", {})
-        details[asset] = {"status": status, "rows": len(arows),
-                          "gate": gate}
-        _record_pair(asset, status=status, rows=len(arows),
-                     reason=report.get("error"),
-                     t1=_gate_summary(gate, "y1_up"),
-                     t2=_gate_summary(gate, "y2_up"),
-                     error=report.get("error"))
-        if bundle is None:
-            continue
-        path = save_bundle(bundle)
-        from core.otc_predict.tracker import register_model
-        register_model(asset, bundle.version, "pair", asset,
-                       {"status": status, "rows": len(arows),
-                        "walk_forward": report.get("gate", {})},
-                       path, activate=True)
-        registered.append(asset)
-        _record_pair(asset, version=bundle.version,
-                     registered_at=time.time())
-        _log(f"{asset}: {status} bundle {bundle.version} registered "
-             f"({len(arows)} rows)")
-
-    # pooled global fallback when NO per-pair bundle registered
-    if not registered and len(pooled_rows) >= FAST_POOL_MIN_ROWS:
-        if len(pooled_rows) > FAST_POOL_MAX_ROWS:
-            pooled_rows = pooled_rows[-FAST_POOL_MAX_ROWS:]
-        report, bundle, status = fast_train_one(pooled_rows, seed=17)
-        details["__global__"] = {"status": status, "rows": len(pooled_rows)}
-        _record_pair("__global__", status=status, rows=len(pooled_rows),
-                     reason=report.get("error"))
-        if bundle is not None:
-            path = save_bundle(bundle)
-            from core.otc_predict.tracker import register_model
-            register_model("global", bundle.version, "global", "",
-                           {"status": status, "rows": len(pooled_rows),
-                            "walk_forward": report.get("gate", {})},
-                           path, activate=True)
-            registered.append("global")
-            _record_pair("__global__", version=bundle.version,
-                         registered_at=time.time())
-            _log(f"global: {status} bundle {bundle.version} registered "
-                 f"({len(pooled_rows)} pooled rows)")
+    fetch_added = sum(
+        int((res or {}).get("added", 0))
+        for res in (fetch.get("results") or {}).values()
+        if isinstance(res, dict))
 
     # predictor picks up new registry rows on its TTL; nudge it now
     try:
@@ -695,7 +772,8 @@ def _run_bootstrap_inner():
 
     _log(f"bootstrap done: registered={registered or 'NONE'} "
          f"({round(time.time() - _state['started_at'], 0)}s since start)")
-    return {"fetch": fetch, "pairs_registered": registered,
+    return {"fetch": fetch, "fetch_added": fetch_added,
+            "pairs_registered": registered,
             "details": details, "dataset_rows": dstats["rows"],
             "dataset_pairs": len(candles_by_asset)}
 
@@ -710,11 +788,16 @@ def _next_sleep_secs(last_summary, last_error):
     error, blocked deps) → retry in 10 minutes so a deploy that starts
     working self-heals within the user's patience window instead of
     silently sleeping 6 hours.
+    MODEL-RUN-FIX-2: a run that trained on the small live dataset AND
+    just landed fresh history also retries in 10 minutes — the next run
+    consolidates the bundles on the much bigger merged dataset.
     """
     if last_error:
         return FAST_RETRY_SECS
     s = last_summary or {}
     if s.get("pairs_registered"):
+        if s.get("fetch_added"):
+            return FAST_RETRY_SECS      # consolidation retrain soon
         return FAST_RETRAIN_SECS
     return FAST_RETRY_SECS
 
