@@ -175,12 +175,18 @@ s_coin = score_signal(0.50, True, pa_perfect, reg, quality_ok)
 check("coin-flip ML → NO_SIGNAL even with perfect PA",
       s_coin["tier"] == "NO_SIGNAL" and s_coin["emit"] is False,
       f"score={s_coin['score']}")
-_w = {"ml": 50, "momentum": 15, "trend": 10, "level": 10,
-      "vol": 5, "structure": 10}
+# UNIFIED-SIGNAL (2026-09-13): the PART 14 weight set now includes the
+# classic-strategies component (ML 50→40, strategy 10).
+_w = {"ml": 40, "momentum": 15, "trend": 10, "level": 10,
+      "vol": 5, "structure": 10, "strategy": 10}
 weighted = sum(_w[k] * v for k, v in s_coin["components"].items())
 check("score = weighted PART 14 component sum",
       abs(weighted - s_coin["score"]) <= 1,
       f"{weighted} vs {s_coin['score']}")
+check("unified strategy component present",
+      "strategy" in s_coin["components"]
+      and s_coin["components"]["strategy"] == 0.5,
+      str(s_coin["components"]))
 s_strong = score_signal(0.93, True, pa_perfect, reg, quality_ok)
 check("0.93 prob + full PA → HIGH, emitted",
       s_strong["tier"] == "HIGH" and s_strong["emit"] is True,

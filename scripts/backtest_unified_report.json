@@ -1,0 +1,109 @@
+{
+  "generated_at": 1789240451.5313568,
+  "pairs": 8,
+  "candles_per_pair": 2600,
+  "seed": 20260913,
+  "dataset_rows": {
+    "extended": 20392,
+    "unified": 20392
+  },
+  "wf": [
+    {
+      "horizon": "y1_up",
+      "cand": "logreg",
+      "ext_acc": 0.6091,
+      "uni_acc": 0.6082,
+      "delta_pp": -0.09,
+      "ext_logloss": 0.6711,
+      "uni_logloss": 0.6718,
+      "n": 16304
+    },
+    {
+      "horizon": "y1_up",
+      "cand": "rf",
+      "ext_acc": 0.6075,
+      "uni_acc": 0.6081,
+      "delta_pp": 0.06,
+      "ext_logloss": 0.6707,
+      "uni_logloss": 0.6706,
+      "n": 16304
+    },
+    {
+      "horizon": "y2_up",
+      "cand": "logreg",
+      "ext_acc": 0.4998,
+      "uni_acc": 0.5021,
+      "delta_pp": 0.23,
+      "ext_logloss": 0.6944,
+      "uni_logloss": 0.6944,
+      "n": 16304
+    },
+    {
+      "horizon": "y2_up",
+      "cand": "rf",
+      "ext_acc": 0.5058,
+      "uni_acc": 0.5053,
+      "delta_pp": -0.05,
+      "ext_logloss": 0.6936,
+      "uni_logloss": 0.6936,
+      "n": 16304
+    }
+  ],
+  "agreement": {
+    "agree": {
+      "n": 24315,
+      "hits": 13746,
+      "rate": 56.53
+    },
+    "conflict": {
+      "n": 6335,
+      "hits": 3416,
+      "rate": 53.92
+    },
+    "neutral": {
+      "n": 1958,
+      "hits": 1137,
+      "rate": 58.07
+    }
+  },
+  "agreement_edge_pp": 2.61,
+  "strategy_only": {
+    "n": 30650,
+    "rate": 54.37
+  },
+  "fair_walk": [
+    {
+      "horizon": "y1_up",
+      "cand": "logreg",
+      "acc": 0.4993,
+      "logloss": 0.6935,
+      "n": 16304,
+      "verdict": "OK (~coin-flip)"
+    },
+    {
+      "horizon": "y1_up",
+      "cand": "rf",
+      "acc": 0.5013,
+      "logloss": 0.6934,
+      "n": 16304,
+      "verdict": "OK (~coin-flip)"
+    },
+    {
+      "horizon": "y2_up",
+      "cand": "logreg",
+      "acc": 0.5013,
+      "logloss": 0.6935,
+      "n": 16304,
+      "verdict": "OK (~coin-flip)"
+    },
+    {
+      "horizon": "y2_up",
+      "cand": "rf",
+      "acc": 0.502,
+      "logloss": 0.6938,
+      "n": 16304,
+      "verdict": "OK (~coin-flip)"
+    }
+  ],
+  "secs": 319.7
+}

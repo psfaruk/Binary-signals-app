@@ -41,17 +41,27 @@ _TIER_SCORES = {
 # GOOD (>=70). WATCH is recorded for tracking but displayed as NO TRADE.
 _EMIT_TIER = os.environ.get("QX_PRED_EMIT_TIER", "GOOD")
 
-# Weights per PART 14 (percent points)
-_W = {"ml": 50, "momentum": 15, "trend": 10, "level": 10,
-      "vol": 5, "structure": 10}
+# Weights per PART 14 (percent points), UNIFIED-SIGNAL (2026-09-13):
+# the user asked "পুরো সিস্টেম টি কে একটি সিস্টেম এর মধ্যে নিয়ে আসা যায়" —
+# the 13 classic strategy modules now vote as a first-class component.
+# PART 14's own text says the weights "fixed truth নয়; backtesting দিয়ে
+# optimize করতে হবে", so ML's 50 points cede 10 to the new STRATEGY block:
+#   ML 40 + Momentum 15 + Trend 10 + Level 10 + Vol 5 + Structure 10
+#   + Strategy 10 = 100
+# `strategy` = agreement of the classic strategies with the ML direction
+# (1.0 = all 13 modules agree, 0.0 = all oppose, 0.5 = abstain/neutral).
+_W = {"ml": 40, "momentum": 15, "trend": 10, "level": 10,
+      "vol": 5, "structure": 10, "strategy": 10}
 
 
 def tier_min_score(tier):
     return _TIER_SCORES.get(tier, 100)
 
 
-def score_signal(probability, direction_up, pa, regime_info, quality):
-    """Combine ML probability + price action into the 100-point score.
+def score_signal(probability, direction_up, pa, regime_info, quality,
+                 strategy=None):
+    """Combine ML probability + price action + classic strategies into the
+    100-point UNIFIED score.
 
     Parameters
     ----------
@@ -62,10 +72,16 @@ def score_signal(probability, direction_up, pa, regime_info, quality):
     quality      : dict of PART 24 booleans from the predictor
                    (data_complete, no_gap, model_loaded, vol_acceptable,
                    no_conflict)
+    strategy     : UNIFIED-SIGNAL — the strategy_bridge summary dict for
+                   this window ({direction, net, agree_count, against_count,
+                   voters, per_module}). None/empty → neutral 0.5
+                   contribution (old behaviour for non-unified callers).
 
     Returns payload dict:
         prediction CALL/PUT, probability, tier, score, emit (bool),
-        reason (Bengali-friendly english code), components breakdown.
+        reason (Bengali-friendly english code), components breakdown,
+        strategy_agree — the classic strategies' agreement with the final
+        direction in [0,1] (displayed in the UI's unified verdict).
     """
     d = 1 if direction_up else -1
     c = pa.get("components", {})
@@ -78,6 +94,12 @@ def score_signal(probability, direction_up, pa, regime_info, quality):
     level = c.get("level", 0.5)
     structure = c.get("structure", 0.5)
 
+    # UNIFIED-SIGNAL strategy component — agreement of the 13 classic
+    # modules with the ML direction (0.5 neutral when they abstain).
+    strat_agree = 0.5
+    if strategy and strategy.get("voters"):
+        strat_agree = min(1.0, max(0.0, 0.5 + 0.5 * strategy.get("net", 0.0) * d))
+
     vol = 1.0
     if regime_info.get("regime") == "HIGH_VOL":
         vol = 0.0
@@ -89,7 +111,8 @@ def score_signal(probability, direction_up, pa, regime_info, quality):
                   + _W["trend"] * trend
                   + _W["level"] * level
                   + _W["vol"] * vol
-                  + _W["structure"] * structure)
+                  + _W["structure"] * structure
+                  + _W["strategy"] * strat_agree)
 
     # tier from the score lines (PART 14)
     if score >= _TIER_SCORES["HIGH"]:
@@ -132,8 +155,11 @@ def score_signal(probability, direction_up, pa, regime_info, quality):
         "components": {
             "ml": round(ml_conf, 3), "momentum": momentum,
             "trend": trend, "level": level, "vol": vol,
-            "structure": structure,
+            "structure": structure, "strategy": round(strat_agree, 3),
         },
         "pa_agreed": bool(pa.get("agreed")),
         "regime": regime_info.get("regime", "RANGING"),
+        # UNIFIED-SIGNAL: the classic strategies' verdict for this payload
+        # (kept even when strategy=None — 0.5 = neutral).
+        "strategy_agree": round(strat_agree, 3),
     }

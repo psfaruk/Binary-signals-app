@@ -349,6 +349,111 @@
         tbody.innerHTML = html;
     }
 
+    // ── UNIFIED-SIGNAL (2026-09-13): model × pair performance matrix ──
+    // USER REQ: "আর কোন মডেল কত টুকু ভালো করছে কোন পেয়ার এ করছে, আমি যেনো
+    // fronted UI তে দেখতে পারি।" — renders model_performance() from
+    // /api/prediction/overview: per (model version × pair) graded
+    // direction accuracy, Wilson-LB rating, model type chips + status.
+    function wrClass(wr) {
+        if (wr == null) return 'mdl-base';
+        if (wr >= 52) return 'mdl-wr-good';
+        if (wr < 48) return 'mdl-wr-bad';
+        return 'mdl-wr-mid';
+    }
+
+    function wrCell(wr, n) {
+        if (wr == null) return '<span class="mdl-base">—</span>';
+        var s = wr.toFixed(1) + '%';
+        if (n != null) s += ' <span class="mdl-base">(' + n + ')</span>';
+        return '<span class="' + wrClass(wr) + '">' + s + '</span>';
+    }
+
+    var MODEL_TYPE_NAMES = {
+        logreg: 'Logistic Regression',
+        rf: 'Random Forest',
+        histgb: 'HistGradientBoost'
+    };
+
+    function renderModelPerf(d) {
+        var tbody = $('mdl-mperf-tbody');
+        if (!tbody) return;
+        var mp = d.model_performance;
+        if (!mp || mp.error) {
+            tbody.innerHTML = '<tr><td colspan="8" class="mdl-loading">' +
+                (mp && mp.error ? 'পড়া যায়নি: ' + esc(mp.error)
+                    : 'এখনো কোনো গ্রেড করা প্রেডিকশন নেই') + '</td></tr>';
+            var noteEl = $('mdl-mperf-note');
+            if (noteEl) noteEl.textContent =
+                'মডেল রেজিস্টার হওয়ার পর প্রতি ক্যান্ডেল-ক্লোজে T+1/T+2 ফ্রিজ হয়, ' +
+                'টার্গেট ক্যান্ডেল ক্লোজ হলেই গ্রেড হয় — তখন এই টেবিলে প্রতিটি ' +
+                'মডেলের আসল স্কোর বসতে থাকবে।';
+            return;
+        }
+        var rows = mp.rows || [];
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="8" class="mdl-loading">' +
+                'এখনো কোনো গ্রেড করা প্রেডিকশন নেই — মডেল ফ্রিজ করা শুরু করলেই ' +
+                'এখানে ফলাফল আসবে</td></tr>';
+            var noteEl2 = $('mdl-mperf-note');
+            if (noteEl2) noteEl2.textContent =
+                'টেবিলটি otc_predictions টেবিলের সেটেল হওয়া রো থেকে তৈরি — ' +
+                'প্রতিটি প্রেডিকশন ফ্রিজ হয় (PART 16) এবং টার্গেট ক্যান্ডেল ' +
+                'ক্লোজে গ্রেড হয়।';
+            return;
+        }
+        var html = '';
+        rows.forEach(function(r) {
+            var type = r.model_type ?
+                (MODEL_TYPE_NAMES[r.model_type] || r.model_type) : 'অজানা';
+            var typeChip = '<span class="mdl-type-chip">' + esc(type) + '</span>';
+            var ver = esc(String(r.model_version || '').slice(0, 14));
+            var modelTxt = typeChip + '<div class="mdl-base">' + ver +
+                (r.trainer === 'fast-unified' ? ' · ইউনিফায়েড' : '') + '</div>';
+            var st = statusBadge(r.status);
+            var last = r.last_signal ? agoStr(r.last_signal) : '—';
+            html += '<tr>' +
+                '<td class="mdl-pair-name">' +
+                    esc(String(r.asset || '').replace('_otc', '')) + '</td>' +
+                '<td class="mdl-ver">' + modelTxt + '</td>' +
+                '<td>' + st + '</td>' +
+                '<td>' + wrCell(r.t1 && r.t1.win_rate,
+                    r.t1 ? (r.t1.wins + r.t1.losses) : 0) + '</td>' +
+                '<td>' + wrCell(r.t2 && r.t2.win_rate,
+                    r.t2 ? (r.t2.wins + r.t2.losses) : 0) + '</td>' +
+                '<td>' + (r.n != null ? r.n : '—') + '</td>' +
+                '<td>' + wrCell(r.rating, null) + '</td>' +
+                '<td class="mdl-base">' + last + '</td>' +
+                '</tr>';
+        });
+        tbody.innerHTML = html;
+
+        // per model-TYPE summary chips ("RF পরিবার সব পেয়ারে গড়ে কত?")
+        var typesBox = $('mdl-mperf-types');
+        if (typesBox) {
+            var byType = mp.by_type || {};
+            var chips = '';
+            Object.keys(byType).sort().forEach(function(t) {
+                var b = byType[t];
+                var nm = MODEL_TYPE_NAMES[t] || t;
+                var wr = b.dir_win_rate;
+                var cls = wrClass(wr);
+                chips += '<span class="mdl-type-sum">' + esc(nm) +
+                    ' · ' + b.pairs + ' পেয়ার · <span class="' + cls + '">' +
+                    (wr != null ? wr.toFixed(1) + '%' : '—') + '</span>' +
+                    ' <span class="mdl-base">(' + (b.wins + b.losses) +
+                    ')</span></span>';
+            });
+            typesBox.innerHTML = chips || '';
+        }
+
+        var noteEl3 = $('mdl-mperf-note');
+        if (noteEl3) {
+            noteEl3.textContent = 'সব সংখ্যা ফ্রিজ হওয়া প্রেডিকশনের গ্রেড থেকে — ' +
+                'সম্পাদন করা হয়নি (PART 16)। কম স্যাম্পলে (১০-এর নিচে) শতাংশ ওঠানামা ' +
+                'করবে — রেটিং কলামই বিশ্বাসযোগ্য তুলনা।';
+        }
+    }
+
     function renderAnalytics(d) {
         var a = d.analytics || {};
         $('mdl-a-total').textContent = a.dir_total != null
@@ -392,6 +497,7 @@
                 renderPairs(d);
                 renderLivePreds(d);
                 renderAnalytics(d);
+                renderModelPerf(d);
             })
             .catch(function() { /* transient — next poll retries */ })
             .finally(function() { _inflight = false; });

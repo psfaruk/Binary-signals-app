@@ -2802,10 +2802,18 @@ async def get_prediction_overview():
             live = _pred_tracker.live_predictions()
         except Exception as exc:
             live = {"error": f"{type(exc).__name__}: {exc}"}
+        # UNIFIED-SIGNAL (2026-09-13): model × pair performance matrix —
+        # USER REQ: "কোন মডেল কত টুকু ভালো করছে কোন পেয়ার এ করছে, আমি
+        # যেনো fronted UI তে দেখতে পারি" — settled frozen rows only,
+        # Wilson-LB ranked, joined with the registry for model type/status.
+        try:
+            mperf = _pred_tracker.model_performance()
+        except Exception as exc:
+            mperf = {"error": f"{type(exc).__name__}: {exc}"}
         return {"daemon": st, "models": models,
                 "candles": counts, "analytics": analytics,
                 "predictor": predictor, "pred_table": pred_table,
-                "live": live,
+                "live": live, "model_performance": mperf,
                 "generated_at": time.time()}
 
     return await asyncio.to_thread(_build)
@@ -2882,6 +2890,25 @@ async def get_prediction_card(asset: str):
         direction_up = (r["prediction"] == "CALL")
         candle = future_candle(base, row_atr, direction_up,
                                r["probability"], r["target_time"])
+        # UNIFIED-SIGNAL (2026-09-13): reconstruct the classic strategies'
+        # verdict from the frozen components JSON — components.strategy is
+        # the strategies' agreement with THIS row's ML direction (0.5 =
+        # abstain), so the unified strip survives page reloads (REST path),
+        # exactly like the candle geometry does.
+        strat = None
+        try:
+            comp = json.loads(r.get("components") or "{}")
+            sa = comp.get("strategy")
+            if sa is not None:
+                sd = ("NEUTRAL" if sa == 0.5 else
+                      r["prediction"] if sa > 0.5 else
+                      ("PUT" if r["prediction"] == "CALL" else "CALL"))
+                strat = {"direction": sd,
+                         "agree_count": None, "against_count": None,
+                         "voters": 1 if sa != 0.5 else 0,
+                         "agrees_with_ml": sd == r["prediction"]}
+        except Exception:
+            strat = None
         return {
             "horizon": r["horizon"],
             "target_time": r["target_time"],
@@ -2894,6 +2921,8 @@ async def get_prediction_card(asset: str):
             "actual_result": r["actual_result"],
             "win_loss": r["win_loss"],
             "candle": candle,
+            "strategy": strat,
+            "strategy_agree": strat.get("agrees_with_ml") if strat else None,
             "locked": True,
         }
 

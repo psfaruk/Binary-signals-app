@@ -2859,6 +2859,38 @@ function _ensurePredCountdown(){
   setInterval(_predCountdownTick, 1000);
 }
 
+// UNIFIED-SIGNAL (2026-09-13): the classic strategies' verdict vs the ML
+// direction — one glance answers "দুই সিস্টেম কি একমত?"। t1/t2 slots carry
+// `strategy` {direction, agree_count, against_count, voters} from the
+// strategy bridge (frozen with the prediction).
+function _unifiedStripHTML(t1, t2){
+  const s = (t1 && t1.strategy) || (t2 && t2.strategy) || null;
+  if(!s || !s.voters) return '';
+  const sDir = s.direction === 'CALL' ? '↑ CALL'
+    : s.direction === 'PUT' ? '↓ PUT' : 'নিরপেক্ষ';
+  // REST-path rows carry voters=1 without counts (reconstructed from the
+  // frozen components JSON) — only show the vote split when it's real.
+  const votesTxt = (s.agree_count != null
+      ? s.agree_count + '↗ / ' + s.against_count + '↘ · ' : '') +
+    s.voters + ' ভোট';
+  // unified verdict per horizon: does the classic engine agree with ML?
+  function verdict(slot, label){
+    if(!slot || !slot.strategy || !slot.prediction) return '';
+    if(slot.prediction !== 'CALL' && slot.prediction !== 'PUT') return '';
+    const agrees = slot.strategy.agrees_with_ml;
+    const cls = slot.strategy.voters === 0 ? 'u-neutral'
+      : agrees ? 'u-agree' : 'u-conflict';
+    const txt = slot.strategy.voters === 0 ? 'নিরপেক্ষ'
+      : agrees ? '✅ একমত' : '⚠️ দ্বন্দ্ব';
+    return '<div>' + label + ': <span class="' + cls + '">' + txt + '</span></div>';
+  }
+  return '<div class="pred-unified">' +
+    '<b>ক্লাসিক স্ট্র্যাটেজি রায়:</b> ' + sDir + ' <span class="mdl-base">(' +
+      votesTxt + ')</span>' +
+    verdict(t1, 'T+1') + verdict(t2, 'T+2') +
+    '</div>';
+}
+
 function renderPredictionCard(data){
   const card = $('pred-card');
   if(!card) return;
@@ -2931,6 +2963,7 @@ function renderPredictionCard(data){
     body = _predSlotHTML('পরবর্তী ক্যান্ডেল', 'NEXT CANDLE', t1) +
            _predSlotHTML('দ্বিতীয় ক্যান্ডেল', '2ND CANDLE', t2) +
            chartHint +
+           _unifiedStripHTML(t1, t2) +
            '<div class="pred-footer">' +
            '<span class="pred-quality">সিগন্যাল কোয়ালিটি: ' +
              '<b class="' + qClass + '">' + esc(qualityTxt) + '</b></span>' +

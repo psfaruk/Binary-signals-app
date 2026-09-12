@@ -50,8 +50,12 @@ if REPO not in sys.path:
 
 from core.constants import ALLOWED_PAIRS_OTC
 from core.otc_dataset import build_dataset, load_candles_from_db
-from core.otc_predict.features_ext import (build_extended_row,
-                                           EXTENDED_FEATURE_NAMES)
+# UNIFIED-SIGNAL (2026-09-13): the trainer now feeds the models the SAME
+# 13 classic strategy modules the live chart engine runs — the two worlds
+# are ONE system from this version on. Old bundles (extended-only) keep
+# predicting unchanged: bundle.feature_names drives predict_up().
+from core.otc_predict.features_ext import (build_unified_row,
+                                           UNIFIED_FEATURE_NAMES)
 from core.otc_predict import models as _models
 from core.otc_predict.models import (CANDIDATES, fit_candidate,
                                      platt_calibrate, ModelBundle,
@@ -471,7 +475,7 @@ def fast_train_one(rows, seed=13):
                 b["rev_dir"][1] += 1
                 b["rev_dir"][0] += (y == (1 - cur_dir))
             for name in cand_names:
-                res = _fit_predict_fold(rows, EXTENDED_FEATURE_NAMES, h,
+                res = _fit_predict_fold(rows, UNIFIED_FEATURE_NAMES, h,
                                         [name], tr_end, te_end)
                 _, p, y, _ = res[0]
                 pooled[h][name]["p"].extend(float(x) for x in p)
@@ -547,10 +551,11 @@ def fast_train_one(rows, seed=13):
 
     # production bundle: retrain the winning candidate on ALL rows
     version = time.strftime("v%Y%m%d-%H%M", time.gmtime())
-    meta = {"trained_rows": n, "status": status, "trainer": "fast",
+    meta = {"trained_rows": n, "status": status, "trainer": "fast-unified",
+            "features": "unified",
             "walk_forward": report["gate"]}
-    bundle = ModelBundle(version, EXTENDED_FEATURE_NAMES, None, None, meta)
-    Xall = np.array([[r[k] for k in EXTENDED_FEATURE_NAMES] for r in rows])
+    bundle = ModelBundle(version, UNIFIED_FEATURE_NAMES, None, None, meta)
+    Xall = np.array([[r[k] for k in UNIFIED_FEATURE_NAMES] for r in rows])
     for h, slot in (("y1_up", "t1"), ("y2_up", "t2")):
         yall = np.array([1 if r[h] else 0 for r in rows])
         # MODEL-RUN-FIX-2: small-data val tail — max(200, …) sliced the
@@ -656,7 +661,7 @@ def _run_bootstrap_inner():
     else:
         rows, dstats = build_dataset(candles_by_asset, window=WINDOW,
                                      micro=True,
-                                     feature_fn=build_extended_row)
+                                     feature_fn=build_unified_row)
         _log(f"dataset: {dstats['rows']} rows from "
              f"{len(candles_by_asset)} pairs "
              f"(doji t1={dstats['dropped_doji_t1']} "

@@ -143,7 +143,8 @@ check("fast_train block exposed with runs ≥ 1",
       and ds["fast_train"].get("runs", 0) >= 1)
 
 print("── T5 the registered bundle actually predicts ──")
-from core.otc_predict.features_ext import build_extended_row  # noqa: E402
+from core.otc_predict.features_ext import (  # noqa: E402
+    build_extended_row, build_unified_row)
 bundle = None
 try:
     from core.otc_predict.models import load_bundle
@@ -153,7 +154,9 @@ except Exception as exc:
     check("bundle loads", False, f"{type(exc).__name__}: {exc}")
 if bundle is not None:
     win = gen_synthetic(60, seed=99)
-    feats = build_extended_row(win)
+    # UNIFIED-SIGNAL (2026-09-13): bundles are trained with the unified
+    # feature set now — the sv_* strategy votes must be in the row.
+    feats = build_unified_row(win)
     p1 = bundle.predict_up(1, feats)
     p2 = bundle.predict_up(2, feats)
     check("predict_up(1) in [0,1]", p1 is not None and 0.0 <= p1 <= 1.0)
@@ -165,7 +168,7 @@ candles = load_candles_from_db(_db.DB_PATH)
 small = {a: cs[:100] for a, cs in candles.items()
          if a == "USDZAR_otc"}          # ONE pair, ~50 rows < 80 (floor)
 srows, _ = build_dataset(small, window=50, micro=True,
-                         feature_fn=build_extended_row)
+                         feature_fn=build_unified_row)
 rep2, b2, st2 = fast_train.fast_train_one(srows)
 check("n<FAST_MIN_PAIR_ROWS → rejected", st2 == "rejected" and b2 is None,
       f"n={len(srows)} status={st2}")
@@ -297,7 +300,7 @@ print("── T17 small-data pair trains end-to-end (was: rows < 2000 dead) ─�
 csmall = {a: cs[:250] for a, cs in candles.items()
           if a == "NZDUSD_otc"}            # 250 candles → ~200 rows
 srows2, _ = build_dataset(csmall, window=50, micro=True,
-                          feature_fn=build_extended_row)
+                          feature_fn=build_unified_row)
 rep3, b3, st3 = fast_train.fast_train_one(srows2)
 check("~200 rows produce real folds (no crash)",
       st3 in ("verified", "provisional", "rejected") and

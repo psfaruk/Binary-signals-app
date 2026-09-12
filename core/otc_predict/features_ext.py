@@ -28,11 +28,18 @@ import math
 
 from core.otc_features import (build_feature_row, FEATURE_NAMES as BASE_NAMES,
                                MIN_WINDOW, atr)  # noqa: F401  (MIN_WINDOW re-export)
+from core.otc_predict.strategy_bridge import (
+    strategy_votes, STRATEGY_FEATURE_NAMES, MIN_WINDOW_STRATEGY)
 
-__all__ = ["build_extended_row", "EXTENDED_FEATURE_NAMES", "MIN_WINDOW_EXT"]
+__all__ = ["build_extended_row", "EXTENDED_FEATURE_NAMES", "MIN_WINDOW_EXT",
+           "build_unified_row", "UNIFIED_FEATURE_NAMES", "MIN_WINDOW_UNIFIED"]
 
 # EMA20 needs a slightly longer warmup than the base MIN_WINDOW=20.
 MIN_WINDOW_EXT = 24
+
+# UNIFIED-SIGNAL (2026-09-13): classic-strategy features need the blender's
+# own indicator warmup floor (30) — higher than EXT's 24.
+MIN_WINDOW_UNIFIED = max(MIN_WINDOW_EXT, MIN_WINDOW_STRATEGY)
 
 _EXTRA_NAMES = (
     # -- momentum extensions (PART 6) --
@@ -65,6 +72,31 @@ _EXTRA_NAMES = (
 )
 
 EXTENDED_FEATURE_NAMES = tuple(BASE_NAMES) + _EXTRA_NAMES
+
+# UNIFIED-SIGNAL (2026-09-13): extended block + the 13 classic strategy
+# modules' net votes + cluster votes + agreement scalars. Bundles trained
+# with this superset carry UNIFIED_FEATURE_NAMES in bundle.feature_names,
+# so live prediction feeds the models EXACTLY what they were trained on
+# (predict_up() keys off bundle.feature_names — old bundles unaffected).
+UNIFIED_FEATURE_NAMES = tuple(EXTENDED_FEATURE_NAMES) + tuple(
+    STRATEGY_FEATURE_NAMES)
+
+
+def build_unified_row(window, micro=None, ticks=None):
+    """UNIFIED-SIGNAL feature row: extended features + strategy votes.
+
+    Same leak-safety contract as build_extended_row — the strategy bridge
+    receives the SAME closed-candle window and nothing else. Needs >=
+    MIN_WINDOW_UNIFIED candles. Returns the extended row dict with the
+    sv_* / svc_* block merged in.
+
+    `ticks` — optional tick buffer for the tickrun module (live path may
+    pass it; training history has none → tickrun abstains honestly).
+    """
+    feats = dict(build_extended_row(window, micro=micro))
+    sv, _summary = strategy_votes(window, ticks=ticks)
+    feats.update(sv)
+    return feats
 
 
 def _ema(values, n):

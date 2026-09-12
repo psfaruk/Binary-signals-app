@@ -35,8 +35,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 from core.otc_dataset import build_dataset, load_candles_from_db
-from core.otc_predict.features_ext import (build_extended_row,
-                                           EXTENDED_FEATURE_NAMES)
+# UNIFIED-SIGNAL (2026-09-13): manual full trainer uses the SAME unified
+# feature set as the fast-train daemon (classic strategy votes included).
+from core.otc_predict.features_ext import (build_unified_row,
+                                           UNIFIED_FEATURE_NAMES)
 from core.otc_predict.models import (CANDIDATES, fit_candidate,
                                      platt_calibrate, apply_platt,
                                      ModelBundle, save_bundle, SKLEARN_OK)
@@ -85,7 +87,7 @@ def train_and_gate(rows, cand_names=None, seed=13):
                 b["rev_dir"][1] += 1
                 b["rev_dir"][0] += (y == (1 - cur_dir))
             for name in cand_names:
-                res = _fit_predict_fold(rows, EXTENDED_FEATURE_NAMES, h,
+                res = _fit_predict_fold(rows, UNIFIED_FEATURE_NAMES, h,
                                         [name], tr_end, te_end)
                 _, p, y, _ = res[0]
                 pooled[h][name]["p"].extend(float(x) for x in p)
@@ -152,10 +154,10 @@ def train_and_gate(rows, cand_names=None, seed=13):
     # retrain the winning candidate on ALL rows for the production bundle
     # (walk-forward proved the family; the shipped model uses every minute)
     version = time.strftime("v%Y%m%d-%H%M", time.gmtime())
-    bundle = ModelBundle(version, EXTENDED_FEATURE_NAMES, None, None,
+    bundle = ModelBundle(version, UNIFIED_FEATURE_NAMES, None, None,
                          {"trained_rows": n, "walk_forward": report["gate"]})
     import numpy as np
-    Xall = np.array([[r[k] for k in EXTENDED_FEATURE_NAMES] for r in rows])
+    Xall = np.array([[r[k] for k in UNIFIED_FEATURE_NAMES] for r in rows])
     for h, key, slot in (("y1_up", 1, "t1"), ("y2_up", 2, "t2")):
         yall = np.array([1 if r[h] else 0 for r in rows])
         val_n = max(200, int(len(Xall) * VAL_FRAC))
@@ -209,7 +211,7 @@ def main():
 
     rows, dstats = build_dataset(candles_by_asset, window=WINDOW,
                                  micro=(args.source == "micro"),
-                                 feature_fn=build_extended_row)
+                                 feature_fn=build_unified_row)
     print(f"[train] dataset: {dstats['rows']} rows from "
           f"{len(candles_by_asset)} pairs "
           f"(doji dropped t1={dstats['dropped_doji_t1']} "

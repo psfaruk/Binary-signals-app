@@ -26,6 +26,7 @@ FREEZE MECHANISM (structural, not procedural):
 """
 
 import json
+import math
 import time
 
 from db import _cursor
@@ -33,7 +34,157 @@ from db import _cursor
 __all__ = ["insert_prediction", "settle_target", "settle_from_history",
            "latest_predictions", "prediction_analytics", "register_model",
            "active_models", "prediction_count", "prediction_table_stats",
-           "live_predictions"]
+           "live_predictions", "model_performance", "wilson_lb"]
+
+
+# ─────────────── UNIFIED-SIGNAL (2026-09-13): model × pair matrix ──────────
+
+def wilson_lb(wins, n, z=1.96):
+    """Wilson 95% lower-bound win-rate — the honest ranking score for small
+    samples. A pair with 3/3 wins must NOT outrank a pair with 60/100."""
+    if n <= 0:
+        return None
+    p = wins / n
+    denom = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return round(100.0 * max(0.0, (centre - margin) / denom), 2)
+
+
+def _registry_meta():
+    """{(name, version): registry row dict} — model type / status / scope."""
+    with _cursor() as c:
+        rows = c.execute(
+            "SELECT name, version, scope, asset, metrics, trained_at, "
+            "active FROM model_registry").fetchall()
+    out = {}
+    for r in rows:
+        d = dict(r)
+        try:
+            m = json.loads(d.pop("metrics") or "{}")
+        except Exception:
+            m = {}
+        wf = m.get("walk_forward") or {}
+        d["model_type"] = ((wf.get("y1_up") or {}).get("selected")
+                           or (wf.get("y2_up") or {}).get("selected"))
+        d["status"] = m.get("status")
+        d["trained_rows"] = m.get("rows")
+        d["trainer"] = m.get("trainer")
+        out[(d["name"], d["version"])] = d
+    return out
+
+
+def model_performance(min_n=1):
+    """UNIFIED-SIGNAL model × pair performance matrix (settled rows only).
+
+    USER REQ (verbatim): "আর কোন মডেল কত টুকু ভালো করছে কোন পেয়ার এ
+    করছে, আমি যেনো fronted UI তে দেখতে পারি।"
+
+    Cross-tabulates the frozen otc_predictions table by (asset,
+    model_version) — directional accuracy over EVERY settled prediction
+    (emit or not — a provisional model's real grade is its direction hit
+    rate), plus emit-only win rate, joined with the model registry so each
+    row knows its model type (logreg / rf / histgb), status and trainer.
+
+    Returns {"rows": [...], "by_type": {...}, "generated_at": ...}.
+    Rows are sorted by Wilson lower-bound (honest small-sample ranking).
+    """
+    reg = _registry_meta()
+    with _cursor() as c:
+        rows = c.execute(
+            """SELECT asset, model_version, horizon, emit, win_loss,
+                      probability, signal_time
+               FROM otc_predictions WHERE settled_at IS NOT NULL"""
+        ).fetchall()
+
+    cells = {}
+    for r in rows:
+        key = (r["asset"], r["model_version"] or "?")
+        cell = cells.setdefault(key, {
+            "asset": r["asset"], "model_version": r["model_version"] or "?",
+            "t1": {"n": 0, "wins": 0, "losses": 0, "draws": 0},
+            "t2": {"n": 0, "wins": 0, "losses": 0, "draws": 0},
+            "emit_n": 0, "emit_wins": 0, "emit_losses": 0,
+            "last_signal": 0,
+        })
+        wl = r["win_loss"] or "draw"
+        h = "t1" if r["horizon"] == 1 else "t2"
+        cell[h]["n"] += 1
+        if wl == "win":
+            cell[h]["wins"] += 1
+        elif wl == "loss":
+            cell[h]["losses"] += 1
+        else:
+            cell[h]["draws"] += 1
+        if r["emit"]:
+            cell["emit_n"] += 1
+            if wl == "win":
+                cell["emit_wins"] += 1
+            elif wl == "loss":
+                cell["emit_losses"] += 1
+        if r["signal_time"] > cell["last_signal"]:
+            cell["last_signal"] = r["signal_time"]
+
+    out_rows = []
+    for key, cell in cells.items():
+        reg_row = reg.get(key) or {}
+        dec = (cell["t1"]["wins"] + cell["t1"]["losses"]
+               + cell["t2"]["wins"] + cell["t2"]["losses"])
+        wins = cell["t1"]["wins"] + cell["t2"]["wins"]
+        n = cell["t1"]["n"] + cell["t2"]["n"]
+        for h in ("t1", "t2"):
+            d = cell[h]
+            ddec = d["wins"] + d["losses"]
+            d["win_rate"] = (round(100.0 * d["wins"] / ddec, 2)
+                             if ddec else None)
+        row = {
+            "asset": cell["asset"],
+            "model_version": cell["model_version"],
+            # registry join (may be empty for a purged registry row — the
+            # frozen predictions are still the truth, type just unknown)
+            "model_type": reg_row.get("model_type"),
+            "status": reg_row.get("status"),
+            "trainer": reg_row.get("trainer"),
+            "scope": reg_row.get("scope"),
+            "trained_rows": reg_row.get("trained_rows"),
+            "trained_at": reg_row.get("trained_at"),
+            "t1": cell["t1"], "t2": cell["t2"],
+            "n": n, "decisive": dec,
+            "dir_win_rate": (round(100.0 * wins / dec, 2) if dec else None),
+            "emit_n": cell["emit_n"],
+            "emit_win_rate": (
+                round(100.0 * cell["emit_wins"]
+                      / max(1, cell["emit_wins"] + cell["emit_losses"]), 2)
+                if (cell["emit_wins"] + cell["emit_losses"]) else None),
+            "avg_probability": None,
+            "last_signal": cell["last_signal"] or None,
+            "rating": wilson_lb(wins, dec),
+        }
+        if n >= min_n:
+            out_rows.append(row)
+
+    out_rows.sort(key=lambda r: (-(r["rating"] if r["rating"] is not None
+                                    else -1.0), -(r["n"] or 0)))
+
+    # per model-TYPE aggregate across pairs — "RF পরিবার সব পেয়ারে গড়ে কত?"
+    by_type = {}
+    for r in out_rows:
+        t = r["model_type"] or "unknown"
+        b = by_type.setdefault(t, {"pairs": 0, "n": 0, "wins": 0,
+                                   "losses": 0, "emit_n": 0})
+        b["pairs"] += 1
+        b["n"] += r["n"]
+        b["wins"] += r["t1"]["wins"] + r["t2"]["wins"]
+        b["losses"] += r["t1"]["losses"] + r["t2"]["losses"]
+        b["emit_n"] += r["emit_n"]
+    for t, b in by_type.items():
+        d = b["wins"] + b["losses"]
+        b["dir_win_rate"] = (round(100.0 * b["wins"] / d, 2)
+                             if d else None)
+        b["rating"] = wilson_lb(b["wins"], d)
+
+    return {"rows": out_rows, "by_type": by_type,
+            "generated_at": time.time()}
 
 
 def insert_prediction(*, asset, period, signal_time, target_time, horizon,

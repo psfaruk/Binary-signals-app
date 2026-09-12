@@ -632,6 +632,33 @@
                     </div>
                     <p class="mdl-note" id="mdl-analytics-note"></p>
                 </div>
+
+                <!-- UNIFIED-SIGNAL (2026-09-13): model × pair matrix.
+                     USER REQ: "আর কোন মডেল কত টুকু ভালো করছে কোন পেয়ার এ
+                     করছে, আমি যেনো fronted UI তে দেখতে পারি।" -->
+                <div class="mdl-section">
+                    <h3>কোন মডেল কোন পেয়ারে কত ভালো করছে</h3>
+                    <p class="mdl-note">প্রতিটি মডেল-ভার্সনের বনাম পেয়ারের আসল গ্রেড করা
+                        ফলাফল — দিকনির্ভুলতা (T+1/T+2 এমিট হোক বা না হোক প্রতিটি ফ্রিজ
+                        করা প্রেডিকশন গ্রেড হয়)। রেটিং = Wilson 95% লোয়ার-বাউন্ড —
+                        কম স্যাম্পলে ভুয়া "১০০%" এর চেয়ে সৎ তুলনা।</p>
+                    <div class="mdl-mperf-types" id="mdl-mperf-types"></div>
+                    <div class="mdl-table-wrap">
+                        <table class="mdl-table" id="mdl-mperf-table">
+                            <thead>
+                                <tr>
+                                    <th>পেয়ার</th><th>মডেল</th><th>স্ট্যাটাস</th>
+                                    <th>T+1 সঠিক</th><th>T+2 সঠিক</th>
+                                    <th>মোট</th><th>রেটিং</th><th>সর্বশেষ</th>
+                                </tr>
+                            </thead>
+                            <tbody id="mdl-mperf-tbody">
+                                <tr><td colspan="8" class="mdl-loading">লোড হচ্ছে…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="mdl-note" id="mdl-mperf-note"></p>
+                </div>
             </section>
 
             <!-- =========== SETTING TAB =========== -->

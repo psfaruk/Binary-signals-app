@@ -31,12 +31,14 @@ import threading
 import time
 
 from core.otc_predict.features_ext import (build_extended_row,
+                                           build_unified_row,
                                            EXTENDED_FEATURE_NAMES,
                                            MIN_WINDOW_EXT)
 from core.otc_predict.geometry import future_candle, atr_from_candles
 from core.otc_predict.regime import detect_regime
 from core.otc_predict.price_action import price_action_confirm
 from core.otc_predict.signal_filter import score_signal
+from core.otc_predict.strategy_bridge import strategy_votes
 
 __all__ = ["on_candle_closed", "engine_enabled", "PRED_WINDOW",
            "runtime_status"]
@@ -273,7 +275,29 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                   last_reason="রেজিস্ট্রিতে সক্রিয় মডেল নেই")
             return payload
 
-        feats = build_extended_row(window, micro=micro)
+        feats = None
+        # UNIFIED-SIGNAL (2026-09-13): the models now see the SAME 13
+        # classic strategy modules the chart engine runs (sv_* features).
+        # Old bundles keep working — predict_up() reads only the feature
+        # names the bundle was TRAINED with; extra keys are ignored, and a
+        # bridge failure falls back to the extended-only row (honest
+        # degradation, never a crash into the feed).
+        try:
+            feats = build_unified_row(window, micro=micro)
+        except Exception as _uni_exc:
+            print(f"[predictor] unified features failed {asset} "
+                  f"(extended fallback): {type(_uni_exc).__name__}: "
+                  f"{_uni_exc}")
+            feats = build_extended_row(window, micro=micro)
+
+        # classic strategies' verdict for THIS closed window (shared by
+        # both horizons; ~0.5 ms — measured, negligible per candle close)
+        try:
+            _sv_feats, strat_summary = strategy_votes(window)
+        except Exception as _strat_exc:
+            print(f"[predictor] strategy bridge failed {asset}: "
+                  f"{type(_strat_exc).__name__}: {_strat_exc}")
+            strat_summary = None
 
         # ── FUTURE-CANDLE GEOMETRY (AUDIT 2026-09-13 / P1) ──────────────
         # USER: "মডেল গুলো ফিউচার ক্যান্ডেল দেখানোর কথা কিন্তু দেখাচ্ছে না"
@@ -298,7 +322,7 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
             quality = _quality_gates(window, period, bundle, reg_info, pa)
             filt = score_signal(
                 prob if prob is not None else 0.5, direction_up,
-                pa, reg_info, quality)
+                pa, reg_info, quality, strategy=strat_summary)
             filt["probability"] = round(prob, 4) if prob is not None else 0.5
             filt["status"] = "ok" if prob is not None else "model_missing"
             target_time = closed_candle["time"] + horizon * period
@@ -320,6 +344,23 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 close_i=base_close)
             if inserted:
                 frozen_here += 1
+            # UNIFIED-SIGNAL: the classic strategies' verdict, frozen with
+            # the prediction (compact — the per-module detail lives in the
+            # classic engine's own signal box; this carries the verdict).
+            strat_slot = None
+            if strat_summary:
+                _sd = strat_summary.get("direction", "NEUTRAL")
+                strat_slot = {
+                    "direction": _sd,
+                    "net": strat_summary.get("net", 0.0),
+                    "agree_count": strat_summary.get("agree_count", 0),
+                    "against_count": strat_summary.get("against_count", 0),
+                    "voters": strat_summary.get("voters", 0),
+                    # unified verdict for THIS horizon's ML direction
+                    "agrees_with_ml": (
+                        (_sd == "CALL" and filt["prediction"] == "CALL") or
+                        (_sd == "PUT" and filt["prediction"] == "PUT")),
+                }
             payload[key] = {
                 "target_time": target_time,
                 "prediction": filt["prediction"],
@@ -334,6 +375,10 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 "quality": quality,
                 # FUTURE-CANDLE payload: expected OHLC for this horizon.
                 "candle": pred_candle,
+                # UNIFIED-SIGNAL: classic strategies' verdict + unified
+                # score component (agreement in [0,1]).
+                "strategy": strat_slot,
+                "strategy_agree": filt.get("strategy_agree", 0.5),
                 "frozen_new": bool(inserted),
                 # frozen_new=False ⇒ the UNIQUE freeze key already held a row
                 # (replay/late callback) and the original prediction stands —
