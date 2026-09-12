@@ -131,7 +131,8 @@ def prediction_analytics(days=None):
             (cutoff,)).fetchall()
 
     def _blank():
-        return {"n": 0, "wins": 0, "losses": 0, "draws": 0}
+        return {"n": 0, "wins": 0, "losses": 0, "draws": 0,
+                "dir_n": 0, "dir_wins": 0, "dir_losses": 0, "dir_draws": 0}
 
     out = {
         "generated_at": time.time(),
@@ -144,12 +145,20 @@ def prediction_analytics(days=None):
         "t1": _blank(), "t2": _blank(),
         "per_pair": {}, "per_tier": {}, "per_hour": {},
         "model_versions": {},
+        # MODEL-RUN-FIX: directional accuracy over ALL frozen predictions
+        # (emit হোক বা না হোক) — provisional মডেলের আসল "রেজাল্ট" এটাই।
+        "dir_total": 0, "dir_wins": 0, "dir_losses": 0, "dir_draws": 0,
     }
     conf_sum = conf_n = 0
     hour_stats = {}
     for r in rows:
         slot = out["t1"] if r["horizon"] == 1 else out["t2"]
         slot["n"] += 1
+        # directional accuracy counts EVERY settled row (emit or not)
+        slot["dir_n"] += 1
+        slot["dir_" + (r["win_loss"] or "draw")] += 1
+        out["dir_total"] += 1
+        out["dir_" + (r["win_loss"] or "draw")] += 1
         if r["emit"]:
             slot["wins" if r["win_loss"] == "win" else
                  "losses" if r["win_loss"] == "loss" else "draws"] += 1
@@ -157,8 +166,14 @@ def prediction_analytics(days=None):
         conf_n += 1
 
         pp = out["per_pair"].setdefault(
-            r["asset"], {"n": 0, "emit": 0, "wins": 0, "losses": 0})
+            r["asset"], {"n": 0, "emit": 0, "wins": 0, "losses": 0,
+                         "dir_n": 0, "dir_wins": 0, "dir_losses": 0})
         pp["n"] += 1
+        pp["dir_n"] += 1
+        if r["win_loss"] == "win":
+            pp["dir_wins"] += 1
+        elif r["win_loss"] == "loss":
+            pp["dir_losses"] += 1
         if r["emit"]:
             pp["emit"] += 1
             pp["wins" if r["win_loss"] == "win" else
@@ -193,6 +208,18 @@ def prediction_analytics(days=None):
     for k in ("t1", "t2"):
         dec = out[k]["wins"] + out[k]["losses"]
         out[k]["win_rate"] = round(100.0 * out[k]["wins"] / dec, 2) if dec else None
+        # MODEL-RUN-FIX: all-prediction directional accuracy per horizon
+        ddec = out[k]["dir_wins"] + out[k]["dir_losses"]
+        out[k]["dir_win_rate"] = (round(100.0 * out[k]["dir_wins"] / ddec, 2)
+                                  if ddec else None)
+    # top-level directional accuracy (ALL settled predictions)
+    ddec = out["dir_wins"] + out["dir_losses"]
+    out["dir_win_rate"] = (round(100.0 * out["dir_wins"] / ddec, 2)
+                           if ddec else None)
+    for a, v in out["per_pair"].items():
+        ddec = v["dir_wins"] + v["dir_losses"]
+        v["dir_win_rate"] = (round(100.0 * v["dir_wins"] / ddec, 2)
+                             if ddec else None)
 
     def _wr(d):
         dec = d["wins"] + d["losses"]

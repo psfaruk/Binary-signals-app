@@ -1758,8 +1758,9 @@ function switchTab(tabName, opts){
   // map onto 'winrate' so old deep-links and muscle memory keep working.
   if(tabName === 'accuracy' || tabName === 'history') tabName = 'winrate';
   if(tabName !== 'chart' && tabName !== 'home'
-     && tabName !== 'setting' && tabName !== 'winrate') return;
-  currentTab = (tabName === 'home' || tabName === 'setting' || tabName === 'winrate') ? 'chart' : tabName;
+     && tabName !== 'setting' && tabName !== 'winrate'
+     && tabName !== 'models') return;
+  currentTab = (tabName === 'home' || tabName === 'setting' || tabName === 'winrate' || tabName === 'models') ? 'chart' : tabName;
 
   // Update sidebar nav items + bottom nav items (new system)
   document.querySelectorAll('.nav-item, .bn-item').forEach(btn => {
@@ -1796,6 +1797,10 @@ function switchTab(tabName, opts){
     // called. Refresh it every time the user opens the tab (defined in
     // app-nav.js; null-safe if that file is absent).
     try{ if(typeof window._refreshTokenStatus === 'function') window._refreshTokenStatus(); }catch(_){}
+  } else if(tabName === 'models'){
+    // MODEL-RUN-FIX (2026-09-12): opening the মডেল tab always refreshes the
+    // live training state from /api/prediction/overview (models-panel.js).
+    try{ if(window.ModelsPanel) window.ModelsPanel.refresh(); }catch(_){}
   } else if(tabName === 'chart'){
     if(chart){
       try{

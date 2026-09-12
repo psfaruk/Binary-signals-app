@@ -48,17 +48,22 @@ from core.constants import ALLOWED_PAIRS_OTC
 from core.otc_dataset import build_dataset, load_candles_from_db
 from core.otc_predict.features_ext import (build_extended_row,
                                            EXTENDED_FEATURE_NAMES)
+from core.otc_predict import models as _models
 from core.otc_predict.models import (CANDIDATES, fit_candidate,
                                      platt_calibrate, ModelBundle,
-                                     save_bundle, SKLEARN_OK)
+                                     save_bundle)
 from core.otc_predict.walk_forward import _folds, _fit_predict_fold, EMBARGO
 
 __all__ = ["run_bootstrap", "bootstrap_status", "start_daemon",
-           "fast_train_one", "ensure_history"]
+           "fast_train_one", "ensure_history", "pair_states"]
 
 # ── HARDCODED CONFIG (user req: "এই জন্য হার্ড কোড ব্যবহার করেন") ──────────
 WINDOW = 50                     # PART 7 context window (spec: 20-50)
-FAST_DAYS = 3                   # max history depth fetched per short pair
+FAST_DAYS = 2                   # max history depth fetched per short pair
+                                # (2d ≈ 2880 candles > the 2500 floor → the
+                                # cold-start fetch finishes ~1/3 faster than
+                                # the old 3-day pull; 10-min retry self-heals
+                                # any short fetch)
 FAST_MIN_CANDLES = 2500         # pair with ≥ this many micro candles skips fetch
 FAST_MIN_PAIR_ROWS = 2000       # dataset rows needed to train one pair
 FAST_MAX_ROWS_PER_PAIR = 12000  # newest-rows cap — retrain stays bounded
@@ -70,7 +75,12 @@ FAST_MIN_TEST_PRED = 150        # pooled unseen predictions per horizon
 FAST_SHUFFLE_MAX = 0.53         # HARD gate — leakage signature = never register
 FAST_BASELINE_MARGIN_PP = 1.5   # VERIFIED bar (PROVISIONAL sits below it)
 FAST_VAL_FRAC = 0.2             # Platt calibration tail
-FAST_RETRAIN_SECS = 6 * 3600    # refresh bundles twice a day
+FAST_RETRAIN_SECS = 6 * 3600    # refresh bundles twice a day AFTER a good run
+FAST_RETRY_SECS = 600           # MODEL-RUN-FIX: a run that registered NOTHING
+                                # (fetch failure / short data / transient
+                                # error) retries in 10 minutes instead of
+                                # silently sleeping 6 hours — the user must
+                                # never wait blind again
 FAST_BOOT_DELAY_SECS = 20       # let the server/feed settle first
 FAST_FETCH_BATCH = 2            # pairs per platform connect (kind batch)
 FAST_FETCH_TIMEOUT = 300        # per-pair get_historical_candles timeout
@@ -79,9 +89,33 @@ FAST_SLEEP_BETWEEN = 2.0        # pause between fetch batches
 _state = {
     "running": False, "runs": 0, "last_run": 0.0, "last_result": None,
     "last_error": None, "thread_started": False, "started_at": time.time(),
+    # MODEL-RUN-FIX: persistent per-pair state so the UI can show — at any
+    # moment, even between runs — exactly which model trained how much and
+    # why a pair is still waiting (fetch error / too few rows / rejected…).
+    "pairs": {},
+    "next_run_at": 0.0,   # epoch the daemon will next attempt a run
 }
-_lock = threading.Lock()
+_lock = threading.Lock()        # guards CONCURRENT RUNS (non-reentrant)
+_pair_lock = threading.Lock()   # guards _state["pairs"] only — MUST be a
+                                # separate lock: _record_pair is called from
+                                # inside _run_bootstrap_inner while _lock is
+                                # held (a shared lock would self-deadlock)
+_wake = threading.Event()       # MODEL-RUN-FIX: token import / admin force
+                                # can wake the sleeping daemon instantly
 _force_requested = False
+
+
+def _sklearn_ok():
+    """Read DYNAMICALLY (tests + startup both patch/miss it differently)."""
+    return bool(getattr(_models, "SKLEARN_OK", False))
+
+
+def _blocked_reason():
+    """Why training cannot run at all, or None."""
+    if not _sklearn_ok():
+        return ("scikit-learn/numpy missing — মডেল ট্রেইন অসম্ভব "
+                "(pip install scikit-learn numpy)")
+    return None
 
 
 # ────────────────────────────── small helpers ─────────────────────────────
@@ -120,8 +154,38 @@ def _micro_counts():
     return {a: int(n) for a, n in rows}
 
 
+def notify_token_pushed():
+    """Wake the daemon NOW after a fresh token import (MODEL-RUN-FIX).
+
+    A dead token blocks the history top-up; the user pastes a new one in
+    the UI → the feed reconnects in seconds → training must retry NOW,
+    not on its next 10-min timer. Called from server._apply_token().
+    """
+    if _state["running"]:
+        return False
+    _state["next_run_at"] = time.time() + 2.0
+    _wake.set()
+    return True
+
+
+def pair_states():
+    """Persistent per-pair snapshot for the Models tab."""
+    with _pair_lock:
+        return {a: dict(s) for a, s in _state["pairs"].items()}
+
+
+def _next_run_in():
+    """Seconds until the daemon's next attempt (None if not scheduled)."""
+    if _state["running"]:
+        return 0.0
+    if _state["next_run_at"]:
+        return max(0.0, round(_state["next_run_at"] - time.time(), 1))
+    return None
+
+
 def bootstrap_status():
     """JSON-safe status for /api/prediction/bootstrap and the UI."""
+    blocked = _blocked_reason()
     return {
         "enabled": os.environ.get("QX_FAST_TRAIN", "1") not in ("0", "false", "no"),
         "running": _state["running"],
@@ -130,6 +194,12 @@ def bootstrap_status():
                          if _state["last_run"] else None),
         "last_error": _state["last_error"],
         "started_at": _state["started_at"],
+        "sklearn_ok": _sklearn_ok(),
+        "blocked": blocked,
+        "pairs": pair_states(),
+        "next_run_in": _next_run_in(),
+        "retrain_secs": FAST_RETRAIN_SECS,
+        "retry_secs": FAST_RETRY_SECS,
         "config": {
             "fast_days": FAST_DAYS, "min_candles": FAST_MIN_CANDLES,
             "min_pair_rows": FAST_MIN_PAIR_ROWS,
@@ -311,8 +381,9 @@ def fast_train_one(rows, seed=13):
     import numpy as np
     rng = random.Random(seed)
     cand_names = [c for c in FAST_CANDIDATES if c in CANDIDATES()]
-    if not cand_names or not SKLEARN_OK:
-        return {"error": "sklearn unavailable"}, None, "rejected"
+    if not cand_names or not _sklearn_ok():
+        return {"error": _blocked_reason() or "sklearn unavailable"}, \
+            None, "rejected"
 
     n = len(rows)
     # Guard: the first expanding fold must leave a real train split after
@@ -479,15 +550,43 @@ def run_bootstrap(force=False):
     return {"started": True, "status": bootstrap_status(), "summary": summary}
 
 
+def _record_pair(asset, **fields):
+    """Merge fields into the persistent per-pair state (MODEL-RUN-FIX)."""
+    with _pair_lock:
+        st = _state["pairs"].setdefault(asset, {})
+        st.update(fields)
+        st["updated_at"] = time.time()
+
+
 def _run_bootstrap_inner():
     _log("bootstrap run starting (hardcoded fast config)")
+    blocked = _blocked_reason()
+    if blocked:
+        # MODEL-RUN-FIX: never fail silently again — the missing-deps case
+        # is announced loudly AND recorded per-pair so the UI shows exactly
+        # why no model can train. Fetch still runs: data accumulation is
+        # useful the moment the deps land (redeploy).
+        _log(f"FATAL: {blocked} — training phase will be skipped; "
+             f"history top-up still runs so data keeps accumulating")
     counts = _micro_counts()
+    for a in sorted(ALLOWED_PAIRS_OTC):
+        _record_pair(a, candles=counts.get(a, 0))
     _log("candle_micro counts: " + ", ".join(
         f"{a.split('_')[0]}={n}" for a, n in sorted(counts.items())))
 
     # phase 1 — top up short pairs from the SAME platform
     fetch = ensure_history(counts)
+    for a, res in (fetch.get("results") or {}).items():
+        if res.get("status") == "ok":
+            _record_pair(a, fetch={"added": res.get("added", 0),
+                                   "total": res.get("total", 0)},
+                         fetch_error=None)
+        else:
+            _record_pair(a, fetch_error=res.get(
+                "reason") or res.get("error") or res.get("status"))
     counts = _micro_counts()
+    for a in sorted(ALLOWED_PAIRS_OTC):
+        _record_pair(a, candles=counts.get(a, 0))
 
     # phase 2 — dataset from the merged (history + live) same-feed data
     candles_by_asset = {a: cs for a, cs in
@@ -495,6 +594,9 @@ def _run_bootstrap_inner():
                         if a in set(ALLOWED_PAIRS_OTC)}
     if not candles_by_asset:
         _log("no candle data at all — nothing to train on yet")
+        for a in sorted(ALLOWED_PAIRS_OTC):
+            _record_pair(a, status="no_data",
+                         reason="candle_micro খালি — ফিড/টোকেন চেক করুন")
         return {"fetch": fetch, "pairs_registered": [],
                 "note": "no candle data yet"}
 
@@ -513,17 +615,42 @@ def _run_bootstrap_inner():
             by_asset[a] = by_asset[a][-FAST_MAX_ROWS_PER_PAIR:]
     pooled_rows = [r for a in sorted(by_asset) for r in by_asset[a]]
 
+    def _gate_summary(gate, h):
+        g = gate.get(h) or {}
+        if not g:
+            return None
+        return {"acc": g.get("acc_pct"),
+                "baseline": (g.get("baselines") or {}).get("prev_dir"),
+                "shuffle": g.get("shuffle_acc"),
+                "model": g.get("selected"),
+                "test_n": g.get("n")}
+
     registered = []
     details = {}
     for asset, arows in sorted(by_asset.items()):
+        if blocked:
+            details[asset] = {"status": "blocked", "rows": len(arows),
+                              "reason": blocked}
+            _record_pair(asset, status="blocked", rows=len(arows),
+                         reason=blocked)
+            continue
         if len(arows) < FAST_MIN_PAIR_ROWS:
             details[asset] = {"status": "skipped",
                               "rows": len(arows),
                               "reason": f"< {FAST_MIN_PAIR_ROWS} rows"}
+            _record_pair(asset, status="skipped", rows=len(arows),
+                         reason=f"ডেটা কম: {len(arows)} rows < "
+                                f"{FAST_MIN_PAIR_ROWS}")
             continue
         report, bundle, status = fast_train_one(arows)
+        gate = report.get("gate", {})
         details[asset] = {"status": status, "rows": len(arows),
-                          "gate": report.get("gate", {})}
+                          "gate": gate}
+        _record_pair(asset, status=status, rows=len(arows),
+                     reason=report.get("error"),
+                     t1=_gate_summary(gate, "y1_up"),
+                     t2=_gate_summary(gate, "y2_up"),
+                     error=report.get("error"))
         if bundle is None:
             continue
         path = save_bundle(bundle)
@@ -533,6 +660,8 @@ def _run_bootstrap_inner():
                         "walk_forward": report.get("gate", {})},
                        path, activate=True)
         registered.append(asset)
+        _record_pair(asset, version=bundle.version,
+                     registered_at=time.time())
         _log(f"{asset}: {status} bundle {bundle.version} registered "
              f"({len(arows)} rows)")
 
@@ -542,6 +671,8 @@ def _run_bootstrap_inner():
             pooled_rows = pooled_rows[-FAST_POOL_MAX_ROWS:]
         report, bundle, status = fast_train_one(pooled_rows, seed=17)
         details["__global__"] = {"status": status, "rows": len(pooled_rows)}
+        _record_pair("__global__", status=status, rows=len(pooled_rows),
+                     reason=report.get("error"))
         if bundle is not None:
             path = save_bundle(bundle)
             from core.otc_predict.tracker import register_model
@@ -550,6 +681,8 @@ def _run_bootstrap_inner():
                             "walk_forward": report.get("gate", {})},
                            path, activate=True)
             registered.append("global")
+            _record_pair("__global__", version=bundle.version,
+                         registered_at=time.time())
             _log(f"global: {status} bundle {bundle.version} registered "
                  f"({len(pooled_rows)} pooled rows)")
 
@@ -569,24 +702,57 @@ def _run_bootstrap_inner():
 
 # ─────────────────────────── the daemon thread ────────────────────────────
 
+def _next_sleep_secs(last_summary, last_error):
+    """MODEL-RUN-FIX: adaptive cadence.
+
+    A run that registered at least one model → normal 6h refresh.
+    A run that registered NOTHING (fetch failed, data short, transient
+    error, blocked deps) → retry in 10 minutes so a deploy that starts
+    working self-heals within the user's patience window instead of
+    silently sleeping 6 hours.
+    """
+    if last_error:
+        return FAST_RETRY_SECS
+    s = last_summary or {}
+    if s.get("pairs_registered"):
+        return FAST_RETRAIN_SECS
+    return FAST_RETRY_SECS
+
+
 def _daemon():
     time.sleep(FAST_BOOT_DELAY_SECS)
     if os.environ.get("QX_FAST_TRAIN", "1") in ("0", "false", "no"):
         _log("disabled by QX_FAST_TRAIN=0 — daemon exiting")
         return
+    blocked = _blocked_reason()
+    if blocked:
+        _log(f"WARNING: {blocked}")
     _log(f"daemon armed: first run in {FAST_BOOT_DELAY_SECS}s, then every "
-         f"{FAST_RETRAIN_SECS // 3600}h (hardcoded fast config)")
+         f"{FAST_RETRAIN_SECS // 3600}h (or {FAST_RETRY_SECS // 60}min "
+         f"retry after an empty run — hardcoded fast config)")
     while True:
         try:
             res = run_bootstrap()
+            summary = res.get("summary") or {}
             if res.get("started"):
-                s = res.get("summary") or {}
                 _log(f"run #{_state['runs']}: registered="
-                     f"{s.get('pairs_registered')} in {s.get('secs')}s")
+                     f"{summary.get('pairs_registered')} in "
+                     f"{summary.get('secs')}s")
+            # schedule the next attempt from THIS run's outcome (also
+            # covers the force-run race: a forced pass finishing here
+            # simply reschedules — the daemon is the only sleeper)
+            sleep_for = _next_sleep_secs(summary, _state["last_error"])
+            _state["next_run_at"] = time.time() + sleep_for
+            _log(f"next run in {sleep_for // 60:.0f}min")
         except Exception as exc:   # the daemon must never die
             _log(f"daemon loop error: {type(exc).__name__}: {exc}")
             _state["last_error"] = f"{type(exc).__name__}: {exc}"
-        time.sleep(FAST_RETRAIN_SECS)
+            _state["next_run_at"] = time.time() + FAST_RETRY_SECS
+        nxt = _state.get("next_run_at") or (time.time() + FAST_RETRY_SECS)
+        # sleep until the next slot — but wake instantly when a fresh token
+        # (or an admin nudge) arrives
+        _wake.wait(timeout=max(1.0, nxt - time.time()))
+        _wake.clear()
 
 
 def start_daemon():

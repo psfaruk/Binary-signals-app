@@ -5,6 +5,16 @@ fastapi>=0.110.0,<0.115
 uvicorn[standard]>=0.27.0
 python-dotenv>=1.0.0
 
+# ── ML training deps (MODEL-RUN-FIX 2026-09-12) ────────────────────────────
+# ROOT-CAUSE FIX: the fast-train bootstrap (core/otc_predict/fast_train.py)
+# needs numpy + scikit-learn, but they were NEVER in this manifest. The
+# sandbox had them globally installed so every local test passed, while on
+# Railway SKLEARN_OK=False made every training attempt fail with
+# "sklearn unavailable" → no model could EVER register (user: "1 ঘন্টা
+# অপেক্ষা, মডেল রান হয়নি"). joblib ships with scikit-learn.
+numpy>=1.26.4,<3.0
+scikit-learn>=1.3.2,<1.8
+
 # ── pyquotex dependencies (vendored copy in ./pyquotex/) ───────────────────
 # The ./pyquotex folder is a vendored copy with local fixes:
 #   - Firefox TLS cipher suite (ssl_utils.py) → bypasses Cloudflare

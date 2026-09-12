@@ -183,5 +183,74 @@ try:
 except Exception as exc:
     check("JSON-serializable", False, str(exc))
 
+# ══ MODEL-RUN-FIX (2026-09-12) — regression guards for the production
+#    "মডেল রান হয়নি, ১ ঘন্টা অপেক্ষা" report ══
+
+print("── T9 requirements.txt ships the ML deps (ROOT-CAUSE guard) ──")
+req_path = os.path.join(REPO, "requirements.txt")
+req_txt = open(req_path).read().lower()
+check("numpy declared", "numpy" in req_txt)
+check("scikit-learn declared", "scikit-learn" in req_txt)
+
+print("── T10 adaptive retry cadence ──")
+check("registered run → 6h refresh",
+      fast_train._next_sleep_secs({"pairs_registered": ["A"]}, None)
+      == fast_train.FAST_RETRAIN_SECS)
+check("empty run → 10min retry",
+      fast_train._next_sleep_secs({"pairs_registered": []}, None)
+      == fast_train.FAST_RETRY_SECS)
+check("error → 10min retry",
+      fast_train._next_sleep_secs({}, "ValueError: x")
+      == fast_train.FAST_RETRY_SECS)
+
+print("── T11 per-pair state recorded ──")
+ps = fast_train.pair_states()
+check("state entries exist", len(ps) >= 1, f"{len(ps)} entries")
+some = next(iter(ps.values()))
+check("entry has updated_at", "updated_at" in some)
+
+print("── T12 sklearn-missing path is HONEST, not silent ──")
+from core.otc_predict import models as _models            # noqa: E402
+_saved = _models.SKLEARN_OK
+try:
+    _models.SKLEARN_OK = False                            # simulate Railway
+    st = fast_train.bootstrap_status()
+    check("bootstrap_status.blocked set", bool(st.get("blocked")))
+    check("bootstrap_status.sklearn_ok False",
+          st.get("sklearn_ok") is False)
+    res = fast_train.run_bootstrap()
+    summ = res.get("summary") or {}
+    check("run completes without registering",
+          summ.get("pairs_registered") == [])
+    ps2 = fast_train.pair_states()
+    blocked_seen = any(v.get("status") == "blocked" for v in ps2.values())
+    check("pairs recorded as blocked", blocked_seen,
+          f"{len(ps2)} entries")
+finally:
+    _models.SKLEARN_OK = _saved                           # restore
+st_after = fast_train.bootstrap_status()
+check("restored → not blocked", st_after.get("blocked") is None)
+
+print("── T13 force-run queue + daemon scheduler fields ──")
+st = fast_train.bootstrap_status()
+check("next_run_in present", "next_run_in" in st)
+check("retry_secs exposed", st.get("retry_secs") == fast_train.FAST_RETRY_SECS)
+
+print("── T14 token-import wake (MODEL-RUN-FIX) ──")
+fast_train._state["next_run_at"] = 0.0
+fast_train._wake.clear()
+woke = fast_train.notify_token_pushed()
+check("wake accepted while idle", woke is True)
+check("next slot scheduled ~2s out",
+      0 < (fast_train._state["next_run_at"] - time.time()) <= 3.0)
+check("wake event set", fast_train._wake.is_set())
+fast_train._wake.clear()
+fast_train._state["next_run_at"] = 0.0
+_saved_running = fast_train._state["running"]
+fast_train._state["running"] = True                      # simulate active run
+check("wake refused while a run is active",
+      fast_train.notify_token_pushed() is False)
+fast_train._state["running"] = _saved_running
+
 print(f"\n══ {len(PASS)} PASS / {len(FAIL)} FAIL ══")
 sys.exit(1 if FAIL else 0)

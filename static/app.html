@@ -55,6 +55,10 @@
                      now the master-detail "রেজাল্ট" view -->
                 <span class="nav-label">রেজাল্ট</span>
             </button>
+            <button class="nav-item" data-tab="models" type="button">
+                <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg></span>
+                <span class="nav-label">মডেল</span>
+            </button>
             <button class="nav-item" data-tab="setting" type="button">
                 <span class="nav-icon"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
                 <span class="nav-label">সেটিংস</span>
@@ -543,6 +547,66 @@
                 </div>
             </section>
 
+            <!-- =========== MODELS TAB (MODEL-RUN-FIX 2026-09-12) ===========
+                 USER REQ: "কি কি মডেল কত টুকু ট্রেইন হলো, রেজাল্ট কি আমি
+                 frontend এ দেখতে পারবো" — ONE tab answering it live:
+                   1. daemon strip  → ট্রেইনার চালু/শেষ রান/পরবর্তী রান/ত্রুটি
+                   2. per-pair grid → কোন পেয়ার কত রো ট্রেইন হলো, কী স্ট্যাটাস
+                   3. results       → প্রেডিকশন গুলোর আসল গ্রেডেড ফলাফল -->
+            <section class="tab-pane" data-pane="models" id="pane-models">
+                <div class="pane-header">
+                    <h2>মডেল ট্রেইনিং</h2>
+                    <p class="pane-subtitle">কোন পেয়ারের মডেল কতটুকু ট্রেইন হলো ও আসল রেজাল্ট</p>
+                </div>
+
+                <div class="mdl-warn" id="mdl-warn" style="display:none">
+                    <span id="mdl-warn-text"></span>
+                </div>
+
+                <div class="mdl-daemon-card" id="mdl-daemon-card">
+                    <div class="mdl-daemon-top">
+                        <span class="mdl-state-chip" id="mdl-state-chip">চেক হচ্ছে…</span>
+                        <button class="btn-secondary" id="mdl-force-btn" type="button">এখনই ট্রেইন করুন</button>
+                    </div>
+                    <div class="mdl-daemon-grid">
+                        <div class="mdl-stat"><span class="mdl-stat-label">মোট রান</span><span class="mdl-stat-value" id="mdl-runs">—</span></div>
+                        <div class="mdl-stat"><span class="mdl-stat-label">শেষ রান</span><span class="mdl-stat-value" id="mdl-lastrun">—</span></div>
+                        <div class="mdl-stat"><span class="mdl-stat-label">পরবর্তী রান</span><span class="mdl-stat-value" id="mdl-nextrun">—</span></div>
+                        <div class="mdl-stat"><span class="mdl-stat-label">রেজিস্টার্ড মডেল</span><span class="mdl-stat-value" id="mdl-regcount">—</span></div>
+                    </div>
+                    <div class="mdl-lastrun-note" id="mdl-lastrun-note"></div>
+                </div>
+
+                <div class="mdl-section">
+                    <h3>পেয়ার অনুযায়ী ট্রেইনিং</h3>
+                    <div class="mdl-table-wrap">
+                        <table class="mdl-table" id="mdl-pair-table">
+                            <thead>
+                                <tr>
+                                    <th>পেয়ার</th><th>ক্যান্ডেল</th><th>স্ট্যাটাস</th>
+                                    <th>ট্রেইন রো</th><th>T+1 অ্যাকুরেসি</th><th>T+2 অ্যাকুরেসি</th>
+                                    <th>মডেল</th><th>নোট</th>
+                                </tr>
+                            </thead>
+                            <tbody id="mdl-pair-tbody">
+                                <tr><td colspan="8" class="mdl-loading">লোড হচ্ছে…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="mdl-section">
+                    <h3>মডেলের আসল রেজাল্ট (প্রতিটি প্রেডিকশন গ্রেড করা)</h3>
+                    <div class="mdl-analytics" id="mdl-analytics">
+                        <div class="mdl-stat"><span class="mdl-stat-label">প্রেডিকশন</span><span class="mdl-stat-value" id="mdl-a-total">—</span></div>
+                        <div class="mdl-stat"><span class="mdl-stat-label">T+1 সঠিক</span><span class="mdl-stat-value" id="mdl-a-t1">—</span></div>
+                        <div class="mdl-stat"><span class="mdl-stat-label">T+2 সঠিক</span><span class="mdl-stat-value" id="mdl-a-t2">—</span></div>
+                        <div class="mdl-stat"><span class="mdl-stat-label">সিগন্যাল উইনরেট</span><span class="mdl-stat-value" id="mdl-a-wr">—</span></div>
+                    </div>
+                    <p class="mdl-note" id="mdl-analytics-note"></p>
+                </div>
+            </section>
+
             <!-- =========== SETTING TAB =========== -->
             <section class="tab-pane" data-pane="setting" id="pane-setting">
                 <div class="pane-header">
@@ -634,6 +698,10 @@
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
                 <span>রেজাল্ট</span>
             </button>
+            <button class="bn-item" data-tab="models" type="button">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/></svg>
+                <span>মডেল</span>
+            </button>
             <button class="bn-item" data-tab="setting" type="button">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 <span>সেটিং</span>
@@ -660,6 +728,7 @@
 <script src="/static/lightweight-charts.js"></script>
 <script src="/static/js/common.js"></script>
 <script src="/static/js/winrate.js"></script>
+<script src="/static/js/models-panel.js"></script>
 <script src="/static/js/app-nav.js"></script>
 <script src="/static/js/token-panel.js"></script>
 <script>

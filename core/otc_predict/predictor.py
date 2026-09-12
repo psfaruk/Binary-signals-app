@@ -244,7 +244,13 @@ def describe_status(asset=None):
         st = fast_train.bootstrap_status()
         fast = {"enabled": st.get("enabled"), "running": st.get("running"),
                 "runs": st.get("runs"), "last_run_ago": st.get("last_run_ago"),
-                "last_error": st.get("last_error")}
+                "last_error": st.get("last_error"),
+                # MODEL-RUN-FIX: surface the hard blocker + next attempt so
+                # the UI can say WHY nothing trained (e.g. sklearn missing).
+                "blocked": st.get("blocked"),
+                "sklearn_ok": st.get("sklearn_ok"),
+                "next_run_in": st.get("next_run_in"),
+                "retry_secs": st.get("retry_secs")}
         res = st.get("result") or {}
         if res:
             fast["pairs_registered"] = res.get("pairs_registered")

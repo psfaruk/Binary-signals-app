@@ -945,6 +945,15 @@ async def _apply_token(token: str, source: str = "api"):
     except Exception as exc:
         print(f"[server] token wake-up failed (non-fatal): {exc}")
 
+    # MODEL-RUN-FIX (2026-09-12): wake the fast-train daemon too — a fresh
+    # token unblocks the history top-up, so training retries NOW instead of
+    # waiting out its 10-minute retry timer.
+    try:
+        from core.otc_predict import fast_train as _ft_wake
+        _ft_wake.notify_token_pushed()
+    except Exception as exc:
+        print(f"[server] fast-train wake-up failed (non-fatal): {exc}")
+
     token_preview = _token_store.mask(token)
     print(f"[server] ✅ token updated at runtime: {token_preview} "
           f"(source={source}, format={norm_meta.get('input_format')}, "
@@ -2717,6 +2726,64 @@ async def post_prediction_bootstrap():
     threading.Thread(target=_fast_train.run_bootstrap,
                      kwargs={"force": True}, daemon=True).start()
     return {"started": True, "status": st}
+
+@app.get("/api/prediction/overview")
+async def get_prediction_overview():
+    """MODEL-RUN-FIX (2026-09-12): ONE payload for the মডেল tab.
+
+    Answers the user's exact questions in the UI:
+      "কোন কোন মডেল কত টুকু ট্রেইন হলো, রেজাল্ট কি frontend এ দেখা যাবে?"
+      → daemon state + per-pair training status/rows/accuracy + registry
+        bundles + prediction outcomes, merged server-side.
+    """
+    import sqlite3 as _sql
+    from core.otc_predict import tracker as _pred_tracker
+
+    def _build():
+        st = _fast_train.bootstrap_status()
+        counts = _fast_train._micro_counts()
+        conn = _db._conn()
+        conn.row_factory = _sql.Row
+        try:
+            reg_rows = conn.execute(
+                "SELECT name, version, scope, asset, trained_at, active, "
+                "metrics, path FROM model_registry "
+                "ORDER BY created_at DESC LIMIT 80").fetchall()
+        finally:
+            conn.close()
+        models = []
+        for r in reg_rows:
+            d = dict(r)
+            try:
+                m = json.loads(d.pop("metrics") or "{}")
+                wf = m.get("walk_forward") or {}
+                def _h(hkey):
+                    g = wf.get(hkey) or {}
+                    if not g:
+                        return None
+                    return {"acc": g.get("acc_pct"),
+                            "baseline": (g.get("baselines") or {})
+                                        .get("prev_dir"),
+                            "shuffle": g.get("shuffle_acc"),
+                            "model": g.get("selected"),
+                            "test_n": g.get("n")}
+                d["status"] = m.get("status")
+                d["trained_rows"] = m.get("rows")
+                d["trainer"] = m.get("trainer")
+                d["t1"] = _h("y1_up")
+                d["t2"] = _h("y2_up")
+            except Exception:
+                pass
+            models.append(d)
+        try:
+            analytics = _pred_tracker.prediction_analytics()
+        except Exception as exc:
+            analytics = {"error": f"{type(exc).__name__}: {exc}"}
+        return {"daemon": st, "models": models,
+                "candles": counts, "analytics": analytics,
+                "generated_at": time.time()}
+
+    return await asyncio.to_thread(_build)
 
 @app.get("/api/prediction/models")
 async def get_prediction_models():
