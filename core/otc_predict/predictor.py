@@ -33,6 +33,7 @@ import time
 from core.otc_predict.features_ext import (build_extended_row,
                                            EXTENDED_FEATURE_NAMES,
                                            MIN_WINDOW_EXT)
+from core.otc_predict.geometry import future_candle, atr_from_candles
 from core.otc_predict.regime import detect_regime
 from core.otc_predict.price_action import price_action_confirm
 from core.otc_predict.signal_filter import score_signal
@@ -274,6 +275,18 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
 
         feats = build_extended_row(window, micro=micro)
 
+        # ── FUTURE-CANDLE GEOMETRY (AUDIT 2026-09-13 / P1) ──────────────
+        # USER: "মডেল গুলো ফিউচার ক্যান্ডেল দেখানোর কথা কিন্তু দেখাচ্ছে না"
+        # ROOT CAUSE: the otc_pred payload carried direction/probability
+        # but NO candle OHLC, so the frontend could only render text in
+        # the side card — the models never got a future candle on the
+        # chart. Fix: attach the expected OHLC for both horizons, anchored
+        # at the just-closed candle's close, sized by window ATR scaled
+        # with the calibrated conviction. The frontend draws these as the
+        # ghost candles (they expire the moment the real candle arrives).
+        base_close = closed_candle["close"]
+        window_atr = atr_from_candles(window)
+
         frozen_here = 0
         for horizon, key in ((1, "t1"), (2, "t2")):
             # horizon-scoped pass: PA first, then the PART 24 gates with the
@@ -289,6 +302,9 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
             filt["probability"] = round(prob, 4) if prob is not None else 0.5
             filt["status"] = "ok" if prob is not None else "model_missing"
             target_time = closed_candle["time"] + horizon * period
+            pred_candle = future_candle(
+                base_close, window_atr, direction_up,
+                filt["probability"], target_time)
             inserted = insert_prediction(
                 asset=asset, period=period,
                 signal_time=closed_candle["time"], target_time=target_time,
@@ -301,7 +317,7 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 # PART 17 audit trail: full features frozen for emitted
                 # signals only (bounded storage); tracked-only rows skip it.
                 feature_json=(feats if filt["emit"] else None),
-                close_i=closed_candle["close"])
+                close_i=base_close)
             if inserted:
                 frozen_here += 1
             payload[key] = {
@@ -312,12 +328,19 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 "emit": filt["emit"], "reason": filt["reason"],
                 "regime": filt["regime"],
                 "pa_agreed": filt["pa_agreed"],
+                # AUDIT 2026-09-13 / P6: quality PER HORIZON — the old
+                # code overwrote payload["quality"] with the t2 pass, so
+                # t1's gate state was silently lost.
+                "quality": quality,
+                # FUTURE-CANDLE payload: expected OHLC for this horizon.
+                "candle": pred_candle,
                 "frozen_new": bool(inserted),
                 # frozen_new=False ⇒ the UNIQUE freeze key already held a row
                 # (replay/late callback) and the original prediction stands —
                 # PART 16 doing its job.
             }
-        payload["quality"] = quality
+        # backward-compatible top-level quality (t1's gate state)
+        payload["quality"] = payload.get("t1", {}).get("quality")
         with _runtime_lock:
             _runtime["predicted"] += 1
             _runtime["frozen"] += frozen_here

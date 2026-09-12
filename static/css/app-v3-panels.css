@@ -578,6 +578,14 @@
   font-size:10.5px;color:var(--text-faint);margin:-4px 2px 0;
   text-align:right;
 }
+/* FUTURE-CANDLE (AUDIT 2026-09-13 / P1): hint line under the T+1/T+2 rows
+   telling the user the model's future candles are painted on the CHART —
+   the card alone hid the whole feature ("মডেল গুলো ফিউচার ক্যান্ডেল
+   দেখাচ্ছে না"). */
+.pred-chart-hint{
+  text-align:left;margin:6px 2px 0;color:var(--accent);
+  opacity:.92;font-size:10.5px;line-height:1.5;
+}
 .pred-row-wait .pred-row-value{color:var(--text-faint);font-weight:400;font-size:12px}
 .pred-row-notrade{opacity:.75}
 .pred-tier-badge{

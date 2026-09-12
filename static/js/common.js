@@ -74,6 +74,20 @@ let currentPeriod = 60;
 let chart = null, candleSeries = null, ghostSeries = null;
 let candleData = [];
 let lastPrediction = null;
+// ── FUTURE-CANDLE (AUDIT 2026-09-13 / P1) ─────────────────────────────────
+// USER: "মডেল গুলো ফিউচার ক্যান্ডেল দেখানোর কথা কিন্তু দেখাচ্ছে না"
+// ROOT CAUSE: the ML models' T+1/T+2 predictions only ever reached the
+// TEXT card — the chart's ghost candle was drawn exclusively from the OLD
+// 6-module engine's prediction.candle. These two vars hold the model's own
+// future candles (built from 'otc_pred' WS frames AND the REST card
+// fallback) so drawModelGhostCandles() can paint T+1/T+2 on the chart:
+//   modelPredCandles — [{time,open,high,low,close,prediction,probability,
+//                        emit,target_time}] (sanitized, chart-ready)
+//   modelPredAsset   — the pair they belong to (cleared on pair switch)
+let modelPredCandles = [];
+let modelPredAsset = '';
+// last payload actually pushed into ghostSeries (debug/test visibility)
+let modelGhostDrawn = [];
 let signalHistory = [];
 let totalCorrect = 0, totalSignals = 0;
 // FIX (AURORA-V3-2026-08-31): history filter chips — direction (সব/CALL/PUT)
@@ -458,21 +472,45 @@ function updateChart(candles, predCandle, resetView){
   if(resetView && candleData.length){
     try{ chart.timeScale().scrollToPosition(3, false); }catch(_){}
   }
-  if(predCandle){
-    // Sanitize predCandle too — it must have a future timestamp
-    const pt = typeof predCandle.time === 'number' ? Math.floor(predCandle.time) : 0;
-    const po = +predCandle.open, ph = +predCandle.high, pl = +predCandle.low, pc = +predCandle.close;
-    if(pt > 0 && isFinite(po) && isFinite(ph) && isFinite(pl) && isFinite(pc) && po > 0){
-      const phi = Math.max(ph, po, pc);
-      const plo = Math.min(pl, po, pc);
-      try{
-        ghostSeries.setData([{ time: pt, open: po, high: phi, low: plo, close: pc }]);
-      }catch(e){ console.error('[chart] ghostSeries.setData error:', e); }
+  // ── FUTURE-CANDLE (AUDIT 2026-09-13 / P1) ─────────────────────────────
+  // The ML models' T+1/T+2 future candles take PRECEDENCE over the old
+  // 6-module engine's single ghost candle: drawing both would put two
+  // candles on the same future time slot (visual garbage). When the model
+  // has LIVE (non-expired) predictions for THIS pair we paint those;
+  // when the model layer is inactive — or its frozen snapshot went fully
+  // stale (e.g. the feed dropped minutes ago) — we fall back to the old
+  // engine's predCandle exactly as before.
+  let drewModelGhost = false;
+  if(modelPredCandles.length && modelPredAsset === currentAsset){
+    const _lastRealT = candleData.length ? candleData[candleData.length - 1].time : 0;
+    const _liveModel = modelPredCandles.some(function(mc){ return mc.time >= _lastRealT; });
+    if(_liveModel){
+      drawModelGhostCandles();
+      drewModelGhost = true;
+    } else {
+      // stale frozen snapshot — every model ghost's slot already closed.
+      // Drop them so the old engine's ghost can take the slot back.
+      modelPredCandles = [];
+      try{ ghostSeries.setData([]); }catch(_){}
+    }
+  }
+  if(!drewModelGhost){
+    if(predCandle){
+      // Sanitize predCandle too — it must have a future timestamp
+      const pt = typeof predCandle.time === 'number' ? Math.floor(predCandle.time) : 0;
+      const po = +predCandle.open, ph = +predCandle.high, pl = +predCandle.low, pc = +predCandle.close;
+      if(pt > 0 && isFinite(po) && isFinite(ph) && isFinite(pl) && isFinite(pc) && po > 0){
+        const phi = Math.max(ph, po, pc);
+        const plo = Math.min(pl, po, pc);
+        try{
+          ghostSeries.setData([{ time: pt, open: po, high: phi, low: plo, close: pc }]);
+        }catch(e){ console.error('[chart] ghostSeries.setData error:', e); }
+      } else {
+        try{ ghostSeries.setData([]); }catch(_){}
+      }
     } else {
       try{ ghostSeries.setData([]); }catch(_){}
     }
-  } else {
-    try{ ghostSeries.setData([]); }catch(_){}
   }
   _priceLinesRange = { lo: 0, hi: 0, step: 0 };
   refreshPriceLines();
@@ -585,6 +623,27 @@ function updateLastCandle(candle){
     if(candleData.length > 500) candleData.shift();
     _setTarget(safeCandle);
     _startRaf();
+    // FUTURE-CANDLE (AUDIT 2026-09-13): the real market just opened the
+    // candle our model ghost was drawn for. >= semantics: the ghost whose
+    // target IS this newly-opened candle STAYS (prediction vs forming
+    // candle, exactly where the old engine draws its ghost); strictly
+    // older ghosts (their slot closed, prediction graded) drop out. The
+    // next 'otc_pred' frame repaints fresh T+1/T+2 ghosts at candle close.
+    if(modelPredCandles.length){
+      const stillLive = modelPredCandles.filter(function(mc){
+        return mc.time >= safeCandle.time;
+      });
+      if(stillLive.length !== modelPredCandles.length){
+        modelPredCandles = stillLive;
+        if(modelPredCandles.length){
+          drawModelGhostCandles();
+        } else {
+          // every model ghost's slot has closed — clear the overlay; the
+          // next otc_pred frame (same second) repaints the new T+1/T+2.
+          try{ ghostSeries.setData([]); }catch(_){}
+        }
+      }
+    }
     // Auto-scroll to show the new candle (only if user is at the right edge)
     try{
       if(chart && chart.timeScale().isVisible()){
@@ -2580,6 +2639,13 @@ function onOtcPred(msg){
   if(msg.asset !== currentAsset) return;
   _predCardAsset = msg.asset;
   _predCardWsAt = Date.now();
+  // FUTURE-CANDLE (AUDIT 2026-09-13 / P1): store the model's own T+1/T+2
+  // candle geometry (server attaches slot.candle) and paint them on the
+  // chart as ghost candles — this is the "মডেল গুলো ফিউচার ক্যান্ডেল
+  // দেখানোর কথা" the user asked for. Frozen direction + calibrated
+  // probability decide the colour and the body size; the drawn candle is a
+  // visualization of the prediction, not a claim of knowing the future.
+  setModelGhostCandles(msg.asset, msg.t1, msg.t2);
   renderPredictionCard({
     status: msg.status,
     model_version: msg.model_version,
@@ -2593,6 +2659,82 @@ function onOtcPred(msg){
   // payload so the card can name WHICH pairs do have models instead of a
   // bare "model not ready" (PRED-VISIBILITY).
   if(msg.status === 'no_model') fetchPredictionCard(msg.asset);
+}
+
+// ── FUTURE-CANDLE (AUDIT 2026-09-13 / P1): model ghost-candle plumbing ────
+// setModelGhostCandles(asset, t1, t2) — sanitize + store the model's frozen
+// T+1/T+2 candle geometry (from a WS 'otc_pred' frame or REST card rows).
+// drawModelGhostCandles() — paint the STILL-FUTURE subset onto ghostSeries.
+// The geometry arrives from the server (core/otc_predict/geometry.py:
+// ATR-scaled body, conviction-scaled size) — the client only sanitizes and
+// filters; it never invents a direction.
+function setModelGhostCandles(asset, t1, t2){
+  modelPredAsset = asset || currentAsset;
+  var out = [];
+  [t1, t2].forEach(function(slot){
+    if(!slot || !slot.candle) return;
+    var c = slot.candle;
+    var t = typeof c.time === 'number' ? Math.floor(c.time) : 0;
+    var o = +c.open, h = +c.high, l = +c.low, cl = +c.close;
+    if(t <= 0 || !isFinite(o) || !isFinite(h) || !isFinite(l) || !isFinite(cl)) return;
+    if(o <= 0 || h <= 0 || l <= 0 || cl <= 0) return;
+    // target_time is the authoritative slot time — geometry time must
+    // match it or be dropped (defensive: never draw a mis-anchored candle)
+    if(slot.target_time && Math.floor(slot.target_time) !== t) return;
+    out.push({
+      time: t,
+      open: o,
+      high: Math.max(h, o, cl),
+      low:  Math.min(l, o, cl),
+      close: cl,
+      prediction: slot.prediction,
+      probability: slot.probability,
+      emit: !!slot.emit,
+      target_time: slot.target_time || t,
+    });
+  });
+  modelPredCandles = out;
+  // No model slots (e.g. a 'no_model' frame): leave the old engine's ghost
+  // candle untouched — the model layer simply is not active for this pair.
+  if(out.length) drawModelGhostCandles();
+}
+
+function drawModelGhostCandles(){
+  if(!ghostSeries || !chart) return;
+  if(!modelPredCandles.length) return;  // model layer inactive — nothing to paint
+  if(modelPredAsset !== currentAsset){
+    // pair switched — the stored ghosts belong to the previous pair
+    modelPredCandles = [];
+    try{ ghostSeries.setData([]); }catch(_){}
+    return;
+  }
+  // Expiry filter — >= not >: the model's T+1 target IS the currently
+  // forming candle's slot (closed.time + period), exactly where the old
+  // engine draws its ghost. Keeping it visible while that candle forms is
+  // the point (prediction vs reality, side by side); it drops out when the
+  // NEXT candle opens (its slot has closed and the prediction is graded).
+  var lastRealTime = candleData.length ? candleData[candleData.length - 1].time : 0;
+  var draw = modelPredCandles.filter(function(mc){ return mc.time >= lastRealTime; });
+  var payload = draw.map(function(mc){
+    return { time: mc.time, open: mc.open, high: mc.high,
+             low: mc.low, close: mc.close };
+  }).sort(function(a, b){ return a.time - b.time; });
+  modelGhostDrawn = payload;
+  try{
+    ghostSeries.setData(payload);
+  }catch(e){
+    console.error('[chart] model ghostSeries.setData error:', e);
+  }
+  // Keep the freshly painted future candles ON SCREEN: the ghosts extend
+  // the time scale to the right, and without a nudge the T+2 candle can
+  // land outside the viewport (verified by pixel-level screenshot test).
+  // Same auto-scroll pattern the app already uses for new real candles
+  // (updateLastCandle → scrollToPosition(3)), so the UX stays consistent.
+  if(payload.length){
+    try{
+      chart.timeScale().scrollToPosition(3, false);
+    }catch(_){}
+  }
 }
 
 function ensurePredictionCard(asset){
@@ -2615,8 +2757,16 @@ function fetchPredictionCard(asset){
       const cur = data.current || [];
       const byH = {};
       cur.forEach(r => { byH[r.horizon] = r; });
+      // FUTURE-CANDLE (AUDIT 2026-09-13 / P1): the REST rows carry the same
+      // server-side candle geometry as the WS frames — paint the frozen
+      // T+1/T+2 future candles on the chart for this fresh page load too.
+      setModelGhostCandles(asset, byH[1] || null, byH[2] || null);
       renderPredictionCard({
-        status: (data.engine && data.engine.model_version) ? 'ok' : 'no_model',
+        // AUDIT 2026-09-13 / P10: status must reflect FROZEN ROWS, not just
+        // registry presence — a restart-time empty registry with frozen rows
+        // still has real predictions to show ('ok'), while no rows at all
+        // honestly means no prediction yet ('no_model').
+        status: cur.length ? 'ok' : 'no_model',
         model_version: data.engine && data.engine.model_version,
         model_status: (data.engine && data.engine.model_status) || null,
         fast_train: (data.engine && data.engine.fast_train) || null,
@@ -2638,6 +2788,10 @@ function _predRowToSlot(r){
     prediction: r.prediction, probability: r.probability,
     tier: r.tier, score: r.score, emit: r.emit ? 1 : 0,
     target_time: r.target_time,
+    // FUTURE-CANDLE (AUDIT 2026-09-13): REST rows carry the same server
+    // geometry as WS frames — pass it through so setModelGhostCandles()
+    // can paint the frozen future candles on fresh page loads.
+    candle: r.candle || null,
     win_loss: r.win_loss, actual_result: r.actual_result,
     reason: '' ,
   };
@@ -2765,8 +2919,18 @@ function renderPredictionCard(data){
       .sort((a, b) => (b.score || 0) - (a.score || 0))[0];
     const qualityTxt = bestTier ? bestTier.tier : 'NO SIGNAL';
     const qClass = bestTier ? ('tier-' + bestTier.tier) : 'tier-none';
+    // FUTURE-CANDLE (AUDIT 2026-09-13 / P1): tell the user the model's
+    // frozen T+1/T+2 predictions are painted on the CHART as ghost
+    // candles — the side card alone hid the whole feature, which is
+    // exactly why "মডেল গুলো ফিউচার ক্যান্ডেল দেখাচ্ছে না" was reported.
+    const drawnN = (t1 && t1.candle ? 1 : 0) + (t2 && t2.candle ? 1 : 0);
+    const chartHint = drawnN
+      ? '<div class="pred-sub pred-chart-hint">👻 চার্টে ' + drawnN +
+        'টি ফিউচার ক্যান্ডেল (T+1/T+2) হালকা রঙে আঁকা হচ্ছে — সম্ভাব্যতা যত বেশি, বডি তত বড়</div>'
+      : '';
     body = _predSlotHTML('পরবর্তী ক্যান্ডেল', 'NEXT CANDLE', t1) +
            _predSlotHTML('দ্বিতীয় ক্যান্ডেল', '2ND CANDLE', t2) +
+           chartHint +
            '<div class="pred-footer">' +
            '<span class="pred-quality">সিগন্যাল কোয়ালিটি: ' +
              '<b class="' + qClass + '">' + esc(qualityTxt) + '</b></span>' +
@@ -3099,6 +3263,9 @@ function wireEvents(){
       window._historyPagesLoaded = 1;
       renderHistory(); renderAccuracy();
       candleData = []; tapePrices = []; tapeDir = [];
+      // FUTURE-CANDLE (AUDIT 2026-09-13 / P1): pair switched — the previous
+      // pair's model ghost candles must not leak onto the new pair's chart.
+      modelPredCandles = []; modelPredAsset = '';
       if(candleSeries) candleSeries.setData([]);
       if(ghostSeries) ghostSeries.setData([]);
       showChartLoading();
@@ -3390,6 +3557,9 @@ function initApp(category){
   reconnectAttempts = 0;
   chart = null; candleSeries = null; ghostSeries = null;
   candleData = []; lastPrediction = null;
+  // FUTURE-CANDLE (AUDIT 2026-09-13 / P1): full re-init (page load / bfcache)
+  // — model ghost-candle state starts clean for the new page.
+  modelPredCandles = []; modelPredAsset = '';
   signalHistory = []; totalCorrect = 0; totalSignals = 0;
   realPairsList = []; otcPairsList = []; alltimeOtcPairsList = []; pairsList = [];
   currentMicro = null; runningConf = null;
@@ -3555,6 +3725,32 @@ function onPageShow(e){
 // Expose initApp + setCategory globally so the page-specific bootstrap
 // (real.js / otc.js) can call it.
 global.initApp = initApp;
+
+// ── FUTURE-CANDLE (AUDIT 2026-09-13): debug/test hooks ────────────────────
+// E2E tests (scripts/e2e_future_candle.py browser phase) and future
+// debugging need visibility into the model ghost-candle layer. __modelPred
+// reports the state; __feedOtcPred injects a frame through the REAL
+// handleMsg() path (exactly what a WS 'otc_pred' message runs through),
+// so the drawing pipeline can be verified in a real browser without a
+// live Quotex connection.
+global.__modelPred = function(){
+  return {
+    asset: modelPredAsset,
+    currentAsset: currentAsset,
+    candles: (modelPredCandles || []).slice(),
+    drawn: (modelGhostDrawn || []).slice(),
+    lastRealTime: candleData.length ? candleData[candleData.length - 1].time : 0,
+    chartReady: !!(chart && candleSeries && ghostSeries),
+  };
+};
+global.__feedOtcPred = function(frame){
+  handleMsg(Object.assign({type: 'otc_pred'}, frame || {}));
+};
+// general frame injector (any WS message type) — lets E2E tests replay a
+// full snapshot → otc_pred sequence in a real browser without a live feed.
+global.__feedFrame = function(msg){
+  handleMsg(msg || {});
+};
 global.setCategory = setCategory;
 
 /* ═══════════════════════════════════════════════════════════════════════

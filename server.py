@@ -2847,14 +2847,41 @@ async def get_prediction_card(asset: str):
     Reads the otc_predictions table — the same frozen rows the live engine
     writes at candle close, so a fresh page load sees exactly what was
     locked (never a re-computed/fabricated state).
+
+    FUTURE-CANDLE (AUDIT 2026-09-13 / P1): every current/history row also
+    carries the EXPECTED candle OHLC (t+h geometry), re-derived with the
+    SAME core.otc_predict.geometry.future_candle() the live WS payload
+    uses — anchored at the frozen row's close_i, ATR from the pair's
+    candle_micro history at/below the row's signal_time. The frontend
+    paints these as the chart's future candles on fresh page load, so the
+    models' T+1/T+2 future candles survive reloads (not just the live WS
+    frames).
     """
     from core.otc_predict import tracker as _pred_tracker
     from core.otc_predict.predictor import describe_status
+    from core.otc_predict.geometry import future_candle, atr_from_candles
     rows = await asyncio.to_thread(
         _pred_tracker.latest_predictions, asset, 12)
     status = await asyncio.to_thread(describe_status, asset)
 
     def _row_out(r):
+        # FUTURE-CANDLE geometry for this frozen row (AUDIT 2026-09-13):
+        # base = the row's own frozen close_i (close of the signal candle);
+        # ATR = the pair's closed-candle history up to that signal_time.
+        # Rows older than the retained history get a price-relative ATR
+        # fallback (geometry stays visible, never fabricated direction).
+        base = r.get("close_i") or 0.0
+        try:
+            hist = _db.get_micro_history(asset, int(r["period"]), 20,
+                                         before_ctime=int(r["signal_time"]) + 1)
+            row_atr = atr_from_candles(hist) if hist else 0.0
+        except Exception:
+            row_atr = 0.0
+        if not row_atr or row_atr <= 0:
+            row_atr = abs(base) * 0.0001 if base else 0.0001
+        direction_up = (r["prediction"] == "CALL")
+        candle = future_candle(base, row_atr, direction_up,
+                               r["probability"], r["target_time"])
         return {
             "horizon": r["horizon"],
             "target_time": r["target_time"],
@@ -2866,6 +2893,7 @@ async def get_prediction_card(asset: str):
             "model_version": r["model_version"],
             "actual_result": r["actual_result"],
             "win_loss": r["win_loss"],
+            "candle": candle,
             "locked": True,
         }
 
