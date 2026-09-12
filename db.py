@@ -1177,7 +1177,8 @@ def _update_hourly_pattern(asset: str, period: int, ctime: int, signal: str,
         cur = conn.cursor()
         cur.execute("""
             SELECT total_signals, correct, wrong, call_win_pct, put_win_pct,
-                   last_ctime, avg_confidence
+                   last_ctime, avg_confidence, counted_keys, best_direction,
+                   call_total, call_correct, put_total, put_correct
             FROM pair_hourly_patterns
             WHERE asset = ? AND hour_utc = ?
         """, (asset, hour_utc))
