@@ -504,7 +504,14 @@ def prediction_analytics(days=None):
                    4)},
     }
     # calibration buckets over P(UP): [lo, hi) edges (Deep Report §34)
-    _CAL_EDGES = (0.50, 0.55, 0.60, 0.65, 0.70, 0.76, 1.01)
+    # CALIBRATION-FIX (2026-09-14): edges extend BELOW 0.5 symmetrically —
+    # `probability` is always P(UP) (predict_proba[:,1], Platt-calibrated),
+    # so a strong PUT row has P(UP) ~0.25 and must land in its own low
+    # bucket, NOT be mirrored into the high buckets (the old mirroring made
+    # confident PUT predictions count as wrong UP predictions and dragged
+    # the 70%+ buckets toward ~37%).
+    _CAL_EDGES = (0.0, 0.24, 0.30, 0.35, 0.40, 0.45, 0.50,
+                  0.55, 0.60, 0.65, 0.70, 0.76, 1.01)
     _cal = [{"lo": _CAL_EDGES[i], "hi": _CAL_EDGES[i + 1],
              "n": 0, "p_sum": 0.0, "up": 0}
             for i in range(len(_CAL_EDGES) - 1)]
@@ -538,16 +545,18 @@ def prediction_analytics(days=None):
         if r["emit"]:
             slot["wins" if r["win_loss"] == "win" else
                  "losses" if r["win_loss"] == "loss" else "draws"] += 1
-        conf_sum += r["probability"] or 0
+        # CALIBRATION-FIX (2026-09-14): average confidence is DIRECTIONAL —
+        # `probability` is P(UP), so a confident PUT (p≈0.25) previously
+        # dragged "avg confidence" down as if the model were unsure.
+        _p = r["probability"] if r["probability"] is not None else 0.5
+        conf_sum += max(_p, 1.0 - _p)
         conf_n += 1
 
-        # HIST-ENGINE: Brier + calibration on the DIRECTIONAL probability
-        # (PUT rows flip to P(UP) = 1 - p so every row speaks the same
-        # language; draws are excluded — they carry no direction).
+        # HIST-ENGINE: Brier + calibration on P(UP). `probability` is ALWAYS
+        # P(UP) — PUT rows are NOT mirrored (they land in their own low
+        # buckets). Draws are excluded — they carry no direction.
         if r["actual_result"] in ("UP", "DOWN") and r["prediction"]:
-            p_up = (r["probability"] or 0.5)
-            if r["prediction"] == "PUT":
-                p_up = 1.0 - p_up
+            p_up = r["probability"] if r["probability"] is not None else 0.5
             o = 1 if r["actual_result"] == "UP" else 0
             _brier_sum += (p_up - o) ** 2
             _brier_n += 1
