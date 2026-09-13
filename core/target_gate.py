@@ -52,29 +52,25 @@ never crash or silently block the live pipeline; a broken gate degrades
 to the pre-gate behaviour (every-candle), never to a dead app.
 
 Env switches:
-    QX_TARGET_GATE           "0" (default since FREQ-FIRST-FIX 2026-09-09 —
-                             the user re-affirmed every-candle emission:
-                             "প্রত্যেক ক্যান্ডেল এ সিগন্যাল লাগবে। যে কোনো
-                             একটি স্ট্রাটেজি একমত হলেই সিগন্যাল আসবে।"),
-                             "1" = opt-in selective mode
-    QX_TARGET_WR             75   target win rate % per pair+direction
-    QX_TARGET_GATE_INIT      68   initial confidence bar (confluence-pass
-                                  signals start at 65; fallback-capped
-                                  signals are ≤63, so INIT=68 means only
-                                  real confluence trades at boot)
-    QX_TARGET_GATE_FLOOR     62   never ease below this
-    QX_TARGET_GATE_CAP       88   never raise above this (MAX_CONFIDENCE=92)
-    QX_TARGET_GATE_ROLLING_N 30   rolling graded window per direction
-    QX_TARGET_GATE_MIN_N     12   min graded samples before controller acts
+    QX_TARGET_GATE           "1" = selective mode; deployments can explicitly
+                             set "0" only when they knowingly prefer coverage
+                             to accuracy
+    QX_TARGET_WR             80   target win rate % per pair+direction
+    QX_TARGET_GATE_INIT      75   production confidence bar (Railway profile)
+    QX_TARGET_GATE_FLOOR     72   production floor (Railway profile)
+    QX_TARGET_GATE_CAP       90   production cap (Railway profile)
+    QX_TARGET_GATE_ROLLING_N 50   production rolling window per direction
+    QX_TARGET_GATE_MIN_N     30   production minimum graded samples
     QX_TARGET_GATE_EASE_MARGIN 3  ease only when WR ≥ target + this
     QX_TARGET_GATE_KP        0.5  proportional gain for the raise step
-    QX_TARGET_GATE_STARVATION 60  WAIT-candles before anti-silence relief
+    QX_TARGET_GATE_STARVATION 0   disable relief in the production profile;
+                                  a positive value enables it
 """
 import os
 import threading
 import time
 
-TARGET_WR = float(os.environ.get("QX_TARGET_WR", "75"))
+TARGET_WR = float(os.environ.get("QX_TARGET_WR", "80"))
 GATE_INIT = int(os.environ.get("QX_TARGET_GATE_INIT", "68"))
 GATE_FLOOR = int(os.environ.get("QX_TARGET_GATE_FLOOR", "62"))
 GATE_CAP = int(os.environ.get("QX_TARGET_GATE_CAP", "88"))
@@ -282,6 +278,11 @@ def _starve_note(asset: str) -> None:
     """Anti-silence relief: after STARVATION_CANDLES consecutive WAIT candles
     for a pair, ease BOTH direction gates by 1 (floor-capped) so a pair that
     drifted to permanent silence gets another chance to trade."""
+    # A quality-first deployment may disable anti-silence relief explicitly:
+    # lowering the bar merely because no high-edge setup appeared defeats the
+    # purpose of an accuracy target.
+    if STARVATION_CANDLES <= 0:
+        return
     st = _starve.setdefault(asset, {"waits": 0, "last_emit": 0.0})
     st["waits"] += 1
     if st["waits"] < STARVATION_CANDLES:

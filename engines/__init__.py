@@ -36,12 +36,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # the expensive prediction and return NEUTRAL immediately.
     # This prevents chronic-loser pairs (BRLUSD_otc 44.3%, USDCOP_otc 44.8%,
     # USDBDT_otc 45.4%) from generating losing signals all day.
-    # FIX (PHASE-2-FIX, 2026-08-13): default flipped to "0" — user requirement
-    # is "প্রত্যেক ক্যান্ডেল এ সিগন্যাল আসতে হবে" (every candle must produce a
-    # signal). With this gate ON, entire pairs would be suppressed for the
-    # day. Re-enable per-deploy if quality is preferred over coverage.
+    # QUALITY-FIRST (2026-09-13): default ON. A pair that demonstrably fails
+    # its payout-adjusted breakeven rate is not an eligible trade source.
     try:
-        if os.environ.get("QX_BREAKEVEN_GATE", "0") == "1" and asset:
+        if os.environ.get("QX_BREAKEVEN_GATE", "1") == "1" and asset:
             from core.breakeven import is_pair_profitable as _is_profitable
             _is_prof, _breason, _wr, _be, _n = _is_profitable(asset, period)
             if not _is_prof:
@@ -76,11 +74,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # Check if the pair is in cooldown (≥8 consecutive losses → skip 30 min).
     # This is a faster-acting gate than the breakeven gate — it catches
     # intraday regime changes before they accumulate into a bad day.
-    # FIX (PHASE-2-FIX, 2026-08-13): default flipped to "0" — same reason
-    # as BREAKEVEN_GATE. Pair-level suppression conflicts with the "every
-    # candle gets a signal" requirement.
+    # QUALITY-FIRST (2026-09-13): default ON. A live loss streak is evidence
+    # that the pair's current regime is unsafe; do not force more trades.
     try:
-        if os.environ.get("QX_PAIR_HEALTH_GATE", "0") == "1" and asset:
+        if os.environ.get("QX_PAIR_HEALTH_GATE", "1") == "1" and asset:
             from core.pair_health import is_pair_healthy as _is_healthy
             _healthy, _hreason = _is_healthy(asset)
             if not _healthy:
@@ -204,19 +201,16 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     except Exception as _tier_exc:
         print(f"[engines] tiered-filter failed for {asset}: {_tier_exc}")
 
-    # ── TARGET-75 GATE (default OFF — FREQ-FIRST-FIX 2026-09-09) ──────────
+    # ── TARGET GATE (default ON — QUALITY-FIRST-FIX 2026-09-13) ──────────
     # LATEST USER DIRECTIVE (2026-09-09, supersedes TARGET-75):
     #   "এত পরিমাণে টাইট দিয়েছেন, 6 ঘণ্টায় সিগন্যাল আসলো সক পেয়ার থেকে
     #    মাত্র 12 টি ... আমার প্রত্যেক ক্যান্ডেল এ সিগন্যাল লাগবে। যে কোনো
     #    একটি স্ট্রাটেজি একমত হলেই সিগন্যাল আসবে। অবশ্য বেস্ট stradegy টি
     #    সিগন্যাল দিবে।"
-    # = every candle MUST emit, ANY ONE agreeing strategy is enough, and the
-    # BEST strategy decides the direction. The gate's WAIT semantics directly
-    # violate the first two clauses (it produced 12 signals / 6h across ALL
-    # pairs), so the shipped default is now "0" (legacy every-candle).
-    # The controller stays fully functional for opt-in deployments:
-    # QX_TARGET_GATE=1 re-enables the per-pair adaptive conviction bar.
-    if os.environ.get("QX_TARGET_GATE", "0") == "1" and asset:
+    # Accuracy/positive-EV takes precedence over forced coverage: a WAIT is
+    # preferable to a direction with no demonstrated edge. Deployments may
+    # explicitly set QX_TARGET_GATE=0 only when they accept that trade-off.
+    if os.environ.get("QX_TARGET_GATE", "1") == "1" and asset:
         try:
             from core.target_gate import apply_gate as _apply_target_gate
             result = _apply_target_gate(result, asset, period)

@@ -3188,6 +3188,20 @@ class QuotexFeed:
         # Now the cache is invalidated immediately after a new grade is logged,
         # so the very next prediction uses the updated win rates.
         if accuracy in ("correct", "wrong"):
+            # Keep the pair-health circuit breaker fed from the same settled
+            # outcomes that are written to signal_log.  Previously the monitor
+            # was queried by engines.predict() but never received an outcome,
+            # so QX_PAIR_HEALTH_GATE could not detect a live loss streak.
+            try:
+                from core.pair_health import record_trade_outcome
+                await asyncio.to_thread(
+                    record_trade_outcome, stream.asset, accuracy == "correct")
+            except Exception as _health_exc:
+                # Health protection is fail-open; logging keeps a broken
+                # monitor observable without interrupting settlement.
+                print(f"[feed] pair-health outcome update failed for "
+                      f"{stream.asset}: {_health_exc}")
+
             try:
                 # Invalidate both OTC and Real adapters (one will be a no-op
                 # since the asset belongs to only one engine, but both adapters

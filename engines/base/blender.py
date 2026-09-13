@@ -18,12 +18,12 @@ The new pipeline:
   3. hand the cluster votes to engines.base.confluence.evaluate() which
      applies the strict high-confidence gates (>=3 clusters agree, zero
      opposition, position-aware, HTF-aware, noise-aware, honest confidence),
-  4. EVERY-CANDLE MODE (default, QX_SIGNAL_MODE=every_candle): when a gate
+  4. EVERY-CANDLE MODE (legacy opt-in, QX_SIGNAL_MODE=every_candle): when a gate
      fails, confluence emits a DETERMINISTIC evidence-based fallback signal
      (labeled "confluence_v1_fallback", confidence 50-63) instead of
      NEUTRAL — 100% candle coverage per the user requirement
-     "প্রত্যেক ক্যান্ডেল এ সিগন্যাল আসতে হবে". Set QX_SIGNAL_MODE=strict to
-     restore pure abstention.
+     "প্রত্যেক ক্যান্ডেল এ সিগন্যাল আসতে হবে". The production default is
+     QX_SIGNAL_MODE=strict: abstain rather than manufacture a direction.
 
 Output dict keeps the exact key set the frontend and feed pipeline expect.
 """
