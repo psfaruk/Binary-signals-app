@@ -1,0 +1,52 @@
+{
+  "generated_at": 1789291712.4672074,
+  "pairs": 8,
+  "candles_per_pair": 2600,
+  "seed": 20260913,
+  "persistence": {
+    "t1": {
+      "n": 20392,
+      "resolved": 13379,
+      "resolution_pct": 65.61,
+      "acc_pct": 52.57,
+      "brier": 0.2509
+    },
+    "t2": {
+      "n": 20392,
+      "resolved": 13379,
+      "resolution_pct": 65.61,
+      "acc_pct": 50.61,
+      "brier": 0.2531
+    },
+    "rows": 20392
+  },
+  "agreement": {
+    "agree": {
+      "n": 6565,
+      "acc_pct": 60.96
+    },
+    "conflict": {
+      "n": 4413,
+      "acc_pct": 59.14
+    },
+    "delta_pp": 1.82
+  },
+  "fair_walk": {
+    "t1": {
+      "n": 20392,
+      "resolved": 13938,
+      "resolution_pct": 68.35,
+      "acc_pct": 49.56,
+      "brier": 0.253
+    },
+    "t2": {
+      "n": 20392,
+      "resolved": 13938,
+      "resolution_pct": 68.35,
+      "acc_pct": 49.96,
+      "brier": 0.2528
+    },
+    "clean": true
+  },
+  "elapsed_secs": 41.9
+}

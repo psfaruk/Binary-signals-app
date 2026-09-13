@@ -809,3 +809,39 @@
   .mdl-pred-cell{font-size:11px}
   #mdl-live-pred-table{min-width:520px}
 }
+
+/* ── HIST-ENGINE (2026-09-13): historical setup-match strip + calibration ── */
+/* Deep Report §13/§34 — "ঐতিহাসিক প্যাটার্ন মিল" in the prediction card,
+   Brier + predicted-vs-actual buckets in the মডেল tab. */
+.pred-unified.pred-hist{
+  border-left:3px solid var(--accent,#5aa2ff);
+}
+.pred-hist .mdl-base{
+  font-weight:600;font-size:10.5px;
+}
+.mdl-calib{
+  margin-top:10px;padding:10px 12px;border-radius:8px;
+  background:var(--glass);border:1px solid var(--border-soft);
+  font-size:12px;line-height:1.7;
+}
+.mdl-calib-row{
+  display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;
+}
+.mdl-calib-row .mdl-stat-value{
+  font-size:14px;font-weight:800;color:var(--text);
+}
+.mdl-calib-table{
+  width:100%;margin-top:8px;border-collapse:collapse;
+  font-size:11.5px;
+}
+.mdl-calib-table th{
+  text-align:left;padding:4px 8px;color:var(--text-dim);
+  font-weight:700;border-bottom:1px solid var(--border-soft);
+}
+.mdl-calib-table td{
+  padding:4px 8px;border-bottom:1px solid var(--border-soft);
+  color:var(--text);font-variant-numeric:tabular-nums;
+}
+.mdl-calib-table tr.calib-good td{color:var(--green);font-weight:700}
+.mdl-calib-table tr.calib-ok td{color:var(--text)}
+.mdl-calib-table tr.calib-bad td{color:var(--yellow);font-weight:700}

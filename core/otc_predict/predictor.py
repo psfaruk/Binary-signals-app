@@ -35,6 +35,7 @@ from core.otc_predict.features_ext import (build_extended_row,
                                            EXTENDED_FEATURE_NAMES,
                                            MIN_WINDOW_EXT)
 from core.otc_predict.geometry import future_candle, atr_from_candles
+from core.otc_predict.hist_stats import live_lookup
 from core.otc_predict.regime import detect_regime
 from core.otc_predict.price_action import price_action_confirm
 from core.otc_predict.signal_filter import score_signal
@@ -276,14 +277,26 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
             return payload
 
         feats = None
-        # UNIFIED-SIGNAL (2026-09-13): the models now see the SAME 13
-        # classic strategy modules the chart engine runs (sv_* features).
-        # Old bundles keep working — predict_up() reads only the feature
-        # names the bundle was TRAINED with; extra keys are ignored, and a
-        # bridge failure falls back to the extended-only row (honest
-        # degradation, never a crash into the feed).
+        # HIST-ENGINE (2026-09-13): the historical setup-match lookup for
+        # THIS closed window (Deep Report §13) — an independent voice the
+        # ML models consume as features AND the UI shows as "ঐতিহাসিক
+        # প্যাটার্ন মিল". Abstains honestly (None) when no level reached
+        # its sample floor; never blocks the prediction path.
+        hist_look = None
         try:
-            feats = build_unified_row(window, micro=micro)
+            hist_look = live_lookup(asset, period, list(candles))
+        except Exception as _hist_exc:
+            print(f"[predictor] hist engine failed {asset}: "
+                  f"{type(_hist_exc).__name__}: {_hist_exc}")
+        # UNIFIED-SIGNAL (2026-09-13): the models now see the SAME 13
+        # classic strategy modules the chart engine runs (sv_* features)
+        # PLUS the hist_* setup-match block. Old bundles keep working —
+        # predict_up() reads only the feature names the bundle was
+        # TRAINED with; extra keys are ignored, and a bridge failure
+        # falls back to the extended-only row (honest degradation, never
+        # a crash into the feed).
+        try:
+            feats = build_unified_row(window, micro=micro, hist=hist_look)
         except Exception as _uni_exc:
             print(f"[predictor] unified features failed {asset} "
                   f"(extended fallback): {type(_uni_exc).__name__}: "
@@ -329,13 +342,34 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
             pred_candle = future_candle(
                 base_close, window_atr, direction_up,
                 filt["probability"], target_time)
+            # HIST-ENGINE: freeze the historical setup-match verdict into
+            # the components JSON — reload-proof (the REST path rebuilds
+            # the strip from comp.hist exactly like comp.strategy).
+            hist_slot = None
+            if hist_look:
+                _hp = hist_look.get(
+                    "p_up_t1" if horizon == 1 else "p_up_t2")
+                _hn = hist_look.get(
+                    "n_t1" if horizon == 1 else "n_t2")
+                _hl = hist_look.get(
+                    "level_t1" if horizon == 1 else "level_t2")
+                if _hp is not None and _hn:
+                    hist_slot = {
+                        "p_up": round(float(_hp), 4),
+                        "n": int(_hn),
+                        "level": _hl or "—",
+                        "agrees": (bool(_hp >= 0.5) == direction_up),
+                    }
+            comp_freeze = dict(filt["components"])
+            if hist_slot is not None:
+                comp_freeze["hist"] = hist_slot
             inserted = insert_prediction(
                 asset=asset, period=period,
                 signal_time=closed_candle["time"], target_time=target_time,
                 horizon=horizon, prediction=filt["prediction"],
                 probability=filt["probability"], tier=filt["tier"],
                 score=filt["score"], emit=filt["emit"],
-                components=filt["components"], regime=filt["regime"],
+                components=comp_freeze, regime=filt["regime"],
                 pa_agreed=filt["pa_agreed"], quality=quality,
                 reason=filt["reason"], model_version=bundle.version,
                 # PART 17 audit trail: full features frozen for emitted
@@ -379,6 +413,10 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 # score component (agreement in [0,1]).
                 "strategy": strat_slot,
                 "strategy_agree": filt.get("strategy_agree", 0.5),
+                # HIST-ENGINE (2026-09-13): the historical setup-match
+                # verdict for THIS horizon — Deep Report §13's "ঐতিহাসিক
+                # প্যাটার্ন মিল" voice in the ensemble display.
+                "hist": hist_slot,
                 "frozen_new": bool(inserted),
                 # frozen_new=False ⇒ the UNIQUE freeze key already held a row
                 # (replay/late callback) and the original prediction stands —

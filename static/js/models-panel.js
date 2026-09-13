@@ -468,6 +468,9 @@
             ? a.win_rate + '% (' + (a.wins || 0) + 'W/' + (a.losses || 0) + 'L)'
             : (a.total_signals ? '—' : 'সিগন্যাল নেই');
         renderLiveEngine(d);
+        // HIST-ENGINE (2026-09-13): calibration truth — Deep Report §34
+        // ("80% বললে সত্যিই 80% হয়?") + §21 payout break-even.
+        renderCalibration(a);
 
         var noteEl = $('mdl-analytics-note');
         if (!a.dir_total) {
@@ -481,6 +484,51 @@
                 '(সিগন্যাল এমিট হোক বা না হোক — প্রতিটি প্রেডিকশন ফ্রিজ ও ' +
                 'গ্রেড করা হয়)। সিগন্যাল এমিশন তখনই হয় যখন মডেল ' +
                 'ভেরিফায়েড + স্কোর গেট পাস করে।';
+        }
+    }
+
+    // HIST-ENGINE (2026-09-13): Brier score + predicted-vs-actual buckets
+    // + payout break-even — the calibration evidence Deep Report §34
+    // demands. Hidden until at least one settled directional row exists.
+    function renderCalibration(a) {
+        var box = $('mdl-calib');
+        if (!box) return;
+        if (!a.brier_n && !(a.calibration || []).length) {
+            box.style.display = 'none';
+            return;
+        }
+        box.style.display = '';
+        var bEl = $('mdl-a-brier');
+        if (bEl) {
+            bEl.textContent = a.brier != null ? a.brier : '—';
+            var bnEl = $('mdl-a-brier-n');
+            if (bnEl) bnEl.textContent = a.brier_n
+                ? '(' + a.brier_n + 'টি)' : '';
+        }
+        var evEl = $('mdl-a-ev');
+        if (evEl && a.ev) {
+            // 85% payout → break-even 54.05% — এর নিচে উইনরেট মানেই -EV
+            evEl.textContent = (a.ev.payout != null
+                ? Math.round(a.ev.payout * 100) : '?') + '% পেআউটে ' +
+                (a.ev.breakeven_wr != null
+                    ? Math.round(a.ev.breakeven_wr * 1000) / 10 : '?') + '%';
+        }
+        var tb = $('mdl-calib-tbody');
+        if (tb) {
+            var rows = a.calibration || [];
+            var html = rows.map(function(b) {
+                var gap = (b.actual_wr != null && b.avg_p != null)
+                    ? Math.abs(b.actual_wr - b.avg_p) : null;
+                var cls = gap == null ? '' : gap <= 5 ? 'calib-good'
+                    : gap <= 12 ? 'calib-ok' : 'calib-bad';
+                return '<tr class="' + cls + '"><td>' +
+                    Math.round((b.lo || 0) * 100) + '–' +
+                    Math.round((b.hi || 0) * 100) + '%</td><td>' +
+                    (b.actual_wr != null ? b.actual_wr + '%' : '—') +
+                    '</td><td>' + (b.n || 0) + '</td></tr>';
+            }).join('');
+            tb.innerHTML = html ||
+                '<tr><td colspan="3" class="mdl-loading">এখনো ডেটা নেই</td></tr>';
         }
     }
 

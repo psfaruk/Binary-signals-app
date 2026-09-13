@@ -2891,6 +2891,34 @@ function _unifiedStripHTML(t1, t2){
     '</div>';
 }
 
+// HIST-ENGINE (2026-09-13): Deep Report §13 — "ঐতিহাসিক প্যাটার্ন মিল"।
+// The engine scanned this pair's own closed-candle history for setups
+// with the same signature (trend/momentum/position/body/streak/S-R/vol)
+// and reports how often the NEXT candle went UP. It abstains (no strip)
+// when no signature level reached its sample floor — honest silence,
+// never a made-up number. Survives reloads via comp.hist (REST path).
+function _histStripHTML(t1, t2){
+  function line(slot, label){
+    if(!slot || !slot.hist || !slot.hist.n) return '';
+    var h = slot.hist;
+    var pct = Math.round((h.p_up || 0) * 100);
+    var dirTxt = h.p_up >= 0.5 ? '↑ UP' : '↓ DOWN';
+    var cls = h.p_up >= 0.5 ? 'u-agree' : 'u-conflict';
+    var agreeTxt = h.agrees == null ? ''
+      : (h.agrees ? ' · <span class="u-agree">✅ ML-এর সাথে একমত</span>'
+                  : ' · <span class="u-conflict">⚠️ ML-এর সাথে দ্বন্দ্ব</span>');
+    return '<div>' + label + ': <b class="' + cls + '">' + pct +
+      '% ' + dirTxt + '</b> <span class="mdl-base">(' + h.n +
+      'টি মিল · ' + esc(String(h.level || 'L?')) + ')</span>' + agreeTxt + '</div>';
+  }
+  var h1 = line(t1, 'T+1'), h2 = line(t2, 'T+2');
+  if(!h1 && !h2) return '';
+  return '<div class="pred-unified pred-hist">' +
+    '<b>ঐতিহাসিক প্যাটার্ন মিল:</b>' + h1 + h2 +
+    '<span class="mdl-base">— এই পেয়ারের নিজের ইতিহাসে একই সেটআপের পরের ' +
+    'ক্যান্ডেলের ফল (probability, guarantee নয়)</span></div>';
+}
+
 function renderPredictionCard(data){
   const card = $('pred-card');
   if(!card) return;
@@ -2964,6 +2992,7 @@ function renderPredictionCard(data){
            _predSlotHTML('দ্বিতীয় ক্যান্ডেল', '2ND CANDLE', t2) +
            chartHint +
            _unifiedStripHTML(t1, t2) +
+           _histStripHTML(t1, t2) +
            '<div class="pred-footer">' +
            '<span class="pred-quality">সিগন্যাল কোয়ালিটি: ' +
              '<b class="' + qClass + '">' + esc(qualityTxt) + '</b></span>' +

@@ -56,6 +56,10 @@ from core.otc_dataset import build_dataset, load_candles_from_db
 # predicting unchanged: bundle.feature_names drives predict_up().
 from core.otc_predict.features_ext import (build_unified_row,
                                            UNIFIED_FEATURE_NAMES)
+# HIST-ENGINE (2026-09-13): rows gain the historical setup-match block
+# (hist_p_up_t1/t2 + hist_conf) right after the dataset build — leak-
+# safe time-deferred counts (Deep Report §13/§17).
+from core.otc_predict.hist_stats import enrich_rows
 from core.otc_predict import models as _models
 from core.otc_predict.models import (CANDIDATES, fit_candidate,
                                      platt_calibrate, ModelBundle,
@@ -662,6 +666,10 @@ def _run_bootstrap_inner():
         rows, dstats = build_dataset(candles_by_asset, window=WINDOW,
                                      micro=True,
                                      feature_fn=build_unified_row)
+        # HIST-ENGINE (2026-09-13): historical setup-match probabilities —
+        # the engine the live predictor consults, computed identically
+        # here so new bundles learn how much historical edge to trust.
+        rows = enrich_rows(rows)
         _log(f"dataset: {dstats['rows']} rows from "
              f"{len(candles_by_asset)} pairs "
              f"(doji t1={dstats['dropped_doji_t1']} "

@@ -2909,6 +2909,14 @@ async def get_prediction_card(asset: str):
                          "agrees_with_ml": sd == r["prediction"]}
         except Exception:
             strat = None
+        # HIST-ENGINE (2026-09-13): the frozen historical setup-match
+        # verdict (comp.hist) — survives reloads like comp.strategy does.
+        hist_slot = None
+        try:
+            hist_slot = (json.loads(r.get("components") or "{}")
+                         .get("hist")) or None
+        except Exception:
+            hist_slot = None
         return {
             "horizon": r["horizon"],
             "target_time": r["target_time"],
@@ -2923,6 +2931,7 @@ async def get_prediction_card(asset: str):
             "candle": candle,
             "strategy": strat,
             "strategy_agree": strat.get("agrees_with_ml") if strat else None,
+            "hist": hist_slot,
             "locked": True,
         }
 

@@ -30,6 +30,8 @@ from core.otc_features import (build_feature_row, FEATURE_NAMES as BASE_NAMES,
                                MIN_WINDOW, atr)  # noqa: F401  (MIN_WINDOW re-export)
 from core.otc_predict.strategy_bridge import (
     strategy_votes, STRATEGY_FEATURE_NAMES, MIN_WINDOW_STRATEGY)
+from core.otc_predict.hist_stats import (
+    hist_feature_values, HIST_FEATURE_NAMES)  # noqa: F401  (re-export)
 
 __all__ = ["build_extended_row", "EXTENDED_FEATURE_NAMES", "MIN_WINDOW_EXT",
            "build_unified_row", "UNIFIED_FEATURE_NAMES", "MIN_WINDOW_UNIFIED"]
@@ -79,23 +81,29 @@ EXTENDED_FEATURE_NAMES = tuple(BASE_NAMES) + _EXTRA_NAMES
 # so live prediction feeds the models EXACTLY what they were trained on
 # (predict_up() keys off bundle.feature_names — old bundles unaffected).
 UNIFIED_FEATURE_NAMES = tuple(EXTENDED_FEATURE_NAMES) + tuple(
-    STRATEGY_FEATURE_NAMES)
+    STRATEGY_FEATURE_NAMES) + tuple(HIST_FEATURE_NAMES)
 
 
-def build_unified_row(window, micro=None, ticks=None):
-    """UNIFIED-SIGNAL feature row: extended features + strategy votes.
+def build_unified_row(window, micro=None, ticks=None, hist=None):
+    """UNIFIED-SIGNAL feature row: extended features + strategy votes
+    + historical setup-match probabilities (Deep Report §13).
 
     Same leak-safety contract as build_extended_row — the strategy bridge
     receives the SAME closed-candle window and nothing else. Needs >=
     MIN_WINDOW_UNIFIED candles. Returns the extended row dict with the
-    sv_* / svc_* block merged in.
+    sv_* / svc_* block and the hist_* block merged in.
 
     `ticks` — optional tick buffer for the tickrun module (live path may
     pass it; training history has none → tickrun abstains honestly).
+    `hist` — optional live_lookup() dict from hist_stats. Neutral values
+    (0.5 / 0.5 / 0.0) when absent, so bundles trained WITH hist features
+    never KeyErrors live and old bundles simply ignore the extra keys
+    (predict_up reads only the bundle's own feature_names).
     """
     feats = dict(build_extended_row(window, micro=micro))
     sv, _summary = strategy_votes(window, ticks=ticks)
     feats.update(sv)
+    feats.update(hist_feature_values(hist))
     return feats
 
 

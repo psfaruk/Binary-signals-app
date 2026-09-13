@@ -39,6 +39,8 @@ from core.otc_dataset import build_dataset, load_candles_from_db
 # feature set as the fast-train daemon (classic strategy votes included).
 from core.otc_predict.features_ext import (build_unified_row,
                                            UNIFIED_FEATURE_NAMES)
+# HIST-ENGINE (2026-09-13): same enrichment as the fast-train daemon.
+from core.otc_predict.hist_stats import enrich_rows
 from core.otc_predict.models import (CANDIDATES, fit_candidate,
                                      platt_calibrate, apply_platt,
                                      ModelBundle, save_bundle, SKLEARN_OK)
@@ -212,6 +214,9 @@ def main():
     rows, dstats = build_dataset(candles_by_asset, window=WINDOW,
                                  micro=(args.source == "micro"),
                                  feature_fn=build_unified_row)
+    # HIST-ENGINE (2026-09-13): historical setup-match probabilities —
+    # identical to the live engine's numbers (leak-safe deferral).
+    rows = enrich_rows(rows)
     print(f"[train] dataset: {dstats['rows']} rows from "
           f"{len(candles_by_asset)} pairs "
           f"(doji dropped t1={dstats['dropped_doji_t1']} "

@@ -27,6 +27,7 @@ FREEZE MECHANISM (structural, not procedural):
 
 import json
 import math
+import os
 import time
 
 from db import _cursor
@@ -457,12 +458,22 @@ def live_predictions(period=60, max_assets=60):
 
 
 def prediction_analytics(days=None):
-    """PART 21 dashboard metrics (settled rows only)."""
+    """PART 21 dashboard metrics (settled rows only).
+
+    HIST-ENGINE (2026-09-13) additions per Deep Report §21/§34:
+      • brier / brier_n — mean (p_up − outcome)² over settled non-draw
+        rows: 0.25 = coin-flip-level, lower = better calibrated.
+      • calibration — predicted P(UP) bucket vs actual UP-rate (the
+        "80% বললে কি সত্যিই ৮০% হয়?" table).
+      • ev — payout break-even win-rate (e.g. 85% payout → 54.05%);
+        anything below it is -EV regardless of how the UI looks.
+    """
     cutoff = (time.time() - days * 86400) if days else 0
     with _cursor() as c:
         rows = c.execute(
             """SELECT asset, horizon, emit, tier, probability, win_loss,
-                      signal_time, score, model_version
+                      signal_time, score, model_version,
+                      prediction, actual_result
                FROM otc_predictions
                WHERE settled_at IS NOT NULL AND signal_time > ?""",
             (cutoff,)).fetchall()
@@ -485,7 +496,20 @@ def prediction_analytics(days=None):
         # MODEL-RUN-FIX: directional accuracy over ALL frozen predictions
         # (emit হোক বা না হোক) — provisional মডেলের আসল "রেজাল্ট" এটাই।
         "dir_total": 0, "dir_wins": 0, "dir_losses": 0, "dir_draws": 0,
+        # HIST-ENGINE (2026-09-13): calibration evidence (Deep Report §34)
+        "brier": None, "brier_n": 0, "calibration": [],
+        "ev": {"payout": float(os.environ.get("QX_PAYOUT", "0.85")),
+               "breakeven_wr": round(
+                   1.0 / (1.0 + float(os.environ.get("QX_PAYOUT", "0.85"))),
+                   4)},
     }
+    # calibration buckets over P(UP): [lo, hi) edges (Deep Report §34)
+    _CAL_EDGES = (0.50, 0.55, 0.60, 0.65, 0.70, 0.76, 1.01)
+    _cal = [{"lo": _CAL_EDGES[i], "hi": _CAL_EDGES[i + 1],
+             "n": 0, "p_sum": 0.0, "up": 0}
+            for i in range(len(_CAL_EDGES) - 1)]
+    _brier_sum = 0.0
+    _brier_n = 0
     conf_sum = conf_n = 0
     hour_stats = {}
     for r in rows:
@@ -516,6 +540,23 @@ def prediction_analytics(days=None):
                  "losses" if r["win_loss"] == "loss" else "draws"] += 1
         conf_sum += r["probability"] or 0
         conf_n += 1
+
+        # HIST-ENGINE: Brier + calibration on the DIRECTIONAL probability
+        # (PUT rows flip to P(UP) = 1 - p so every row speaks the same
+        # language; draws are excluded — they carry no direction).
+        if r["actual_result"] in ("UP", "DOWN") and r["prediction"]:
+            p_up = (r["probability"] or 0.5)
+            if r["prediction"] == "PUT":
+                p_up = 1.0 - p_up
+            o = 1 if r["actual_result"] == "UP" else 0
+            _brier_sum += (p_up - o) ** 2
+            _brier_n += 1
+            for b in _cal:
+                if b["lo"] <= p_up < b["hi"]:
+                    b["n"] += 1
+                    b["p_sum"] += p_up
+                    b["up"] += o
+                    break
 
         pp = out["per_pair"].setdefault(
             r["asset"], {"n": 0, "emit": 0, "wins": 0, "losses": 0,
@@ -608,6 +649,17 @@ def prediction_analytics(days=None):
             wh = min(hrows, key=lambda x: x[1])
             out["best_time"] = {"hour_utc": bh[0], "win_rate": round(bh[1], 2)}
             out["worst_time"] = {"hour_utc": wh[0], "win_rate": round(wh[1], 2)}
+    # HIST-ENGINE (2026-09-13): finalize Brier + calibration buckets
+    # (Deep Report §34 — "80% বললে সত্যিই ৮০% হয়?" প্রমাণের টেবিল)।
+    if _brier_n:
+        out["brier"] = round(_brier_sum / _brier_n, 4)
+    out["brier_n"] = _brier_n
+    out["calibration"] = [
+        {"lo": round(b["lo"], 2), "hi": round(b["hi"], 2),
+         "n": b["n"],
+         "avg_p": round(100.0 * b["p_sum"] / b["n"], 1) if b["n"] else None,
+         "actual_wr": round(100.0 * b["up"] / b["n"], 1) if b["n"] else None}
+        for b in _cal if b["n"]]
     return out
 
 

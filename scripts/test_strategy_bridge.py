@@ -96,6 +96,7 @@ def main():
     from core.otc_predict.features_ext import (
         build_unified_row, build_extended_row, UNIFIED_FEATURE_NAMES,
         EXTENDED_FEATURE_NAMES)
+    from core.otc_predict.hist_stats import HIST_FEATURE_NAMES
     row = build_unified_row(window, micro=None)
     check("unified is superset of extended",
           set(EXTENDED_FEATURE_NAMES) < set(row.keys()))
@@ -103,7 +104,12 @@ def main():
           all(k in row for k in STRATEGY_FEATURE_NAMES))
     check("UNIFIED names = extended + strategy",
           list(UNIFIED_FEATURE_NAMES) ==
-          list(EXTENDED_FEATURE_NAMES) + list(STRATEGY_FEATURE_NAMES))
+          list(EXTENDED_FEATURE_NAMES) + list(STRATEGY_FEATURE_NAMES)
+          # HIST-ENGINE (2026-09-13): + the 3 hist_* setup-match names
+          + list(HIST_FEATURE_NAMES))
+    check("unified row carries hist features (neutral without engine)",
+          all(k in row for k in HIST_FEATURE_NAMES)
+          and row["hist_p_up_t1"] == 0.5 and row["hist_conf"] == 0.0)
 
     print("== 4. agreement score math ==")
     check("full agree -> 1.0",

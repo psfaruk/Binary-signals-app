@@ -630,6 +630,31 @@
                         <span class="mdl-live-dot" id="mdl-live-dot"></span>
                         <span id="mdl-live-text">লাইভ ইঞ্জিন স্ট্যাটাস লোড হচ্ছে…</span>
                     </div>
+                    <!-- HIST-ENGINE (2026-09-13): Deep Report §21/§34 —
+                         calibration truth (Brier + predicted-vs-actual
+                         buckets) + payout break-even. "৮০% বললে কি সত্যিই
+                         ৮০% হয়?" — এখানেই উত্তর। -->
+                    <div class="mdl-calib" id="mdl-calib" style="display:none">
+                        <div class="mdl-calib-row">
+                            <span class="mdl-stat-label">Brier স্কোর</span>
+                            <span class="mdl-stat-value" id="mdl-a-brier">—</span>
+                            <span class="mdl-base" id="mdl-a-brier-n"></span>
+                        </div>
+                        <div class="mdl-calib-row">
+                            <span class="mdl-stat-label">পেআউট break-even</span>
+                            <span class="mdl-stat-value" id="mdl-a-ev">—</span>
+                        </div>
+                        <table class="mdl-calib-table" id="mdl-calib-table">
+                            <thead>
+                                <tr><th>বলেছিল</th><th>বাস্তবে</th><th>n</th></tr>
+                            </thead>
+                            <tbody id="mdl-calib-tbody"></tbody>
+                        </table>
+                        <p class="mdl-note">"বলেছিল" = মডেলের P(UP) বালতি, "বাস্তবে" =
+                        সেই প্রেডিকশনগুলোতে আসলে কত % UP হয়েছে। দুই সংখ্যা যত
+                        কাছাকাছি, মডেল তত সৎ-calibrated। Brier: 0.25 = কয়েন-টস
+                        লেভেল, যত কম তত ভালো।</p>
+                    </div>
                     <p class="mdl-note" id="mdl-analytics-note"></p>
                 </div>
 
