@@ -2133,7 +2133,8 @@ class QuotexFeed:
         return result, micro_hist
 
     async def _run_eoc(self, stream: _AssetStream,
-                actual_open: float | None = None) -> dict | None:
+                actual_open: float | None = None,
+                ml_payload: dict | None = None) -> dict | None:
         # FIX (DEEP-AUDIT-2026-07-26 / F-01-04): copy the candles list so the
         # EOC snapshot is not aliased to stream.candles. A concurrent
         # _close_running_and_start_new on another coroutine could append a
@@ -2204,6 +2205,61 @@ class QuotexFeed:
             running_ticks=None, stream=stream)
         if result is None:
             return None
+
+        # ── JOINT-VERIFICATION GATE (2026-09-13) ──────────────────────────
+        # USER REQUIREMENT: "মডেল ও মডিউল ইঞ্জিন একসাথে কাজ করুক — প্রতিটি
+        # সিগন্যাল verify হয়ে তবেই emit হবে।"
+        # Every CALL/PUT from the classic engine must now pass the JOINT
+        # gate (core/joint_gate.py) before reaching the UI/Telegram/webhooks:
+        #   1. MODEL VOICE  — the ML engine's frozen T+1 prediction for THIS
+        #      candle must agree (verified model + emit=True); a
+        #      guard-suspended pair is a hard reject.
+        #   2. VERIFIER VOICE — the 5-layer real-time verifier
+        #      (core/signal_verifier) runs on EVERY signal: VETO ⇒ reject,
+        #      WEAKEN ⇒ confidence ×0.5, CONFIRM ⇒ ×1.1.
+        #   3. FALLBACK BAR — every-candle fallback signals may emit only
+        #      with a verifier CONFIRM (audited 32-45% win otherwise).
+        # Fail-CLOSED: a gate exception ⇒ NEUTRAL, never an unverified
+        # signal. Disable the whole gate with env QX_JOINT_GATE=0.
+        if (os.environ.get("QX_JOINT_GATE", "1") == "1"
+                and result.get("signal") in ("CALL", "PUT")):
+            try:
+                from core.joint_gate import apply_joint_gate
+                _new_open_time = (closed[-1]["time"] + stream.period) \
+                    if closed else None
+                _gate = await asyncio.to_thread(
+                    apply_joint_gate, result, stream.asset, stream.period,
+                    closed, base_ticks, ml_payload, _new_open_time)
+                if _gate.get("rejected"):
+                    result["signal"] = "NEUTRAL"
+                    result["strength"] = "NEUTRAL"
+                    result["confidence"] = 0
+                    result["verified"] = False
+                    result["verification"] = _gate
+                    result.setdefault("reasons", []).append(
+                        "JOINT-GATE REJECT: " + _gate.get("reason", "unverified"))
+                else:
+                    result["verified"] = True
+                    result["verification"] = _gate
+                    if _gate.get("final_confidence") is not None:
+                        result["confidence"] = int(_gate["final_confidence"])
+                    result.setdefault("reasons", []).append(
+                        "JOINT-GATE PASS: " + _gate.get("reason", "verified"))
+            except Exception as _jg_exc:
+                # Fail-closed: an unverified signal must never ship.
+                print(f"[feed] joint-gate FAILED (fail-closed) for "
+                      f"{stream.asset}: {type(_jg_exc).__name__}: {_jg_exc}")
+                result["signal"] = "NEUTRAL"
+                result["strength"] = "NEUTRAL"
+                result["confidence"] = 0
+                result["verified"] = False
+                result["verification"] = {
+                    "rejected": True,
+                    "reason": f"gate error: {type(_jg_exc).__name__}"}
+                result.setdefault("reasons", []).append(
+                    f"JOINT-GATE ERROR (fail-closed): "
+                    f"{type(_jg_exc).__name__}: {_jg_exc}")
+
         # FIX (Bug #3, 2026-07-17): removed `stream.inverted = result.get("_flipped")`
         # — the prediction engine never emits an `_flipped` key, so this was
         # always False, and no caller ever read `stream.inverted` afterward.
@@ -3267,7 +3323,35 @@ class QuotexFeed:
                 stream.zone_streak = {"regime": _key[0], "zone": _key[1],
                                       "losses": 1 if accuracy == "wrong" else 0}
 
-        stream.prediction = await self._run_eoc(stream, actual_open=first_tick)
+        # ── OTC-PREDICT-ENGINE (2026-09-11, PART 15/16/27) ────────────────
+        # The just-closed candle is now fully CLOSED. Freeze the T+1/T+2
+        # predictions for the NEXT two candles (features use closed candles
+        # only — zero future information), settle any earlier predictions
+        # whose target candle just closed, and broadcast the card payload.
+        # Failures are swallowed: the live feed's health outranks predictions.
+        # JOINT-GATE (2026-09-13): this block now runs BEFORE _run_eoc so
+        # the ML engine's frozen T+1 opinion for THIS new candle exists when
+        # the classic signal is computed — the joint gate cross-checks the
+        # two engines against each other (model voice × module voice).
+        _otc_pred_payload = None
+        try:
+            from core.otc_predict.predictor import on_candle_closed
+            _otc_pred_payload = await asyncio.to_thread(
+                on_candle_closed, stream.asset, stream.period,
+                list(stream.candles), dict(closed), _micro_snap)
+        except Exception as _pred_exc:
+            print(f"[feed] otc-predict failed for {stream.asset}: "
+                  f"{type(_pred_exc).__name__}: {_pred_exc}")
+        if _otc_pred_payload and self._broadcast:
+            try:
+                await self._broadcast(
+                    {"type": "otc_pred", **_otc_pred_payload})
+            except Exception as _pred_exc:
+                print(f"[silent-except] feed.py otc_pred broadcast "
+                      f"{type(_pred_exc).__name__}: {_pred_exc}")
+
+        stream.prediction = await self._run_eoc(
+            stream, actual_open=first_tick, ml_payload=_otc_pred_payload)
         # FIX (LOSS-HISTORY-FIX, 2026-07-23): lock the direction at EOC.
         # Once the EOC prediction sets CALL or PUT, that direction is
         # locked for the entire candle — LIVE re-eval can update
@@ -3296,29 +3380,6 @@ class QuotexFeed:
             await asyncio.to_thread(
                 self._save_micro, stream.asset, stream.period, closed,
                 _micro_snap, stream.candles, list(stream.ticks))
-
-        # ── OTC-PREDICT-ENGINE (2026-09-11, PART 15/16/27) ────────────────
-        # The just-closed candle is now fully CLOSED. Freeze the T+1/T+2
-        # predictions for the NEXT two candles (features use closed candles
-        # only — zero future information), settle any earlier predictions
-        # whose target candle just closed, and broadcast the card payload.
-        # Failures are swallowed: the live feed's health outranks predictions.
-        _otc_pred_payload = None
-        try:
-            from core.otc_predict.predictor import on_candle_closed
-            _otc_pred_payload = await asyncio.to_thread(
-                on_candle_closed, stream.asset, stream.period,
-                list(stream.candles), dict(closed), _micro_snap)
-        except Exception as _pred_exc:
-            print(f"[feed] otc-predict failed for {stream.asset}: "
-                  f"{type(_pred_exc).__name__}: {_pred_exc}")
-        if _otc_pred_payload and self._broadcast:
-            try:
-                await self._broadcast(
-                    {"type": "otc_pred", **_otc_pred_payload})
-            except Exception as _pred_exc:
-                print(f"[silent-except] feed.py otc_pred broadcast "
-                      f"{type(_pred_exc).__name__}: {_pred_exc}")
 
         # FIX (DATA-FLOW-2026-07-22): record this candle with the algorithm
         # monitor. It maintains a rolling 30-candle window per asset and
