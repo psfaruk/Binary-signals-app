@@ -41,6 +41,14 @@ from core.otc_predict.price_action import price_action_confirm
 from core.otc_predict.signal_filter import score_signal
 from core.otc_predict.strategy_bridge import strategy_votes
 
+# EDGE-GUARD (2026-09-13): live win-rate circuit breaker — the module that
+# stops a losing pair from emitting ("লস বেশি হচ্ছে" must never be a
+# permanent state while signals keep firing).
+try:
+    from core.otc_predict import guard as _guard
+except Exception:      # pragma: no cover — guard must never kill the feed
+    _guard = None
+
 __all__ = ["on_candle_closed", "engine_enabled", "PRED_WINDOW",
            "runtime_status"]
 
@@ -225,6 +233,15 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
         if n:
             with _runtime_lock:
                 _runtime["settle_graded"] += n
+            # EDGE-GUARD: a fresh settlement changes the live win rate —
+            # drop the cached verdicts so the next prediction in THIS same
+            # callback decides with the new numbers (a losing streak
+            # suspends emission within ONE candle, not one TTL later).
+            try:
+                if _guard is not None:
+                    _guard.invalidate(asset)
+            except Exception:
+                pass
     except Exception as exc:
         print(f"[predictor] settle failed {asset}: {type(exc).__name__}: {exc}")
         _note(asset, last_error=f"settle: {type(exc).__name__}: {exc}")
@@ -240,6 +257,12 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 _runtime["settle_history"] += n
             print(f"[predictor] {asset}: settled {n} missed-close "
                   f"prediction(s) from reloaded history")
+            # EDGE-GUARD: missed settlements change the live win rate too
+            try:
+                if _guard is not None:
+                    _guard.invalidate(asset)
+            except Exception:
+                pass
     except Exception as exc:
         print(f"[predictor] settle-from-history failed {asset}: "
               f"{type(exc).__name__}: {exc}")
@@ -332,16 +355,63 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
             direction_up = prob is not None and prob >= 0.5
             pa = price_action_confirm(window, direction_up, features=feats)
             reg_info = detect_regime(window)
+
+            # EDGE-GUARD (2026-09-13): has THIS (pair, horizon) actually been
+            # winning live? A pair whose emitted signals sit below the
+            # payout break-even is suspended — the prediction still freezes
+            # and grades (PART 16/17 unchanged), it just stops being sold.
+            g_allowed, g_state, g_reason, g_stats = (True, None, None, None)
+            try:
+                if _guard is not None:
+                    g_allowed, g_state, g_reason, g_stats = \
+                        _guard.emission_allowed(asset, horizon, period)
+            except Exception as _g_exc:
+                print(f"[predictor] guard failed {asset} t{horizon}: "
+                      f"{type(_g_exc).__name__}: {_g_exc}")
+
             quality = _quality_gates(window, period, bundle, reg_info, pa)
+            # EDGE-GUARD gate visible in the frozen row's quality JSON
+            quality["live_edge_ok"] = bool(g_allowed)
+
+            # HIST-ENGINE second voice: does the historical setup-match
+            # agree with the ML direction? (None = abstained — does not
+            # count for or against; the strategy voice is consulted too.)
+            _hist_agrees = None
+            if hist_look:
+                _hp = hist_look.get(
+                    "p_up_t1" if horizon == 1 else "p_up_t2")
+                if _hp is not None:
+                    _hist_agrees = bool(_hp >= 0.5) == direction_up
+
             filt = score_signal(
                 prob if prob is not None else 0.5, direction_up,
-                pa, reg_info, quality, strategy=strat_summary)
+                pa, reg_info, quality, strategy=strat_summary,
+                model_status=(bundle.meta.get("status", "verified")
+                              if bundle else None),
+                horizon=horizon, hist_agrees=_hist_agrees)
+            # EDGE-GUARD final say — runs AFTER score_signal so the edge
+            # gates are recorded, but a suspended pair can NEVER emit.
+            if not g_allowed:
+                filt["emit"] = False
+                _gr = filt.get("reason") or ""
+                if "guard_suspended" not in _gr:
+                    filt["reason"] = (_gr + ";" if _gr else "") + \
+                        f"guard_suspended:{g_state}"
+                filt["guard"] = {"state": g_state, "reason": g_reason,
+                                 "stats": g_stats}
             filt["probability"] = round(prob, 4) if prob is not None else 0.5
             filt["status"] = "ok" if prob is not None else "model_missing"
             target_time = closed_candle["time"] + horizon * period
-            pred_candle = future_candle(
-                base_close, window_atr, direction_up,
-                filt["probability"], target_time)
+            # FUTURE-CANDLE honesty (EDGE-GUARD 2026-09-13): the ghost
+            # candle geometry is attached ONLY to a slot the system
+            # actually endorses for trading (emit=True). Every non-emitted
+            # slot carries candle=None — the chart stops painting
+            # coin-flip directions the user was visually trading.
+            pred_candle = None
+            if filt["emit"]:
+                pred_candle = future_candle(
+                    base_close, window_atr, direction_up,
+                    filt["probability"], target_time)
             # HIST-ENGINE: freeze the historical setup-match verdict into
             # the components JSON — reload-proof (the REST path rebuilds
             # the strip from comp.hist exactly like comp.strategy).
@@ -407,7 +477,9 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 # code overwrote payload["quality"] with the t2 pass, so
                 # t1's gate state was silently lost.
                 "quality": quality,
-                # FUTURE-CANDLE payload: expected OHLC for this horizon.
+                # FUTURE-CANDLE payload: expected OHLC for this horizon —
+                # None unless the slot is EMITTED (EDGE-GUARD honesty:
+                # no ghost candle for display-only predictions).
                 "candle": pred_candle,
                 # UNIFIED-SIGNAL: classic strategies' verdict + unified
                 # score component (agreement in [0,1]).
@@ -417,6 +489,10 @@ def on_candle_closed(asset, period, candles, closed_candle, micro):
                 # verdict for THIS horizon — Deep Report §13's "ঐতিহাসিক
                 # প্যাটার্ন মিল" voice in the ensemble display.
                 "hist": hist_slot,
+                # EDGE-GUARD (2026-09-13): the live circuit-breaker verdict
+                # for this (pair, horizon) — the UI shows the suspension
+                # reason in plain Bengali instead of a silent NO TRADE.
+                "guard": filt.get("guard"),
                 "frozen_new": bool(inserted),
                 # frozen_new=False ⇒ the UNIQUE freeze key already held a row
                 # (replay/late callback) and the original prediction stands —

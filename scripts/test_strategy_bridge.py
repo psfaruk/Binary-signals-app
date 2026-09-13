@@ -279,8 +279,12 @@ def main():
           0.0 <= (t1.get("strategy_agree") or 0) <= 1.0)
     check("t2 has strategy too",
           isinstance(payload["t2"].get("strategy"), dict))
-    check("candle geometry still present",
-          isinstance(t1.get("candle"), dict))
+    # EDGE-GUARD (2026-09-13): ghost-candle geometry is attached ONLY to
+    # emitted slots. This bundle is PROVISIONAL → display-only → no candle
+    # (the chart must not paint a direction the system won't trade).
+    check("provisional model carries NO ghost candle (emit-only geometry)",
+          t1.get("candle") is None and t1.get("emit") is False,
+          f"candle={t1.get('candle')} emit={t1.get('emit')}")
 
     # frozen row components carry the strategy component
     lp = tracker.latest_predictions("CCC_otc", 4)

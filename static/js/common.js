@@ -2673,6 +2673,13 @@ function setModelGhostCandles(asset, t1, t2){
   var out = [];
   [t1, t2].forEach(function(slot){
     if(!slot || !slot.candle) return;
+    // EDGE-GUARD (2026-09-13): ghost candles are painted ONLY for slots
+    // the system actually endorses (emit=true, server attached geometry).
+    // Non-emitted slots arrive with candle=null — "ডিরেকশন wrong দেখানো
+    // হয়" was the user trading display-only coin-flip ghosts off the
+    // chart; those no longer render. The prediction CARD still shows the
+    // honest NO TRADE row with its probability and grade.
+    if(!slot.emit) return;
     var c = slot.candle;
     var t = typeof c.time === 'number' ? Math.floor(c.time) : 0;
     var o = +c.open, h = +c.high, l = +c.low, cl = +c.close;
@@ -2697,6 +2704,12 @@ function setModelGhostCandles(asset, t1, t2){
   // No model slots (e.g. a 'no_model' frame): leave the old engine's ghost
   // candle untouched — the model layer simply is not active for this pair.
   if(out.length) drawModelGhostCandles();
+  else if(modelPredAsset === currentAsset){
+    // every slot suppressed (guard / not verified / below band) — clear
+    // stale ghosts so the chart never shows an outdated direction
+    try{ ghostSeries && ghostSeries.setData([]); }catch(_){ }
+    modelGhostDrawn = [];   // keep the debug/test mirror in sync
+  }
 }
 
 function drawModelGhostCandles(){
@@ -2792,8 +2805,11 @@ function _predRowToSlot(r){
     // geometry as WS frames — pass it through so setModelGhostCandles()
     // can paint the frozen future candles on fresh page loads.
     candle: r.candle || null,
+    // EDGE-GUARD (2026-09-13): the live circuit-breaker verdict frozen
+    // with newer rows — powers the NO TRADE reason line.
+    guard: r.guard || null,
     win_loss: r.win_loss, actual_result: r.actual_result,
-    reason: '' ,
+    reason: r.reason || '',
   };
 }
 
@@ -2816,11 +2832,28 @@ function _predSlotHTML(labelBn, labelEn, slot){
   if(slot.win_loss === 'loss') resultChip = '<span class="pred-result loss">✗ লস</span>';
   if(slot.win_loss === 'draw') resultChip = '<span class="pred-result draw">◆ ড্র</span>';
   if(!slot.emit){
+    // EDGE-GUARD (2026-09-13): say WHY there is no trade — a suspended
+    // pair shows its live win-rate reason in plain Bengali instead of an
+    // unexplained silence ("লস বেশি হচ্ছে" → the system answers itself).
+    let why = 'অবিশ্বাস্য মাত্রা — সিগন্যাল নেই (' + pct + ')';
+    if(slot.guard && slot.guard.reason){
+      why = esc(slot.guard.reason);
+    } else if(slot.reason && /guard_suspended/.test(slot.reason)){
+      why = 'লাইভ জিৎ-হার break-even-এর নিচে — এই পেয়ারের সিগন্যাল সাময়িক বন্ধ';
+    } else if(slot.reason && /model_not_verified/.test(slot.reason)){
+      why = 'মডেল এখনো প্রোভিশনাল — verified না হওয়া পর্যন্ত সিগন্যাল নেই';
+    } else if(slot.reason && /prob_below_band|coin_flip/.test(slot.reason)){
+      why = 'প্রোবাবিলিটি ব্যান্ডের ভিতরে (' + pct + ') — সিগন্যাল নেই';
+    } else if(slot.reason && /no_second_voice/.test(slot.reason)){
+      why = 'একক ভয়েস — কৌশল/হিস্ট্রি সমর্থন নেই, সিগন্যাল নেই';
+    } else if(slot.reason && /t2_emit_disabled/.test(slot.reason)){
+      why = 'T+2 সিগন্যাল বন্ধ (কয়েন-ফ্লিপ এজ) — ট্র্যাকিং চলছে';
+    }
     return '<div class="pred-row pred-row-notrade">' +
       '<span class="pred-row-label">' + esc(labelBn) + ' <small>(' + esc(labelEn) + ')</small></span>' +
       '<span class="pred-row-value notrade">NO TRADE' + resultChip + '</span>' +
       '</div>' +
-      '<div class="pred-sub">অবিশ্বাস্য মাত্রা — সিগন্যাল নেই (' + pct + ')</div>';
+      '<div class="pred-sub">' + why + '</div>';
   }
   return '<div class="pred-row">' +
     '<span class="pred-row-label">' + esc(labelBn) + ' <small>(' + esc(labelEn) + ')</small></span>' +

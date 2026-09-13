@@ -187,12 +187,18 @@ check("unified strategy component present",
       "strategy" in s_coin["components"]
       and s_coin["components"]["strategy"] == 0.5,
       str(s_coin["components"]))
-s_strong = score_signal(0.93, True, pa_perfect, reg, quality_ok)
-check("0.93 prob + full PA → HIGH, emitted",
+# EDGE-GUARD (2026-09-13): emission now additionally requires a VERIFIED
+# model, a probability beyond the 0.65 band, and a second agreeing voice —
+# the measured real-data edge is coin-flip, so the old "score alone emits"
+# behaviour was exactly the wrong-direction-losses complaint.
+s_strong = score_signal(0.93, True, pa_perfect, reg, quality_ok,
+                        model_status="verified", hist_agrees=True)
+check("0.93 prob + full PA + verified + voice → HIGH, emitted",
       s_strong["tier"] == "HIGH" and s_strong["emit"] is True,
       f"tier={s_strong['tier']} score={s_strong['score']}")
-s_mid = score_signal(0.75, True, pa_perfect, reg, quality_ok)
-check("calibrated 75% + full PA → GOOD, emitted",
+s_mid = score_signal(0.75, True, pa_perfect, reg, quality_ok,
+                     model_status="verified", hist_agrees=True)
+check("calibrated 75% + full PA + verified + voice → GOOD, emitted",
       s_mid["tier"] == "GOOD" and s_mid["emit"] is True,
       f"tier={s_mid['tier']} score={s_mid['score']}")
 s_qfail = score_signal(0.93, True, pa_perfect, reg,
@@ -206,6 +212,43 @@ s_veto = score_signal(0.93, True, pa_with_veto,
 check("veto blocks emission", s_veto["emit"] is False)
 check("probability echoed calibrated value",
       s_strong["probability"] == 0.93)
+# ── EDGE-GUARD emission gates (2026-09-13) ─────────────────────────────
+s_prov = score_signal(0.93, True, pa_perfect, reg, quality_ok,
+                      model_status="provisional", hist_agrees=True)
+check("provisional model NEVER emits (display-only)",
+      s_prov["emit"] is False and "model_not_verified" in s_prov["reason"],
+      str(s_prov["reason"]))
+s_nover = score_signal(0.93, True, pa_perfect, reg, quality_ok,
+                       hist_agrees=True)
+check("unknown model status never emits",
+      s_nover["emit"] is False and "model_not_verified" in s_nover["reason"],
+      str(s_nover["reason"]))
+s_band = score_signal(0.58, True, pa_perfect, reg, quality_ok,
+                      model_status="verified", hist_agrees=True)
+check("probability inside the 0.35-0.65 band never emits",
+      s_band["emit"] is False and "prob_below_band" in s_band["reason"],
+      str(s_band["reason"]))
+s_nokey = score_signal(0.62, True, pa_perfect, reg, quality_ok,
+                       model_status="verified", hist_agrees=True)
+check("p=0.62 inside band (below 0.65) never emits",
+      s_nokey["emit"] is False, str(s_nokey["reason"]))
+s_t2 = score_signal(0.93, True, pa_perfect, reg, quality_ok,
+                    model_status="verified", hist_agrees=True, horizon=2)
+check("T+2 emission disabled by default (coin-flip horizon)",
+      s_t2["emit"] is False and "t2_emit_disabled" in s_t2["reason"],
+      str(s_t2["reason"]))
+s_nov = score_signal(0.93, True, pa_perfect, reg, quality_ok,
+                     model_status="verified", hist_agrees=False)
+check("single voice DISAGREEING blocks emission",
+      s_nov["emit"] is False and "no_second_voice" in s_nov["reason"],
+      str(s_nov["reason"]))
+s_strat = score_signal(
+    0.93, True, pa_perfect, reg, quality_ok, model_status="verified",
+    strategy={"direction": "CALL", "net": 2.0, "agree_count": 8,
+              "against_count": 1, "voters": 9})
+check("strategy voice alone can carry the second-vote",
+      s_strat["emit"] is True, str(s_strat["reason"]))
+
 
 print("── 6. prediction FREEZE + settlement (PART 16/17) ──")
 import db as _db                                        # noqa: E402

@@ -2717,6 +2717,23 @@ async def get_prediction_bootstrap():
     """Fast-train bootstrap state (runs, config, last result)."""
     return await asyncio.to_thread(_fast_train.bootstrap_status)
 
+@app.get("/api/prediction/guard")
+async def get_prediction_guard():
+    """EDGE-GUARD (2026-09-13): live win-rate circuit breaker state.
+
+    Per (pair × horizon): is emission allowed, why not, and the numbers
+    behind the verdict (emit win rate, Wilson lower bound vs the payout
+    break-even). The মডেল tab shows this so "লস বেশি হচ্ছে" is answered
+    with the suspension reason instead of more losing signals.
+    """
+    try:
+        from core.otc_predict import guard as _guard_mod
+        from core.constants import ALLOWED_PAIRS_OTC as _PAIRS
+        assets = sorted(set(_PAIRS))
+        return await asyncio.to_thread(_guard_mod.guard_status, assets)
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
 @app.post("/api/prediction/bootstrap")
 async def post_prediction_bootstrap():
     """Force a fast-train run right now (non-blocking; one at a time)."""
@@ -2878,18 +2895,24 @@ async def get_prediction_card(asset: str):
         # ATR = the pair's closed-candle history up to that signal_time.
         # Rows older than the retained history get a price-relative ATR
         # fallback (geometry stays visible, never fabricated direction).
+        # EDGE-GUARD (2026-09-13): geometry is attached ONLY to EMITTED
+        # rows — the live WS path stopped painting ghosts for display-only
+        # predictions, and the REST path must stay identical so a page
+        # reload never resurrects a suppressed candle.
         base = r.get("close_i") or 0.0
-        try:
-            hist = _db.get_micro_history(asset, int(r["period"]), 20,
-                                         before_ctime=int(r["signal_time"]) + 1)
-            row_atr = atr_from_candles(hist) if hist else 0.0
-        except Exception:
-            row_atr = 0.0
-        if not row_atr or row_atr <= 0:
-            row_atr = abs(base) * 0.0001 if base else 0.0001
-        direction_up = (r["prediction"] == "CALL")
-        candle = future_candle(base, row_atr, direction_up,
-                               r["probability"], r["target_time"])
+        candle = None
+        if r.get("emit"):
+            try:
+                hist = _db.get_micro_history(asset, int(r["period"]), 20,
+                                             before_ctime=int(r["signal_time"]) + 1)
+                row_atr = atr_from_candles(hist) if hist else 0.0
+            except Exception:
+                row_atr = 0.0
+            if not row_atr or row_atr <= 0:
+                row_atr = abs(base) * 0.0001 if base else 0.0001
+            direction_up = (r["prediction"] == "CALL")
+            candle = future_candle(base, row_atr, direction_up,
+                                   r["probability"], r["target_time"])
         # UNIFIED-SIGNAL (2026-09-13): reconstruct the classic strategies'
         # verdict from the frozen components JSON — components.strategy is
         # the strategies' agreement with THIS row's ML direction (0.5 =

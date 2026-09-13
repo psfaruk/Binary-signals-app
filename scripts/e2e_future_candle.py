@@ -168,18 +168,25 @@ check("payload returned", payload is not None and payload.get("status") == "ok",
       str(payload and payload.get("status")))
 t1 = (payload or {}).get("t1") or {}
 t2 = (payload or {}).get("t2") or {}
-check("t1.candle geometry present", isinstance(t1.get("candle"), dict),
-      str(t1))
-check("t2.candle geometry present", isinstance(t2.get("candle"), dict),
-      str(t2))
+# EDGE-GUARD (2026-09-13): a PROVISIONAL model is display-only — no
+# emission, NO ghost candle. The old test asserted candles here; the new
+# honesty contract is candle=None unless the slot actually emits.
+check("provisional t1 emits nothing", t1.get("emit") is False, str(t1.get("emit")))
+check("provisional t2 emits nothing", t2.get("emit") is False, str(t2.get("emit")))
+check("provisional t1 carries NO ghost candle",
+      t1.get("candle") is None, str(t1.get("candle")))
+check("provisional t2 carries NO ghost candle",
+      t2.get("candle") is None, str(t2.get("candle")))
+check("provisional reason names the edge gate",
+      "model_not_verified" in (t1.get("reason") or ""), str(t1.get("reason")))
+check("t2 reason names the disabled second horizon",
+      "t2_emit_disabled" in (t2.get("reason") or ""), str(t2.get("reason")))
 check("t1 target time = closed + 60",
       t1.get("target_time") == closed["time"] + 60)
 check("t2 target time = closed + 120",
       t2.get("target_time") == closed["time"] + 120)
-check("t1.candle time matches target_time",
-      t1.get("candle", {}).get("time") == t1.get("target_time"))
-check("t2.candle time matches target_time",
-      t2.get("candle", {}).get("time") == t2.get("target_time"))
+check("t1 target time still broadcast (card countdown)",
+      isinstance(t1.get("target_time"), int))
 
 
 def _dir_ok(slot):
@@ -191,10 +198,6 @@ def _dir_ok(slot):
     if slot.get("prediction") == "PUT":
         return c["close"] < c["open"]
     return False
-
-
-check("t1 candle direction matches frozen prediction", _dir_ok(t1), str(t1))
-check("t2 candle direction matches frozen prediction", _dir_ok(t2), str(t2))
 check("t1 carries its own quality gates (P6 fix)",
       isinstance(t1.get("quality"), dict)
       and "no_gap" in t1.get("quality", {}))
@@ -204,15 +207,75 @@ check("t2 carries its own quality gates (P6 fix)",
 check("top-level quality mirrors t1 (backward compat)",
       payload.get("quality") == t1.get("quality"))
 
-# candle anchored at the closed candle's close price
-check("t1 candle opens at closed candle close",
-      abs((t1.get("candle") or {}).get("open", 0) - closed["close"]) < 1e-6,
-      f"{(t1.get('candle') or {}).get('open')} vs {closed['close']}")
-check("t2 candle opens at closed candle close",
-      abs((t2.get("candle") or {}).get("open", 0) - closed["close"]) < 1e-6)
+# ── PHASE B2 — VERIFIED bundle + full-agreement voices → t1 EMITS ────
+print("── PHASE B2: verified model, voices agree — emitted ghost candle ──")
+# NOTE: the generator's default t0 depends on n — generating 121 candles
+# with the default start would land closed2 at the SAME minute as closed
+# (key collision on the freeze table, INSERT OR IGNORE silently keeps the
+# old provisional rows). Anchor the second series to the first one's grid
+# so closed2 is exactly one minute after closed.
+live_candles2 = _synthetic_candles(121, seed=11,
+                                    start=live_candles[0]["time"] + 60)
+window2 = live_candles2[-50:]
+closed2 = window2[-1]
+_verified = _models.ModelBundle(
+    "vfc-e2e-2", EXTENDED_FEATURE_NAMES,
+    {"model": m1, "platt": coefs, "name": "logreg"},
+    {"model": m2, "platt": coefs, "name": "logreg"},
+    {"status": "verified", "rows": len(rows)})
+_verified.predict_up = lambda horizon, feat_row: 0.90
+_predictor._cache["reg"] = {"TESTPAIR_otc": {
+    "name": "TESTPAIR_otc", "version": "vfc-e2e-2", "path": path}}
+_predictor._cache["bundles"] = {"TESTPAIR_otc:vfc-e2e-2": _verified}
+_predictor._cache["checked_at"] = time.time()
 
+_orig_sv = _predictor.strategy_votes
+_orig_ll = _predictor.live_lookup
+_orig_pa = _predictor.price_action_confirm
+_orig_dr = _predictor.detect_regime
+_predictor.strategy_votes = lambda w, ticks=None: ({}, {
+    "direction": "CALL", "net": 1.0, "agree_count": 5,
+    "against_count": 0, "voters": 5})
+_predictor.live_lookup = lambda a, p, c: {
+    "p_up_t1": 0.9, "n_t1": 500, "level_t1": "L2",
+    "p_up_t2": 0.9, "n_t2": 500, "level_t2": "L2"}
+_predictor.price_action_confirm = lambda w, d, features=None, regime=None: {
+    "pa_score": 1.0, "agreed": True, "against_count": 0, "veto": None,
+    "components": {"trend": 1.0, "momentum": 1.0, "level": 1.0,
+                   "rejection": 1.0, "structure": 1.0}}
+_predictor.detect_regime = lambda w: {
+    "regime": "RANGING", "trend_score": 0.1, "vol_state": "normal",
+    "extreme_vol": False}
+try:
+    payload2 = _predictor.on_candle_closed("TESTPAIR_otc", 60, window2,
+                                           closed2, micro)
+finally:
+    _predictor.strategy_votes = _orig_sv
+    _predictor.live_lookup = _orig_ll
+    _predictor.price_action_confirm = _orig_pa
+    _predictor.detect_regime = _orig_dr
+
+v1 = (payload2 or {}).get("t1") or {}
+v2 = (payload2 or {}).get("t2") or {}
+check("verified+agreed t1 EMITS", v1.get("emit") is True, str(v1.get("emit")))
+check("emitted t1 carries ghost candle geometry",
+      isinstance(v1.get("candle"), dict), str(v1.get("candle")))
+check("emitted t1 candle direction matches prediction (CALL)",
+      _dir_ok(v1), str(v1))
+check("emitted t1 candle opens at closed candle close",
+      abs((v1.get("candle") or {}).get("open", 0) - closed2["close"]) < 1e-6)
+check("emitted t1 candle time matches target_time",
+      v1.get("candle", {}).get("time") == v1.get("target_time"))
+check("t2 still display-only (second horizon disabled)",
+      v2.get("emit") is False and v2.get("candle") is None, str(v2.get("emit")))
 # freeze actually happened (PART 16) — same directions in the DB
 from core.otc_predict.tracker import latest_predictions             # noqa: E402
+frozen2 = latest_predictions("TESTPAIR_otc", 6)
+sig2 = [r for r in frozen2 if r["signal_time"] == closed2["time"]]
+emit_rows = [r for r in sig2 if r["emit"]]
+check("emitted row frozen with emit=1", len(emit_rows) == 1,
+      str([(r['horizon'], r['emit']) for r in sig2]))
+
 frozen = latest_predictions("TESTPAIR_otc", 4)
 sig_rows = [r for r in frozen if r["signal_time"] == closed["time"]]
 check("frozen rows written for this close", len(sig_rows) == 2,
@@ -251,23 +314,28 @@ try:
     cur = card.get("current") or []
     check("REST card current group has both horizons", len(cur) == 2,
           str(len(cur)))
+    # The newest frozen snapshot is the Phase-B2 one: t1 emitted (candle
+    # present), t2 display-only (candle None) — the REST path must mirror
+    # the WS payload exactly (EDGE-GUARD parity).
     if len(cur) == 2:
         r1, r2 = cur[0], cur[1]
-        check("REST t1 row carries candle geometry",
-              isinstance(r1.get("candle"), dict), str(r1))
-        check("REST t2 row carries candle geometry",
-              isinstance(r2.get("candle"), dict), str(r2))
-        # anchored at the frozen close_i (geometry base from the DB row)
-        from core.otc_predict.tracker import latest_predictions as _lp
-        fz = [x for x in _lp("TESTPAIR_otc", 4)
-              if x["signal_time"] == closed["time"]]
-        fz1 = next((x for x in fz if x["horizon"] == 1), None)
-        if fz1:
-            check("REST t1 candle anchored at frozen close_i",
-                  abs(r1["candle"]["open"] - (fz1["close_i"] or 0)) < 1e-6,
-                  f"{r1['candle']['open']} vs {fz1['close_i']}")
-        check("REST t1 candle time == target_time",
-              r1.get("candle", {}).get("time") == r1.get("target_time"))
+        check("REST emitted t1 row carries candle geometry",
+              r1.get("emit") and isinstance(r1.get("candle"), dict),
+              str(r1.get("emit")) + " " + str(r1.get("candle")))
+        check("REST non-emitted t2 row carries NO candle",
+              (not r2.get("emit")) and r2.get("candle") is None,
+              str(r2.get("emit")) + " " + str(r2.get("candle")))
+        if r1.get("candle"):
+            from core.otc_predict.tracker import latest_predictions as _lp
+            fz = [x for x in _lp("TESTPAIR_otc", 8)
+                  if x["signal_time"] == r1.get("signal_time")]
+            fz1 = next((x for x in fz if x["horizon"] == 1), None)
+            if fz1:
+                check("REST t1 candle anchored at frozen close_i",
+                      abs(r1["candle"]["open"] - (fz1["close_i"] or 0)) < 1e-6,
+                      f"{r1['candle']['open']} vs {fz1['close_i']}")
+            check("REST t1 candle time == target_time",
+                  r1.get("candle", {}).get("time") == r1.get("target_time"))
 
     # the frontend half of the fix must be SERVED (not just backend)
     with urllib.request.urlopen(BASE + "/static/js/common.js",
@@ -316,40 +384,76 @@ try:
             if ready:
                 # /app boots the 'otc' category → currentAsset = EURUSD_otc.
                 # onOtcPred drops frames for other pairs (defensive filter),
-                # so the injected frame must carry THAT asset — the geometry
-                # (t1/t2 candle OHLC from PHASE B) is what we verify.
+                # so the injected frame must carry THAT asset.
+                # EDGE-GUARD contract: t1 = EMITTED slot WITH geometry (must
+                # draw), t2 = display-only (must NOT draw) — and a third
+                # rogue slot (emit=false but geometry present) verifies the
+                # frontend refuses non-emit geometry even if a bug sends it.
                 cur_asset = page.evaluate("() => window.__modelPred().currentAsset")
                 check("browser booted on a pair (otc default)",
                       bool(cur_asset), str(cur_asset))
+                from core.otc_predict.geometry import future_candle as _fc
+                from core.otc_predict.geometry import atr_from_candles as _atr
+                _a = _atr(window2)
+                emit_candle = _fc(closed2["close"], _a, True, 0.9,
+                                  closed2["time"] + 60)
+                rogue_candle = _fc(closed2["close"], _a, False, 0.55,
+                                   closed2["time"] + 120)
                 frame = {
                     "asset": cur_asset,
                     "period": 60,
                     "status": "ok",
-                    "model_version": "vfc-e2e-1",
-                    "model_status": "provisional",
-                    "signal_time": closed["time"],
+                    "model_version": "vfc-e2e-2",
+                    "model_status": "verified",
+                    "signal_time": closed2["time"],
                     "locked": True,
-                    "t1": t1, "t2": t2,
+                    "t1": {"target_time": closed2["time"] + 60,
+                           "prediction": "CALL", "probability": 0.9,
+                           "tier": "HIGH", "score": 92, "emit": True,
+                           "reason": "tier:HIGH",
+                           "candle": emit_candle},
+                    "t2": {"target_time": closed2["time"] + 120,
+                           "prediction": "PUT", "probability": 0.55,
+                           "tier": "WATCH", "score": 62, "emit": False,
+                           "reason": "edge_guard:t2_emit_disabled",
+                           "candle": None},
                 }
                 page.evaluate("fr => window.__feedOtcPred(fr)", frame)
                 st = page.evaluate("() => window.__modelPred()")
-                check("browser stored model ghost candles",
-                      st["asset"] == cur_asset and len(st["candles"]) == 2,
+                check("browser stored ONLY the emitted ghost candle",
+                      st["asset"] == cur_asset and len(st["candles"]) == 1,
                       json.dumps(st))
-                check("browser ghost candles carry the payload geometry",
-                      len(st["candles"]) == 2
-                      and st["candles"][0]["time"] == t1["target_time"]
-                      and st["candles"][1]["time"] == t2["target_time"])
-                check("ghost series actually painted (drawn payload)",
-                      len(st["drawn"]) == 2, json.dumps(st.get("drawn")))
-                if len(st["drawn"]) == 2:
-                    d1, d2 = st["drawn"]
-                    check("drawn T+1 keeps its direction",
-                          (d1["close"] > d1["open"]) ==
-                          (t1["prediction"] == "CALL"))
-                    check("drawn T+2 keeps its direction",
-                          (d2["close"] > d2["open"]) ==
-                          (t2["prediction"] == "CALL"))
+                if len(st["candles"]) == 1:
+                    check("stored ghost carries the emitted geometry",
+                          st["candles"][0]["time"] == closed2["time"] + 60)
+                check("ghost series painted exactly the emitted candle",
+                      len(st["drawn"]) == 1
+                      and st["drawn"][0]["time"] == closed2["time"] + 60,
+                      json.dumps(st.get("drawn")))
+                if len(st["drawn"]) == 1:
+                    d1 = st["drawn"][0]
+                    check("drawn T+1 keeps its direction (CALL up)",
+                          d1["close"] > d1["open"])
+                # rogue frame: emit=false + geometry — frontend must refuse
+                rogue_frame = {
+                    "asset": cur_asset, "period": 60, "status": "ok",
+                    "model_version": "vfc-e2e-2",
+                    "model_status": "verified",
+                    "signal_time": closed2["time"],
+                    "locked": True,
+                    "t1": {"target_time": closed2["time"] + 60,
+                           "prediction": "PUT", "probability": 0.55,
+                           "tier": "WATCH", "score": 62, "emit": False,
+                           "reason": "edge_guard:prob_below_band",
+                           "candle": rogue_candle},
+                    "t2": None,
+                }
+                page.evaluate("fr => window.__feedOtcPred(fr)", rogue_frame)
+                st2 = page.evaluate("() => window.__modelPred()")
+                check("frontend REFUSES non-emit geometry (rogue slot)",
+                      len(st2["candles"]) == 0 and len(st2["drawn"]) == 0,
+                      json.dumps({"candles": st2["candles"],
+                                  "drawn": st2["drawn"]}))
                 # the card must tell the user the candles are on the chart
                 card_txt = page.evaluate(
                     "() => document.getElementById('pred-card') ?"
