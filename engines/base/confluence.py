@@ -66,18 +66,23 @@ import os
 # The user's standing requirement is: "আমার প্রত্যেকটি ক্যান্ডেল এ সিগন্যাল লাগবে"
 # (every candle MUST produce a CALL or PUT signal).
 #
-#   "every_candle"  (DEFAULT) — strict confluence is tried first; when any
+#   "every_candle"  (legacy opt-in) — strict confluence is tried first; when any
 #       gate rejects the setup, a DETERMINISTIC evidence-based fallback
 #       direction is emitted instead of NEUTRAL so coverage is 100%.
 #       Fallback signals are honestly labeled (strategy
 #       "confluence_v1_fallback", confidence 50-63, quality FALLBACK) so
 #       the UI and win-rate stats can always separate them from strict
 #       high-confidence signals.
-#   "strict" — the original CONFLUENCE-V1 abstention behavior: any gate
-#       failure returns NEUTRAL (coverage historically 0-0.4%).
-SIGNAL_MODE = os.environ.get("QX_SIGNAL_MODE", "every_candle").strip().lower()
+#   "strict" (DEFAULT) — any gate failure returns NEUTRAL. This is the only
+#       honest production default: a forced direction has no demonstrated
+#       edge and must never be presented as a trade recommendation.
+#
+# Operators who deliberately prefer coverage over accuracy can still set
+# QX_SIGNAL_MODE=every_candle, but that mode is unsuitable for an
+# accuracy/positive-EV target.
+SIGNAL_MODE = os.environ.get("QX_SIGNAL_MODE", "strict").strip().lower()
 if SIGNAL_MODE not in ("every_candle", "strict"):
-    SIGNAL_MODE = "every_candle"
+    SIGNAL_MODE = "strict"
 
 # ── Tunables (env-overridable for ops, safe defaults) ────────────────────────
 MIN_AGREE_CLUSTERS = max(2, int(os.environ.get("QX_MIN_AGREE_CLUSTERS", "3")))
