@@ -2206,23 +2206,23 @@ class QuotexFeed:
         if result is None:
             return None
 
-        # ── JOINT-VERIFICATION GATE (2026-09-13) ──────────────────────────
-        # USER REQUIREMENT: "মডেল ও মডিউল ইঞ্জিন একসাথে কাজ করুক — প্রতিটি
-        # সিগন্যাল verify হয়ে তবেই emit হবে।"
+        # ── JOINT-VERIFICATION GATE (2026-09-14, HARD-CODED ON) ──────────
+        # USER REQUIREMENT: "সব ML ও মডিউল ইঞ্জিন verify করবে — আরো হার্ড
+        # চেক করে সিগন্যাল দেবে, false signal দেবে না।"
         # Every CALL/PUT from the classic engine must now pass the JOINT
         # gate (core/joint_gate.py) before reaching the UI/Telegram/webhooks:
         #   1. MODEL VOICE  — the ML engine's frozen T+1 prediction for THIS
         #      candle must agree (verified model + emit=True); a
         #      guard-suspended pair is a hard reject.
         #   2. VERIFIER VOICE — the 5-layer real-time verifier
-        #      (core/signal_verifier) runs on EVERY signal: VETO ⇒ reject,
-        #      WEAKEN ⇒ confidence ×0.5, CONFIRM ⇒ ×1.1.
-        #   3. FALLBACK BAR — every-candle fallback signals may emit only
-        #      with a verifier CONFIRM (audited 32-45% win otherwise).
+        #      (core/signal_verifier) runs on EVERY signal; ANY single layer
+        #      VETO ⇒ reject, WEAKEN ⇒ confidence ×0.5, CONFIRM ⇒ ×1.1.
+        #   3. FALLBACK POLICY — every-candle fallback signals emit only
+        #      with a verifier CONFIRM or an ML joint agreement (verified
+        #      ML emit=True, same direction, clean verifier pass).
         # Fail-CLOSED: a gate exception ⇒ NEUTRAL, never an unverified
-        # signal. Disable the whole gate with env QX_JOINT_GATE=0.
-        if (os.environ.get("QX_JOINT_GATE", "1") == "1"
-                and result.get("signal") in ("CALL", "PUT")):
+        # signal. No env off-switch (hard-coded per user directive).
+        if result.get("signal") in ("CALL", "PUT"):
             try:
                 from core.joint_gate import apply_joint_gate
                 _new_open_time = (closed[-1]["time"] + stream.period) \

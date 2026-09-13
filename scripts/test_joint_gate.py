@@ -29,19 +29,21 @@ def classic(signal="CALL", conf=70, strategy="confluence_v1",
     return r
 
 
-def ml(signal="CALL", emit=True, guard_state=None, target_time=3460):
+def ml(signal="CALL", emit=True, guard_state=None, target_time=3460,
+       model_status="verified"):
     t1 = {"prediction": signal, "probability": 0.72, "emit": emit,
           "target_time": target_time}
     if guard_state:
         t1["guard"] = {"state": guard_state}
-    return {"asset": "EURUSD_otc", "period": 60, "t1": t1}
+    return {"asset": "EURUSD_otc", "period": 60,
+            "model_status": model_status, "t1": t1}
 
 
-def stub_verifier(verdict, mult=1.0):
+def stub_verifier(verdict, mult=1.0, layers=None):
     def _stub(prediction, candles, ticks, asset, hour_utc):
         return {"verdict": verdict, "confidence_adjustment": mult,
-                "layers": {"L1_price_action": {"verdict": "PASS",
-                                               "reason": "stub"}},
+                "layers": layers or {"L1_price_action":
+                                    {"verdict": "PASS", "reason": "stub"}},
                 "reason": f"stub {verdict}"}
     return _stub
 
@@ -54,12 +56,13 @@ def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
 
 
-# 1. gate disabled → pass-through (legacy behavior)
+# 1. HARD-CODED ON: env cannot disable the gate
 os.environ["QX_JOINT_GATE"] = "0"
 r = jg.apply_joint_gate(classic(), "EURUSD_otc", 60, CANDLES, TICKS,
                         ml("PUT"), target_time=3460)
-check("gate disabled passes through", r["rejected"] is False)
-os.environ["QX_JOINT_GATE"] = "1"
+check("gate hard-coded ON (env off-switch ignored)",
+      r["rejected"] is True and "opposes" in r["reason"])
+os.environ.pop("QX_JOINT_GATE", None)
 
 # 2. ML opposes → reject
 jg.verify_signal = stub_verifier("PASS")
@@ -96,26 +99,65 @@ r = jg.apply_joint_gate(classic("CALL"), "EURUSD_otc", 60, CANDLES, TICKS,
                         None, target_time=3460)
 check("verifier VETO rejects", r["rejected"] is True)
 
-# 7. fallback bar: PASS → reject; CONFIRM → pass
+# 7. HARD RULE: one layer VETO rejects even when aggregate says WEAKEN
+jg.verify_signal = stub_verifier(
+    "WEAKEN", 0.5,
+    layers={"L1_price_action": {"verdict": "VETO", "reason": "counter-trend"},
+            "L3_tick_momentum": {"verdict": "CONFIRM", "reason": "aligned"}})
+r = jg.apply_joint_gate(classic("CALL"), "EURUSD_otc", 60, CANDLES, TICKS,
+                        ml("CALL"), target_time=3460)
+check("any single layer VETO → reject (hard rule)",
+      r["rejected"] is True and "VETO in L1_price_action" in r["reason"])
+
+# 8. fallback + PASS without ML → reject
 jg.verify_signal = stub_verifier("PASS", 1.0)
 r = jg.apply_joint_gate(
     classic("CALL", conf=52, strategy="confluence_v1_fallback", fallback=True),
     "EURUSD_otc", 60, CANDLES, TICKS, None, target_time=3460)
-check("fallback + PASS → reject", r["rejected"] is True)
+check("fallback + PASS without ML → reject", r["rejected"] is True)
+
+# 9. fallback + CONFIRM → pass
 jg.verify_signal = stub_verifier("CONFIRM", 1.1)
 r = jg.apply_joint_gate(
     classic("CALL", conf=52, strategy="confluence_v1_fallback", fallback=True),
     "EURUSD_otc", 60, CANDLES, TICKS, None, target_time=3460)
 check("fallback + CONFIRM → pass", r["rejected"] is False)
 
-# 8. WEAKEN halves confidence
+# 10. fallback + ML joint agreement + clean PASS → pass (the new volume path)
+jg.verify_signal = stub_verifier("PASS", 1.0)
+r = jg.apply_joint_gate(
+    classic("CALL", conf=52, strategy="confluence_v1_fallback", fallback=True),
+    "EURUSD_otc", 60, CANDLES, TICKS, ml("CALL"), target_time=3460)
+check("fallback + ML agree + clean PASS → pass (ML joint reopen)",
+      r["rejected"] is False and r["final_confidence"] == 52
+      and r["model_voice"]["state"] == "agree")
+
+# 11. fallback + ML agree but verifier WEAKEN → reject (no false signals)
+jg.verify_signal = stub_verifier("WEAKEN", 0.5)
+r = jg.apply_joint_gate(
+    classic("CALL", conf=52, strategy="confluence_v1_fallback", fallback=True),
+    "EURUSD_otc", 60, CANDLES, TICKS, ml("CALL"), target_time=3460)
+check("fallback + ML agree + WEAKEN → reject",
+      r["rejected"] is True)
+
+# 12. provisional model abstains — cannot reopen a fallback
+jg.verify_signal = stub_verifier("PASS", 1.0)
+r = jg.apply_joint_gate(
+    classic("CALL", conf=52, strategy="confluence_v1_fallback", fallback=True),
+    "EURUSD_otc", 60, CANDLES, TICKS,
+    ml("CALL", model_status="provisional"), target_time=3460)
+check("provisional ML abstains → fallback stays rejected",
+      r["rejected"] is True
+      and r["model_voice"]["state"] == "abstain_provisional")
+
+# 13. WEAKEN halves confidence (non-fallback, ML agree)
 jg.verify_signal = stub_verifier("WEAKEN", 0.5)
 r = jg.apply_joint_gate(classic("CALL", conf=80), "EURUSD_otc", 60,
                         CANDLES, TICKS, ml("CALL"), target_time=3460)
 check("WEAKEN → conf 80→40", r["rejected"] is False
       and r["final_confidence"] == 40)
 
-# 9. verifier exception → fail-closed reject
+# 14. verifier exception → fail-closed reject
 def boom(*a, **k):
     raise RuntimeError("boom")
 jg.verify_signal = boom
@@ -123,7 +165,7 @@ r = jg.apply_joint_gate(classic("CALL"), "EURUSD_otc", 60, CANDLES, TICKS,
                         None, target_time=3460)
 check("verifier exception → fail-closed reject", r["rejected"] is True)
 
-# 10. target_time mismatch in payload → ML voice falls back to DB/absent
+# 15. target_time mismatch in payload → ML voice absent (verifier-only)
 jg.verify_signal = stub_verifier("PASS", 1.0)
 r = jg.apply_joint_gate(classic("CALL"), "EURUSD_otc", 60, CANDLES, TICKS,
                         ml("PUT", target_time=999999), target_time=3460)
