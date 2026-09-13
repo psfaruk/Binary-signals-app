@@ -171,8 +171,7 @@ def get_verifier_status() -> Dict[str, Any]:
         uptime = time.time() - s["started_at"]
         total = s["total_verified"]
         return {
-            "enabled": (os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1"
-                        or os.environ.get("QX_JOINT_GATE", "1") == "1"),
+            "enabled": os.environ.get("QX_SIGNAL_VERIFIER", "0") == "1",
             "uptime_seconds": round(uptime, 0),
             "uptime_human": _human_duration(uptime),
             "total_verified": total,
