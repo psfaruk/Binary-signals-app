@@ -142,19 +142,14 @@ check("OTC module list matches cluster membership",
 check("REAL module list matches cluster membership",
       set(REAL_CONFIG.module_names) == set(cf.MODULE_TO_CLUSTER.keys()))
 
-# Insufficient data handling — mode-dependent (2026-09-07):
-#   every_candle (default) → deterministic fallback CALL/PUT (100% coverage)
-#   strict                 → NEUTRAL with confidence 0
+# Insufficient data handling — mode-dependent (2026-09-14):
+#   any_theory (default) → NEUTRAL (module engine abstains; the ML model
+#                          supplies the candle's signal in the live feed)
+#   strict                → NEUTRAL with confidence 0
 pred_short = engines_predict(gen_trend(25, 0.0003), asset="EURUSD_otc")
-if cf.SIGNAL_MODE == "every_candle":
-    check("insufficient candles → every-candle fallback signal (labeled)",
-          pred_short["signal"] in ("CALL", "PUT")
-          and pred_short.get("strategy") == "confluence_v1_fallback"
-          and pred_short.get("signal_quality") == "FALLBACK",
-          f"signal={pred_short['signal']} strategy={pred_short.get('strategy')}")
-else:
-    check("insufficient candles → NEUTRAL (no fallback signal)",
-          pred_short["signal"] == "NEUTRAL" and pred_short.get("confidence") == 0)
+check("insufficient candles → NEUTRAL (module engine abstains; ML speaks live)",
+      pred_short["signal"] == "NEUTRAL" and pred_short.get("confidence") == 0,
+      f"signal={pred_short['signal']} strategy={pred_short.get('strategy')}")
 
 # ── 2. INDICATOR MATH ───────────────────────────────────────────────────────
 print("\n[2] Indicator math fixes")
@@ -320,15 +315,15 @@ check("no engine errors across 960 candles",
       str([p for p in [] ]))
 total_fired = sum(r["n_fired"] for r in results.values())
 total_graded = sum(r["correct"] + r["wrong"] for r in results.values())
-# FIX (2026-09-07): mode-aware coverage expectation.
-#   every_candle (default) → USER REQ: 100% of candles must fire
-#   strict                 → high-confidence abstention (< 50% fired)
-if cf.SIGNAL_MODE == "every_candle":
-    check("every-candle mode: 100% of candles fire (user requirement)",
-          total_fired == 3 * 259, f"fired={total_fired}/777")
-else:
-    check("engine abstains often (high-confidence mode: fired < 50% of candles)",
+# ANY-THEORY (2026-09-14): the module engine fires a THEORY signal on
+# ~every candle (any one module vote suffices). Rare zero-theory candles
+# abstain (NEUTRAL) and the live feed takes the ML model's prediction.
+if cf.SIGNAL_MODE == "strict":
+    check("strict mode: high-confidence abstention (< 50% fired)",
           total_fired < 0.5 * 3 * 259, f"fired={total_fired}/777")
+else:
+    check("engine fires theory signals on ~every candle (any-theory mode: fired >= 95%)",
+          total_fired >= 0.95 * 3 * 259, f"fired={total_fired}/777")
 check("every fired signal has >= MIN_AGREE_CLUSTERS cluster agreement",
       True)  # structurally guaranteed by confluence gates; verified by gate tests below
 graded_wr = [r["win_rate"] for r in results.values() if r["win_rate"] is not None]
@@ -378,14 +373,21 @@ trend_candles = gen_trend(60, 0.0004, seed=55)
 # deterministic fallback CALL/PUT is emitted with honest low-band
 # confidence instead of NEUTRAL.
 def _assert_gate_reject(res, gate, name):
-    if cf.SIGNAL_MODE == "every_candle":
-        check(name + " [every_candle: labeled fallback emitted]",
+    if cf.SIGNAL_MODE == "any_theory":
+        # ANY-THEORY (USER-2026-09-14): the strict gate still rejects
+        # (confluence_reject_gate records WHY) but the module vote now emits
+        # a REAL theory signal — strategy "confluence_v1_any", quality
+        # MEDIUM/LOW, confidence in the ANY band, source "strategy".
+        # Heuristic fallbacks (persistence/htf_fade/body_fade) are BANNED.
+        check(name + " [any_theory: REAL theory signal emitted]",
               res["signal"] in ("CALL", "PUT")
               and res.get("confluence_reject_gate") == gate
-              and res.get("strategy") == "confluence_v1_fallback"
-              and res.get("signal_quality") == "FALLBACK"
-              and cf.FALLBACK_CONF_BASE <= (res.get("confidence") or 0)
-                  <= cf.FALLBACK_CONF_CAP,
+              and res.get("strategy") == "confluence_v1_any"
+              and res.get("signal_quality") in ("MEDIUM", "LOW")
+              and res.get("signal_source") == "strategy"
+              and not res.get("fallback")
+              and cf.ANY_CONF_BASE <= (res.get("confidence") or 0)
+                  <= cf.ANY_CONF_CAP,
               f"signal={res['signal']} gate={res.get('confluence_reject_gate')} "
               f"conf={res.get('confidence')}")
     else:
@@ -473,16 +475,30 @@ res_i, _ = _run_gates(spec_i, trend_candles)
 # MOMENTUM cluster splits → abstains; remaining CALL clusters: TREND+PATTERN+LEVEL?
 # key_level not in spec_i → LEVEL abstains. So CALL clusters = TREND, PATTERN (+MICRO if
 # candle_reaction present — it isn't) → 2 → NEUTRAL expected.
-check("gate I: cluster-internal split makes cluster abstain (2 left → strict NEUTRAL)",
-      (res_i["signal"] == "NEUTRAL" if cf.SIGNAL_MODE == "strict"
-       else (res_i["signal"] in ("CALL", "PUT")
-             and res_i.get("confluence_reject_gate") == "insufficient_agreement")),
-      f"got {res_i['signal']} gate={res_i.get('confluence_reject_gate')}")
+if cf.SIGNAL_MODE == "strict":
+    check("gate I: cluster-internal split makes cluster abstain (2 left → strict NEUTRAL)",
+          res_i["signal"] == "NEUTRAL"
+          and res_i.get("confluence_reject_gate") == "insufficient_agreement",
+          f"got {res_i['signal']} gate={res_i.get('confluence_reject_gate')}")
+else:
+    # ANY-THEORY: the split cluster abstains, but TREND+PATTERN modules still
+    # voted → a REAL theory signal is emitted (any-one-theory rule).
+    check("gate I: split cluster abstains; remaining votes still emit (any-theory)",
+          res_i["signal"] in ("CALL", "PUT")
+          and res_i.get("confluence_reject_gate") == "insufficient_agreement"
+          and res_i.get("strategy") == "confluence_v1_any",
+          f"got {res_i['signal']} gate={res_i.get('confluence_reject_gate')} "
+          f"strategy={res_i.get('strategy')}")
 
-# J) zero votes → strict: NEUTRAL / every_candle: deterministic fallback
+# J) zero votes → strict: NEUTRAL / any_theory: NEUTRAL (module engine
+#    abstains; feed.py takes the ML model's frozen T+1 prediction instead —
+#    USER: "মডিউল ইঞ্জিন থেকে সিগন্যাল আসলো না — ML model থেকে সিগন্যাল টি আসবে")
 res_j, _ = _run_gates([], trend_candles)
-_assert_gate_reject(res_j, "no_votes",
-                    "gate J: zero votes (no_votes)")
+check("gate J: zero votes → module engine abstains (NEUTRAL; ML model speaks live)",
+      res_j["signal"] == "NEUTRAL"
+      and res_j.get("confluence_reject_gate") == "no_theory_vote"
+      and res_j.get("strategy") == "confluence_v1",
+      f"got {res_j['signal']} gate={res_j.get('confluence_reject_gate')}")
 
 # ── SUMMARY ─────────────────────────────────────────────────────────────────
 print("\n" + "=" * 72)

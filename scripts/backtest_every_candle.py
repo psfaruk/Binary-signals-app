@@ -56,7 +56,7 @@ from typing import List, Dict
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-os.environ.setdefault("QX_SIGNAL_MODE", "every_candle")
+os.environ.setdefault("QX_SIGNAL_MODE", "any_theory")
 # TARGET-75 note (2026-09-09): this harness verifies MECHANICS (100% candle
 # coverage / per-direction split / grading) of the every-candle pipeline, so
 # the production-default TARGET gate must be OFF here — otherwise the gate's
@@ -182,8 +182,9 @@ def summarize(history: List[Dict], label: str = "") -> Dict:
         "win_pct": (round(wr, 1) if wr is not None else None),
         "call": bucket([h for h in history if h["signal"] == "CALL"]),
         "put": bucket([h for h in history if h["signal"] == "PUT"]),
-        "strict": bucket([h for h in history if h["quality"] not in ("FALLBACK",)]),
-        "fallback": bucket([h for h in history if h["quality"] == "FALLBACK"]),
+        "strict": bucket([h for h in history if h["quality"] in ("HIGH", "MEDIUM") and h.get("strategy") == "confluence_v1"]),
+        "any_theory": bucket([h for h in history if h.get("strategy") == "confluence_v1_any"]),
+        "ml_model": bucket([h for h in history if h.get("strategy") == "ml_model_t1"]),
     }
     return out
 
@@ -207,7 +208,7 @@ def main():
     print(f"Pairs: {pairs}   Candles/scenario: {args.candles}   "
           f"Scenarios: trend_up/trend_down/random_walk")
     print(f"Mode: {cf_mod.SIGNAL_MODE}  conf floor: {cf_mod.MIN_CONFIDENCE}  "
-          f"fallback band: {cf_mod.FALLBACK_CONF_BASE}-{cf_mod.FALLBACK_CONF_CAP}\n")
+          f"any-theory band: {cf_mod.ANY_CONF_BASE}-{cf_mod.ANY_CONF_CAP}\n")
 
     report = {"mode": cf_mod.SIGNAL_MODE, "candles_per_scenario": args.candles,
               "pairs": {}}

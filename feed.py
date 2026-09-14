@@ -249,21 +249,26 @@ def _clean_display(raw_display: str) -> str:
     return _OTC_SUFFIX_RE.sub("", raw_display.replace("\n", "")).strip()
 
 
-# ── Pair catalog — USER-SPECIFIED 16 PAIRS ONLY (2026-07-30) ────────────────
-# User requirement: "শুধু মাত্র এই পেয়ার গুলোই থাকবে, একটা কম ও থাকবে না বেশিও
-# থাকবে না। 100% নিশ্চিত করতে হবে।"
+# ── Pair catalog — 22 USER-SPECIFIED PAIRS (PAIR-EXPAND 2026-09-14) ──────────
+# User requirement (2026-07-30): "শুধু মাত্র এই পেয়ার গুলোই থাকবে, একটা কম ও
+# থাকবে না বেশিও থাকবে না। 100% নিশ্চিত করতে হবে।"
+# User requirement (2026-09-14): "আমি আরও কিছু পেয়ার অ্যাড করতে চাই, যেই গুলো
+# আছে সেই গুলো থাকবে। এই গুলো ও অ্যাড করতে হবে — USDARS, AUDJPY, NZDJPY,
+# NZDCAD, USDNGN, GBPNZD, EURNZD — এই পেয়ার গুলো otc"
 #
-# 11 OTC pairs (all 24/7 exotic — All-Time OTC page):
-#   BRL/USD OTC, NZD/USD OTC, USD/BDT OTC, USD/COP OTC, USD/IDR OTC,
-#   USD/INR OTC, USD/MXN OTC, USD/PKR OTC, USD/ZAR OTC, USD/DZD OTC,
-#   USD/PHP OTC
+# 18 OTC pairs (all 24/7 exotic/cross — All-Time OTC page):
+#   BRL/USD, NZD/USD, USD/BDT, USD/COP, USD/IDR, USD/INR, USD/MXN,
+#   USD/PKR, USD/ZAR, USD/DZD, USD/PHP  (original 11)
+#   + USD/ARS, AUD/JPY, NZD/JPY, NZD/CAD, USD/NGN, GBP/NZD, EUR/NZD
 #
-# 5 Real pairs (Real Market page — weekdays only):
-#   AUD/USD, EUR/USD, USD/JPY, EUR/GBP, GBP/USD
+# 4 Real pairs (Real Market page — weekdays only):
+#   AUD/USD, EUR/USD, USD/JPY, EUR/GBP
 #
 # NO OTHER PAIRS WILL APPEAR. The _FOREX_BASES filter rejects any instrument
-# not in this list, so even if Quotex sends 200+ instruments, only these 16
-# pass through.
+# not in this list, so even if Quotex sends 200+ instruments, only these 22
+# pass through. Always-on streams are capped at MAX_ALWAYS_ON_STREAMS (16)
+# with all-time-OTC priority; the remaining pairs stream on demand the
+# moment a viewer selects them (ensure_stream).
 
 _USER_OTC_PAIRS = [
     "BRLUSD_otc",    # BRL/USD OTC
@@ -277,6 +282,16 @@ _USER_OTC_PAIRS = [
     "USDZAR_otc",    # USD/ZAR OTC
     "USDDZD_otc",    # USD/DZD OTC
     "USDPHP_otc",    # USD/PHP OTC
+    # PAIR-EXPAND (USER-2026-09-14): 7 new OTC pairs —
+    # "USDARS, AUDJPY, NZDJPY, NZDCAD, USDNGN, GBPNZD, EURNZD এই পেয়ার
+    # গুলো otc" — all existing pairs kept, these added.
+    "USDARS_otc",    # USD/ARS OTC
+    "AUDJPY_otc",    # AUD/JPY OTC
+    "NZDJPY_otc",    # NZD/JPY OTC
+    "NZDCAD_otc",    # NZD/CAD OTC
+    "USDNGN_otc",    # USD/NGN OTC
+    "GBPNZD_otc",    # GBP/NZD OTC
+    "EURNZD_otc",    # EUR/NZD OTC
 ]
 
 _USER_REAL_PAIRS = [
@@ -2132,6 +2147,141 @@ class QuotexFeed:
             recent_accuracy=_recent_acc)
         return result, micro_hist
 
+    def _ml_t1_from_db(self, asset: str, period: int,
+                       closed: list[dict]) -> tuple[dict | None, str | None]:
+        """Frozen T+1 row for the candle about to open (DB fallback path).
+
+        Used when _run_eoc runs WITHOUT a live ml_payload (watchdog /
+        initial-snapshot EOC calls): resolves the frozen otc_predictions
+        row whose target_time == last-close + period. Returns
+        (t1_dict, model_status) or (None, None).
+        """
+        try:
+            from core.otc_predict.tracker import latest_predictions
+            if not closed:
+                return None, None
+            target_time = closed[-1]["time"] + period
+            rows = latest_predictions(asset, 20)
+            for r in rows:
+                if r.get("horizon") != 1:
+                    continue
+                if r.get("target_time") != target_time:
+                    continue
+                return ({"prediction": r.get("prediction"),
+                         "probability": r.get("probability"),
+                         "emit": bool(r.get("emit")),
+                         "target_time": r.get("target_time"),
+                         "guard": None,
+                         "model_version": r.get("model_version")}, None)
+        except Exception as _db_exc:
+            print(f"[feed] ML T+1 DB lookup failed for {asset}: "
+                  f"{type(_db_exc).__name__}: {_db_exc}")
+        return None, None
+
+    def _ml_source_signal(self, result: dict | None, ml_payload: dict | None,
+                          stream: _AssetStream, closed: list[dict]) -> dict | None:
+        """ML-model signal source (USER-2026-09-14): "মডিউল ইঞ্জিন থেকে
+        সিগন্যাল আসলো না — ML model থেকে সিগন্যাল টি আসবে।"
+
+        When the module (strategy) engine returned NEUTRAL (zero theories
+        voted), the ML engine's frozen T+1 prediction for the NEW candle
+        becomes this candle's signal — a REAL model prediction, never a
+        heuristic fallback. Honest labeling:
+          * strategy        = "ml_model_t1"
+          * signal_source   = "ml_model"
+          * signal_quality  = "ML_HIGH" (prob >= 0.65) / "ML" otherwise
+          * confidence      = 50 + |P(up) - 0.5| * 100, capped 92 —
+                              honestly calibrated from the model's own
+                              probability, never fabricated
+        Returns the substituted result dict, or None when the ML engine
+        also has no prediction for this candle (honest no-signal: neither
+        engine could speak).
+        """
+        try:
+            t1 = None
+            model_status = None
+            if isinstance(ml_payload, dict):
+                t1 = ml_payload.get("t1")
+                model_status = ml_payload.get("model_status")
+            if (not isinstance(t1, dict)
+                    or t1.get("prediction") not in ("CALL", "PUT")):
+                # DB fallback (watchdog / initial-snapshot EOC paths carry no
+                # live payload): read the frozen T+1 row for THIS candle.
+                t1, model_status = self._ml_t1_from_db(
+                    stream.asset, stream.period, closed)
+            if not isinstance(t1, dict) or t1.get("prediction") not in ("CALL", "PUT"):
+                return None
+            prob = t1.get("probability")
+            if prob is None:
+                return None
+            try:
+                prob = float(prob)
+            except (TypeError, ValueError):
+                return None
+            direction = t1["prediction"]
+            model_version = (ml_payload or {}).get("model_version") \
+                if isinstance(ml_payload, dict) else None
+            if model_version is None:
+                model_version = t1.get("model_version")
+            model_status = model_status or t1.get("model_status") or "verified"
+            emit_flag = bool(t1.get("emit"))
+            guard_state = None
+            if isinstance(t1.get("guard"), dict):
+                guard_state = t1["guard"].get("state")
+
+            # Honest confidence: 50 + the model's calibrated edge over a
+            # coin flip (|p-0.5|*100), capped below MAX like the strategy
+            # engine's band. A 0.65/0.35 model ⇒ 65; a 0.52/0.48 model ⇒ 52.
+            conf = 50 + int(round(abs(prob - 0.5) * 100))
+            conf = max(50, min(92, conf))
+            strength = "STRONG" if conf >= 75 else ("MEDIUM" if conf >= 60 else "WEAK")
+
+            base = result if isinstance(result, dict) else {}
+            reasons = list(base.get("reasons") or [])
+            reasons.append(
+                f"_ML_SOURCE: module engine returned NEUTRAL (no theory "
+                f"voted) — ML model T+1 prediction {direction} "
+                f"(P(up)={prob:.4f}, model={model_version}, "
+                f"status={model_status}) supplies this candle's signal.")
+            if emit_flag:
+                reasons.append(
+                    "_ML_SOURCE_EMIT: the model's own quality gates passed "
+                    "(emit=True) — verified model voice.")
+            if guard_state == "suspended":
+                reasons.append(
+                    "_ML_SOURCE_GUARD: edge-guard has this pair suspended "
+                    "(live win rate below break-even) — confidence penalty "
+                    "applied by the source gate, signal still shown per the "
+                    "every-candle requirement.")
+
+            sub = dict(base)
+            sub.update({
+                "signal": direction,
+                "confidence": conf,
+                "raw_confidence": conf,
+                "strength": strength,
+                "score": 0,
+                "signal_source": "ml_model",
+                "strategy": "ml_model_t1",
+                "strategy_reason": (
+                    f"ML model T+1 — {direction} at P(up)={prob:.3f} "
+                    f"({model_status} model {model_version})"),
+                "signal_quality": "ML_HIGH" if prob >= 0.65 else "ML",
+                "ml_probability": round(prob, 4),
+                "ml_model_version": model_version,
+                "ml_model_status": model_status,
+                "ml_emit": emit_flag,
+                "reasons": reasons,
+            })
+            print(f"[feed] {stream.asset}: module engine silent — ML model "
+                  f"T+1 supplies the signal ({direction}, p={prob:.3f})")
+            return sub
+        except Exception as _ml_exc:
+            print(f"[feed] ML-source substitution failed for "
+                  f"{getattr(stream, 'asset', '?')}: "
+                  f"{type(_ml_exc).__name__}: {_ml_exc}")
+            return None
+
     async def _run_eoc(self, stream: _AssetStream,
                 actual_open: float | None = None,
                 ml_payload: dict | None = None) -> dict | None:
@@ -2206,23 +2356,31 @@ class QuotexFeed:
         if result is None:
             return None
 
-        # ── JOINT-VERIFICATION GATE (2026-09-14, HARD-CODED ON) ──────────
-        # USER REQUIREMENT: "সব ML ও মডিউল ইঞ্জিন verify করবে — আরো হার্ড
-        # চেক করে সিগন্যাল দেবে, false signal দেবে না।"
-        # Every CALL/PUT from the classic engine must now pass the JOINT
-        # gate (core/joint_gate.py) before reaching the UI/Telegram/webhooks:
-        #   1. MODEL VOICE  — the ML engine's frozen T+1 prediction for THIS
-        #      candle must agree (verified model + emit=True); a
-        #      guard-suspended pair is a hard reject.
-        #   2. VERIFIER VOICE — the 5-layer real-time verifier
-        #      (core/signal_verifier) runs on EVERY signal; ANY single layer
-        #      VETO ⇒ reject, WEAKEN ⇒ confidence ×0.5, CONFIRM ⇒ ×1.1.
-        #   3. FALLBACK POLICY — every-candle fallback signals emit only
-        #      with a verifier CONFIRM or an ML joint agreement (verified
-        #      ML emit=True, same direction, clean verifier pass).
-        # Fail-CLOSED: a gate exception ⇒ NEUTRAL, never an unverified
-        # signal. No env off-switch (hard-coded per user directive).
-        if result.get("signal") in ("CALL", "PUT"):
+        # ── SIGNAL SOURCE GATE (2026-09-14, ANY-THEORY + ML hand-off) ────
+        # USER REQUIREMENT (verbatim): "প্রত্যেক ক্যান্ডেল এ সিগন্যাল প্রধান
+        # করতে হবে, কিন্তু fallback signals দেওয়া যাবে না। ... যে কোনো একটি
+        # পাস হলেই সিগন্যাল দিবে। মডিউল ইঞ্জিন থেকে সিগন্যাল আসলো না —
+        # ML model থেকে সিগন্যাল টি আসবে।"
+        #
+        # Source hierarchy per candle:
+        #   1. STRATEGY (module) engine — any ONE theory/module vote wins
+        #      (confluence_v1_any / confluence_v1 strict pass). This is the
+        #      candle's signal.
+        #   2. ML MODEL — when the module engine returned NEUTRAL (zero
+        #      theories voted), the ML engine's frozen T+1 prediction for
+        #      THIS candle becomes the signal (strategy "ml_model_t1").
+        # NO heuristic fallback signals exist anymore (banned upstream).
+        #
+        # The joint gate (core/joint_gate.py) NO LONGER rejects to NEUTRAL —
+        # it grades the signal (ML voice + 5-layer verifier) and adjusts
+        # confidence only, so every candle keeps its CALL/PUT direction.
+        if result is not None and result.get("signal") == "NEUTRAL":
+            ml_sub = self._ml_source_signal(
+                result, ml_payload, stream, closed)
+            if ml_sub is not None:
+                result = ml_sub
+
+        if result is not None and result.get("signal") in ("CALL", "PUT"):
             try:
                 from core.joint_gate import apply_joint_gate
                 _new_open_time = (closed[-1]["time"] + stream.period) \
@@ -2230,34 +2388,25 @@ class QuotexFeed:
                 _gate = await asyncio.to_thread(
                     apply_joint_gate, result, stream.asset, stream.period,
                     closed, base_ticks, ml_payload, _new_open_time)
-                if _gate.get("rejected"):
-                    result["signal"] = "NEUTRAL"
-                    result["strength"] = "NEUTRAL"
-                    result["confidence"] = 0
-                    result["verified"] = False
-                    result["verification"] = _gate
-                    result.setdefault("reasons", []).append(
-                        "JOINT-GATE REJECT: " + _gate.get("reason", "unverified"))
-                else:
-                    result["verified"] = True
-                    result["verification"] = _gate
-                    if _gate.get("final_confidence") is not None:
-                        result["confidence"] = int(_gate["final_confidence"])
-                    result.setdefault("reasons", []).append(
-                        "JOINT-GATE PASS: " + _gate.get("reason", "verified"))
+                # NEVER rejected (USER-2026-09-14): the gate only grades.
+                result["verified"] = True
+                result["verification"] = _gate
+                if _gate.get("final_confidence") is not None:
+                    result["confidence"] = int(_gate["final_confidence"])
+                    result["raw_confidence"] = int(_gate["final_confidence"])
+                result.setdefault("reasons", []).append(
+                    "SOURCE-GATE: " + _gate.get("reason", "graded"))
             except Exception as _jg_exc:
-                # Fail-closed: an unverified signal must never ship.
-                print(f"[feed] joint-gate FAILED (fail-closed) for "
+                # Fail-open: the source signal stands even if grading broke.
+                print(f"[feed] joint-gate grading failed (fail-open) for "
                       f"{stream.asset}: {type(_jg_exc).__name__}: {_jg_exc}")
-                result["signal"] = "NEUTRAL"
-                result["strength"] = "NEUTRAL"
-                result["confidence"] = 0
                 result["verified"] = False
                 result["verification"] = {
-                    "rejected": True,
-                    "reason": f"gate error: {type(_jg_exc).__name__}"}
+                    "rejected": False,
+                    "reason": f"gate error (fail-open): "
+                              f"{type(_jg_exc).__name__}"}
                 result.setdefault("reasons", []).append(
-                    f"JOINT-GATE ERROR (fail-closed): "
+                    f"SOURCE-GATE ERROR (fail-open): "
                     f"{type(_jg_exc).__name__}: {_jg_exc}")
 
         # FIX (Bug #3, 2026-07-17): removed `stream.inverted = result.get("_flipped")`

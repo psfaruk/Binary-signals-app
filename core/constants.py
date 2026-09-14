@@ -21,8 +21,17 @@ import os
 # This is the ONLY place pair lists are defined. Every other module MUST
 # import from here. Adding/removing a pair = edit here only.
 #
-# Quotex silently drops subscriptions past ~15 concurrent and bans at
-# ~76 subscribe attempts / 20 min — 15 is the documented safe ceiling.
+# PAIR-EXPAND (USER-2026-09-14): 7 new OTC pairs added on the user's
+# request ("আমি আরও কিছু পেয়ার অ্যাড করতে চাই ... এই পেয়ার গুলো otc"):
+#   USDARS_otc, AUDJPY_otc, NZDJPY_otc, NZDCAD_otc, USDNGN_otc,
+#   GBPNZD_otc, EURNZD_otc
+# → 18 OTC + 4 Real = 22 pairs total. All existing pairs kept.
+#
+# NOTE: the historical comment below about Quotex dropping subscriptions
+# past ~15 concurrent still applies — with 22 pairs, the app relies on the
+# feed's staggered subscription + stuck-stream watchdog rather than
+# subscribing everything at once. OTC category views subscribe the OTC
+# subset only.
 
 ALLOWED_PAIRS_OTC = (
     "USDZAR_otc",    # USD/ZAR OTC
@@ -36,6 +45,14 @@ ALLOWED_PAIRS_OTC = (
     "USDDZD_otc",    # USD/DZD OTC
     "USDINR_otc",    # USD/INR OTC
     "USDPHP_otc",    # USD/PHP OTC
+    # PAIR-EXPAND (USER-2026-09-14) — new OTC pairs:
+    "USDARS_otc",    # USD/ARS OTC (Argentine Peso — volatile exotic)
+    "AUDJPY_otc",    # AUD/JPY OTC (cross — trend-friendly)
+    "NZDJPY_otc",    # NZD/JPY OTC (cross — trend-friendly)
+    "NZDCAD_otc",    # NZD/CAD OTC (cross — range-friendly)
+    "USDNGN_otc",    # USD/NGN OTC (Nigerian Naira — volatile exotic)
+    "GBPNZD_otc",    # GBP/NZD OTC (cross — volatile, mean-reverting)
+    "EURNZD_otc",    # EUR/NZD OTC (cross — volatile, mean-reverting)
 )
 
 ALLOWED_PAIRS_REAL = (

@@ -109,6 +109,13 @@ function displayPairName(asset){
   }
   return base + (a.endsWith('_otc') ? ' OTC' : '');
 }
+// ANY-THEORY (2026-09-14): friendly Bengali labels for the new signal
+// sources — strict confluence / ANY ONE theory vote / ML model T+1.
+const STRAT_LABELS = {
+  'confluence_v1': 'কনফ্লুয়েন্স',
+  'confluence_v1_any': 'স্ট্রাটেজি ভোট',
+  'ml_model_t1': 'ML মডেল (T+1)'
+};
 let soundEnabled = false, audioCtx = null;
 // FIX (PREFS-WIRING-2026-09-07, HIGH): the Settings switches persisted their
 // values to localStorage (bst_prefs_v2) but NOTHING ever read them — the
@@ -760,6 +767,51 @@ function renderPending(){
   alertedSignalDirection = null;
 }
 
+// ANY-THEORY (2026-09-14) — signal source badge. Every candle emits exactly
+// one legitimate signal source:
+//   src-strategy  স্ট্রাটেজি (module engine, strict confluence pass)
+//   src-any       স্ট্রাটেজি × থিওরি (ANY ONE theory/module voted)
+//   src-ml        ML মডেল (module engine silent → ML T+1 prediction)
+// The badge lives in the signal-box header next to the strength badge.
+function renderSourceBadge(pred){
+  let host = null;
+  const hdr = document.querySelector('.signal-header');
+  if(hdr){
+    let el = hdr.querySelector('#signal-source-badge');
+    if(!el){
+      el = document.createElement('span');
+      el.id = 'signal-source-badge';
+      el.className = 'src-badge';
+      hdr.appendChild(el);
+    }
+    host = el;
+  }
+  if(!host) return;
+  const s = pred.signal || 'NEUTRAL';
+  if(s !== 'CALL' && s !== 'PUT'){
+    host.style.display = 'none';
+    return;
+  }
+  host.style.display = '';
+  if(pred.signal_source === 'ml_model'){
+    host.className = 'src-badge src-ml';
+    host.textContent = 'ML মডেল';
+    host.title = pred.strategy_reason ||
+      'মডিউল ইঞ্জিন নীরব — ML মডেলের T+1 প্রেডিকশন এই ক্যান্ডেলের সিগন্যাল দিয়েছে';
+  } else if(pred.strategy === 'confluence_v1_any'){
+    host.className = 'src-badge src-any';
+    host.textContent = pred.best_strategy
+      ? ('থিওরি: ' + pred.best_strategy)
+      : 'থিওরি ভোট';
+    host.title = pred.strategy_reason ||
+      'যে কোনো একটি স্ট্রাটেজি থিওরি পাস হয়েছে — সেই ভোট থেকে সিগন্যাল';
+  } else {
+    host.className = 'src-badge src-strategy';
+    host.textContent = 'কনফ্লুয়েন্স';
+    host.title = pred.strategy_reason || 'একাধিক ক্লাস্টারের strict কনফ্লুয়েন্স';
+  }
+}
+
 function renderSignal(pred){
   if(!pred) return;
   const s = pred.signal || 'NEUTRAL';
@@ -827,6 +879,13 @@ function renderSignal(pred){
   _setClass('signal-strength-badge', badgeCls);
   _setText('signal-strength-badge', str || 'NEUTRAL');
 
+  // ANY-THEORY SOURCE BADGE (2026-09-14): every candle's signal now comes
+  // from ONE of two legitimate sources — the module (strategy) engine
+  // ("যে কোনো একটি পাস হলেই সিগন্যাল দিবে") or, when no theory voted,
+  // the ML model ("ML model থেকে সিগন্যাল টি আসবে"). The badge makes the
+  // source visible at a glance; heuristic fallbacks no longer exist.
+  renderSourceBadge(pred);
+
   const conf = pred.confidence || 0;
   _setText('sig-conf-val', Math.round(conf) + '%');
   _setStyle('sig-conf-bar', 'width', conf + '%');
@@ -864,12 +923,13 @@ function renderSignal(pred){
   // unhide the parent row when a non-default strategy is present.
   const stratName = pred.strategy || '';
   const stratReason = pred.strategy_reason || '';
+  const stratLabel = STRAT_LABELS[stratName] || stratName;
   // FREQ-FIRST-FIX (2026-09-09): show WHICH strategy decided the signal
   // ("অবশ্য বেস্ট stradegy টি সিগন্যাল দিবে") — e.g.
-  // "confluence_v1_fallback → momentum".
+  // "স্ট্রাটেজি ভোট → momentum".
   const stratDisplay = pred.best_strategy
-    ? `${stratName} → ${pred.best_strategy}`
-    : stratName;
+    ? `${stratLabel} → ${pred.best_strategy}`
+    : stratLabel;
   const stratEl = $('sig-strategy');
   const stratRow = $('sig-strategy-row');
   if(stratEl){
@@ -1597,8 +1657,8 @@ function showSignalDetail(idx){
     }catch(_e){ /* malformed reasons — ignore */ }
   }
   rows += detailRow('Strategy', _bestStrat
-    ? `${d.strategy || 'confluence_v1'} → ${_bestStrat}`
-    : (d.strategy || 'confluence_v1'));
+    ? `${STRAT_LABELS[d.strategy] || d.strategy || 'confluence_v1'} → ${_bestStrat}`
+    : (STRAT_LABELS[d.strategy] || d.strategy || 'confluence_v1'));
   rows += detailRow('Score', d.score != null ? (d.score >= 0 ? '+' : '') + d.score : '—');
   rows += detailRow('Confidence', d.confidence != null ? Math.round(d.confidence) + '%' : '—');
   rows += detailRow('Strength', d.strength || '—');

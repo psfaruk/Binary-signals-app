@@ -1475,9 +1475,12 @@ async def module_stats():
         except Exception as _ce:
             stats["calibration_error"] = str(_ce)
         stats["coverage_note"] = (
-            "every-candle mode: most signals are FALLBACK coverage signals "
-            "(strict high-confidence gates reject ~98% of candles). Treat "
-            "fallback signals as information, not trade advice; check "
+            "any-theory mode (2026-09-14): every candle emits a REAL "
+            "theory-backed signal — strict confluence first, then ANY ONE "
+            "strategy module's vote (strategy 'confluence_v1_any'); when no "
+            "theory votes the ML model supplies the signal (strategy "
+            "'ml_model_t1'). No heuristic fallback signals exist. Treat "
+            "LOW-confidence single-theory signals with care; check "
             "/api/psychology for the discipline rules.")
         return stats
 

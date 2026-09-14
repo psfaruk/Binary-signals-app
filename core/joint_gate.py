@@ -1,43 +1,50 @@
 """
-core/joint_gate.py — JOINT SIGNAL VERIFICATION GATE (2026-09-14, hard-coded ON)
+core/joint_gate.py — SIGNAL SOURCE VERIFICATION GATE (2026-09-14 rewrite)
 
-USER REQUIREMENT (verbatim): "সব ML ও মডিউল ইঞ্জিন verify করবে — আরো হার্ড
-চেক করে সিগন্যাল দেবে, false signal দেবে না, কিন্তু সিগন্যাল একটু বেশি
-আসতে হবে।"
+USER REQUIREMENT (verbatim, latest directive supersedes the old
+reject-to-NEUTRAL behavior):
 
-This gate is HARD-CODED ON. There is deliberately NO env off-switch:
-every classic CALL/PUT must pass BOTH voices before it can reach the
-UI / Telegram / webhooks.
+  "প্রত্যেক ক্যান্ডেল এ সিগন্যাল প্রধান করতে হবে, কিন্তু fallback signals
+   দেওয়া যাবে না। ... যে কোনো একটি পাস হলেই সিগন্যাল দিবে। মডিউল
+   ইঞ্জিন থেকে সিগন্যাল আসলো না — ML model থেকে সিগন্যাল টি আসবে।"
+
+  = the module engine's ANY-ONE-THEORY signal and the ML model's frozen
+    T+1 prediction are the two LEGITIMATE signal sources. A theory vote is
+    the authority for its candle — this gate must never suppress it back
+    to NEUTRAL (that would violate the every-candle requirement). Both
+    verification voices now ADJUST CONFIDENCE and RECORD their verdicts
+    instead of rejecting:
 
   1. MODEL VOICE — the ML engine's frozen T+1 prediction for THIS exact
-     candle (target_time match). VERIFIED models only; a provisional
-     (fast-train bootstrap) model abstains.
-       * emit=True + same direction   ⇒ AGREE — strong joint evidence
-         (emit=True already implies calibrated prob ≥0.65 and the ML's
-         own strategy second-voice agreement, so an agreeing fallback is
-         a model × module × module triple confirmation)
-       * emit=True + opposite direction ⇒ REJECT
-       * edge-guard suspended           ⇒ REJECT (circuit breaker)
-       * no model / emit=False (quality)⇒ abstain (verifier-only path)
+     candle (target_time match). VERIFIED models speak; provisional
+     (fast-train bootstrap) models abstain honestly.
+       * emit=True + same direction   ⇒ AGREE   ⇒ +3 confidence
+       * emit=True + opposite         ⇒ OPPOSE  ⇒ -5 confidence (floored)
+       * no model / emit=False        ⇒ abstain (no adjustment)
+       * edge-guard suspended         ⇒ noted, -10 confidence (floored),
+                                         the signal still ships — the pair
+                                         health is surfaced in the UI
   2. VERIFIER VOICE — the 5 real-time layers (price action, wick
      rejection, tick momentum, key level, historical pattern).
-       HARD RULE: ANY single layer VETO ⇒ REJECT, even if the aggregate
-       says otherwise. WEAKEN ⇒ confidence ×0.5. CONFIRM ⇒ ×1.1 (cap 95).
-  3. FALLBACK POLICY (hard-coded) — classic every-candle fallback
-     signals (signal_quality FALLBACK / strategy "*_fallback") are
-     coin-flip by construction and emit ONLY with EITHER:
-       * verifier CONFIRM, or
-       * ML JOINT AGREEMENT: verified ML emit=True with the SAME
-         direction AND the verifier is a clean PASS (no VETO, no WEAKEN
-         layer).
-     This is the "harder check AND more signals" path: the fallback
-     reopens only where the ML engine independently confirms it.
+       * CONFIRM ⇒ ×1.1 (cap 95)
+       * PASS    ⇒ unchanged
+       * WEAKEN  ⇒ ×0.75
+       * VETO (any single layer) ⇒ ×0.55, floor 30 — a strong honesty
+         penalty, but the signal direction STANDS per the every-candle
+         mandate (the UI shows the veto so the user can skip it).
+  3. NO FALLBACK POLICY — heuristic fallback signals are banned upstream
+     (confluence.py any-theory rewrite); nothing here re-opens them.
 
-Fail-CLOSED: any gate exception ⇒ REJECT (an unverified signal must
-never ship).
+Fail-OPEN on internal errors: the theory vote is the authority, so a gate
+exception records the error and lets the signal through unchanged (the
+old fail-closed path produced signal-less candles, violating the latest
+directive).
 
 Called from feed.py::_run_eoc, immediately after the classic engine
-returns, before stream.prediction is set.
+returns, before stream.prediction is set. When the classic engine returns
+NEUTRAL (zero theories voted), feed.py takes the ML model's frozen T+1
+prediction as the candle's signal BEFORE calling this gate, so the ML
+voice becomes the SOURCE and the verifier voice grades it.
 """
 import os
 import time
@@ -45,6 +52,15 @@ import time
 from core.signal_verifier import verify_signal, _record_verdict
 
 MAX_CONFIDENCE = 95
+MIN_CONFIDENCE_FLOOR = 30
+
+# Confidence adjustments (USER-2026-09-14: adjust, never reject)
+VETO_MULT = 0.55          # any verifier layer VETO
+WEAKEN_MULT = 0.75        # aggregate WEAKEN
+CONFIRM_MULT = 1.10       # aggregate CONFIRM
+ML_AGREE_BONUS = 3        # verified ML emit=True, same direction
+ML_OPPOSE_PENALTY = 5     # verified ML emit=True, opposite direction
+ML_SUSPENDED_PENALTY = 10 # edge-guard suspended pair
 
 
 def _short(reason, n=160):
@@ -93,38 +109,31 @@ def _ml_voice(asset, ml_payload, target_time):
     return t1, model_status
 
 
-def _reject(asset, signal, hour_utc, conf, model, ver, reason):
-    """Build a REJECT verdict and record it for the /api/verifier endpoints."""
-    layers = (ver or {}).get("layers") or {}
+def _record(asset, signal, hour_utc, verdict, mult, layers, reason,
+            conf, final_conf, final_signal):
+    """Persist the gate verdict for the /api/verifier endpoints (never fatal)."""
     try:
-        _record_verdict(asset, signal, hour_utc, "VETO", 0.0, layers,
-                        _short(reason), conf, 0, "NEUTRAL")
+        _record_verdict(asset, signal, hour_utc, verdict, mult, layers,
+                        _short(reason), conf, final_conf, final_signal)
     except Exception:
         pass
-    return {
-        "rejected": True,
-        "verdict": "JOINT_REJECT",
-        "reason": reason,
-        "model_voice": model,
-        "verifier_voice": ver,
-        "confidence_mult": None,
-        "final_confidence": 0,
-        "fallback": bool(model and model.get("fallback")),
-    }
 
 
 def apply_joint_gate(result, asset, period, candles, ticks,
                      ml_payload=None, target_time=None):
-    """Verify one classic CALL/PUT against the ML voice + 5-layer verifier.
+    """Grade one CALL/PUT against the ML voice + 5-layer verifier.
 
-    HARD-CODED ON — no env off-switch (see module docstring).
+    NEVER rejects (USER-2026-09-14): every directional signal keeps its
+    direction; the voices only adjust confidence and are recorded so the
+    UI / stats can show how each signal was graded.
 
     Returns a dict:
-        rejected          — True ⇒ caller must convert to NEUTRAL
-        reason / verdict  — human-readable summary
+        rejected          — always False for directional signals
+        verdict           — JOINT_PASS / JOINT_ADJUSTED / SKIP
+        reason            — human-readable summary
         model_voice       — ML opinion used (or "no_model")
         verifier_voice    — 5-layer verdict details
-        final_confidence  — confidence after verifier adjustment
+        final_confidence  — confidence after all adjustments
     """
     signal = result.get("signal")
     if signal not in ("CALL", "PUT"):
@@ -132,25 +141,26 @@ def apply_joint_gate(result, asset, period, candles, ticks,
                 "reason": "not directional",
                 "model_voice": None, "verifier_voice": None,
                 "confidence_mult": None,
-                "final_confidence": int(result.get("confidence") or 0),
-                "fallback": False}
+                "final_confidence": int(result.get("confidence") or 0)}
 
     conf = int(result.get("confidence") or 0)
     hour_utc = int(time.gmtime().tm_hour)
-    is_fallback = (result.get("signal_quality") == "FALLBACK"
-                   or bool(result.get("fallback"))
-                   or str(result.get("strategy", "")).endswith("_fallback"))
-    voices = []
+    source = result.get("signal_source") or (
+        "ml_model" if result.get("strategy") == "ml_model_t1" else "strategy")
+    voices = [f"src={source}"]
 
     # ── 1. MODEL VOICE ─────────────────────────────────────────────────────
     model = {"present": False, "state": "no_model", "direction": None,
              "emit": None, "guard_state": None, "model_status": None,
              "probability": None}
+    ml_adj = 0
     try:
         t1, mstatus = _ml_voice(asset, ml_payload, target_time)
     except Exception as exc:
-        return _reject(asset, signal, hour_utc, conf, model, None,
-                       f"model voice failed: {type(exc).__name__}")
+        # Fail-open: the source signal stands; record the error.
+        model["state"] = "voice_error"
+        voices.append(f"ML voice error: {type(exc).__name__}")
+        t1, mstatus = None, None
     model["model_status"] = mstatus
     if t1 and t1.get("prediction") in ("CALL", "PUT"):
         model["present"] = True
@@ -159,88 +169,84 @@ def apply_joint_gate(result, asset, period, candles, ticks,
         model["emit"] = bool(t1.get("emit"))
         if isinstance(t1.get("guard"), dict):
             model["guard_state"] = t1["guard"].get("state")
-        if mstatus == "provisional":
-            # VERIFIED models only may confirm or veto — a provisional
+        if source == "ml_model":
+            # The ML model IS the source — its own voice is not a second
+            # opinion; just record it.
+            model["state"] = "source"
+            voices.append(f"ML({model['direction']}) SOURCE")
+        elif mstatus == "provisional":
+            # VERIFIED models only may agree or oppose — a provisional
             # (fast-train bootstrap) model abstains honestly.
             model["state"] = "abstain_provisional"
             voices.append("ML provisional — abstain")
         elif model["guard_state"] == "suspended":
-            return _reject(asset, signal, hour_utc, conf, model, None,
-                           f"ML edge-guard suspended this pair "
-                           f"(state={model['guard_state']}) — no trade")
+            model["state"] = "suspended"
+            ml_adj -= ML_SUSPENDED_PENALTY
+            voices.append("ML edge-guard suspended pair (conf penalty)")
         elif model["emit"]:
-            if model["direction"] != signal:
-                return _reject(asset, signal, hour_utc, conf, model, None,
-                               f"ML T+1 says {model['direction']} — opposes "
-                               f"classic {signal} (joint agreement required)")
-            model["state"] = "agree"
-            voices.append(f"ML({model['direction']}) AGREE")
+            if model["direction"] == signal:
+                model["state"] = "agree"
+                ml_adj += ML_AGREE_BONUS
+                voices.append(f"ML({model['direction']}) AGREE")
+            else:
+                model["state"] = "oppose"
+                ml_adj -= ML_OPPOSE_PENALTY
+                voices.append(f"ML({model['direction']}) OPPOSES "
+                              f"{signal} (conf penalty)")
         else:
             model["state"] = "abstain_quality"
             voices.append("ML no-trade (quality) — abstain")
 
-    # ── 2. VERIFIER VOICE (always runs — fail-closed) ─────────────────────
+    # ── 2. VERIFIER VOICE (always runs; fail-open) ─────────────────────────
+    ver = None
+    v_verdict = "PASS"
+    v_mult = 1.0
+    veto_layers = []
+    weaken_layers = []
     try:
         ver = verify_signal(result, candles, ticks, asset, hour_utc)
+        v_verdict = (ver or {}).get("verdict", "PASS")
+        v_mult = float((ver or {}).get("confidence_adjustment", 1.0) or 1.0)
+        layers = (ver or {}).get("layers") or {}
+        veto_layers = [l for l, r in layers.items()
+                       if r.get("verdict") == "VETO"]
+        weaken_layers = [l for l, r in layers.items()
+                         if r.get("verdict") == "WEAKEN"]
+        voices.append(f"verifier {v_verdict}")
     except Exception as exc:
-        return _reject(asset, signal, hour_utc, conf, model, None,
-                       f"verifier failed: {type(exc).__name__} "
-                       f"(fail-closed)")
-    v_verdict = (ver or {}).get("verdict", "PASS")
-    v_mult = float((ver or {}).get("confidence_adjustment", 1.0) or 1.0)
-    layers = (ver or {}).get("layers") or {}
-    veto_layers = [l for l, r in layers.items()
-                   if r.get("verdict") == "VETO"]
-    weaken_layers = [l for l, r in layers.items()
-                     if r.get("verdict") == "WEAKEN"]
-    voices.append(f"verifier {v_verdict}")
+        voices.append(f"verifier error (fail-open): {type(exc).__name__}")
 
-    # HARD RULE (2026-09-14): ANY single layer VETO ⇒ reject, even when
-    # the aggregate verdict softened it to WEAKEN via a confirming layer.
-    # The aggregate VETO itself also always rejects.
-    if veto_layers or v_verdict == "VETO":
-        _which = ", ".join(veto_layers) if veto_layers else "aggregate"
-        return _reject(asset, signal, hour_utc, conf, model, ver,
-                       f"5-layer verifier VETO in {_which} — "
-                       f"{_short((ver or {}).get('reason'))}")
-
-    # ── 3. FALLBACK POLICY (hard-coded) ───────────────────────────────────
-    if is_fallback:
-        ml_joint = (model["state"] == "agree")
-        confirmed = (v_verdict == "CONFIRM")
-        clean_pass = (v_verdict == "PASS" and not weaken_layers)
-        if not (confirmed or (ml_joint and clean_pass)):
-            return _reject(asset, signal, hour_utc, conf, model, ver,
-                           f"fallback signal (strategy="
-                           f"{result.get('strategy')}) without verifier "
-                           f"CONFIRM or ML joint agreement — coin-flip by "
-                           f"construction")
-        if ml_joint and not confirmed:
-            voices.append("FALLBACK reopened by ML joint agreement")
-
-    # ── confidence adjustment ──────────────────────────────────────────────
+    # ── confidence adjustment (never a direction change) ───────────────────
     final_conf = conf
-    if v_verdict == "WEAKEN":
-        final_conf = int(round(conf * v_mult))
+    if veto_layers or v_verdict == "VETO":
+        # ANY single layer VETO ⇒ strong honesty penalty, signal stands
+        # (every-candle mandate; the UI shows the veto).
+        _which = ", ".join(veto_layers) if veto_layers else "aggregate"
+        voices.append(f"VETO in {_which} — conf x{VETO_MULT}")
+        final_conf = int(round(final_conf * VETO_MULT))
+    elif v_verdict == "WEAKEN":
+        final_conf = int(round(final_conf * WEAKEN_MULT))
     elif v_verdict == "CONFIRM":
-        final_conf = min(MAX_CONFIDENCE, int(round(conf * max(v_mult, 1.0))))
-    final_conf = max(0, min(MAX_CONFIDENCE, final_conf))
+        final_conf = int(round(final_conf * max(v_mult, CONFIRM_MULT)))
+    final_conf += ml_adj
+    final_conf = max(MIN_CONFIDENCE_FLOOR, min(MAX_CONFIDENCE, final_conf))
 
+    verdict = ("JOINT_PASS" if final_conf == conf else "JOINT_ADJUSTED")
     try:
-        _record_verdict(asset, signal, hour_utc, v_verdict, v_mult,
-                        layers, (ver or {}).get("reason", ""), conf,
-                        final_conf, signal)
+        _record(asset, signal, hour_utc, v_verdict, v_mult,
+                (ver or {}).get("layers") or {},
+                (ver or {}).get("reason", ""), conf, final_conf, signal)
     except Exception:
         pass
 
     return {
         "rejected": False,
-        "verdict": "JOINT_PASS",
+        "verdict": verdict,
         "reason": " + ".join(voices) + f" (conf {conf}→{final_conf})",
         "model_voice": model,
         "verifier_voice": ver,
         "confidence_mult": (v_mult if v_verdict in ("WEAKEN", "CONFIRM")
                             else None),
         "final_confidence": final_conf,
-        "fallback": is_fallback,
+        "signal_source": source,
     }

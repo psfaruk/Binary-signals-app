@@ -1,4 +1,4 @@
-"""engines/base/confluence.py — STRICT high-confidence confluence engine.
+"""engines/base/confluence.py — ANY-ONE-THEORY confluence engine.
 
 CONFLUENCE-V1 (2026-09-02) — Complete replacement for the old
 pile-of-patches blending pipeline. Built from a full code audit that found
@@ -15,34 +15,28 @@ the root causes of wrong predictions:
   3. NO POSITION AWARENESS — signals fired against the prevailing regime
      (reversals in trends, continuations mid-range).
 
-THE FIX — six INDEPENDENT evidence clusters; a signal only exists when:
+ANY-THEORY REWRITE (USER-2026-09-14) — the standing directive:
 
-  * ≥ MIN_AGREE_CLUSTERS distinct clusters vote the SAME direction
-  * ZERO clusters vote the opposite direction (abstention is allowed)
-  * the market POSITION (regime + range location + HTF trend) agrees with
-    the signal type:
-      - TREND regime  → only with-trend continuation
-      - RANGE regime  → only fade at range extreme (bottom/top 30%)
-      - VOLATILE      → never trade
-  * HTF (5-minute) trend does not oppose the direction
-  * the candle is not sub-noise (range ≥ 0.20 × ATR — coin-flip territory)
-  * honest confidence ≥ MIN_CONFIDENCE (no manufactured numbers)
+  "প্রত্যেক ক্যান্ডেল এ সিগন্যাল প্রধান করতে হবে, কিন্তু fallback signals
+   দেওয়া যাবে না। ... যে কোনো একটি পাস হলেই সিগন্যাল দিবে। মডিউল
+   ইঞ্জিন থেকে সিগন্যাল আসলো না [তাহলে] ML model থেকে সিগন্যাল টি আসবে।"
 
-FREQ-FIRST-FIX (2026-09-09) — user's LATEST directive supersedes selectivity:
+  = every candle emits CALL/PUT, BUT the direction must be THEORY-backed:
+      * ANY ONE strategy module/theory with a directional vote — the signal
+        is emitted from that vote (the best learned-weighted module decides
+        the direction), labeled strategy "confluence_v1_any", a REAL
+        signal (never the banned "confluence_v1_fallback").
+      * ZERO theories voted — this engine returns NEUTRAL and the ML model
+        supplies the candle's signal (feed.py wires that source).
+      * Heuristic fallbacks (persistence, HTF-fade, body-fade, default CALL)
+        are BANNED — those deterministic coin-flip chains measured 32-45.5%
+        WR live and were physically removed from this engine.
 
-  "আমার প্রত্যেক ক্যান্ডেল এ সিগন্যাল লাগবে। যে কোনো একটি স্ট্রাটেজি
-   একমত হলেই সিগন্যাল আসবে। অবশ্য বেস্ট stradegy টি সিগন্যাল দিবে।"
-
-  = EVERY candle emits CALL/PUT; if ANY ONE strategy has a directional
-    vote the signal is emitted from that vote; the BEST strategy (highest
-    learned-weighted score for this pair+direction) decides the direction.
-    When a strict gate rejects the setup, _fallback_result() emits the
-    best-strategy direction with honest FALLBACK labeling (confidence
-    50-63, strategy "confluence_v1_fallback", best_strategy=<module>) so
-    the UI, history and win-rate stats can always separate strict
-    high-confidence signals from fallback coverage signals. The TARGET-75
-    gate (core/target_gate.py) that previously converted these into WAIT
-    is now default-OFF.
+The strict high-confidence confluence path (>=3 clusters, zero opposition,
+position/HTF/noise-aware, honest confidence) is tried FIRST — when it
+passes, the signal carries the stronger "confluence_v1" label. When any
+strict gate rejects, the ANY-ONE-THEORY rule takes over (any module vote
+means a signal). Both paths are theory-backed; neither fabricates direction.
 
 Cluster definitions (independence-by-design, de-duplicating the correlated
 modules found in the audit):
@@ -59,25 +53,30 @@ score). Each cluster votes by majority of its voting members; an internal
 tie (members split CALL/PUT) makes the whole cluster abstain — split
 evidence is not agreement.
 """
-import math
 import os
 
-# ── SIGNAL MODE (USER REQUIREMENT 2026-09-07) ──────────────────────────────
-# The user's standing requirement is: "আমার প্রত্যেকটি ক্যান্ডেল এ সিগন্যাল লাগবে"
-# (every candle MUST produce a CALL or PUT signal).
+# ── SIGNAL MODE (USER REQUIREMENT 2026-09-14, ANY-THEORY) ──────────────────
+# The user's standing requirement: "প্রত্যেক ক্যান্ডেল এ সিগন্যাল প্রধান করতে
+# হবে, কিন্তু fallback signals দেওয়া যাবে না" — every candle MUST produce a
+# CALL or PUT signal, but heuristic fallbacks are BANNED.
 #
-#   "every_candle"  (DEFAULT) — strict confluence is tried first; when any
-#       gate rejects the setup, a DETERMINISTIC evidence-based fallback
-#       direction is emitted instead of NEUTRAL so coverage is 100%.
-#       Fallback signals are honestly labeled (strategy
-#       "confluence_v1_fallback", confidence 50-63, quality FALLBACK) so
-#       the UI and win-rate stats can always separate them from strict
-#       high-confidence signals.
-#   "strict" — the original CONFLUENCE-V1 abstention behavior: any gate
-#       failure returns NEUTRAL (coverage historically 0-0.4%).
-SIGNAL_MODE = os.environ.get("QX_SIGNAL_MODE", "every_candle").strip().lower()
-if SIGNAL_MODE not in ("every_candle", "strict"):
-    SIGNAL_MODE = "every_candle"
+#   "any_theory"  (DEFAULT) — strict confluence is tried first; when any
+#       gate rejects, ANY ONE theory/module with a directional vote emits
+#       the signal (best learned-weighted module decides). Coverage is
+#       ~100% (modules fire on almost every candle). When ZERO theories
+#       voted the engine returns NEUTRAL and feed.py takes the ML model's
+#       frozen T+1 prediction as this candle's signal (USER: "মডিউল
+#       ইঞ্জিন থেকে সিগন্যাল আসলো না — ML model থেকে সিগন্যাল টি আসবে").
+#   "strict" — pure abstention: any gate failure returns NEUTRAL and the
+#       ML model supplies the signal (identical NEUTRAL hand-off).
+#   Legacy value "every_candle" is accepted and mapped to "any_theory"
+#       (the old heuristic-fallback emission was removed — it violated the
+#       no-fallback directive).
+_LEGACY_MODES = {"every_candle": "any_theory"}
+_raw_mode = os.environ.get("QX_SIGNAL_MODE", "any_theory").strip().lower()
+SIGNAL_MODE = _LEGACY_MODES.get(_raw_mode, _raw_mode)
+if SIGNAL_MODE not in ("any_theory", "strict"):
+    SIGNAL_MODE = "any_theory"
 
 # ── Tunables (env-overridable for ops, safe defaults) ────────────────────────
 MIN_AGREE_CLUSTERS = max(2, int(os.environ.get("QX_MIN_AGREE_CLUSTERS", "3")))
@@ -85,29 +84,25 @@ MIN_CONFIDENCE = max(50, int(os.environ.get("QX_MIN_CONFLUENCE_CONF", "65")))
 RANGE_FADE_BAND = float(os.environ.get("QX_RANGE_FADE_BAND", "0.30"))
 NOISE_ATR_RATIO = float(os.environ.get("QX_NOISE_ATR_RATIO", "0.20"))
 MAX_CONFIDENCE = 92
-# Fallback confidence band — always BELOW MIN_CONFIDENCE so a fallback
-# signal can never be mistaken for a strict high-confidence signal.
-FALLBACK_CONF_BASE = 50
-FALLBACK_CONF_CAP = min(63, MIN_CONFIDENCE - 2)
+# ANY-THEORY confidence band (USER-2026-09-14) — replaces the old fallback
+# band. A single-theory signal is a REAL strategy signal, so it earns a
+# mid band (55+), but always stays BELOW MIN_CONFIDENCE so it can never be
+# mistaken for a strict multi-cluster high-confidence signal. The legacy
+# constant names are kept (scripts + joint_gate reference them) with the
+# new any-theory semantics.
+ANY_CONF_BASE = 55
+ANY_CONF_CAP = max(ANY_CONF_BASE, MIN_CONFIDENCE - 1)
+FALLBACK_CONF_BASE = ANY_CONF_BASE      # legacy alias (banned fallbacks gone)
+FALLBACK_CONF_CAP = ANY_CONF_CAP        # legacy alias
+# Confidence bumps inside the any-theory band:
+ANY_CONF_PER_AGREEING_MODULE = 3        # each extra agreeing module
+ANY_CONF_PER_NET_SCORE = 4              # honest evidence-quality bonus (net//4)
 
-# ── PERSISTENCE-AWARE FALLBACK (ACCURACY-FIX 2026-09-11) ────────────────────
-# Live-data audit of 7,376 graded signals (50.23% WR) found the old
-# fallback direction chain was ANTI-predictive in its deterministic steps:
-#   htf_trend basis      → 32.0% win (n=25)  (following the 5m trend loses)
-#   cluster_majority     → 44.4% win (n=72)
-#   body_direction       → 45.5% win (n=33)  (following the last body loses)
-#   best_strategy_vote   → 50.3% win (n=6144) (no edge at all)
-# while the only REAL, walk-forward-verifiable edge in the data is per-pair
-# candle-colour PERSISTENCE (mean-reversion on OTC feeds, momentum on real
-# feeds): P(next=UP|last=UP) measured on a rolling window of CLOSED candles.
-# Walk-forward replay over the same 7,376 candles: +0.73pp aggregate and up
-# to +6.45pp on mean-reverting pairs (USDZAR_otc 47.98%→54.44%), because the
-# stats are computed strictly from candles[:-1] (already closed) at predict
-# time — no look-ahead by construction.
-PERSIST_WINDOW = int(os.environ.get("QX_PERSIST_WINDOW", "300"))   # rolling candle window
-PERSIST_MIN_N = int(os.environ.get("QX_PERSIST_MIN_N", "60"))      # min transitions to trust
-PERSIST_MARGIN = float(os.environ.get("QX_PERSIST_MARGIN", "0.03")) # min |p-0.5| edge
-PERSIST_CONF_PER_PP = 1.0   # confidence pp per measured edge pp (honest calibration)
+# NOTE (USER-2026-09-14): the PERSISTENCE-AWARE FALLBACK block that used to
+# live here (PERSIST_* constants + _persistence_stats) was REMOVED — the
+# no-fallback directive bans persistence/htf_fade/body_fade/default chains
+# as signal sources. A measured persistence edge no longer manufactures a
+# direction; only real theory votes (or the ML model, via feed.py) do.
 
 # Cluster → member modules. A module name may appear in exactly one cluster.
 CLUSTERS = {
@@ -122,62 +117,6 @@ MODULE_TO_CLUSTER = {}
 for _c, _members in CLUSTERS.items():
     for _m in _members:
         MODULE_TO_CLUSTER[_m] = _c
-
-
-def _persistence_stats(candles, window=PERSIST_WINDOW):
-    """Per-pair candle-colour persistence from CLOSED candle history.
-
-    STRICTLY CAUSAL: callers pass the closed-candle list available at predict
-    time (the new candle is never in it), so every transition counted here
-    happened in the past. Returns a dict:
-      {"last": "UP"|"DOWN"|None,
-       "n": transitions-after-last-colour,
-       "p_next_up": P(next=UP | last colour),
-       "edge_pp": |p_next_up - 0.5| * 100,
-       "dir": "CALL"|"PUT" (the persistence-implied next direction)}
-    """
-    if not candles or len(candles) < 3:
-        return None
-    hist = candles[-(window + 1):] if len(candles) > window + 1 else candles
-    last_color = None
-    o = float(hist[-1].get("open", 0.0) or 0.0)
-    c = float(hist[-1].get("close", 0.0) or 0.0)
-    if c > o:
-        last_color = "UP"
-    elif c < o:
-        last_color = "DOWN"
-    if last_color is None:
-        return None
-
-    n_after = k_up = 0
-    for j in range(1, len(hist)):
-        po = float(hist[j - 1].get("open", 0.0) or 0.0)
-        pc = float(hist[j - 1].get("close", 0.0) or 0.0)
-        prev_color = "UP" if pc > po else ("DOWN" if pc < po else None)
-        if prev_color != last_color:
-            continue
-        oj = float(hist[j].get("open", 0.0) or 0.0)
-        cj = float(hist[j].get("close", 0.0) or 0.0)
-        if cj == oj:
-            continue  # draw — no direction information
-        n_after += 1
-        if cj > oj:
-            k_up += 1
-    if n_after < PERSIST_MIN_N:
-        return None
-    p_next_up = k_up / n_after
-    if abs(p_next_up - 0.5) < PERSIST_MARGIN:
-        return None  # no significant edge — do not override module evidence
-    return {
-        "last": last_color,
-        "n": n_after,
-        "p_next_up": p_next_up,
-        "edge_pp": abs(p_next_up - 0.5) * 100.0,
-        "dir": "CALL" if p_next_up > 0.5 else "PUT",
-        "kind": "mean-reversion" if (
-            (last_color == "UP" and p_next_up < 0.5)
-            or (last_color == "DOWN" and p_next_up > 0.5)) else "momentum",
-    }
 
 
 def _collapse_module_votes(grouped_results):
@@ -239,53 +178,32 @@ def _cluster_votes(module_votes):
     return clusters
 
 
-def _fallback_direction(module_votes, cluster_votes, htf_trend,
-                        candles=None):
-    """Deterministic best-effort direction for EVERY-CANDLE mode.
+def _any_theory_direction(module_votes, cluster_votes):
+    """THEORY-ONLY direction for the ANY-ONE-THEORY mode (USER 2026-09-14).
 
-    USER DIRECTIVE (FREQ-FIRST-FIX 2026-09-09):
-      "যে কোনো একটি স্ট্রাটেজি একমত হলেই সিগন্যাল আসবে। অবশ্য বেস্ট
-       stradegy টি সিগন্যাল দিবে।"
-    = if ANY ONE strategy has a directional vote, a signal MUST be emitted,
-      and the BEST strategy's vote decides the direction.
+    USER DIRECTIVE: "যে কোনো একটি পাস হলেই সিগন্যাল দিবে" — if ANY ONE
+    strategy/theory has a directional vote, the signal is emitted from that
+    vote; the BEST strategy (highest learned-weighted score) decides the
+    direction. NO heuristic fallbacks (persistence, HTF-fade, body-fade,
+    default CALL) are consulted — those are banned.
 
-    ACCURACY-FIX (2026-09-11) — measured performance of the OLD chain on
-    7,098 graded live signals drove a reordering. New priority chain
-    (first decisive step wins):
+    Priority chain (every step is theory-backed; first decisive step wins):
 
-      0. PERSISTENCE EDGE (NEW) — when this pair's closed-candle history
-         shows a statistically meaningful candle-colour persistence
-         (mean-reversion on OTC feeds / momentum on real feeds, measured
-         over the last ≤300 CLOSED candles with ≥60 transitions and a
-         ≥3pp deviation from the coin-flip), that measured edge decides.
-         This is the only walk-forward-verified edge in the live data
-         (+0.73pp aggregate, up to +6.45pp per pair). The best-module
-         vote only decides when no measured persistence edge exists.
       1. BEST-STRATEGY VOTE — the single highest-scoring directional module
          decides (scores are already scaled by reliability × per-pair
          LEARNED weights in blender.py, so "best" = the strategy with the
          strongest learned evidence for THIS pair+direction).
       2. Exact score tie between two best modules → net weighted evidence
          (sum of all module scores per direction).
-      3. Cluster-count majority.
-      4. HTF (5-minute) trend — now FADED, not followed: the live ledger
-         shows following the 5m EMA trend on 1-minute binaries won only
-         32% of the time (n=25). Counter-trend is the honest default for
-         a 1-minute expiry against a 5-minute trend extreme.
-      5. Last candle body — now FADED (anti-momentum): following the last
-         body won 45.5% (n=33); the pooled after-run mean-reversion edge
-         is P(reverse) ≈ 52-53% after runs of 1-3 same-colour candles.
-      6. Absolute last resort: CALL (deterministic, never random).
+      3. Cluster-count majority (clusters are themselves derived only from
+         module votes — still theory-backed).
 
-    Returns (direction, net_evidence, basis_label, best_module_name|None,
-             persistence_dict|None).
+    Returns (direction|None, net_evidence, basis_label, best_module|None).
+    direction is None when ZERO theories voted — the caller then returns
+    NEUTRAL and feed.py takes the ML model's frozen T+1 prediction as this
+    candle's signal ("মডিউল ইঞ্জিন থেকে সিগন্যাল আসলো না — ML model থেকে
+    সিগন্যাল টি আসবে").
     """
-    # ── Step 0 (ACCURACY-FIX): measured per-pair persistence edge ──────
-    persist = _persistence_stats(candles) if candles else None
-    if persist is not None:
-        return persist["dir"], int(round(persist["edge_pp"])), \
-            f"persistence_{persist['kind']}", None, persist
-
     best_mod = None
     best_score = 0
     tie_directions = set()
@@ -306,7 +224,7 @@ def _fallback_direction(module_votes, cluster_votes, htf_trend,
         put_score = sum(v["score"] for v in module_votes.values()
                         if v["direction"] == "PUT")
         net = abs(call_score - put_score)
-        return direction, net, "best_strategy_vote", best_mod, None
+        return direction, net, "best_strategy_vote", best_mod
 
     if best_mod is not None:
         # Top-score tier is SPLIT (e.g. momentum 5 CALL vs pattern 5 PUT):
@@ -316,84 +234,77 @@ def _fallback_direction(module_votes, cluster_votes, htf_trend,
         put_score = sum(v["score"] for v in module_votes.values()
                         if v["direction"] == "PUT")
         if call_score > put_score:
-            return "CALL", call_score - put_score, "module_evidence", None, None
+            return "CALL", call_score - put_score, "module_evidence", None
         if put_score > call_score:
-            return "PUT", put_score - call_score, "module_evidence", None, None
-        # still tied → fall through to the deterministic chain below.
+            return "PUT", put_score - call_score, "module_evidence", None
+        # still tied → cluster majority below.
 
-    # No directional module vote at all → deterministic tie-break chain.
+    # Cluster-count majority — clusters derive ONLY from module votes.
     n_call = sum(1 for v in cluster_votes.values() if v["direction"] == "CALL")
     n_put = sum(1 for v in cluster_votes.values() if v["direction"] == "PUT")
     if n_call > n_put:
-        return "CALL", 0, "cluster_majority", None, None
+        return "CALL", 0, "cluster_majority", None
     if n_put > n_call:
-        return "PUT", 0, "cluster_majority", None, None
+        return "PUT", 0, "cluster_majority", None
 
-    # Still tied → HTF trend — FADED (see docstring: following it won 32%).
-    if htf_trend == "UPTREND":
-        return "PUT", 0, "htf_fade", None, None
-    if htf_trend == "DOWNTREND":
-        return "CALL", 0, "htf_fade", None, None
+    # ZERO theory-backed evidence → no direction (NEUTRAL; ML takes over).
+    # Deliberately NO htf_fade / body_fade / default CALL — banned.
+    return None, 0, "no_theory_vote", None
 
-    # Still tied → last candle body — FADED (anti-momentum; see docstring).
-    if candles:
-        try:
-            last = candles[-1]
-            o = float(last.get("open", 0.0))
-            c = float(last.get("close", 0.0))
-            if c > o:
-                return "PUT", 0, "body_fade", None, None
-            if c < o:
-                return "CALL", 0, "body_fade", None, None
-        except Exception:
-            pass
-
-    return "CALL", 0, "default", None, None
-
-
-def _fallback_result(reasons, module_votes, cluster_votes, ctx, asset,
-                     htf_trend, candles, gate="unknown"):
-    """Build an every-candle FALLBACK prediction (CALL/PUT always present).
+def _any_theory_result(reasons, module_votes, cluster_votes, ctx, asset,
+                        htf_trend, candles, gate="unknown"):
+    """Build the ANY-ONE-THEORY prediction (USER 2026-09-14).
 
     Honest labeling contract:
-      * strategy        = "confluence_v1_fallback" (never masquerades as strict)
-      * signal_quality  = "FALLBACK"
-      * confidence      = 50..FALLBACK_CONF_CAP (below MIN_CONFIDENCE) and
-                         EMPIRICALLY calibrated (ACCURACY-FIX 2026-09-11):
-                         when the direction comes from a measured persistence
-                         edge, confidence = 50 + measured edge pp — no more
-                         fabricated numbers (the old net//3 formula claimed
-                         conf~60-70 while delivering 48-50% actual win rate,
-                         a -12 to -21pp calibration gap measured live).
+      * strategy        = "confluence_v1_any" — a REAL theory-backed signal
+                         (strict gates rejected the setup, but a strategy
+                         module voted and its vote decided the direction).
+      * signal_quality  = "MEDIUM" (>=2 modules agree) / "LOW" (single module)
+      * confidence      = ANY_CONF_BASE..ANY_CONF_CAP (always below
+                         MIN_CONFIDENCE so it never masquerades as a strict
+                         multi-cluster signal) and evidence-scaled:
+                         base 55, +3 per extra agreeing module, +net//4
+                         evidence bonus, +2 HTF alignment, +2 range-fade
+                         alignment.
       * confluence_reject_gate = which strict gate rejected the setup
       * best_strategy   = the strategy module whose vote DECIDED the
-        direction (FREQ-FIRST-FIX 2026-09-09: "বেস্ট stradegy টি সিগন্যাল
-        দিবে") — surfaced in reasons + UI so the user always sees WHICH
-        strategy gave the signal and why. When a measured persistence edge
-        decided instead, best_strategy is None and the persistence stats
-        are surfaced in reasons + the confluence dict.
-    The direction is deterministic (see _fallback_direction) — same input
-    data always yields the same signal, so backtests are reproducible.
+        direction ("বেস্ট stradegy টি সিগন্যাল দিবে") — surfaced in
+        reasons + UI so the user always sees WHICH strategy gave the
+        signal.
+      * NO fallback key, NO persistence, NO fabricated direction — when
+        zero theories voted this returns NEUTRAL (via _neutral_result in
+        _gate_exit) and feed.py takes the ML model's signal instead.
+    Deterministic: same input always yields the same signal, so backtests
+    are reproducible.
     """
-    direction, net, basis, best_mod, persist = _fallback_direction(
-        module_votes, cluster_votes, htf_trend, candles)
+    direction, net, basis, best_mod = _any_theory_direction(
+        module_votes, cluster_votes)
+
+    if direction is None:
+        # ZERO theories voted — strategy engine abstains; the ML model
+        # (feed.py source hand-off) supplies this candle's signal.
+        reasons.append(
+            "_NO_THEORY_VOTE: no strategy module produced a directional "
+            "vote on this candle — module engine abstains (NEUTRAL); "
+            "the ML model supplies the signal.")
+        return _neutral_result(reasons, module_votes, cluster_votes, ctx,
+                                asset, htf_trend, gate="no_theory_vote")
 
     n_agree = sum(1 for v in cluster_votes.values()
                   if v["direction"] == direction)
-    n_oppose = sum(1 for v in cluster_votes.values()
-                   if v["direction"] != direction)
+    n_voted = len(module_votes)
+    n_same_dir = sum(1 for v in module_votes.values()
+                     if v["direction"] == direction)
+    n_opp_dir = n_voted - n_same_dir
 
-    # Honest low-band confidence (ACCURACY-FIX 2026-09-11):
-    # • persistence-decided → 50 + measured edge pp (cap FALLBACK_CONF_CAP)
-    # • otherwise → the old conservative formula (small net bonus only)
-    if persist is not None:
-        confidence = FALLBACK_CONF_BASE + int(round(
-            persist["edge_pp"] * PERSIST_CONF_PER_PP))
-    else:
-        confidence = FALLBACK_CONF_BASE + min(6, net // 3)
+    # Honest evidence-scaled confidence inside the any-theory band.
+    confidence = ANY_CONF_BASE
+    confidence += ANY_CONF_PER_AGREEING_MODULE * max(0, n_same_dir - 1)
+    confidence += min(ANY_CONF_PER_NET_SCORE, net // ANY_CONF_PER_NET_SCORE
+                      if ANY_CONF_PER_NET_SCORE else 0)
     htf_aligned = ((htf_trend == "UPTREND" and direction == "CALL")
                    or (htf_trend == "DOWNTREND" and direction == "PUT"))
-    if htf_aligned and persist is None:
+    if htf_aligned:
         confidence += 2
     # RANGE regime fade-alignment bonus: in a range, a signal that fades the
     # extreme (CALL at bottom / PUT at top) is structurally better placed.
@@ -403,57 +314,44 @@ def _fallback_result(reasons, module_votes, cluster_votes, ctx, asset,
     if regime.get("is_ranging") and pos is not None:
         fade_aligned = ((direction == "CALL" and pos <= RANGE_FADE_BAND)
                         or (direction == "PUT" and pos >= 1.0 - RANGE_FADE_BAND))
-        if fade_aligned and persist is None:
+        if fade_aligned:
             confidence += 2
-    confidence = max(FALLBACK_CONF_BASE, min(FALLBACK_CONF_CAP, confidence))
+    confidence = max(ANY_CONF_BASE, min(ANY_CONF_CAP, confidence))
 
-    n_voted = len(module_votes)
-    if persist is not None:
-        reasons.append(
-            f"_PERSISTENCE_EDGE: measured P(next=UP|last={persist['last']})="
-            f"{persist['p_next_up']:.1%} over {persist['n']} transitions — "
-            f"{persist['kind']} edge {persist['edge_pp']:.1f}pp decided "
-            f"{direction} (empirical, walk-forward-verified basis).")
-    if best_mod is not None and persist is None:
+    if best_mod is not None:
         best_score = module_votes[best_mod]["score"]
-        n_same_dir = sum(1 for v in module_votes.values()
-                         if v["direction"] == direction)
-        n_opp_dir = n_voted - n_same_dir
         reasons.append(
             f"_BEST_STRATEGY_VOTE: {best_mod} (learned-weighted score "
             f"{best_score}) decided {direction} — {n_voted} strategy "
             f"module(s) voted ({n_same_dir} {direction}, {n_opp_dir} "
-            f"opposed); any-one-agrees rule satisfied.")
+            f"opposed); any-one-theory rule satisfied.")
     reasons.append(
-        f"_EVERY_CANDLE_FALLBACK: strict gate '{gate}' rejected the setup — "
-        f"emitting {direction} (basis={basis}, net={net}, conf={confidence}) "
-        f"to honor the every-candle signal requirement.")
+        f"_ANY_THEORY_SIGNAL: strict gate '{gate}' rejected the setup — "
+        f"emitting {direction} from theory evidence (basis={basis}, "
+        f"net={net}, agree_modules={n_same_dir}, conf={confidence}).")
 
     return {
         "signal": direction,
         "confidence": confidence,
         "raw_confidence": confidence,
-        "strength": "WEAK",
+        "strength": "MEDIUM" if n_same_dir >= 2 else "WEAK",
         "score": net,
         "agree": n_agree,
         "total": len(cluster_votes) or n_agree,
         "signals_fired": sum(len(v["members"]) for v in cluster_votes.values()),
-        "strategy": "confluence_v1_fallback",
+        "strategy": "confluence_v1_any",
         "best_strategy": best_mod,
         "strategy_reason": (
-            f"every-candle fallback — strict gate '{gate}' rejected; "
+            f"any-one-theory — strict gate '{gate}' rejected; "
             + (f"best strategy {best_mod} (score "
                f"{module_votes[best_mod]['score']}) voted {direction}"
                if best_mod is not None
-               else (f"measured persistence edge {persist['edge_pp']:.1f}pp "
-                     f"({persist['kind']}, n={persist['n']}) decided {direction}"
-                     if persist is not None
-                     else f"direction from {basis}"))),
-        "signal_quality": "FALLBACK",
-        "fallback": True,
-        "fallback_basis": basis,
+               else f"direction from {basis}")),
+        "signal_quality": "MEDIUM" if n_same_dir >= 2 else "LOW",
+        "signal_source": "strategy",
+        "any_theory": True,
+        "any_theory_basis": basis,
         "confluence_reject_gate": gate,
-        "persistence": persist,
         "confluence": {
             "clusters_agree": sorted(
                 c for c, v in cluster_votes.items()
@@ -475,17 +373,19 @@ def _fallback_result(reasons, module_votes, cluster_votes, ctx, asset,
         },
     }
 
-
 def _gate_exit(reasons, module_votes, cluster_votes, ctx, asset,
                htf_trend, candles, gate):
-    """Single exit point for strict-gate failures.
+    """Single exit point for strict-gate failures (USER-2026-09-14).
 
-    every_candle mode → deterministic fallback signal (100% coverage).
-    strict mode      → NEUTRAL with the reject-gate label.
+    any_theory mode → ANY ONE module vote emits a REAL theory signal
+                      (strategy "confluence_v1_any"); zero votes → NEUTRAL
+                      and the ML model supplies the signal from feed.py.
+    strict mode     → NEUTRAL with the reject-gate label (ML model still
+                      supplies the signal from feed.py — same hand-off).
     """
-    if SIGNAL_MODE == "every_candle":
-        return _fallback_result(reasons, module_votes, cluster_votes, ctx,
-                                asset, htf_trend, candles, gate=gate)
+    if SIGNAL_MODE == "any_theory":
+        return _any_theory_result(reasons, module_votes, cluster_votes, ctx,
+                                  asset, htf_trend, candles, gate=gate)
     return _neutral_result(reasons, module_votes, cluster_votes, ctx,
                            asset, htf_trend, gate=gate)
 
@@ -506,10 +406,14 @@ def _range_position(candles, lookback=20):
 
 def evaluate(grouped_results, ctx, config, asset="", htf_trend="SIDEWAYS",
              candles=None, all_reasons=None):
-    """Run the strict confluence gates. Returns a prediction dict.
+    """Run the strict confluence gates, then the ANY-ONE-THEORY rule.
 
-    NEVER emits a fallback signal: every gate failure returns NEUTRAL with
-    the full reason trail so the UI can explain *why* no trade was taken.
+    Returns a prediction dict. Strict gates first (>=3 clusters, zero
+    opposition, position/HTF/noise-aware, honest confidence ≥
+    MIN_CONFIDENCE). When a gate rejects: any module vote ⇒ REAL
+    "confluence_v1_any" signal; zero votes ⇒ NEUTRAL (feed.py then takes
+    the ML model's frozen T+1 prediction as this candle's signal). NO
+    heuristic fallback is ever emitted (USER-2026-09-14 directive).
     """
     candles = candles or []
     reasons = all_reasons if all_reasons is not None else []
@@ -682,6 +586,7 @@ def evaluate(grouped_results, ctx, config, asset="", htf_trend="SIDEWAYS",
         "total": len(cluster_votes) or n_agree,
         "signals_fired": sum(len(v["members"]) for v in cluster_votes.values()),
         "strategy": "confluence_v1",
+        "signal_source": "strategy",
         "strategy_reason": (
             f"{n_agree} independent clusters agree: "
             f"{', '.join(sorted(majority))}"),

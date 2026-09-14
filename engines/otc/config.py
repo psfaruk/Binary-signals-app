@@ -128,6 +128,72 @@ PAIR_CONFIGS = {
         "profile": "default", "description": "USDPHP-OTC: default balanced",
         "weights": DEFAULT_WEIGHTS,
     },
+    # ─── PAIR-EXPAND (USER-2026-09-14): 7 new OTC pairs ──────────────────
+    # Profiles chosen from the pair families the research already calibrated:
+    #   * USD-exotic high-volatility (ARS, NGN) → the USDZAR/USDMXN profile
+    #     (S/R + Bollinger dominant, trend-following dampened)
+    #   * JPY crosses (AUDJPY, NZDJPY) → trend-following profile (the real
+    #     USDJPY research: EMA ribbon + momentum primary)
+    #   * NZD crosses (NZDCAD, GBPNZD, EURNZD) → NZDUSD-like balanced with
+    #     mean-reversion emphasis (crosses chop; BB+RSI primary)
+    # The per-pair weight adapter auto-calibrates from live graded signals,
+    # so these are honest starting points, not final answers.
+    "USDARS_otc": {
+        "profile": "volatile", "description": "USDARS-OTC: high volatility — S/R + BB",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "sr_bounce": 2.5,
+                    "bollinger_rsi": 2.2,
+                    "stochastic": 1.8,
+                    "momentum": 1.0},
+    },
+    "AUDJPY_otc": {
+        "profile": "trending", "description": "AUDJPY-OTC: JPY cross — trend-following",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "ema_ribbon": 2.5,
+                    "momentum": 2.0,
+                    "multi_tf": 1.8,
+                    "bollinger_rsi": 1.5},
+    },
+    "NZDJPY_otc": {
+        "profile": "trending", "description": "NZDJPY-OTC: JPY cross — trend-following",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "ema_ribbon": 2.5,
+                    "momentum": 2.0,
+                    "multi_tf": 1.8,
+                    "bollinger_rsi": 1.5},
+    },
+    "NZDCAD_otc": {
+        "profile": "calibrated", "description": "NZDCAD-OTC: range cross — BB+RSI primary",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "bollinger_rsi": 2.5,
+                    "sr_bounce": 2.0,
+                    "stochastic": 1.8,
+                    "ema_ribbon": 1.0},
+    },
+    "USDNGN_otc": {
+        "profile": "volatile", "description": "USDNGN-OTC: high volatility — S/R + BB",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "sr_bounce": 2.5,
+                    "bollinger_rsi": 2.2,
+                    "stochastic": 1.8,
+                    "momentum": 1.0},
+    },
+    "GBPNZD_otc": {
+        "profile": "calibrated", "description": "GBPNZD-OTC: volatile cross — mean-reversion",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "bollinger_rsi": 2.5,
+                    "stochastic": 2.0,
+                    "sr_bounce": 2.0,
+                    "ema_ribbon": 0.8},
+    },
+    "EURNZD_otc": {
+        "profile": "calibrated", "description": "EURNZD-OTC: volatile cross — mean-reversion",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "bollinger_rsi": 2.5,
+                    "stochastic": 2.0,
+                    "sr_bounce": 2.0,
+                    "ema_ribbon": 0.8},
+    },
 }
 
 _config_keys = set(PAIR_CONFIGS.keys())

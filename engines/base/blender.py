@@ -16,14 +16,15 @@ The new pipeline:
   1. run every strategy module (fixed indicator math),
   2. collapse correlated modules into six INDEPENDENT evidence clusters,
   3. hand the cluster votes to engines.base.confluence.evaluate() which
-     applies the strict high-confidence gates (>=3 clusters agree, zero
-     opposition, position-aware, HTF-aware, noise-aware, honest confidence),
-  4. EVERY-CANDLE MODE (default, QX_SIGNAL_MODE=every_candle): when a gate
-     fails, confluence emits a DETERMINISTIC evidence-based fallback signal
-     (labeled "confluence_v1_fallback", confidence 50-63) instead of
-     NEUTRAL — 100% candle coverage per the user requirement
-     "প্রত্যেক ক্যান্ডেল এ সিগন্যাল আসতে হবে". Set QX_SIGNAL_MODE=strict to
-     restore pure abstention.
+     applies the strict high-confidence gates first (>=3 clusters agree,
+     zero opposition, position-aware, HTF-aware, noise-aware, honest
+     confidence), then the ANY-ONE-THEORY rule (USER-2026-09-14): any
+     single module vote emits a REAL "confluence_v1_any" signal; zero
+     votes return NEUTRAL and feed.py takes the ML model's frozen T+1
+     prediction as the candle's signal ("মডিউল ইঞ্জিন থেকে সিগন্যাল
+     আসলো না — ML model থেকে সিগন্যাল টি আসবে"). NO heuristic fallback
+     signals are ever emitted (banned by directive). Set
+     QX_SIGNAL_MODE=strict for pure abstention.
 
 Output dict keeps the exact key set the frontend and feed pipeline expect.
 """
@@ -95,71 +96,18 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     module_names = config.module_names
 
     if candles is None or len(candles) < MIN_CANDLES_FOR_PREDICTION:
-        # EVERY-CANDLE MODE: even below the indicator warmup floor the user
-        # still requires a direction. Use the deterministic body-direction /
-        # HTF tie-break chain (no indicator math — the data is too thin for
-        # the modules) with the honest fallback labeling.
-        if _cf.SIGNAL_MODE == "every_candle" and candles:
-            n = len(candles)
-            # ACCURACY-FIX (2026-09-11): try the measured persistence edge
-            # first (per-pair, strictly from closed history), then the
-            # anti-momentum fade. The old chain FOLLOWED the last body
-            # (body_direction basis) which measured 45.5% win live — the
-            # faded direction is the honest default before warmup completes.
-            persist = _cf._persistence_stats(candles)
-            if persist is not None:
-                direction = persist["dir"]
-                basis = f"persistence_{persist['kind']}"
-            else:
-                direction = "CALL"
-                basis = "default"
-                if n >= 1:
-                    try:
-                        o = float(candles[-1].get("open", 0.0))
-                        c = float(candles[-1].get("close", 0.0))
-                        if c > o:
-                            direction, basis = "PUT", "body_fade"
-                        elif c < o:
-                            direction, basis = "CALL", "body_fade"
-                    except Exception:
-                        pass
-            if basis == "default":
-                if htf_trend == "UPTREND":
-                    direction, basis = "PUT", "htf_fade"
-                elif htf_trend == "DOWNTREND":
-                    direction, basis = "CALL", "htf_fade"
-            conf = _cf.FALLBACK_CONF_BASE
-            if persist is not None:
-                conf = _cf.FALLBACK_CONF_BASE + int(round(
-                    persist["edge_pp"] * _cf.PERSIST_CONF_PER_PP))
-            elif (htf_trend == "UPTREND" and direction == "CALL") or (
-                    htf_trend == "DOWNTREND" and direction == "PUT"):
-                conf += 2
-            conf = max(_cf.FALLBACK_CONF_BASE,
-                       min(_cf.FALLBACK_CONF_CAP, conf))
-            result = _neutral(
-                [f"INSUFFICIENT_DATA: need >= {MIN_CANDLES_FOR_PREDICTION} "
-                 f"closed candles (got {n}) — every-candle fallback active"],
-                {}, asset, weight_adapter,
-                module_names=module_names, htf_trend=htf_trend)
-            result.update({
-                "signal": direction,
-                "confidence": conf,
-                "raw_confidence": conf,
-                "strength": "WEAK",
-                "score": 0,
-                "strategy": "confluence_v1_fallback",
-                "strategy_reason": (
-                    f"every-candle fallback ({basis}) — insufficient data"),
-                "signal_quality": "FALLBACK",
-                "fallback": True,
-                "fallback_basis": basis,
-                "confluence_reject_gate": "insufficient_data",
-            })
-            return result
-        return _neutral(["INSUFFICIENT_DATA: need >= 30 closed candles"],
-                        {}, asset, weight_adapter,
-                        module_names=module_names, htf_trend=htf_trend)
+        # NO-FALLBACK DIRECTIVE (USER-2026-09-14): the module engine
+        # abstains below the indicator warmup floor — it no longer emits
+        # the old every-candle fallback (persistence/body-fade chain was
+        # banned). feed.py hands this candle to the ML model; if the ML
+        # engine also lacks data, the candle honestly carries no signal.
+        return _neutral(
+            [f"INSUFFICIENT_DATA: need >= {MIN_CANDLES_FOR_PREDICTION} "
+             f"closed candles (got {len(candles) if candles else 0}) — "
+             f"module engine abstains (no fallback; ML model may supply "
+             f"the signal)"],
+            {}, asset, weight_adapter,
+            module_names=module_names, htf_trend=htf_trend)
 
     # ── Step 1: shared market context ────────────────────────────────────────
     ctx = compute_context(candles)

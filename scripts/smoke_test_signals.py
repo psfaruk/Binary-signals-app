@@ -2,21 +2,27 @@
 """
 scripts/smoke_test_signals.py — pipeline health check.
 
-UPDATED (2026-09-07) for the EVERY-CANDLE signal mode (QX_SIGNAL_MODE
-default "every_candle"). The user's standing requirement:
+UPDATED (2026-09-14) for the ANY-THEORY signal mode (QX_SIGNAL_MODE default
+"any_theory"). The user's standing requirements:
 
-  "আমার প্রত্যেকটি ক্যান্ডেল এ সিগন্যাল লাগবে"
-  (every candle MUST produce a CALL or PUT signal)
+  "প্রত্যেক ক্যান্ডেল এ সিগন্যাল প্রধান করতে হবে, কিন্তু fallback signals
+   দেওয়া যাবে না। ... যে কোনো একটি পাস হলেই সিগন্যাল দিবে। মডিউল ইঞ্জিন
+   থেকে সিগন্যাল আসলো না — ML model থেকে সিগন্যাল টি আসবে।"
 
-What this test verifies:
+What this test verifies (strategy-engine-only view — the ML hand-off for
+zero-theory candles is verified by scripts/backtest_any_theory.py):
   ✓ zero engine errors across all candles
-  ✓ 100% candle coverage — every candle yields CALL or PUT (no NEUTRAL)
+  ✓ ~full candle coverage — every candle where ANY theory voted yields
+    CALL/PUT; the rare zero-theory candle returns NEUTRAL (the live feed
+    then takes the ML model's frozen T+1 prediction — ml_model_t1)
   ✓ strict signals (strategy "confluence_v1") carry confidence >= floor
-  ✓ fallback signals (strategy "confluence_v1_fallback") are honestly
-    labeled: confidence in [50, 63], quality FALLBACK
+  ✓ ANY-THEORY signals (strategy "confluence_v1_any") are REAL theory
+    signals: confidence in [ANY_CONF_BASE, ANY_CONF_CAP], quality
+    MEDIUM/LOW, source "strategy"
+  ✓ ZERO fallback signals (strategy "confluence_v1_fallback" / quality
+    FALLBACK / fallback=True are BANNED)
   ✓ no legacy fallback strategies (smart_fallback / smart_evidence_vote)
   ✓ direction is deterministic (same window → same signal)
-  ✓ strict mode regression: QX_SIGNAL_MODE=strict still abstains (NEUTRAL)
 
 Run:
     python scripts/smoke_test_signals.py
@@ -35,8 +41,8 @@ from typing import List, Dict
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-# EVERY-CANDLE mode is the product default — explicit here for clarity.
-os.environ.setdefault("QX_SIGNAL_MODE", "every_candle")
+# ANY-THEORY mode is the production default — explicit here for clarity.
+os.environ.setdefault("QX_SIGNAL_MODE", "any_theory")
 
 from engines.base import confluence as cf_mod
 
@@ -114,6 +120,8 @@ def run_backtest(pairs: List[str], n_candles: int = 100) -> Dict:
                         "strength": pred.get("strength", "NONE"),
                         "strategy": pred.get("strategy", "unknown"),
                         "quality": pred.get("signal_quality", ""),
+                        "source": pred.get("signal_source", ""),
+                        "fallback": bool(pred.get("fallback")),
                         "gate": pred.get("confluence_reject_gate", ""),
                         "agree": pred.get("agree", 0),
                     })
@@ -126,6 +134,8 @@ def run_backtest(pairs: List[str], n_candles: int = 100) -> Dict:
                         "strength": "NONE",
                         "strategy": "error",
                         "quality": "",
+                        "source": "",
+                        "fallback": False,
                         "gate": f"{type(e).__name__}: {e}",
                         "agree": 0,
                     })
@@ -141,7 +151,7 @@ def main():
     pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
 
     print("=" * 72)
-    print("SMOKE TEST — EVERY-CANDLE MODE (100% coverage, honest fallback)")
+    print("SMOKE TEST — ANY-THEORY MODE (theory-backed signals, ML hand-off)")
     print("=" * 72)
     print(f"Pairs: {pairs}  |  Candles/scenario: {args.candles}")
     print(f"Mode: SIGNAL_MODE={cf_mod.SIGNAL_MODE}  "
@@ -161,25 +171,37 @@ def main():
 
         # ── Checks ────────────────────────────────────────────────────────
         err_ok = (n_err == 0)
-        # USER REQ: every candle produces CALL or PUT (no NEUTRAL, no gaps)
-        coverage_ok = (len(fired) == n_total)
+        # ANY-THEORY coverage: nearly every candle gets a CALL/PUT from a
+        # theory vote. Rare NEUTRALs are EXPECTED (zero theories voted) —
+        # the live feed hands those candles to the ML model (verified in
+        # backtest_any_theory.py). Strategy-engine-only floor: >= 95%.
+        coverage_pct = 100.0 * len(fired) / max(1, n_total)
+        coverage_ok = (coverage_pct >= 95.0)
         # Strict signals: confluence_v1 + conf >= floor + MEDIUM/STRONG
         strict_ok = all(
             s["strategy"] == "confluence_v1"
             and s["confidence"] >= cf_mod.MIN_CONFIDENCE
             and s["strength"] in ("MEDIUM", "STRONG")
             for s in fired if s["strategy"] == "confluence_v1")
-        # Fallback signals: honest labeling + low confidence band
-        fallback_ok = all(
-            s["strategy"] == "confluence_v1_fallback"
-            and cf_mod.FALLBACK_CONF_BASE <= s["confidence"] <= cf_mod.FALLBACK_CONF_CAP
-            and s["quality"] == "FALLBACK"
-            for s in fired if s["strategy"] == "confluence_v1_fallback")
+        # ANY-THEORY signals: real theory signals in the ANY band
+        any_ok = all(
+            s["strategy"] == "confluence_v1_any"
+            and cf_mod.ANY_CONF_BASE <= s["confidence"] <= cf_mod.ANY_CONF_CAP
+            and s["quality"] in ("MEDIUM", "LOW")
+            and s["source"] == "strategy"
+            for s in fired if s["strategy"] == "confluence_v1_any")
+        # NO-FALLBACK (USER 2026-09-14): banned labels must NEVER appear
+        no_fallback = all(
+            s["strategy"] != "confluence_v1_fallback"
+            and not s["fallback"]
+            and s["quality"] != "FALLBACK"
+            for s in signals)
         # No legacy fallback strategies may appear
         legacy = {"smart_fallback", "smart_evidence_vote", "error", "unknown"}
         no_legacy = not (set(strat_counter.keys()) & legacy)
 
-        pair_ok = err_ok and coverage_ok and strict_ok and fallback_ok and no_legacy
+        pair_ok = (err_ok and coverage_ok and strict_ok and any_ok
+                   and no_fallback and no_legacy)
         overall_ok &= pair_ok
 
         status = "✓ PASS" if pair_ok else "✗ FAIL"
@@ -187,32 +209,36 @@ def main():
         print(f"  CALL: {counts.get('CALL', 0)}  PUT: {counts.get('PUT', 0)}  "
               f"NEUTRAL: {counts.get('NEUTRAL', 0)}  ERROR: {n_err}")
         print(f"  Coverage: {len(fired)}/{n_total} "
-              f"({100.0 * len(fired) / max(1, n_total):.1f}% — every-candle mode "
-              f"requires 100%)")
+              f"({coverage_pct:.1f}% — the ML model covers the zero-theory "
+              f"candles live; floor 95%)")
         print(f"  Strategies: {dict(strat_counter)}")
         if fired:
             confs = [s["confidence"] for s in fired]
             print(f"  Conf range: {min(confs)}–{max(confs)}")
-        if neutral:
-            print(f"  ⚠ NEUTRAL leaked into every-candle mode!")
-        if not err_ok:
+        if n_err:
             examples = [s["gate"] for s in signals if s["signal"] == "ERROR"][:3]
             print(f"  ⚠ ERRORS: {examples}")
         if not coverage_ok:
-            print(f"  ⚠ COVERAGE FAIL — {n_total - len(fired)} candle(s) without a signal")
+            print(f"  ⚠ COVERAGE FAIL — {100 - coverage_pct:.1f}% of candles "
+                  f"without a strategy signal (zero-theory rate too high)")
         if not strict_ok:
             bad = [s for s in fired
                    if s["strategy"] == "confluence_v1"
                    and not (s["confidence"] >= cf_mod.MIN_CONFIDENCE
                             and s["strength"] in ("MEDIUM", "STRONG"))][:3]
             print(f"  ⚠ BAD STRICT SIGNALS: {bad}")
-        if not fallback_ok:
+        if not any_ok:
             bad = [s for s in fired
+                   if s["strategy"] == "confluence_v1_any"
+                   and not (cf_mod.ANY_CONF_BASE <= s["confidence"]
+                            <= cf_mod.ANY_CONF_CAP
+                            and s["quality"] in ("MEDIUM", "LOW"))][:3]
+            print(f"  ⚠ BAD ANY-THEORY SIGNALS: {bad}")
+        if not no_fallback:
+            bad = [s for s in signals
                    if s["strategy"] == "confluence_v1_fallback"
-                   and not (cf_mod.FALLBACK_CONF_BASE <= s["confidence"]
-                            <= cf_mod.FALLBACK_CONF_CAP
-                            and s["quality"] == "FALLBACK")][:3]
-            print(f"  ⚠ BAD FALLBACK SIGNALS: {bad}")
+                   or s["fallback"] or s["quality"] == "FALLBACK"][:3]
+            print(f"  ⚠ FALLBACK SIGNALS SEEN (BANNED): {bad}")
         if not no_legacy:
             print(f"  ⚠ LEGACY strategy appeared: {dict(strat_counter)}")
         print()
@@ -230,9 +256,10 @@ def main():
 
     print("=" * 72)
     if overall_ok:
-        print("  ✅ PASS — pipeline healthy: 100% candle coverage, zero errors,")
-        print("     strict signals >= confidence floor, fallback signals")
-        print("     honestly labeled in the 50-63 band.")
+        print("  ✅ PASS — pipeline healthy: theory-backed signals, zero errors,")
+        print("     strict signals >= confidence floor, any-theory signals in")
+        print("     the 55-64 band, ZERO fallback signals, ML hand-off covers")
+        print("     the rare zero-theory candles (see backtest_any_theory.py).")
     else:
         print("  ❌ FAIL — see details above.")
     print("=" * 72)

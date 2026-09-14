@@ -20,6 +20,13 @@
     <link rel="stylesheet" href="/static/css/app-v3.css">
     <link rel="stylesheet" href="/static/css/token-panel.css">
     <link rel="stylesheet" href="/static/css/confluence.css">
+    <!-- RESPONSIVE-DEEP-FIX 2026-09-14 (USER REQ: "মোবাইল ও ডেস্কটপ
+         friendly না — স্ক্রিন এর বাহিরে চলে গেছে, সব অপশন টিক করতে হবে"):
+         loads LAST so its equal-specificity overrides win — topbar price
+         squeeze + hidden payout fixed, signal meta 2×2 on phones, model-tab
+         tables fit without forced 560px min-width, safe-area bottom nav,
+         touch targets, overflow guards per panel. -->
+    <link rel="stylesheet" href="/static/css/app-responsive-fix.css">
 </head>
 <body data-category="otc" data-tab="chart">
 
@@ -755,7 +762,7 @@
                             <div class="about-row"><span>ভার্সন</span><strong>3.0.0 (Aurora)</strong></div>
                             <div class="about-row"><span>বিল্ড</span><strong>2026-08-31</strong></div>
                             <div class="about-row"><span>ইঞ্জিন</span><strong>13-module blender</strong></div>
-                            <div class="about-row"><span>সিগন্যাল মোড</span><strong>প্রতি ক্যান্ডেলে (WEAK চালু)</strong></div>
+                            <div class="about-row"><span>সিগন্যাল মোড</span><strong>প্রতি ক্যান্ডেলে — থিওরি/ML সোর্স (ফলব্যাক নেই)</strong></div>
                             <div class="about-row"><span>Public read</span><strong id="about-public-read">চালু</strong></div>
                         </div>
                     </div>

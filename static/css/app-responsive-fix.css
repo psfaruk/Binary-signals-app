@@ -1,0 +1,208 @@
+/* ============================================================================
+   app-responsive-fix.css — RESPONSIVE DEEP-FIX (2026-09-14)
+
+   USER REQ: "অ্যাপ এর মোবাইল ও ডেস্কটপ কম্পিউটার ব্যবহারে friendly না।
+   স্ক্রিন এর বাহিরে চলে গেছে, লেয়াউট টিক নাই, সব অপশন গুল টিক করে দিবেন।"
+
+   Fixes (measured at 320 / 360 / 390 / 640 / 768 / 1024 / 1366 viewports):
+     1. TOPBAR (≤779px) — the price display was squeezed to ~14px wide and
+        the payout badge was display:none ≤640px. Now the pair selector
+        takes its own full row; price + payout share a comfortable second
+        row. NOTHING is hidden anymore (user: "সব অপশন গুল টিক").
+     2. SIGNAL META (≤640px) — the 4-column grid was unreadably tight on
+        phones (the old `flex-wrap` fix was a no-op on a grid). Now 2×2.
+     3. MODEL-TAB TABLES (≤640px) — .mdl-table forced min-width 560-640px
+        inside a ~336px wrap → constant horizontal scrolling. Now the
+        min-width is dropped and low-priority columns hide so the rest
+        FITS; the wrap keeps a scroll escape hatch for edge cases.
+     4. BOTTOM NAV — bigger labels + safe-area padding for notched phones.
+     5. TOUCH TARGETS — chips/buttons get a 32px minimum hit height.
+     6. SIGNAL-SOURCE BADGE (any-theory 2026-09-14) — module-engine vs
+        ML-model source chip styling.
+   Loads LAST (after confluence.css) so equal-specificity rules win.
+   ============================================================================ */
+
+/* ─── 0. Signal-source badge (ANY-THEORY / ML hand-off, 2026-09-14) ─────── */
+.src-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  font-family:var(--mono);font-size:10px;font-weight:800;
+  letter-spacing:.06em;text-transform:uppercase;
+  padding:3px 9px;border-radius:999px;white-space:nowrap;
+  border:1px solid var(--border);
+  background:var(--glass);color:var(--text-dim);
+}
+.src-badge.src-strategy{
+  color:#38bdf8;border-color:rgba(56,189,248,.45);
+  background:rgba(56,189,248,.10);
+}
+.src-badge.src-ml{
+  color:#a78bfa;border-color:rgba(167,139,250,.45);
+  background:rgba(167,139,250,.10);
+}
+.src-badge.src-any{
+  color:#fbbf24;border-color:rgba(251,191,36,.4);
+  background:rgba(251,191,36,.08);
+}
+
+/* ─── 1. Topbar — phones & small tablets ─────────────────────────────────── */
+@media (max-width: 779px){
+  /* Two comfortable rows inside .topbar-center:
+       row A: pair selector (full width, readable)
+       row B: price + payout (side by side, nothing squeezed) */
+  .topbar-center{
+    display:flex;flex-wrap:wrap;align-content:flex-start;
+    gap:8px 10px;min-width:0;
+  }
+  .pair-select{
+    flex:1 1 100%;max-width:none;min-width:0;height:40px;
+  }
+  .price-display{
+    flex:1 1 auto;min-width:96px;
+    flex-direction:row;align-items:center;gap:7px;
+  }
+  .price-display .price-label{display:inline}
+  .price-row{gap:4px}
+  .payout-display{display:flex;flex:0 0 auto}
+  .payout-display .payout-label{padding:4px 9px;font-size:11px}
+}
+
+/* ─── 2. ≤640px: compact phones ──────────────────────────────────────────── */
+@media (max-width: 640px){
+  /* UNDO the old payout hide (panels.css:527 + v3.css:654) — the user
+     explicitly asked for every option to stay visible & ticked. */
+  .payout-display{display:flex}
+  .price-display{min-width:96px}
+  .price-display .price-label{display:inline}
+
+  /* Signal meta: 2×2 grid — 4 columns was unreadably tight. */
+  .signal-meta-row{display:grid;grid-template-columns:repeat(2,1fr);gap:6px}
+  .signal-meta-item{padding:7px 10px}
+
+  /* Model-tab tables: FIT instead of forcing 560-640px min-width.
+     (ID-level overrides needed — panels.css:810 sets an ID-specific
+     min-width:520px on #mdl-live-pred-table that beats class rules.) */
+  .mdl-table-wrap{
+    overflow-x:auto;-webkit-overflow-scrolling:touch;
+    scrollbar-width:thin;
+  }
+  .mdl-table, #mdl-pair-table, #mdl-live-pred-table, #mdl-mperf-table{
+    min-width:0;width:100%;table-layout:fixed;font-size:10.5px;
+  }
+  .mdl-table th{
+    white-space:normal;padding:7px 6px;font-size:9.5px;
+    letter-spacing:.03em;line-height:1.3;
+  }
+  .mdl-table td{
+    padding:7px 6px;white-space:normal;word-break:break-word;
+    overflow:hidden;text-overflow:ellipsis;
+  }
+  /* Hide low-priority columns so the rest fits WITHOUT scrolling:
+     mdl-pair-table: hide ক্যান্ডেল(2) + নোট(8)
+     mdl-live-pred-table: hide ফ্রিজ হয়েছে(4) [+ মডেল(5) ≤479]
+     mdl-mperf-table: hide স্ট্যাটাস(3) + মোট(6) + সর্বশেষ(8)          */
+  #mdl-pair-table th:nth-child(2), #mdl-pair-table td:nth-child(2),
+  #mdl-pair-table th:nth-child(8), #mdl-pair-table td:nth-child(8),
+  #mdl-live-pred-table th:nth-child(4), #mdl-live-pred-table td:nth-child(4),
+  #mdl-mperf-table th:nth-child(3), #mdl-mperf-table td:nth-child(3),
+  #mdl-mperf-table th:nth-child(6), #mdl-mperf-table td:nth-child(6),
+  #mdl-mperf-table th:nth-child(8), #mdl-mperf-table td:nth-child(8){
+    display:none;
+  }
+  /* Long model-version strings get ellipsized instead of stretching. */
+  #mdl-mperf-table td:nth-child(2), #mdl-pair-table td:nth-child(7){
+    max-width:118px;overflow:hidden;text-overflow:ellipsis;
+  }
+  @media (max-width:479px){
+    #mdl-live-pred-table th:nth-child(5), #mdl-live-pred-table td:nth-child(5){
+      display:none;   /* মডেল column — same info lives in the per-pair table */
+    }
+    #mdl-mperf-table td:nth-child(2){max-width:92px}
+  }
+
+  /* Touch targets — chips & small buttons get a real hit height. */
+  .wr-chip,.icon-btn-sm{
+    min-height:32px;display:inline-flex;align-items:center;
+  }
+  .wr-chip{padding:6px 11px}
+  .icon-btn-sm{width:32px;height:32px}
+
+  /* History rows breathe a little. */
+  .history-row{padding:8px 9px}
+  .modal-content{max-width:calc(100vw - 24px)}
+}
+
+/* ─── 3. ≤479px: small phones ────────────────────────────────────────────── */
+@media (max-width: 479px){
+  /* Payout stays visible (overrides v3.css:654 display:none). */
+  .payout-display{display:flex !important}
+  .payout-display .payout-label{font-size:10.5px;padding:3px 8px}
+
+  /* Bottom nav: readable labels + notch-safe height. */
+  .app-bottomnav{padding:6px 4px calc(6px + env(safe-area-inset-bottom, 0px))}
+  .bn-item span{font-size:10px}
+  .bn-item{padding:6px 2px;gap:3px}
+
+  /* Confluence chips: 3-per-row grid — 6 pills in one 370px row were
+     cramped and mis-tappable. */
+  .confluence-chips{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
+  .cf-chip{
+    display:flex;justify-content:center;align-items:center;
+    font-size:9px;padding:5px 4px;min-height:26px;text-align:center;
+  }
+
+  .home-grid{grid-template-columns:1fr 1fr;gap:8px}
+  .stat-card{padding:10px 11px}
+  .mdl-daemon-grid{grid-template-columns:1fr 1fr;gap:6px}
+  .wr-toolbar{gap:6px}
+  .wr-group{gap:5px}
+  .psy-grid{grid-template-columns:1fr}
+  .src-badge{font-size:9px;padding:2px 8px}
+}
+
+/* ─── 4. ≤360px: very small phones ───────────────────────────────────────── */
+@media (max-width: 360px){
+  .price-display{min-width:86px}
+  .price-display .price-value,.price-display .live-price-val{font-size:12.5px}
+  .payout-display .payout-label{font-size:10px;padding:3px 7px}
+  .cf-chip{font-size:8.5px;letter-spacing:.02em}
+  .signal-meta-row{gap:5px}
+  .signal-meta-item{padding:6px 8px}
+  .mdl-table{font-size:10px}
+  .bn-item span{font-size:9px}
+  .home-grid{grid-template-columns:1fr}
+  .stat-card-lg{grid-column:1 / -1}
+}
+
+/* ─── 5. Tablet portrait 780-1023px ──────────────────────────────────────── */
+@media (min-width: 780px) and (max-width: 1023px){
+  .price-display{min-width:110px}
+  .payout-display{display:flex}
+  .pair-select{flex:0 1 240px}
+}
+
+/* ─── 6. Desktop ≥1024px sanity ──────────────────────────────────────────── */
+@media (min-width: 1024px){
+  /* Chart column gets a sensible floor so ultra-wide side panels never
+     crush it at 1024-1100px. */
+  .chart-layout{grid-template-columns:minmax(420px,1fr) 320px}
+  .price-display{min-width:110px}
+  .payout-display{display:flex}
+  /* Long Bengali strings (module reasons, strategy notes) wrap instead
+     of stretching panels horizontally. */
+  .module-row,.strategy-value,.mdl-note,.psy-card-body{
+    overflow-wrap:anywhere;word-break:break-word;
+  }
+}
+
+/* Horizontal-overflow guard for EVERY viewport: any accidental overflow
+   scrolls INSIDE its panel instead of pushing the page sideways. */
+.app-main{min-width:0}
+.tab-pane{min-width:0;max-width:100%;overflow-x:clip}
+.chart-layout{min-width:0}
+.chart-main{min-width:0}
+.chart-panel{min-width:0}
+.home-card{min-width:0}
+.mdl-section{min-width:0}
+.settings-section{min-width:0}
+.wr-pairlist{min-width:0}
+.history-list{min-width:0}
