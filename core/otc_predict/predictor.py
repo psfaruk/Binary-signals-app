@@ -572,6 +572,26 @@ def describe_status(asset=None):
         res = st.get("result") or {}
         if res:
             fast["pairs_registered"] = res.get("pairs_registered")
+        # ZERO-REASONS (2026-09-14): when a run has ALREADY finished with
+        # zero models and no hard error, the card must not repeat the
+        # "৫–৭ মিনিটে মডেল বানাবে" promise — that moment is past. Collect
+        # the per-pair skip reasons (ডেটা কম / candle_micro খালি / …) so
+        # the UI can show the honest diagnosis + when the retry fires.
+        if res and not res.get("pairs_registered"):
+            reasons = []
+            seen = set()
+            try:
+                for a, pst in (fast_train.pair_states() or {}).items():
+                    if not a or a == "__global__":
+                        continue
+                    r = (pst or {}).get("reason") or (pst or {}).get("error")
+                    if r and r not in seen:
+                        seen.add(r)
+                        reasons.append(f"{str(a).replace('_otc', '')}: {r}")
+            except Exception:
+                pass
+            if reasons:
+                fast["zero_reasons"] = reasons[:6]
     except Exception:
         fast = {}
 

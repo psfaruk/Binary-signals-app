@@ -252,12 +252,21 @@ def _gen_pair_candles(asset, days, end_ts, rng):
     return candles
 
 
-def seed_synthetic_history(assets, days=None, db_path=None, log=print):
+def seed_synthetic_history(assets, days=None, db_path=None, log=print,
+                            max_existing=0):
     """Seed candle_micro with synthetic 1m candles for the given assets.
 
-    Only pairs with ZERO existing candles are seeded (never mixed into a
-    pair that already has real/mixed history — the honesty boundary).
-    INSERT OR IGNORE everywhere: a live row on the same minute is sacred.
+    Honesty boundary (STARVED-SEED 2026-09-14): a pair whose EXISTING
+    candle count exceeds ``max_existing`` is never touched — real history
+    stays pure. Pairs at or below it (zero, or a starved handful of stale
+    rows that can never reach FAST_MIN_PAIR_ROWS on their own) get a
+    synthetic cold-start on top; INSERT OR IGNORE keeps every real row
+    sacred, provenance ranges cover ONLY the synthetic block, and the
+    মডেল tab badges the pair সিন্থেটিক until real data purges it.
+    fast_train passes max_existing=SEED_STARVED_CANDLES so the old
+    zero-only rule widens to "too little data to ever train" — closing
+    the band where a pair with e.g. 40 stale candles was neither seeded
+    nor trainable and the app showed "মডেল এখনো প্রস্তুত নয়" forever.
     Returns {asset: {"added": n, "range": [t0, t1]}} for seeded pairs.
     """
     days = days or SYNTH_DAYS
@@ -271,13 +280,17 @@ def seed_synthetic_history(assets, days=None, db_path=None, log=print):
     conn = sqlite3.connect(db_path, timeout=60)
     seeded = {}
     try:
-        existing = {a for (a,) in conn.execute(
-            "SELECT DISTINCT asset FROM candle_micro WHERE period=60")}
+        existing_counts = {a: int(n) for a, n in conn.execute(
+            "SELECT asset, COUNT(*) FROM candle_micro WHERE period=60 "
+            "GROUP BY asset")}
         now_min = int(time.time()) // 60 * 60
         ranges = synth_ranges()
         for asset in assets:
-            if asset in existing:
-                continue        # never blend into a pair that has history
+            have = existing_counts.get(asset, 0)
+            if have > int(max_existing):
+                continue    # enough real history — never blend
+            if have and asset in ranges:
+                continue    # already carries a synth block — never re-stack
             rng = random.Random(f"{asset}:synth:v1")   # stable, reproducible
             candles = _gen_pair_candles(asset, days, now_min, rng)
             conn.executemany(
@@ -298,7 +311,10 @@ def seed_synthetic_history(assets, days=None, db_path=None, log=print):
             n = conn.execute(
                 "SELECT COUNT(*) FROM candle_micro "
                 "WHERE asset=? AND period=60", (asset,)).fetchone()[0]
-            seeded[asset] = {"added": n,
+            # "added" = rows this seed actually contributed (a blended
+            # starved pair keeps its few pre-existing real rows — those
+            # are not ours to claim)
+            seeded[asset] = {"added": max(0, n - have),
                              "range": [candles[0]["time"], candles[-1]["time"]]}
             ranges[asset] = [candles[0]["time"], candles[-1]["time"]]
         _save_ranges(conn, ranges)

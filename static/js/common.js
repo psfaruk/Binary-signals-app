@@ -3054,9 +3054,38 @@ function renderPredictionCard(data){
         esc(String(why).slice(0, 160)) +
         '। সিস্টেম ১০ মিনিটে আবার চেষ্টা করবে।</div>';
     } else {
-      const training = ft.running
-        ? '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন চলছে (কয়েক মিনিটে প্রস্তুত হবে)। '
-        : '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন সার্ভার চালু হওয়ার ৫–৭ মিনিটের মধ্যে মডেল বানাবে। ';
+      // ZERO-STATE HONESTY (2026-09-14): the old branch promised
+      // "৫–৭ মিনিটে মডেল বানাবে" for EVERY idle zero-model state —
+      // even when fast-train was disabled, or a run had ALREADY
+      // finished registering nothing (a promise that can never keep
+      // itself). Five distinct states now, each saying what is actually
+      // true and what happens next.
+      let training;
+      if(ft.enabled === false){
+        training = '⛔ স্বয়ংক্রিয় ফাস্ট-ট্রেইন বন্ধ আছে (QX_FAST_TRAIN=0) — ' +
+                   'চালু না হলে কোনো মডেল তৈরি হবে না। ';
+      } else if(ft.running){
+        training = '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন চলছে ' +
+                   '(মডেলগুলো একটি একটি করে রেজিস্টার হচ্ছে, কয়েক মিনিটে প্রস্তুত হবে)। ';
+      } else if((Number(ft.runs) || 0) > 0){
+        // a run already finished with ZERO models and no hard error —
+        // the "৫–৭ মিনিট" moment is past; show the diagnosis instead
+        const reasons = ft.zero_reasons || [];
+        const whyTxt = reasons.length
+          ? ' মূল কারণ: <b>' + esc(reasons.slice(0, 3).join('; ')) + '</b>।'
+          : '';
+        const nxt = Number(ft.next_run_in);
+        const nxtTxt = (nxt > 0)
+          ? ' পরের স্বয়ংক্রিয় চেষ্টা ~' + Math.max(1, Math.round(nxt / 60)) + ' মিনিটে।'
+          : '';
+        training = '⚠ শেষ ট্রেইনিং চেষ্টায় কোনো মডেল রেজিস্টার হয়নি।' +
+                   whyTxt + nxtTxt +
+                   ' "মডেল" ট্যাব → "এখনই ট্রেইন" বাটন চাপলে এখনই আবার শুরু হবে। ';
+      } else {
+        training = '🤖 মডেল এখনো প্রস্তুত নয় — স্বয়ংক্রিয় ফাস্ট-ট্রেইন সার্ভার ' +
+                   'চালু হওয়ার ৫–৭ মিনিটের মধ্যে মডেল বানাবে (প্রথম ধাপ: ' +
+                   'ডেটা সিড → তারপর পেয়ার-ধরে-পেয়ার ট্রেইন)। ';
+      }
       const ftErr = ft.last_error
         ? '<div class="pred-gate">⚠ শেষ ট্রেইনিং চেষ্টা ব্যর্থ: ' + esc(String(ft.last_error).slice(0, 120)) + '</div>'
         : '';

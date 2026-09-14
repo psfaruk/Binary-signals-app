@@ -35,6 +35,11 @@ if sys.platform != "win32":
     os.environ.setdefault("QX_ROOT",
                           os.path.join(os.environ.get("TMPDIR", "/tmp"), "plybit_cache"))
 
+# BOOTSTRAP-GRACE (2026-09-14): process start time for /healthz — gives the
+# fast-train daemon's FIRST run a 15-min window where a dead feed does not
+# 503-restart the container mid-training (models otherwise never exist).
+_PROC_START = time.time()
+
 import db as _db
 
 if os.environ.get("QX_USE_RAW_WS", "0") == "1":
@@ -616,15 +621,46 @@ async def healthz(request: Request):
     stale) passed healthcheck forever and the container was never restarted.
     Now: returns 503 when feed_healthy=False so Railway's restart policy
     actually triggers.
+
+    BOOTSTRAP-GRACE (2026-09-14): a 503 restart-loop had a second victim —
+    the fast-train daemon. Its first run (data seed + 18 pair trainings)
+    needs 3-7 continuous minutes; if the feed task dies early (dead token
+    crash, transient WS error) Railway restarts the container every
+    healthcheck cycle and the daemon NEVER finishes, so the app can show
+    "মডেল এখনো প্রস্তুত নয়" forever even though nothing is wrong with
+    training itself. While the FIRST bootstrap run is still pending or
+    running AND the process is young (< 15 min), report healthy with the
+    grace reason in the payload — after that window the old 503 behavior
+    resumes (a restart may fetch a fresh token, and models/db persist on
+    the volume anyway).
     """
     feed_task = getattr(request.app.state, "feed_task", None)
     feed_task_alive = bool(feed_task is not None and not feed_task.done())
     feed_dead_normal_exit = bool(getattr(request.app.state,
                                          "feed_dead_normal_exit", False))
     feed_healthy = feed_task_alive and not feed_dead_normal_exit
-    payload = {"ok": feed_healthy, "feed_connected": bool(getattr(feed, "_connected", False)), "feed_task_alive": feed_task_alive, "feed_dead_normal_exit": feed_dead_normal_exit, "feed_healthy": feed_healthy}
-    # 503 when feed is dead so Railway restarts the container
-    if not feed_healthy:
+
+    # BOOTSTRAP-GRACE: first fast-train run pending/in-flight + young process
+    bootstrap_grace = False
+    try:
+        from core.otc_predict import fast_train as _ft_hc
+        st = _ft_hc.bootstrap_status()
+        first_run_pending = (not st.get("runs")) and st.get("enabled")
+        bootstrap_grace = bool(
+            (first_run_pending or st.get("running"))
+            and (time.time() - _PROC_START) < 900)
+    except Exception:
+        pass
+
+    payload = {"ok": feed_healthy or bootstrap_grace,
+               "feed_connected": bool(getattr(feed, "_connected", False)),
+               "feed_task_alive": feed_task_alive,
+               "feed_dead_normal_exit": feed_dead_normal_exit,
+               "feed_healthy": feed_healthy,
+               "bootstrap_grace": bootstrap_grace}
+    # 503 only when the feed is dead AND the first model bootstrap is not
+    # still inside its grace window
+    if not (feed_healthy or bootstrap_grace):
         return JSONResponse(status_code=503, content=payload)
     return payload
 

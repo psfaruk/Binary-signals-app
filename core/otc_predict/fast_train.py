@@ -116,6 +116,16 @@ FAST_RETRY_SECS = 600           # MODEL-RUN-FIX: a run that registered NOTHING
                                 # silently sleeping 6 hours — the user must
                                 # never wait blind again
 FAST_BOOT_DELAY_SECS = 20       # let the server/feed settle first
+
+# STARVED-SEED (2026-09-14): a pair with a handful of stale real candles
+# (say 40 — live feed wrote a few once, token died) is NOT zero, so the
+# old zero-only synth seed skipped it; and with rows ≈ candles−51 <
+# FAST_MIN_PAIR_ROWS it can NEVER train either. When every pair sits in
+# that band the app shows "মডেল এখনো প্রস্তুত নয়" FOREVER (each 10-min
+# retry re-skips). Starved = too few candles to ever reach the row
+# minimum even in principle: rows ≈ candles − (WINDOW + labels ≈ 51),
+# so candles must exceed FAST_MIN_PAIR_ROWS + 51; +30 safety margin.
+SEED_STARVED_CANDLES = FAST_MIN_PAIR_ROWS + 51 + 30
 FAST_FETCH_BATCH = 2            # pairs per platform connect (kind batch)
 FAST_FETCH_TIMEOUT = 300        # per-pair get_historical_candles timeout
 FAST_SLEEP_BETWEEN = 2.0        # pause between fetch batches
@@ -707,16 +717,25 @@ def _run_bootstrap_inner():
     # ROOT CAUSE this fixes: candle_micro's only sources (live feed +
     # platform top-up) BOTH need a token — no token ⇒ empty table ⇒ the
     # daemon logged "no candle data at all" forever and ZERO models ever
-    # registered. Pairs with ZERO candles now get a clearly-labelled
-    # synthetic 2-day cold-start history (provenance in _meta; models stay
-    # status=provisional with meta data_source="synthetic"; the মডেল tab
-    # shows the badge). REAL data always wins: the fetch purges synth rows
-    # pair-by-pair as platform history lands, and the live feed's INSERT OR
-    # REPLACE overwrites same-minute synth rows row-by-row.
-    zero_pairs = [a for a in sorted(ALLOWED_PAIRS_OTC) if not counts.get(a)]
-    if zero_pairs and _synth is not None:
+    # registered. STARVED-SEED (same day, round 2): the zero-only trigger
+    # left a second hole — pairs holding 1..SEED_STARVED_CANDLES stale
+    # candles were neither seeded (not zero) nor trainable (rows < 80),
+    # so a DB with only partial old data could sit at registered=NONE
+    # forever with NO error. The trigger is now "too little data to ever
+    # train", not "zero data": those pairs get the clearly-labelled
+    # synthetic cold-start block (real rows stay sacred via INSERT OR
+    # IGNORE; provenance in _meta; status=provisional, data_source=
+    # "synthetic"; the মডেল tab shows the badge). REAL data always wins:
+    # the fetch purges synth rows pair-by-pair as platform history lands,
+    # and the live feed's INSERT OR REPLACE overwrites same-minute synth
+    # rows row-by-row.
+    starved_pairs = [a for a in sorted(ALLOWED_PAIRS_OTC)
+                     if counts.get(a, 0) < SEED_STARVED_CANDLES]
+    if starved_pairs and _synth is not None:
         try:
-            _seeded = _synth.seed_synthetic_history(zero_pairs, log=_log)
+            _seeded = _synth.seed_synthetic_history(
+                starved_pairs, log=_log,
+                max_existing=SEED_STARVED_CANDLES - 1)
             if _seeded:
                 counts = _micro_counts()
                 for a in sorted(ALLOWED_PAIRS_OTC):
