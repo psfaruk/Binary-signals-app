@@ -1,0 +1,563 @@
+{
+ "date": "2026-09-14 10:20 UTC",
+ "protocol": {
+  "folds": "expanding walk-forward (_fast_folds), EMBARGO=2",
+  "platt": "time-ordered val tail",
+  "shuffle_draws": 5,
+  "bootstrap_n": 500,
+  "data": "synthetic regime-switching, 2 reps \u00d7 18 pairs \u00d7 2d, end_ts=1789200000",
+  "features_base": 73,
+  "features_deep": 48,
+  "honesty": "synthetic data \u21d2 mechanism proof only; real edge measured when live token lands (retrain cycle)"
+ },
+ "tier1": {
+  "y1_up|logreg|BASE": {
+   "n": 81072,
+   "acc": 0.4985,
+   "logloss": 0.7533,
+   "shuffle_probe": 0.4996
+  },
+  "y1_up|logreg|FULL": {
+   "n": 81072,
+   "acc": 0.4991,
+   "logloss": 0.9405,
+   "shuffle_probe": 0.4999
+  },
+  "y1_up|logreg|NOISE": {
+   "n": 81072,
+   "acc": 0.4983,
+   "logloss": 0.7754,
+   "shuffle_probe": 0.4991
+  },
+  "y1_up|rf|BASE": {
+   "n": 81072,
+   "acc": 0.497,
+   "logloss": 0.6991,
+   "shuffle_probe": 0.5003
+  },
+  "y1_up|rf|FULL": {
+   "n": 81072,
+   "acc": 0.4958,
+   "logloss": 0.6992,
+   "shuffle_probe": 0.5004
+  },
+  "y1_up|rf|NOISE": {
+   "n": 81072,
+   "acc": 0.4954,
+   "logloss": 0.6986,
+   "shuffle_probe": 0.4992
+  },
+  "y2_up|logreg|BASE": {
+   "n": 81072,
+   "acc": 0.4989,
+   "logloss": 0.7476,
+   "shuffle_probe": 0.5011
+  },
+  "y2_up|logreg|FULL": {
+   "n": 81072,
+   "acc": 0.499,
+   "logloss": 0.9133,
+   "shuffle_probe": 0.5016
+  },
+  "y2_up|logreg|NOISE": {
+   "n": 81072,
+   "acc": 0.4988,
+   "logloss": 0.771,
+   "shuffle_probe": 0.4998
+  },
+  "y2_up|rf|BASE": {
+   "n": 81072,
+   "acc": 0.4969,
+   "logloss": 0.6991,
+   "shuffle_probe": 0.4999
+  },
+  "y2_up|rf|FULL": {
+   "n": 81072,
+   "acc": 0.4949,
+   "logloss": 0.6997,
+   "shuffle_probe": 0.4996
+  },
+  "y2_up|rf|NOISE": {
+   "n": 81072,
+   "acc": 0.4964,
+   "logloss": 0.6984,
+   "shuffle_probe": 0.4993
+  }
+ },
+ "tier1_paired_deltas": {
+  "y1_up|logreg|FULL-BASE": {
+   "delta_acc": 0.0005,
+   "ci_lo": -0.0025,
+   "ci_hi": 0.004,
+   "significant": false
+  },
+  "y1_up|logreg|NOISE-BASE": {
+   "delta_acc": -0.0002,
+   "ci_lo": -0.0028,
+   "ci_hi": 0.0028,
+   "significant": false
+  },
+  "y1_up|rf|FULL-BASE": {
+   "delta_acc": -0.0012,
+   "ci_lo": -0.0041,
+   "ci_hi": 0.0016,
+   "significant": false
+  },
+  "y1_up|rf|NOISE-BASE": {
+   "delta_acc": -0.0016,
+   "ci_lo": -0.0046,
+   "ci_hi": 0.0016,
+   "significant": false
+  },
+  "y2_up|logreg|FULL-BASE": {
+   "delta_acc": 0.0001,
+   "ci_lo": -0.003,
+   "ci_hi": 0.0032,
+   "significant": false
+  },
+  "y2_up|logreg|NOISE-BASE": {
+   "delta_acc": -0.0001,
+   "ci_lo": -0.0031,
+   "ci_hi": 0.0031,
+   "significant": false
+  },
+  "y2_up|rf|FULL-BASE": {
+   "delta_acc": -0.0021,
+   "ci_lo": -0.005,
+   "ci_hi": 0.0007,
+   "significant": false
+  },
+  "y2_up|rf|NOISE-BASE": {
+   "delta_acc": -0.0005,
+   "ci_lo": -0.0039,
+   "ci_hi": 0.0027,
+   "significant": false
+  },
+  "y1_up|histgb|FULL-BASE": {
+   "delta_acc": -0.0016,
+   "ci_lo": -0.0068,
+   "ci_hi": 0.0039,
+   "significant": false
+  },
+  "y1_up|extratrees|FULL-BASE": {
+   "delta_acc": 0.0023,
+   "ci_lo": -0.0033,
+   "ci_hi": 0.0076,
+   "significant": false
+  },
+  "y2_up|histgb|FULL-BASE": {
+   "delta_acc": 0.0016,
+   "ci_lo": -0.0036,
+   "ci_hi": 0.0072,
+   "significant": false
+  },
+  "y2_up|extratrees|FULL-BASE": {
+   "delta_acc": -0.0017,
+   "ci_lo": -0.0068,
+   "ci_hi": 0.0033,
+   "significant": false
+  }
+ },
+ "tier1_per_pair_acc": {
+  "y1_up|logreg|BASE|AUDJPY_otc": 0.5022,
+  "y1_up|rf|BASE|AUDJPY_otc": 0.4991,
+  "y2_up|logreg|BASE|AUDJPY_otc": 0.4964,
+  "y2_up|rf|BASE|AUDJPY_otc": 0.4947,
+  "y1_up|logreg|FULL|AUDJPY_otc": 0.4849,
+  "y1_up|rf|FULL|AUDJPY_otc": 0.5075,
+  "y2_up|logreg|FULL|AUDJPY_otc": 0.5031,
+  "y2_up|rf|FULL|AUDJPY_otc": 0.5044,
+  "y1_up|logreg|NOISE|AUDJPY_otc": 0.504,
+  "y1_up|rf|NOISE|AUDJPY_otc": 0.4964,
+  "y2_up|logreg|NOISE|AUDJPY_otc": 0.4938,
+  "y2_up|rf|NOISE|AUDJPY_otc": 0.5062,
+  "y1_up|logreg|BASE|BRLUSD_otc": 0.4862,
+  "y1_up|rf|BASE|BRLUSD_otc": 0.4933,
+  "y2_up|logreg|BASE|BRLUSD_otc": 0.5093,
+  "y2_up|rf|BASE|BRLUSD_otc": 0.4982,
+  "y1_up|logreg|FULL|BRLUSD_otc": 0.4853,
+  "y1_up|rf|FULL|BRLUSD_otc": 0.4916,
+  "y2_up|logreg|FULL|BRLUSD_otc": 0.5004,
+  "y2_up|rf|FULL|BRLUSD_otc": 0.4969,
+  "y1_up|logreg|NOISE|BRLUSD_otc": 0.5009,
+  "y1_up|rf|NOISE|BRLUSD_otc": 0.4987,
+  "y2_up|logreg|NOISE|BRLUSD_otc": 0.5009,
+  "y2_up|rf|NOISE|BRLUSD_otc": 0.4978,
+  "y1_up|logreg|BASE|EURNZD_otc": 0.5191,
+  "y1_up|rf|BASE|EURNZD_otc": 0.5102,
+  "y2_up|logreg|BASE|EURNZD_otc": 0.4982,
+  "y2_up|rf|BASE|EURNZD_otc": 0.5111,
+  "y1_up|logreg|FULL|EURNZD_otc": 0.5089,
+  "y1_up|rf|FULL|EURNZD_otc": 0.5067,
+  "y2_up|logreg|FULL|EURNZD_otc": 0.4987,
+  "y2_up|rf|FULL|EURNZD_otc": 0.504,
+  "y1_up|logreg|NOISE|EURNZD_otc": 0.5089,
+  "y1_up|rf|NOISE|EURNZD_otc": 0.496,
+  "y2_up|logreg|NOISE|EURNZD_otc": 0.5004,
+  "y2_up|rf|NOISE|EURNZD_otc": 0.4991,
+  "y1_up|logreg|BASE|GBPNZD_otc": 0.5027,
+  "y1_up|rf|BASE|GBPNZD_otc": 0.5018,
+  "y2_up|logreg|BASE|GBPNZD_otc": 0.5004,
+  "y2_up|rf|BASE|GBPNZD_otc": 0.5102,
+  "y1_up|logreg|FULL|GBPNZD_otc": 0.4996,
+  "y1_up|rf|FULL|GBPNZD_otc": 0.4933,
+  "y2_up|logreg|FULL|GBPNZD_otc": 0.5067,
+  "y2_up|rf|FULL|GBPNZD_otc": 0.484,
+  "y1_up|logreg|NOISE|GBPNZD_otc": 0.516,
+  "y1_up|rf|NOISE|GBPNZD_otc": 0.5093,
+  "y2_up|logreg|NOISE|GBPNZD_otc": 0.4982,
+  "y2_up|rf|NOISE|GBPNZD_otc": 0.4871,
+  "y1_up|logreg|BASE|NZDCAD_otc": 0.48,
+  "y1_up|rf|BASE|NZDCAD_otc": 0.5098,
+  "y2_up|logreg|BASE|NZDCAD_otc": 0.5004,
+  "y2_up|rf|BASE|NZDCAD_otc": 0.4907,
+  "y1_up|logreg|FULL|NZDCAD_otc": 0.5013,
+  "y1_up|rf|FULL|NZDCAD_otc": 0.508,
+  "y2_up|logreg|FULL|NZDCAD_otc": 0.4845,
+  "y2_up|rf|FULL|NZDCAD_otc": 0.4991,
+  "y1_up|logreg|NOISE|NZDCAD_otc": 0.5075,
+  "y1_up|rf|NOISE|NZDCAD_otc": 0.4813,
+  "y2_up|logreg|NOISE|NZDCAD_otc": 0.508,
+  "y2_up|rf|NOISE|NZDCAD_otc": 0.516,
+  "y1_up|logreg|BASE|NZDJPY_otc": 0.4987,
+  "y1_up|rf|BASE|NZDJPY_otc": 0.504,
+  "y2_up|logreg|BASE|NZDJPY_otc": 0.4996,
+  "y2_up|rf|BASE|NZDJPY_otc": 0.4964,
+  "y1_up|logreg|FULL|NZDJPY_otc": 0.4916,
+  "y1_up|rf|FULL|NZDJPY_otc": 0.4911,
+  "y2_up|logreg|FULL|NZDJPY_otc": 0.5027,
+  "y2_up|rf|FULL|NZDJPY_otc": 0.488,
+  "y1_up|logreg|NOISE|NZDJPY_otc": 0.4925,
+  "y1_up|rf|NOISE|NZDJPY_otc": 0.4933,
+  "y2_up|logreg|NOISE|NZDJPY_otc": 0.4929,
+  "y2_up|rf|NOISE|NZDJPY_otc": 0.4916,
+  "y1_up|logreg|BASE|NZDUSD_otc": 0.5164,
+  "y1_up|rf|BASE|NZDUSD_otc": 0.4929,
+  "y2_up|logreg|BASE|NZDUSD_otc": 0.5142,
+  "y2_up|rf|BASE|NZDUSD_otc": 0.5044,
+  "y1_up|logreg|FULL|NZDUSD_otc": 0.5102,
+  "y1_up|rf|FULL|NZDUSD_otc": 0.5062,
+  "y2_up|logreg|FULL|NZDUSD_otc": 0.5111,
+  "y2_up|rf|FULL|NZDUSD_otc": 0.5053,
+  "y1_up|logreg|NOISE|NZDUSD_otc": 0.5022,
+  "y1_up|rf|NOISE|NZDUSD_otc": 0.4987,
+  "y2_up|logreg|NOISE|NZDUSD_otc": 0.5031,
+  "y2_up|rf|NOISE|NZDUSD_otc": 0.5071,
+  "y1_up|logreg|BASE|USDARS_otc": 0.4853,
+  "y1_up|rf|BASE|USDARS_otc": 0.4969,
+  "y2_up|logreg|BASE|USDARS_otc": 0.4911,
+  "y2_up|rf|BASE|USDARS_otc": 0.496,
+  "y1_up|logreg|FULL|USDARS_otc": 0.5058,
+  "y1_up|rf|FULL|USDARS_otc": 0.4862,
+  "y2_up|logreg|FULL|USDARS_otc": 0.5044,
+  "y2_up|rf|FULL|USDARS_otc": 0.4836,
+  "y1_up|logreg|NOISE|USDARS_otc": 0.4885,
+  "y1_up|rf|NOISE|USDARS_otc": 0.4916,
+  "y2_up|logreg|NOISE|USDARS_otc": 0.4929,
+  "y2_up|rf|NOISE|USDARS_otc": 0.4956,
+  "y1_up|logreg|BASE|USDBDT_otc": 0.4964,
+  "y1_up|rf|BASE|USDBDT_otc": 0.496,
+  "y2_up|logreg|BASE|USDBDT_otc": 0.4898,
+  "y2_up|rf|BASE|USDBDT_otc": 0.4871,
+  "y1_up|logreg|FULL|USDBDT_otc": 0.4836,
+  "y1_up|rf|FULL|USDBDT_otc": 0.4925,
+  "y2_up|logreg|FULL|USDBDT_otc": 0.4996,
+  "y2_up|rf|FULL|USDBDT_otc": 0.4809,
+  "y1_up|logreg|NOISE|USDBDT_otc": 0.5009,
+  "y1_up|rf|NOISE|USDBDT_otc": 0.5009,
+  "y2_up|logreg|NOISE|USDBDT_otc": 0.5036,
+  "y2_up|rf|NOISE|USDBDT_otc": 0.4858,
+  "y1_up|logreg|BASE|USDCOP_otc": 0.4987,
+  "y1_up|rf|BASE|USDCOP_otc": 0.4889,
+  "y2_up|logreg|BASE|USDCOP_otc": 0.4902,
+  "y2_up|rf|BASE|USDCOP_otc": 0.5009,
+  "y1_up|logreg|FULL|USDCOP_otc": 0.4911,
+  "y1_up|rf|FULL|USDCOP_otc": 0.5018,
+  "y2_up|logreg|FULL|USDCOP_otc": 0.4973,
+  "y2_up|rf|FULL|USDCOP_otc": 0.4702,
+  "y1_up|logreg|NOISE|USDCOP_otc": 0.4987,
+  "y1_up|rf|NOISE|USDCOP_otc": 0.4827,
+  "y2_up|logreg|NOISE|USDCOP_otc": 0.4876,
+  "y2_up|rf|NOISE|USDCOP_otc": 0.4809,
+  "y1_up|logreg|BASE|USDDZD_otc": 0.512,
+  "y1_up|rf|BASE|USDDZD_otc": 0.4969,
+  "y2_up|logreg|BASE|USDDZD_otc": 0.5071,
+  "y2_up|rf|BASE|USDDZD_otc": 0.4947,
+  "y1_up|logreg|FULL|USDDZD_otc": 0.5058,
+  "y1_up|rf|FULL|USDDZD_otc": 0.4982,
+  "y2_up|logreg|FULL|USDDZD_otc": 0.5044,
+  "y2_up|rf|FULL|USDDZD_otc": 0.5031,
+  "y1_up|logreg|NOISE|USDDZD_otc": 0.504,
+  "y1_up|rf|NOISE|USDDZD_otc": 0.4951,
+  "y2_up|logreg|NOISE|USDDZD_otc": 0.5013,
+  "y2_up|rf|NOISE|USDDZD_otc": 0.4969,
+  "y1_up|logreg|BASE|USDIDR_otc": 0.488,
+  "y1_up|rf|BASE|USDIDR_otc": 0.5062,
+  "y2_up|logreg|BASE|USDIDR_otc": 0.5022,
+  "y2_up|rf|BASE|USDIDR_otc": 0.5,
+  "y1_up|logreg|FULL|USDIDR_otc": 0.4876,
+  "y1_up|rf|FULL|USDIDR_otc": 0.4925,
+  "y2_up|logreg|FULL|USDIDR_otc": 0.5031,
+  "y2_up|rf|FULL|USDIDR_otc": 0.4907,
+  "y1_up|logreg|NOISE|USDIDR_otc": 0.4947,
+  "y1_up|rf|NOISE|USDIDR_otc": 0.4947,
+  "y2_up|logreg|NOISE|USDIDR_otc": 0.5022,
+  "y2_up|rf|NOISE|USDIDR_otc": 0.4898,
+  "y1_up|logreg|BASE|USDINR_otc": 0.4978,
+  "y1_up|rf|BASE|USDINR_otc": 0.5031,
+  "y2_up|logreg|BASE|USDINR_otc": 0.4867,
+  "y2_up|rf|BASE|USDINR_otc": 0.4956,
+  "y1_up|logreg|FULL|USDINR_otc": 0.4987,
+  "y1_up|rf|FULL|USDINR_otc": 0.5062,
+  "y2_up|logreg|FULL|USDINR_otc": 0.4831,
+  "y2_up|rf|FULL|USDINR_otc": 0.5058,
+  "y1_up|logreg|NOISE|USDINR_otc": 0.4933,
+  "y1_up|rf|NOISE|USDINR_otc": 0.4925,
+  "y2_up|logreg|NOISE|USDINR_otc": 0.5031,
+  "y2_up|rf|NOISE|USDINR_otc": 0.5013,
+  "y1_up|logreg|BASE|USDMXN_otc": 0.4911,
+  "y1_up|rf|BASE|USDMXN_otc": 0.4916,
+  "y2_up|logreg|BASE|USDMXN_otc": 0.5062,
+  "y2_up|rf|BASE|USDMXN_otc": 0.4982,
+  "y1_up|logreg|FULL|USDMXN_otc": 0.4885,
+  "y1_up|rf|FULL|USDMXN_otc": 0.4969,
+  "y2_up|logreg|FULL|USDMXN_otc": 0.5044,
+  "y2_up|rf|FULL|USDMXN_otc": 0.4964,
+  "y1_up|logreg|NOISE|USDMXN_otc": 0.4867,
+  "y1_up|rf|NOISE|USDMXN_otc": 0.5031,
+  "y2_up|logreg|NOISE|USDMXN_otc": 0.5071,
+  "y2_up|rf|NOISE|USDMXN_otc": 0.5053,
+  "y1_up|logreg|BASE|USDNGN_otc": 0.5071,
+  "y1_up|rf|BASE|USDNGN_otc": 0.4956,
+  "y2_up|logreg|BASE|USDNGN_otc": 0.5058,
+  "y2_up|rf|BASE|USDNGN_otc": 0.4898,
+  "y1_up|logreg|FULL|USDNGN_otc": 0.4885,
+  "y1_up|rf|FULL|USDNGN_otc": 0.4973,
+  "y2_up|logreg|FULL|USDNGN_otc": 0.4876,
+  "y2_up|rf|FULL|USDNGN_otc": 0.4893,
+  "y1_up|logreg|NOISE|USDNGN_otc": 0.5142,
+  "y1_up|rf|NOISE|USDNGN_otc": 0.5169,
+  "y2_up|logreg|NOISE|USDNGN_otc": 0.5013,
+  "y2_up|rf|NOISE|USDNGN_otc": 0.5058,
+  "y1_up|logreg|BASE|USDPHP_otc": 0.5191,
+  "y1_up|rf|BASE|USDPHP_otc": 0.5004,
+  "y2_up|logreg|BASE|USDPHP_otc": 0.4925,
+  "y2_up|rf|BASE|USDPHP_otc": 0.4969,
+  "y1_up|logreg|FULL|USDPHP_otc": 0.5093,
+  "y1_up|rf|FULL|USDPHP_otc": 0.4978,
+  "y2_up|logreg|FULL|USDPHP_otc": 0.5049,
+  "y2_up|rf|FULL|USDPHP_otc": 0.4991,
+  "y1_up|logreg|NOISE|USDPHP_otc": 0.504,
+  "y1_up|rf|NOISE|USDPHP_otc": 0.4987,
+  "y2_up|logreg|NOISE|USDPHP_otc": 0.5089,
+  "y2_up|rf|NOISE|USDPHP_otc": 0.4947,
+  "y1_up|logreg|BASE|USDPKR_otc": 0.5027,
+  "y1_up|rf|BASE|USDPKR_otc": 0.4951,
+  "y2_up|logreg|BASE|USDPKR_otc": 0.4845,
+  "y2_up|rf|BASE|USDPKR_otc": 0.4925,
+  "y1_up|logreg|FULL|USDPKR_otc": 0.4738,
+  "y1_up|rf|FULL|USDPKR_otc": 0.488,
+  "y2_up|logreg|FULL|USDPKR_otc": 0.472,
+  "y2_up|rf|FULL|USDPKR_otc": 0.4791,
+  "y1_up|logreg|NOISE|USDPKR_otc": 0.508,
+  "y1_up|rf|NOISE|USDPKR_otc": 0.4805,
+  "y2_up|logreg|NOISE|USDPKR_otc": 0.4911,
+  "y2_up|rf|NOISE|USDPKR_otc": 0.4987,
+  "y1_up|logreg|BASE|USDZAR_otc": 0.4911,
+  "y1_up|rf|BASE|USDZAR_otc": 0.5022,
+  "y2_up|logreg|BASE|USDZAR_otc": 0.5058,
+  "y2_up|rf|BASE|USDZAR_otc": 0.4871,
+  "y1_up|logreg|FULL|USDZAR_otc": 0.5058,
+  "y1_up|rf|FULL|USDZAR_otc": 0.4964,
+  "y2_up|logreg|FULL|USDZAR_otc": 0.5098,
+  "y2_up|rf|FULL|USDZAR_otc": 0.4982,
+  "y1_up|logreg|NOISE|USDZAR_otc": 0.4964,
+  "y1_up|rf|NOISE|USDZAR_otc": 0.508,
+  "y2_up|logreg|NOISE|USDZAR_otc": 0.4978,
+  "y2_up|rf|NOISE|USDZAR_otc": 0.4973
+ },
+ "tier2_ablation": {
+  "y1_up|BASE": {
+   "n": 27024,
+   "acc": 0.5008,
+   "logloss": 0.7621,
+   "shuffle_probe": 0.5021
+  },
+  "y1_up|BASE+INTER": {
+   "n": 27024,
+   "acc": 0.5025,
+   "logloss": 0.7712,
+   "shuffle_probe": 0.5006
+  },
+  "y1_up|BASE+MICRO": {
+   "n": 27024,
+   "acc": 0.5015,
+   "logloss": 0.7677,
+   "shuffle_probe": 0.5004
+  },
+  "y1_up|BASE+REGIME": {
+   "n": 27024,
+   "acc": 0.5025,
+   "logloss": 0.7697,
+   "shuffle_probe": 0.4998
+  },
+  "y1_up|BASE+REGIME|rf": {
+   "n": 27024,
+   "acc": 0.4963,
+   "logloss": 0.6982,
+   "shuffle_probe": 0.4998
+  },
+  "y1_up|BASE+SERIAL": {
+   "n": 27024,
+   "acc": 0.501,
+   "logloss": 0.7744,
+   "shuffle_probe": 0.4993
+  },
+  "y1_up|BASE+SERIAL|rf": {
+   "n": 27024,
+   "acc": 0.5016,
+   "logloss": 0.6981,
+   "shuffle_probe": 0.5005
+  },
+  "y1_up|BASE+TIME": {
+   "n": 27024,
+   "acc": 0.501,
+   "logloss": 0.8903,
+   "shuffle_probe": 0.5016
+  },
+  "y1_up|BASE|rf": {
+   "n": 27024,
+   "acc": 0.4975,
+   "logloss": 0.6982,
+   "shuffle_probe": 0.4996
+  },
+  "y1_up|DEEP_ONLY": {
+   "n": 27024,
+   "acc": 0.503,
+   "logloss": 0.8591,
+   "shuffle_probe": 0.5002
+  },
+  "y1_up|FULL": {
+   "n": 27024,
+   "acc": 0.5023,
+   "logloss": 0.9576,
+   "shuffle_probe": 0.4984
+  },
+  "y2_up|BASE": {
+   "n": 27024,
+   "acc": 0.504,
+   "logloss": 0.7485,
+   "shuffle_probe": 0.5006
+  },
+  "y2_up|BASE+INTER": {
+   "n": 27024,
+   "acc": 0.5015,
+   "logloss": 0.7526,
+   "shuffle_probe": 0.5003
+  },
+  "y2_up|BASE+MICRO": {
+   "n": 27024,
+   "acc": 0.5031,
+   "logloss": 0.7503,
+   "shuffle_probe": 0.5004
+  },
+  "y2_up|BASE+REGIME": {
+   "n": 27024,
+   "acc": 0.5028,
+   "logloss": 0.7536,
+   "shuffle_probe": 0.5002
+  },
+  "y2_up|BASE+REGIME|rf": {
+   "n": 27024,
+   "acc": 0.5007,
+   "logloss": 0.6978,
+   "shuffle_probe": 0.5002
+  },
+  "y2_up|BASE+SERIAL": {
+   "n": 27024,
+   "acc": 0.5013,
+   "logloss": 0.7618,
+   "shuffle_probe": 0.4997
+  },
+  "y2_up|BASE+SERIAL|rf": {
+   "n": 27024,
+   "acc": 0.5013,
+   "logloss": 0.6976,
+   "shuffle_probe": 0.5009
+  },
+  "y2_up|BASE+TIME": {
+   "n": 27024,
+   "acc": 0.5036,
+   "logloss": 0.9091,
+   "shuffle_probe": 0.4999
+  },
+  "y2_up|BASE|rf": {
+   "n": 27024,
+   "acc": 0.5002,
+   "logloss": 0.6981,
+   "shuffle_probe": 0.4996
+  },
+  "y2_up|DEEP_ONLY": {
+   "n": 27024,
+   "acc": 0.5066,
+   "logloss": 0.8596,
+   "shuffle_probe": 0.4988
+  },
+  "y2_up|FULL": {
+   "n": 27024,
+   "acc": 0.5073,
+   "logloss": 0.9495,
+   "shuffle_probe": 0.5016
+  }
+ },
+ "tier3_new_models": {
+  "y1_up|extratrees|BASE": {
+   "n": 27024,
+   "acc": 0.4963,
+   "logloss": 0.6976,
+   "shuffle_probe": 0.5015
+  },
+  "y1_up|extratrees|FULL": {
+   "n": 27024,
+   "acc": 0.4986,
+   "logloss": 0.6981,
+   "shuffle_probe": 0.4999
+  },
+  "y1_up|histgb|BASE": {
+   "n": 27024,
+   "acc": 0.5,
+   "logloss": 0.7098,
+   "shuffle_probe": 0.5018
+  },
+  "y1_up|histgb|FULL": {
+   "n": 27024,
+   "acc": 0.4984,
+   "logloss": 0.7151,
+   "shuffle_probe": 0.4991
+  },
+  "y2_up|extratrees|BASE": {
+   "n": 27024,
+   "acc": 0.5009,
+   "logloss": 0.6974,
+   "shuffle_probe": 0.4967
+  },
+  "y2_up|extratrees|FULL": {
+   "n": 27024,
+   "acc": 0.4993,
+   "logloss": 0.6978,
+   "shuffle_probe": 0.5037
+  },
+  "y2_up|histgb|BASE": {
+   "n": 27024,
+   "acc": 0.5009,
+   "logloss": 0.7097,
+   "shuffle_probe": 0.5043
+  },
+  "y2_up|histgb|FULL": {
+   "n": 27024,
+   "acc": 0.5025,
+   "logloss": 0.7108,
+   "shuffle_probe": 0.5008
+  }
+ }
+}

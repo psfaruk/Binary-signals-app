@@ -32,6 +32,8 @@ from core.otc_predict.strategy_bridge import (
     strategy_votes, STRATEGY_FEATURE_NAMES, MIN_WINDOW_STRATEGY)
 from core.otc_predict.hist_stats import (
     hist_feature_values, HIST_FEATURE_NAMES)  # noqa: F401  (re-export)
+from core.otc_predict.features_deep import (
+    build_deep_row, DEEP_FEATURE_NAMES)  # noqa: F401  (re-export)
 
 __all__ = ["build_extended_row", "EXTENDED_FEATURE_NAMES", "MIN_WINDOW_EXT",
            "build_unified_row", "UNIFIED_FEATURE_NAMES", "MIN_WINDOW_UNIFIED"]
@@ -41,6 +43,8 @@ MIN_WINDOW_EXT = 24
 
 # UNIFIED-SIGNAL (2026-09-13): classic-strategy features need the blender's
 # own indicator warmup floor (30) — higher than EXT's 24.
+# DEEP (2026-09-14): the deep block's own floor is 24 ≤ 30, so the unified
+# minimum is unchanged.
 MIN_WINDOW_UNIFIED = max(MIN_WINDOW_EXT, MIN_WINDOW_STRATEGY)
 
 _EXTRA_NAMES = (
@@ -83,15 +87,30 @@ EXTENDED_FEATURE_NAMES = tuple(BASE_NAMES) + _EXTRA_NAMES
 UNIFIED_FEATURE_NAMES = tuple(EXTENDED_FEATURE_NAMES) + tuple(
     STRATEGY_FEATURE_NAMES) + tuple(HIST_FEATURE_NAMES)
 
+# DEEP-FEATURES (2026-09-14, user ask: "Feature engineering আরও গভীর করা —
+# broker-এর algorithm-এর কোনো detectable pattern খোঁজা: নির্দিষ্ট সময়,
+# নির্দিষ্ট পেয়ার, নির্দিষ্ট regime-এ"). The unified row gains the 48-feature
+# deep block (time-of-day/session, direction serial-dependence, regime
+# one-hots + Hurst, time×pattern interactions, pair-local micro stats).
+# Backward compatibility is the same contract as every earlier superset
+# extension: bundles store their own feature_names and predict_up() reads
+# only those — old (deep-less) bundles keep predicting bit-for-bit, new
+# bundles are trained by the SAME build_unified_row the live path runs,
+# so training and prediction features can never drift apart.
+UNIFIED_FEATURE_NAMES = tuple(UNIFIED_FEATURE_NAMES) + tuple(
+    DEEP_FEATURE_NAMES)
+
 
 def build_unified_row(window, micro=None, ticks=None, hist=None):
     """UNIFIED-SIGNAL feature row: extended features + strategy votes
-    + historical setup-match probabilities (Deep Report §13).
+    + historical setup-match probabilities (Deep Report §13)
+    + DEEP block (time / serial / regime / interactions / micro-local).
 
-    Same leak-safety contract as build_extended_row — the strategy bridge
-    receives the SAME closed-candle window and nothing else. Needs >=
-    MIN_WINDOW_UNIFIED candles. Returns the extended row dict with the
-    sv_* / svc_* block and the hist_* block merged in.
+    Same leak-safety contract as build_extended_row — every block
+    (strategy bridge, hist engine, deep block) receives the SAME
+    closed-candle window and nothing else. Needs >= MIN_WINDOW_UNIFIED
+    candles. Returns the extended row dict with the sv_* / svc_* block,
+    the hist_* block and the deep block merged in.
 
     `ticks` — optional tick buffer for the tickrun module (live path may
     pass it; training history has none → tickrun abstains honestly).
@@ -104,6 +123,9 @@ def build_unified_row(window, micro=None, ticks=None, hist=None):
     sv, _summary = strategy_votes(window, ticks=ticks)
     feats.update(sv)
     feats.update(hist_feature_values(hist))
+    # DEEP block — pure-python O(window) math over the same closed
+    # candles; .get()-guarded micro reads keep live-path robustness.
+    feats.update(build_deep_row(window))
     return feats
 
 

@@ -81,7 +81,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.8
+   "secs": 0.9
   },
   {
    "asset": "NZDJPY_otc",
@@ -189,7 +189,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 0.8
   },
   {
    "asset": "EURNZD_otc",
@@ -213,7 +213,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 0.8
   }
  ]
 }

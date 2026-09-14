@@ -85,6 +85,7 @@ def main():
     from core.otc_predict.features_ext import (
         build_unified_row, UNIFIED_FEATURE_NAMES, EXTENDED_FEATURE_NAMES)
     from core.otc_predict.strategy_bridge import STRATEGY_FEATURE_NAMES
+    from core.otc_predict.features_deep import DEEP_FEATURE_NAMES
 
     candles = synth_candles(3000, seed=11)
     rows = synth_rows(candles)
@@ -268,12 +269,13 @@ def main():
     check("real hist merged", row_hist["hist_p_up_t1"] == 0.73)
     check("conf log-scaled in (0,1]", 0.0 < row_hist["hist_conf"] <= 1.0)
     expect = (len(EXTENDED_FEATURE_NAMES) + len(STRATEGY_FEATURE_NAMES)
-              + len(HIST_FEATURE_NAMES))
-    check("UNIFIED == EXT + STRATEGY + HIST",
+              + len(HIST_FEATURE_NAMES) + len(DEEP_FEATURE_NAMES))
+    check("UNIFIED == EXT + STRATEGY + HIST + DEEP",
           len(UNIFIED_FEATURE_NAMES) == expect,
           f"{len(UNIFIED_FEATURE_NAMES)} vs {expect}")
-    check("hist names are the tail",
-          tuple(UNIFIED_FEATURE_NAMES[-3:]) == HIST_FEATURE_NAMES)
+    check("deep names are the tail",
+          tuple(UNIFIED_FEATURE_NAMES[-len(DEEP_FEATURE_NAMES):])
+          == DEEP_FEATURE_NAMES)
 
     print("== 9. predictor payload freeze + bundle back-compat ==")
     from core.otc_predict import predictor as pred

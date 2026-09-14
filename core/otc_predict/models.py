@@ -59,9 +59,16 @@ def _std_pipeline(clf):
 
 
 def CANDIDATES():
-    """Candidate estimators (PART 10 list mapped to available libs)."""
+    """Candidate estimators (PART 10 list mapped to available libs).
+
+    extratrees (2026-09-14, DEEP-FEATURES ask "নতুন model try করে দেখা"):
+    extremely-randomized trees — the extra randomization is a natural
+    match for noisy per-candle direction targets; kept in the pool for
+    walk-forward selection, never force-fitted.
+    """
     if not SKLEARN_OK:
         return {}
+    from sklearn.ensemble import ExtraTreesClassifier
     return {
         "logreg": lambda: _std_pipeline(LogisticRegression(
             C=0.2, max_iter=1000, random_state=SEED)),
@@ -71,6 +78,9 @@ def CANDIDATES():
         "histgb": lambda: HistGradientBoostingClassifier(
             max_iter=150, max_depth=3, learning_rate=0.05,
             min_samples_leaf=40, l2_regularization=1.0, random_state=SEED),
+        "extratrees": lambda: ExtraTreesClassifier(
+            n_estimators=300, max_depth=8, min_samples_leaf=15,
+            random_state=SEED, n_jobs=1, class_weight=None),
     }
 
 
