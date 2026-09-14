@@ -247,6 +247,16 @@ def _next_run_in():
 def bootstrap_status():
     """JSON-safe status for /api/prediction/bootstrap and the UI."""
     blocked = _blocked_reason()
+    # SYNTH (2026-09-14): which pairs currently run on synthetic cold-start
+    # data — surfaced so the মডেল tab can badge them honestly.
+    _synth_info = None
+    try:
+        from core.otc_predict import synth_seed as _ss
+        _st = _ss.synth_stats()
+        _synth_info = {"enabled": _st["enabled"], "days": _st["days"],
+                       "pairs": _st["pairs"]}
+    except Exception:
+        _synth_info = None
     return {
         "enabled": os.environ.get("QX_FAST_TRAIN", "1") not in ("0", "false", "no"),
         "running": _state["running"],
@@ -257,6 +267,7 @@ def bootstrap_status():
         "started_at": _state["started_at"],
         "sklearn_ok": _sklearn_ok(),
         "blocked": blocked,
+        "synth": _synth_info,
         "pairs": pair_states(),
         "next_run_in": _next_run_in(),
         "retrain_secs": FAST_RETRAIN_SECS,
@@ -406,6 +417,16 @@ async def _fetch_batch(plan):
                                  float(c["close"])))
                 except Exception:
                     continue
+            # SYNTH-PURGE (2026-09-14): REAL platform history just landed
+            # for this pair — drop its synthetic cold-start rows FIRST so
+            # the INSERT OR IGNORE below is not blocked by same-minute
+            # synth rows (real data always wins, synth_seed.py contract).
+            if norm:
+                try:
+                    from core.otc_predict import synth_seed as _synth
+                    _synth.purge_pair(asset, log=lambda m: None)
+                except Exception:
+                    pass
             # INSERT OR IGNORE: a live candle_micro row (with microstructure)
             # must NEVER be replaced by a bare history row.
             before = conn.execute(
@@ -433,8 +454,15 @@ async def _fetch_batch(plan):
 
 # ─────────────────── phase 2: fast walk-forward train ─────────────────────
 
-def fast_train_one(rows, seed=13):
+def fast_train_one(rows, seed=13, data_source=None):
     """Train + gate ONE asset's rows with the fast configuration.
+
+    data_source (2026-09-14): "synthetic" rows came from the offline
+    cold-start seeder. Such a bundle is HARD-CAPPED to status
+    "provisional" — synthetic data can never *prove* a real edge (the
+    walk-forward still runs, the shuffle probe still gates leakage) —
+    and its meta/registry row carries data_source for the মডেল tab
+    badge. "real" (or None = legacy callers) changes nothing.
 
     Returns (report, bundle_or_None, status) with status in
     {"verified", "provisional", "rejected"}.
@@ -507,10 +535,22 @@ def fast_train_one(rows, seed=13):
             continue
         cname, cs = min(stats.items(), key=lambda kv: kv[1]["logloss"])
         ys = pooled[h][cname]["y"][:]
-        rng.shuffle(ys)
         ps = pooled[h][cname]["p"]
-        shuf_acc = sum(1 for pi, yi in zip(ps, ys)
-                       if (pi >= 0.5) == (yi == 1)) / len(ps)
+        # SHUFFLE-PROBE-FIX (2026-09-14): mean of 5 label permutations
+        # instead of ONE draw. A single permutation of n≈2000+ test rows
+        # has σ≈1% — pure chance lands above the 0.53 hard gate every
+        # ~20th pair (AUDJPY on the first synthetic run: 0.5306 with a
+        # data-deterministic seed → the pair could NEVER self-heal).
+        # The mean of 5 shrinks permutation noise ~√5 while a genuine
+        # evaluation-order leak still blows far past the gate — strictly
+        # tighter statistics, same detection power.
+        shuf_accs = []
+        for _k in range(5):
+            ys = ys[:]
+            rng.shuffle(ys)
+            shuf_accs.append(sum(1 for pi, yi in zip(ps, ys)
+                                 if (pi >= 0.5) == (yi == 1)) / len(ps))
+        shuf_acc = sum(shuf_accs) / len(shuf_accs)
         bl = base[h]
         bl_rates = {
             "always_call": 100 * bl["always_call"][0] / bl["always_call"][1],
@@ -551,12 +591,22 @@ def fast_train_one(rows, seed=13):
                        g["verified"]["logloss_below_coinflip"]
                        for g in report["gate"].values())
     status = "verified" if all_verified else "provisional"
+    # SYNTH HONESTY CAP: a bundle whose data is (any part) synthetic can
+    # never be called verified — the edge is unproven on real OTC quotes
+    # by construction. The model still RUNS and grades (provisional),
+    # exactly like a small-live-data model whose edge isn't proven yet.
+    if data_source == "synthetic":
+        report["synthetic_cap_applied"] = True
+        if status == "verified":
+            status = "provisional"
     report["status"] = status
+    report["data_source"] = data_source
 
     # production bundle: retrain the winning candidate on ALL rows
     version = time.strftime("v%Y%m%d-%H%M", time.gmtime())
     meta = {"trained_rows": n, "status": status, "trainer": "fast-unified",
             "features": "unified",
+            "data_source": data_source,
             "walk_forward": report["gate"]}
     bundle = ModelBundle(version, UNIFIED_FEATURE_NAMES, None, None, meta)
     Xall = np.array([[r[k] for k in UNIFIED_FEATURE_NAMES] for r in rows])
@@ -638,6 +688,46 @@ def _run_bootstrap_inner():
         _log(f"FATAL: {blocked} — training phase will be skipped; "
              f"history top-up still runs so data keeps accumulating")
     counts = _micro_counts()
+
+    # ── SYNTH-PURGE (2026-09-14): pairs the LIVE feed took over lose their
+    # synthetic cold-start rows BEFORE training, so this run's bundles are
+    # trained on pure real data (see synth_seed.py honesty contract).
+    _synth = None
+    try:
+        from core.otc_predict import synth_seed as _synth_mod
+        _synth = _synth_mod
+        _purged = _synth.purge_stale_synthetic(log=_log)
+        if _purged:
+            counts = _micro_counts()
+    except Exception as _p_exc:
+        _log(f"synth purge failed (continuing on real data): "
+             f"{type(_p_exc).__name__}: {_p_exc}")
+
+    # ── SYNTH-SEED (2026-09-14): "মডেল গুলো তে ডেটা আসছে না ও ট্রেইন হচ্ছে না"
+    # ROOT CAUSE this fixes: candle_micro's only sources (live feed +
+    # platform top-up) BOTH need a token — no token ⇒ empty table ⇒ the
+    # daemon logged "no candle data at all" forever and ZERO models ever
+    # registered. Pairs with ZERO candles now get a clearly-labelled
+    # synthetic 2-day cold-start history (provenance in _meta; models stay
+    # status=provisional with meta data_source="synthetic"; the মডেল tab
+    # shows the badge). REAL data always wins: the fetch purges synth rows
+    # pair-by-pair as platform history lands, and the live feed's INSERT OR
+    # REPLACE overwrites same-minute synth rows row-by-row.
+    zero_pairs = [a for a in sorted(ALLOWED_PAIRS_OTC) if not counts.get(a)]
+    if zero_pairs and _synth is not None:
+        try:
+            _seeded = _synth.seed_synthetic_history(zero_pairs, log=_log)
+            if _seeded:
+                counts = _micro_counts()
+                for a in sorted(ALLOWED_PAIRS_OTC):
+                    _record_pair(a, candles=counts.get(a, 0),
+                                 data_source=("synthetic" if a in _seeded
+                                              else "real"))
+        except Exception as _s_exc:
+            _log(f"synthetic seed failed (real-data-only training): "
+                 f"{type(_s_exc).__name__}: {_s_exc}")
+    _synth_ranges = (_synth.synth_ranges() if _synth is not None else {})
+
     for a in sorted(ALLOWED_PAIRS_OTC):
         _record_pair(a, candles=counts.get(a, 0))
     _log("candle_micro counts: " + ", ".join(
@@ -697,6 +787,10 @@ def _run_bootstrap_inner():
                     "test_n": g.get("n")}
 
         for asset, arows in sorted(by_asset.items()):
+            # SYNTH provenance: a pair still holding synthetic rows trains
+            # an HONEST model — meta says data_source, status can never
+            # exceed "provisional", the UI badge says সিন্থেটিক ডেটা.
+            _src = "synthetic" if asset in _synth_ranges else "real"
             if blocked:
                 details[asset] = {"status": "blocked", "rows": len(arows),
                                   "reason": blocked}
@@ -711,12 +805,15 @@ def _run_bootstrap_inner():
                              reason=f"ডেটা কম: {len(arows)} rows < "
                                     f"{FAST_MIN_PAIR_ROWS}")
                 continue
-            report, bundle, status = fast_train_one(arows)
+            report, bundle, status = fast_train_one(
+                arows, data_source=_src)
             gate = report.get("gate", {})
             details[asset] = {"status": status, "rows": len(arows),
+                              "data_source": _src,
                               "gate": gate}
             _record_pair(asset, status=status, rows=len(arows),
                          reason=report.get("error"),
+                         data_source=_src,
                          t1=_gate_summary(gate, "y1_up"),
                          t2=_gate_summary(gate, "y2_up"),
                          error=report.get("error"))
@@ -726,23 +823,30 @@ def _run_bootstrap_inner():
             from core.otc_predict.tracker import register_model
             register_model(asset, bundle.version, "pair", asset,
                            {"status": status, "rows": len(arows),
+                            "data_source": _src,
                             "walk_forward": report.get("gate", {})},
                            path, activate=True)
             registered.append(asset)
             _record_pair(asset, version=bundle.version,
                          registered_at=time.time())
             _log(f"{asset}: {status} bundle {bundle.version} registered "
-                 f"({len(arows)} rows)")
+                 f"({len(arows)} rows, data={_src})")
 
         # pooled global fallback when NO per-pair bundle registered
         if not registered and len(pooled_rows) >= FAST_POOL_MIN_ROWS:
             if len(pooled_rows) > FAST_POOL_MAX_ROWS:
                 pooled_rows = pooled_rows[-FAST_POOL_MAX_ROWS:]
-            report, bundle, status = fast_train_one(pooled_rows, seed=17)
+            _pooled_src = ("synthetic"
+                           if any(a in _synth_ranges for a in by_asset)
+                           else "real")
+            report, bundle, status = fast_train_one(
+                pooled_rows, seed=17, data_source=_pooled_src)
             details["__global__"] = {"status": status,
-                                     "rows": len(pooled_rows)}
+                                     "rows": len(pooled_rows),
+                                     "data_source": _pooled_src}
             _record_pair("__global__", status=status,
                          rows=len(pooled_rows),
+                         data_source=_pooled_src,
                          reason=report.get("error"))
             if bundle is not None:
                 path = save_bundle(bundle)
@@ -750,16 +854,26 @@ def _run_bootstrap_inner():
                 register_model("global", bundle.version, "global", "",
                                {"status": status,
                                 "rows": len(pooled_rows),
+                                "data_source": _pooled_src,
                                 "walk_forward": report.get("gate", {})},
                                path, activate=True)
                 registered.append("global")
                 _record_pair("__global__", version=bundle.version,
                              registered_at=time.time())
                 _log(f"global: {status} bundle {bundle.version} registered "
-                     f"({len(pooled_rows)} pooled rows)")
+                     f"({len(pooled_rows)} pooled rows, data={_pooled_src})")
 
     # ── phase 2 — history top-up AFTER registration (slow, background) ──
-    fetch = ensure_history(counts)
+    # SYNTH (2026-09-14): pass REAL-only counts so synth-seeded pairs are
+    # still treated as short and get their real platform top-up — their
+    # 2880 synthetic candles must never mask the need for real data.
+    _fetch_counts = counts
+    if _synth is not None:
+        try:
+            _fetch_counts = _synth.effective_real_counts(counts)
+        except Exception:
+            pass
+    fetch = ensure_history(_fetch_counts)
     for a, res in (fetch.get("results") or {}).items():
         if res.get("status") == "ok":
             _record_pair(a, fetch={"added": res.get("added", 0),

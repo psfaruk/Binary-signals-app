@@ -2790,6 +2790,9 @@ async def get_prediction_overview():
                 d["status"] = m.get("status")
                 d["trained_rows"] = m.get("rows")
                 d["trainer"] = m.get("trainer")
+                # SYNTH (2026-09-14): "synthetic" = cold-start seeded rows,
+                # "real" = live/platform candles — the মডেল tab badges it.
+                d["data_source"] = m.get("data_source")
                 d["t1"] = _h("y1_up")
                 d["t2"] = _h("y2_up")
             except Exception:

@@ -63,6 +63,18 @@
         return '<span class="mdl-badge mdl-badge-' + m[0] + '">' + esc(m[1]) + '</span>';
     }
 
+    // SYNTH (2026-09-14): data-provenance badge — a model trained on the
+    // offline cold-start seed is labelled সিন্থেটিক ডেটা so live-vs-
+    // synthetic can never be confused. Real platform/live data gets the
+    // লাইভ ডেটা chip only once it truly is real (legacy rows: no chip).
+    function dataBadge(src) {
+        if (src === 'synthetic')
+            return ' <span class="mdl-badge mdl-badge-warn" title="টোকেন না থাকায় সিন্থেটিক কোল্ড-স্টার্ট ডেটায় ট্রেইন — আসল ডেটা এলে অটো রিপ্লেস">🧪 সিন্থেটিক ডেটা</span>';
+        if (src === 'real')
+            return ' <span class="mdl-badge mdl-badge-ok">লাইভ ডেটা</span>';
+        return '';
+    }
+
     function accStr(h) {
         if (!h || h.acc == null) return '—';
         var s = h.acc.toFixed(1) + '%';
@@ -95,6 +107,14 @@
             ' — Railway এ deploy হলে এই লাইন দেখা মানে requirements.txt এ ' +
             'scikit-learn/numpy নেই। রিডিপ্লোয়ে ঠিক হয়ে যাবে।';
         else if (st.last_error) warnMsg = '⚠️ শেষ রানে সমস্যা: ' + st.last_error;
+        // SYNTH (2026-09-14): honest note when any pair trains on the
+        // offline synthetic cold-start (no token) — never silent.
+        else if (st.synth && st.synth.pairs && st.synth.pairs.length) {
+            warnMsg = '🧪 টোকেন নেই — ' + st.synth.pairs.length +
+                ' পেয়ার সিন্থেটিক কোল্ড-স্টার্ট ডেটায় ট্রেইন হচ্ছে ' +
+                '(প্রোভিশনাল, ব্যাজ দেখুন)। টোকেন ইমপোর্ট করলেই আসল ডেটা ' +
+                'নামবে এবং ~১০ মিনিটে আসল ডেটায় রি-ট্রেইন হবে।';
+        }
         if (warnMsg) {
             warn.style.display = '';
             warnText.textContent = warnMsg;
@@ -196,10 +216,11 @@
             var modelTxt = version ? esc(version) : '—';
             if (m && m.t1 && m.t1.model) modelTxt += ' · ' + esc(m.t1.model);
             else if (m && m.t2 && m.t2.model) modelTxt += ' · ' + esc(m.t2.model);
+            var src = (m && m.data_source) || p.data_source;
             html += '<tr>' +
                 '<td class="mdl-pair-name">' + esc(a.replace('_otc', '')) + '</td>' +
                 '<td>' + (candles[a] != null ? candles[a] : (p.candles != null ? p.candles : '—')) + '</td>' +
-                '<td>' + statusBadge(status) + '</td>' +
+                '<td>' + statusBadge(status) + dataBadge(src) + '</td>' +
                 '<td>' + (rows != null ? rows : '—') + '</td>' +
                 '<td>' + accStr(t1) + '</td>' +
                 '<td>' + accStr(t2) + '</td>' +
@@ -211,7 +232,7 @@
             html += '<tr class="mdl-global-row">' +
                 '<td class="mdl-pair-name">GLOBAL (ফলব্যাক)</td>' +
                 '<td>—</td>' +
-                '<td>' + statusBadge(globalM.status) + '</td>' +
+                '<td>' + statusBadge(globalM.status) + dataBadge(globalM.data_source) + '</td>' +
                 '<td>' + (globalM.trained_rows != null ? globalM.trained_rows : '—') + '</td>' +
                 '<td>' + accStr(globalM.t1) + '</td>' +
                 '<td>' + accStr(globalM.t2) + '</td>' +

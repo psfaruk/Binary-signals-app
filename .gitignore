@@ -54,3 +54,9 @@ settings/
 .coverage
 htmlcov/
 data/
+
+# ─── ML runtime artefacts (SYNTH 2026-09-14) ────────────────────────
+# trained bundle files land next to the DB (models_dir()); backtest
+# outputs are regenerable — neither belongs in the repo.
+models/
+scripts/out/

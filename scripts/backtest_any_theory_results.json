@@ -1,71 +1,71 @@
 {
  "edge": "persistence",
- "candles": 400,
+ "candles": 500,
  "signal_mode": "any_theory",
  "aggregate": {
-  "candles": 2555,
-  "coverage_pct": 99.92,
-  "win_rate": 58.87,
+  "candles": 3255,
+  "coverage_pct": 99.94,
+  "win_rate": 58.59,
   "fallback_violations": 0,
   "by_source": {
    "strategy_any": {
-    "correct": 1409,
-    "wrong": 1006
+    "correct": 1798,
+    "wrong": 1291
    },
    "strategy_strict": {
-    "correct": 91,
-    "wrong": 44
+    "correct": 104,
+    "wrong": 55
    },
    "ml_model": {
-    "correct": 3,
-    "wrong": 0
+    "correct": 4,
+    "wrong": 1
    }
   }
  },
  "pairs": [
   {
    "asset": "USDZAR_otc",
-   "total": 365,
-   "covered": 365,
+   "total": 465,
+   "covered": 465,
    "coverage_pct": 100.0,
-   "win_rate": 56.4,
-   "graded": 365,
+   "win_rate": 57.4,
+   "graded": 465,
    "by_source": {
     "strategy_any": {
-     "correct": 193,
-     "wrong": 158,
+     "correct": 248,
+     "wrong": 197,
      "draw": 0,
-     "win_rate": 55.0
+     "win_rate": 55.7
     },
     "strategy_strict": {
-     "correct": 12,
+     "correct": 17,
      "wrong": 1,
      "draw": 0,
-     "win_rate": 92.3
+     "win_rate": 94.4
     },
     "ml_model": {
-     "correct": 1,
+     "correct": 2,
      "wrong": 0,
      "draw": 0,
      "win_rate": 100.0
     }
    },
    "fallback_violations": [],
-   "secs": 3.4
+   "secs": 3.6
   },
   {
    "asset": "AUDJPY_otc",
-   "total": 365,
-   "covered": 364,
-   "coverage_pct": 99.7,
-   "win_rate": 58.8,
-   "graded": 364,
+   "total": 465,
+   "covered": 464,
+   "coverage_pct": 99.8,
+   "win_rate": 58.2,
+   "graded": 464,
    "by_source": {
     "strategy_any": {
-     "correct": 205,
-     "wrong": 147,
+     "correct": 261,
+     "wrong": 191,
      "draw": 0,
-     "win_rate": 58.2
+     "win_rate": 57.7
     },
     "strategy_strict": {
      "correct": 8,
@@ -81,75 +81,75 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.6
+   "secs": 0.8
   },
   {
    "asset": "NZDJPY_otc",
-   "total": 365,
-   "covered": 365,
+   "total": 465,
+   "covered": 465,
    "coverage_pct": 100.0,
-   "win_rate": 57.8,
-   "graded": 365,
+   "win_rate": 57.0,
+   "graded": 465,
    "by_source": {
     "strategy_any": {
-     "correct": 194,
-     "wrong": 146,
+     "correct": 243,
+     "wrong": 188,
      "draw": 0,
-     "win_rate": 57.1
+     "win_rate": 56.4
     },
     "strategy_strict": {
-     "correct": 17,
-     "wrong": 8,
+     "correct": 22,
+     "wrong": 12,
      "draw": 0,
-     "win_rate": 68.0
+     "win_rate": 64.7
     }
    },
    "fallback_violations": [],
-   "secs": 0.6
+   "secs": 0.8
   },
   {
    "asset": "NZDCAD_otc",
-   "total": 365,
-   "covered": 365,
+   "total": 465,
+   "covered": 465,
    "coverage_pct": 100.0,
-   "win_rate": 58.6,
-   "graded": 365,
+   "win_rate": 58.9,
+   "graded": 465,
    "by_source": {
     "strategy_any": {
-     "correct": 199,
-     "wrong": 143,
+     "correct": 257,
+     "wrong": 182,
      "draw": 0,
-     "win_rate": 58.2
+     "win_rate": 58.5
     },
     "strategy_strict": {
-     "correct": 15,
-     "wrong": 8,
+     "correct": 17,
+     "wrong": 9,
      "draw": 0,
-     "win_rate": 65.2
+     "win_rate": 65.4
     }
    },
    "fallback_violations": [],
-   "secs": 0.6
+   "secs": 0.8
   },
   {
    "asset": "USDNGN_otc",
-   "total": 365,
-   "covered": 365,
+   "total": 465,
+   "covered": 465,
    "coverage_pct": 100.0,
-   "win_rate": 63.3,
-   "graded": 365,
+   "win_rate": 60.2,
+   "graded": 465,
    "by_source": {
     "strategy_any": {
-     "correct": 221,
-     "wrong": 127,
+     "correct": 269,
+     "wrong": 177,
      "draw": 0,
-     "win_rate": 63.5
+     "win_rate": 60.3
     },
     "strategy_strict": {
-     "correct": 9,
-     "wrong": 7,
+     "correct": 10,
+     "wrong": 8,
      "draw": 0,
-     "win_rate": 56.2
+     "win_rate": 55.6
     },
     "ml_model": {
      "correct": 1,
@@ -159,55 +159,61 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.6
+   "secs": 0.8
   },
   {
    "asset": "GBPNZD_otc",
-   "total": 365,
-   "covered": 365,
+   "total": 465,
+   "covered": 465,
    "coverage_pct": 100.0,
-   "win_rate": 57.5,
-   "graded": 365,
+   "win_rate": 59.1,
+   "graded": 465,
    "by_source": {
     "strategy_any": {
-     "correct": 191,
-     "wrong": 147,
+     "correct": 256,
+     "wrong": 179,
      "draw": 0,
-     "win_rate": 56.5
+     "win_rate": 58.9
     },
     "strategy_strict": {
      "correct": 19,
-     "wrong": 8,
+     "wrong": 10,
      "draw": 0,
-     "win_rate": 70.4
+     "win_rate": 65.5
+    },
+    "ml_model": {
+     "correct": 0,
+     "wrong": 1,
+     "draw": 0,
+     "win_rate": 0.0
     }
    },
    "fallback_violations": [],
-   "secs": 0.6
+   "secs": 0.9
   },
   {
    "asset": "EURNZD_otc",
-   "total": 365,
-   "covered": 364,
-   "coverage_pct": 99.7,
-   "win_rate": 59.6,
-   "graded": 364,
+   "total": 465,
+   "covered": 464,
+   "coverage_pct": 99.8,
+   "win_rate": 59.3,
+   "graded": 464,
    "by_source": {
     "strategy_any": {
-     "correct": 206,
-     "wrong": 138,
+     "correct": 264,
+     "wrong": 177,
      "draw": 0,
      "win_rate": 59.9
     },
     "strategy_strict": {
      "correct": 11,
-     "wrong": 9,
+     "wrong": 12,
      "draw": 0,
-     "win_rate": 55.0
+     "win_rate": 47.8
     }
    },
    "fallback_violations": [],
-   "secs": 0.6
+   "secs": 0.9
   }
  ]
 }
