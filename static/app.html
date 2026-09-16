@@ -362,6 +362,35 @@
                             <ul class="te-reasons" id="te-reasons"><li>টিকের অপেক্ষায়…</li></ul>
                         </div>
 
+                        <!-- COORDINATION-MS (2026-09-16): রানিং ক্যান্ডেল
+                             এনালাইসিস × মডিউল সিগন্যাল × মডেল ইঞ্জিন — প্রতি
+                             টিকে মিলিয়ে এক কোঅর্ডিনেশন সিগন্যাল -->
+                        <div class="coord-panel" id="coord-section">
+                            <div class="panel-section-header">
+                                <h4>কোঅর্ডিনেশন সিগন্যাল <span class="te-eye-icon" title="রানিং ক্যান্ডেল এনালাইসিস + মডিউল + মডেল ইঞ্জিন — প্রতি টিকে মিলিয়ে">🧠</span></h4>
+                                <span class="coord-state-chip" id="coord-state">—</span>
+                            </div>
+                            <div class="coord-summary-row">
+                                <span class="coord-summary" id="coord-summary">টিকের অপেক্ষায়…</span>
+                                <span class="coord-ms" id="coord-ms" title="সার্ভারে কোঅর্ডিনেশন কম্পিউট হতে লাগা সময় (মাইক্রোসেকেন্ড)">— µs</span>
+                            </div>
+                            <div class="coord-align-row">
+                                <span class="coord-align-label">অ্যালাইনমেন্ট</span>
+                                <div class="coord-align-bar"><div class="coord-align-fill" id="coord-align-fill"></div></div>
+                                <span class="coord-align-value" id="coord-align-value">—%</span>
+                            </div>
+                            <div class="coord-voices" id="coord-voices">
+                                <div class="coord-voice anchor"><span class="cv-label">সিগন্যাল</span><span class="cv-dir" id="cv-signal">—</span></div>
+                                <div class="coord-voice"><span class="cv-label">চোখ</span><span class="cv-dir" id="cv-eye">—</span></div>
+                                <div class="coord-voice"><span class="cv-label">মডেল</span><span class="cv-dir" id="cv-model">—</span></div>
+                                <div class="coord-voice"><span class="cv-label">রান-কনফার্ম</span><span class="cv-dir" id="cv-runconf">—</span></div>
+                            </div>
+                            <div class="coord-foot">
+                                <span id="coord-updated" class="coord-updated">—</span>
+                                <span class="coord-updated" id="coord-phase">—</span>
+                            </div>
+                        </div>
+
                         <!-- Share signal table — common.js owns this -->
                         <div class="share-panel" id="share-signal-section">
                             <div class="share-header share-signal-header">

@@ -1,0 +1,42 @@
+{
+  "n_candles": 5000,
+  "seed": 21,
+  "signals_none": 749,
+  "signals_flip": 1261,
+  "q_none": 0.8958611481975968,
+  "q_flip": 0.9143536875495638,
+  "none": {
+    "ALIGNED": {
+      "n": 347,
+      "win": 310
+    },
+    "PARTIAL": {
+      "n": 20,
+      "win": 4
+    },
+    "CONFLICT": {
+      "n": 382,
+      "win": 64
+    }
+  },
+  "flip_persistence": {
+    "ALIGNED": {
+      "n": 784,
+      "win": 731
+    },
+    "PARTIAL": {
+      "n": 30,
+      "win": 4
+    },
+    "CONFLICT": {
+      "n": 447,
+      "win": 82
+    }
+  },
+  "value_gap_pp": 1.804427163410971,
+  "latency_us": {
+    "avg": 39.640804472347824,
+    "p999": 68.43299979664152
+  },
+  "pass": true
+}

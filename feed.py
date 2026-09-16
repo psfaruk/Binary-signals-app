@@ -126,7 +126,11 @@ SIGNAL_DELAY_SEC = float(os.environ.get("SIGNAL_DELAY_SEC", "0.0"))
 # MICRO_RECALC_EVERY: recompute _analyze_microstructure() every N ticks. The
 # common OTC case is close-only updates (price moves but high/low don't), so
 # the cached micro stays valid. Set to 1 to disable caching (legacy behavior).
-MICRO_RECALC_EVERY = int(os.environ.get("MICRO_RECALC_EVERY", "5"))
+# FIX (COORDINATION-MS 2026-09-16): default 5 → 1. USER: "অ্যাপ এর প্রত্যেকটি
+# ডেটা মিলি সেকেন্ড এ আপডেট হবে" — the micro panel must be fresh on EVERY
+# tick, not every 5th. The analysis is O(200) on the bounded tick tail
+# (µs-scale), so per-tick recompute is safe at 10 ticks/sec × 30 streams.
+MICRO_RECALC_EVERY = int(os.environ.get("MICRO_RECALC_EVERY", "1"))
 # SKIP_REDUNDANT_BROADCAST: when True, skip the tick broadcast if the running
 # candle's high/low/close are all unchanged since the last broadcast AND no
 # prediction change happened. Cuts JSON serialize + WS send for repeated
@@ -225,9 +229,13 @@ RUNCONF_MIN_TICKS = int(os.environ.get("QX_RUNCONF_MIN_TICKS", "5"))
 STRENGTH_GATE_MIN_TICKS = int(os.environ.get("QX_STRENGTH_GATE_MIN_TICKS", "10"))
 # TICK-EYE (2026-09-16): recompute the live tick-eye snapshot at most every
 # N tick broadcasts (the eye is recomputed immediately when a NEW high/low
-# forms regardless of the counter). 5 ≈ 2-4 updates/second on OTC feeds —
-# smooth enough for the human-eye panel, cheap enough for 30+ streams.
-TICK_EYE_BROADCAST_EVERY = int(os.environ.get("QX_TICK_EYE_BCAST_EVERY", "5"))
+# forms regardless of the counter).
+# FIX (COORDINATION-MS 2026-09-16): default 5 → 1. USER: "একটি ক্যান্ডেল এ কি
+# হচ্ছে মিলি সেকেন্ড এ ইঞ্জিন দেখবে" — the eye IS the engine's view inside
+# the running candle, so it must be computed and broadcast on EVERY tick.
+# live_eye is O(400) single-pass (≈100µs) — safe at full tick rate; keep the
+# env override for a constrained deployment to re-throttle if ever needed.
+TICK_EYE_BROADCAST_EVERY = int(os.environ.get("QX_TICK_EYE_BCAST_EVERY", "1"))
 
 # ── Fallback display-name helper ─────────────────────────────────────────────
 def _api_to_display(api_name: str) -> str:
@@ -737,6 +745,18 @@ class _AssetStream:
     # reads stream._last_micro for /api/signals/latest buyer/seller pct.
     # Previously never assigned → always null in that API.
     _last_micro: dict | None = None
+
+    # ── COORDINATION-MS (2026-09-16) ───────────────────────────────────
+    # Live coordination state (core/coordination.py), refreshed on EVERY
+    # tick broadcast and kept here so EOC can attach the just-closed
+    # candle's final coordination to the graded record.
+    _last_coordination: dict | None = None
+    # Latest live tick-eye anatomy (kept even when the broadcast throttle
+    # skips attaching it, so the coordination always sees the freshest eye).
+    _last_eye: dict | None = None
+    # The ML engine's frozen T+1 voice for the RUNNING candle, cached once at
+    # EOC from the joint gate's model voice (zero DB reads in the tick loop).
+    _coord_model_voice: dict | None = None
 
     # ── Skip-redundant-broadcast (2026-07-11) ────────────────────────────
     # Snapshot of the last-broadcast candle (high/low/close). If the next
@@ -2411,6 +2431,17 @@ class QuotexFeed:
                     result["raw_confidence"] = int(_gate["final_confidence"])
                 result.setdefault("reasons", []).append(
                     "SOURCE-GATE: " + _gate.get("reason", "graded"))
+                # COORDINATION-MS (2026-09-16): cache the ML voice for the
+                # candle that just OPENED (target_time = new open). The joint
+                # gate already extracted it from the frozen T+1 row — reuse
+                # it so the per-tick coordination needs ZERO DB reads.
+                _mv = (_gate.get("model_voice") or {})
+                stream._coord_model_voice = {
+                    "direction": _mv.get("direction"),
+                    "probability": _mv.get("probability"),
+                    "emit": _mv.get("emit"),
+                    "state": _mv.get("state"),
+                } if _mv else None
             except Exception as _jg_exc:
                 # Fail-open: the source signal stands even if grading broke.
                 print(f"[feed] joint-gate grading failed (fail-open) for "
@@ -2423,6 +2454,12 @@ class QuotexFeed:
                 result.setdefault("reasons", []).append(
                     f"SOURCE-GATE ERROR (fail-open): "
                     f"{type(_jg_exc).__name__}: {_jg_exc}")
+                stream._coord_model_voice = None
+        else:
+            # COORDINATION-MS (2026-09-16): no CALL/PUT anchor for the new
+            # candle — the coordination will report NO_SIGNAL; clear any
+            # stale model voice so it never leaks into a later candle.
+            stream._coord_model_voice = None
 
         # FIX (Bug #3, 2026-07-17): removed `stream.inverted = result.get("_flipped")`
         # — the prediction engine never emits an `_flipped` key, so this was
@@ -3345,6 +3382,11 @@ class QuotexFeed:
         # is None during the grade (broadcast shows PENDING) and is set to
         # the new prediction atomically after the grade completes.
         old_prediction = stream.prediction
+        # COORDINATION-MS (2026-09-16): capture the just-closed candle's FINAL
+        # live coordination (what the merged voices said at its last tick) —
+        # BEFORE the new-candle reset clears it — so the graded record can
+        # carry it as post-hoc audit evidence.
+        old_coordination = getattr(stream, "_last_coordination", None)
         stream.prediction = None
 
         # Grade the candle that just closed against the prediction that was
@@ -3591,6 +3633,11 @@ class QuotexFeed:
         self._track_tick(stream, first_tick)   # keep tracked high/low fresh
         # Invalidate caches — new candle, fresh compute needed.
         self._reset_micro_cache(stream)
+        # COORDINATION-MS (2026-09-16): the new candle starts with a clean
+        # coordination slate (old_coordination was captured above for the
+        # graded record; _last_eye belonged to the closed candle).
+        stream._last_coordination = None
+        stream._last_eye = None
         # FIX (LOSS-HISTORY-FIX, 2026-07-23): reset the locked direction
         # for the new candle. Each candle gets ONE direction lock — once
         # set (via EOC prediction or LIVE re-eval), it can't flip to the
@@ -3613,6 +3660,13 @@ class QuotexFeed:
                 "ctime": closed.get("time"),
                 "confidence": (old_prediction or {}).get("confidence"),
                 "strength": (old_prediction or {}).get("strength"),
+                # COORDINATION-MS (2026-09-16): the closed candle's final live
+                # coordination — what the eye/model/runconf said at its last
+                # tick, for post-hoc win/loss analysis of coordination states.
+                "coordination_final": (
+                    {"state": old_coordination.get("state"),
+                     "alignment": old_coordination.get("alignment")}
+                    if old_coordination else None),
             }
         except Exception:
             stream.last_graded = None
@@ -3927,6 +3981,9 @@ class QuotexFeed:
                             # result belongs to — no more client-side guessing.
                             "signal":     (getattr(stream, "last_graded", None) or {}).get("signal"),
                             "ctime":      (getattr(stream, "last_graded", None) or {}).get("ctime"),
+                            # COORDINATION-MS (2026-09-16): the closed
+                            # candle's final live-coordination state.
+                            "coordination_final": (getattr(stream, "last_graded", None) or {}).get("coordination_final"),
                         })
 
                 if self._client is None:
@@ -4104,6 +4161,9 @@ class QuotexFeed:
                                 "candles": last_eoc_candles,
                                 "signal": (getattr(stream, "last_graded", None) or {}).get("signal"),
                                 "ctime": (getattr(stream, "last_graded", None) or {}).get("ctime"),
+                                # COORDINATION-MS (2026-09-16): the closed
+                                # candle's final live-coordination state.
+                                "coordination_final": (getattr(stream, "last_graded", None) or {}).get("coordination_final"),
                             })
 
                         # Continue with ticks AFTER this boundary — may contain
@@ -4631,36 +4691,69 @@ class QuotexFeed:
                             # No change at all — skip
                             continue
 
+                        # COORDINATION-MS (2026-09-16): compute the running
+                        # confirmation ONCE per broadcast — the msg field and
+                        # the coordination both consume it (no double compute).
+                        _runconf = self._running_confirmation(stream)
                         msg = {
                             "type":          "tick",
                             "asset":         stream.asset,
                             "period":        stream.period,
                             "candle":        running,
-                            "running_conf":  self._running_confirmation(stream),
+                            "running_conf":  _runconf,
                             "micro":         micro_snap,
                         }
-                        # ── TICK-EYE LIVE (2026-09-16) ─────────────────────────
+                        # ── TICK-EYE LIVE (2026-09-16, ms-fresh) ─────────────
                         # The "human eye" view of the RUNNING candle (user:
-                        # "টিক মানুষের মতোই কাজে লাগানো যাবে"). Computed on a
-                        # bounded tail of the tick buffer (≤400 ticks) every
-                        # ~TICK_EYE_BROADCAST_EVERY broadcasts — cheap by
-                        # design, and the UI panel renders from this field.
+                        # "টিক মানুষের মতোই কাজে লাগানো যাবে"). Computed on
+                        # EVERY broadcast now (TICK_EYE_BROADCAST_EVERY=1) on
+                        # a bounded tail of the tick buffer (≤400 ticks) —
+                        # O(400) single-pass ≈ 100µs, i.e. millisecond-fresh
+                        # at the feed's own tick rate. The stream keeps the
+                        # latest anatomy even when the (env-overridable)
+                        # throttle skips attaching it to THIS msg, so the
+                        # coordination below always sees the freshest eye.
+                        _eye = None
                         try:
+                            from core.tick_eye import live_eye
+                            _eye = live_eye(
+                                list(stream.ticks)[-400:],
+                                stream.candle_open_price,
+                                stream.period,
+                                stream.candle_open_time)
+                            stream._last_eye = _eye
                             _te_count = getattr(stream, '_tick_eye_bcast_count', 0) + 1
                             stream._tick_eye_bcast_count = _te_count
                             if _te_count % TICK_EYE_BROADCAST_EVERY == 0 or cur_high != getattr(stream, '_tick_eye_last_hi', None) or cur_low != getattr(stream, '_tick_eye_last_lo', None):
-                                from core.tick_eye import live_eye
-                                msg["tick_eye"] = live_eye(
-                                    list(stream.ticks)[-400:],
-                                    stream.candle_open_price,
-                                    stream.period,
-                                    stream.candle_open_time)
+                                msg["tick_eye"] = _eye
                                 stream._tick_eye_last_hi = cur_high
                                 stream._tick_eye_last_lo = cur_low
                         except Exception as _te_exc:
                             # Never let the eye break the tick pipeline.
                             print(f"[feed] tick-eye compute failed for "
                                   f"{stream.asset}: {type(_te_exc).__name__}: {_te_exc}")
+                        # ── COORDINATION SIGNAL (COORDINATION-MS 2026-09-16) ──
+                        # USER: "তারও সব কিছু মিলিয়ে সিগন্যাল আসবে রানিং ক্যান্ডেল
+                        # এনালাইসিস, মডিউল, মডেল ইঞ্জিন এই সব কিছু মিলিয়ে
+                        # করডিনেশন সিগন্যাল আসবে" — on EVERY tick, merge the
+                        # four voices (running-candle eye × published module
+                        # signal × cached ML T+1 voice × runconf) into one
+                        # coordination state. Pure function over data already
+                        # computed this tick; measured < 100µs per call.
+                        try:
+                            from core.coordination import compute_coordination
+                            _coord = compute_coordination(
+                                _eye if _eye is not None
+                                    else getattr(stream, "_last_eye", None),
+                                stream.prediction,
+                                getattr(stream, "_coord_model_voice", None),
+                                _runconf)
+                            msg["coordination"] = _coord
+                            stream._last_coordination = _coord
+                        except Exception as _c_exc:
+                            # Never let the coordination break the tick pipeline.
+                            print(f"[feed] coordination compute failed for "
+                                  f"{stream.asset}: {type(_c_exc).__name__}: {_c_exc}")
                         # FIX (2026-07-13): always send prediction if gate has opened
                         # (not just on pred_changed — that was blocking real-time updates)
                         if not (stream.signal_delay_until > 0 and time.time() < stream.signal_delay_until):

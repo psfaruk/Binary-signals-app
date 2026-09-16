@@ -1171,10 +1171,9 @@ function renderTickEye(te){
     phaseEl.className = 'te-phase-chip ' + (phase === 'LAST10' ? 'last10' :
                           phase === 'LATE' ? 'late' : '');
   }
-  _setText('te-secs', secs + 's');
-  if(secs !== '—' && phaseEl){
-    phaseEl.textContent += ' · ' + secs + 's';
-  }
+  // COORDINATION-MS: the seconds display is driven by the local 100ms
+  // timer (updateMsFreshTimers) so the countdown stays millisecond-fresh
+  // BETWEEN ticks too — renderTickEye only refreshes the market data.
   // Verdict
   const dir = te.eye_direction || 'NEUTRAL';
   const str = te.eye_strength || 0;
@@ -1273,6 +1272,127 @@ function renderTickEye(te){
       });
     }
   }
+}
+
+/* ─── COORDINATION SIGNAL (COORDINATION-MS 2026-09-16) ────────────────────── */
+/* USER: "রানিং ক্যান্ডেল এনালাইসিস, মডিউল, মডেল ইঞ্জিন এই সব কিছু মিলিয়ে
+   করডিনেশন সিগন্যাল আসবে" — server feed.py attaches msg.coordination to
+   EVERY tick broadcast (computed in <100µs on the server, stamped with
+   server_ms). This renders the merged four-voice state; between ticks a
+   local 100ms timer keeps the countdown / age displays fresh. */
+let currentCoordination = null;
+let lastCoordClientMs   = 0;   /* Date.now() when the latest coordination arrived */
+
+function _voiceDirTxt(v){
+  if(!v) return '—';
+  if(v.dir === 'CALL') return 'CALL';
+  if(v.dir === 'PUT')  return 'PUT';
+  if(v.role === 'abstain') return '· মত নেই';
+  if(v.role === 'source') return 'সোর্স';
+  return '—';
+}
+
+function renderCoordination(coord){
+  if(!coord) return;
+  currentCoordination = coord;
+  lastCoordClientMs   = Date.now();
+
+  // State chip
+  const st = coord.state || '—';
+  const stateEl = $('coord-state');
+  const stateTxt = st === 'ALIGNED_CALL' ? 'অ্যালাইন্ড কল ✓' :
+                   st === 'ALIGNED_PUT'  ? 'অ্যালাইন্ড পুট ✓' :
+                   st === 'PARTIAL'     ? 'আংশিক' :
+                   st === 'CONFLICT'    ? 'দ্বন্দ্ব ⚠' :
+                   st === 'WAITING'     ? 'অপেক্ষায়' :
+                   st === 'NO_SIGNAL'   ? 'সিগন্যাল নেই' : st;
+  if(stateEl){
+    stateEl.textContent = stateTxt;
+    stateEl.className = 'coord-state-chip ' + (
+      st === 'ALIGNED_CALL' ? 'call' :
+      st === 'ALIGNED_PUT'  ? 'put' :
+      st === 'PARTIAL'      ? 'partial' :
+      st === 'CONFLICT'     ? 'conflict' :
+      st === 'WAITING'      ? 'waiting' : '');
+  }
+
+  // Summary + server compute-time proof (µs)
+  _setText('coord-summary', coord.summary_bn || '—');
+  _setText('coord-ms', (coord.compute_us != null ? coord.compute_us : '—') + ' µs');
+
+  // Alignment bar
+  const al = coord.alignment;
+  const fill = $('coord-align-fill');
+  if(fill){
+    fill.style.width = (al == null ? 0 : Math.max(0, Math.min(100, al))) + '%';
+    fill.className = 'coord-align-fill ' + (
+      al == null ? '' :
+      al >= 70 ? 'good' : al >= 40 ? 'mid' : 'bad');
+  }
+  _setText('coord-align-value', al == null ? '—%' : al + '%');
+
+  // Voice chips (XSS-safe: textContent only)
+  const byName = {};
+  (coord.voices || []).forEach(v => { byName[v.name] = v; });
+  _setText('cv-signal', _voiceDirTxt(byName.signal));
+  _setText('cv-eye',    _voiceDirTxt(byName.eye));
+  _setText('cv-model',  _voiceDirTxt(byName.model));
+  _setText('cv-runconf',_voiceDirTxt(byName.runconf));
+  const sigDir = (byName.signal || {}).dir;
+  ['cv-signal','cv-eye','cv-model','cv-runconf'].forEach(id => {
+    const el = $(id);
+    if(!el) return;
+    const key = id === 'cv-signal' ? 'signal' : id === 'cv-eye' ? 'eye' :
+                id === 'cv-model' ? 'model' : 'runconf';
+    const v = byName[key] || {};
+    el.className = 'cv-dir ' + (
+      v.dir === 'CALL' ? 'call' : v.dir === 'PUT' ? 'put' :
+      v.role === 'abstain' ? 'abstain' : '');
+    if(v.role === 'voice'){
+      el.textContent += v.agree ? ' ✓' : ' ✗';
+      el.className += v.agree ? ' agree' : ' disagree';
+    }
+  });
+  if(sigDir !== 'CALL' && sigDir !== 'PUT'){
+    const sv = $('cv-signal');
+    if(sv) sv.textContent = 'নেই';
+  }
+
+  // Phase + age (age also refreshed by the 100ms local timer)
+  _setText('coord-phase', coord.phase ? 'ফেজ: ' + coord.phase : '');
+  _setText('coord-updated', 'আপডেট 0ms আগে');
+}
+
+/* COORDINATION-MS: 100ms local timer — keeps the candle countdown AND the
+   coordination age display millisecond-fresh BETWEEN server ticks (the
+   server data itself arrives per-tick, event-driven). Also re-derives the
+   phase chip so LAST10 highlights exactly on time even on sparse feeds. */
+function updateMsFreshTimers(){
+  const now = Date.now();
+  // Candle countdown (one decimal = 100ms resolution)
+  if(runningCandleOpenTime && currentPeriod){
+    const secsLeft = Math.max(0, (runningCandleOpenTime + currentPeriod) - now / 1000);
+    _setText('te-secs', secsLeft.toFixed(1) + 's');
+    const phaseEl = $('te-phase');
+    if(phaseEl){
+      const frac = secsLeft / currentPeriod;
+      const ph = secsLeft <= 10 ? 'LAST10' : frac <= 1/3 ? 'LATE' :
+                 frac <= 2/3 ? 'MID' : 'EARLY';
+      const baseTxt = ph === 'LAST10' ? 'শেষ ১০ সেকেন্ড' : ph === 'LATE' ? 'লেট' :
+                      ph === 'MID' ? 'মিড' : 'আর্লি';
+      phaseEl.textContent = baseTxt + ' · ' + secsLeft.toFixed(1) + 's';
+      phaseEl.className = 'te-phase-chip ' + (ph === 'LAST10' ? 'last10' :
+                          ph === 'LATE' ? 'late' : '');
+    }
+  }
+  // Coordination age
+  if(lastCoordClientMs){
+    const age = now - lastCoordClientMs;
+    _setText('coord-updated', 'আপডেট ' + age + 'ms আগে');
+  }
+}
+if(typeof setInterval === 'function' && !window.__coordMsTimer){
+  window.__coordMsTimer = setInterval(updateMsFreshTimers, 100);
 }
 
 /* ─── MICROSTRUCTURE ─────────────────────────────────────────────────────── */
@@ -3379,6 +3499,10 @@ function onTick(msg){
   if(msg.micro) renderMicro(msg.micro);
   // TICK-EYE (2026-09-16): live human-eye anatomy of the running candle.
   if(msg.tick_eye) renderTickEye(msg.tick_eye);
+  // COORDINATION-MS (2026-09-16): the merged four-voice coordination —
+  // running candle analysis × module signal × model engine × runconf —
+  // attached to EVERY tick broadcast by the server.
+  if(msg.coordination) renderCoordination(msg.coordination);
   if(msg.running_conf){
     runningConf = msg.running_conf;
     if(currentMicro) renderMicro(currentMicro);

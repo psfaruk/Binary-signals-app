@@ -502,6 +502,77 @@ svg{display:block}
   .te-grid{grid-template-columns:repeat(2,1fr)}
 }
 
+/* ─── COORDINATION panel (COORDINATION-MS 2026-09-16): রানিং ক্যান্ডেল
+   এনালাইসিস × মডিউল সিগন্যাল × মডেল ইঞ্জিন — প্রতি টিকে মিলিয়ে ——— */
+.coord-panel{
+  background:var(--card);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  padding:13px 14px;margin-top:12px;
+  box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 10px 30px rgba(0,0,0,.28);
+}
+.coord-panel h4{
+  font-size:11px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--text-dim);margin-bottom:0;
+}
+.coord-state-chip{
+  font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;
+  padding:3px 8px;border-radius:12px;
+  background:var(--glass);border:1px solid var(--border);color:var(--text-faint);
+}
+.coord-state-chip.call{color:var(--green);border-color:rgba(52,211,153,.45)}
+.coord-state-chip.put{color:var(--red);border-color:rgba(251,113,133,.45)}
+.coord-state-chip.partial{color:var(--yellow);border-color:rgba(251,191,36,.4)}
+.coord-state-chip.conflict{
+  color:var(--red);border-color:rgba(251,113,133,.6);
+  animation:dot-pulse 1s ease-in-out infinite;
+}
+.coord-state-chip.waiting{color:var(--text-faint)}
+.coord-summary-row{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:7px 10px;border-radius:9px;margin-bottom:9px;
+  background:var(--glass);border:1px solid var(--border-soft);
+}
+.coord-summary{font-size:10.5px;color:var(--text-dim);font-weight:600;line-height:1.4;min-width:0}
+.coord-ms{
+  font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--text-faint);
+  flex:0 0 auto;padding:2px 7px;border-radius:10px;
+  background:rgba(52,211,153,.07);border:1px solid rgba(52,211,153,.2);
+}
+.coord-align-row{
+  display:flex;align-items:center;gap:8px;margin-bottom:9px;
+}
+.coord-align-label{
+  font-size:8.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--text-faint);flex:0 0 auto;
+}
+.coord-align-bar{
+  flex:1 1 auto;height:7px;border-radius:5px;overflow:hidden;
+  background:rgba(148,163,184,.13);border:1px solid var(--border-soft);
+}
+.coord-align-fill{height:100%;width:0%;border-radius:5px;transition:width .15s ease}
+.coord-align-fill.good{background:linear-gradient(90deg,#34d399,#10b981)}
+.coord-align-fill.mid{background:linear-gradient(90deg,#fbbf24,#f59e0b)}
+.coord-align-fill.bad{background:linear-gradient(90deg,#fb7185,#ef4444)}
+.coord-align-value{font-family:var(--mono);font-size:11px;font-weight:800;color:var(--text);flex:0 0 auto}
+.coord-voices{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}
+.coord-voice{
+  display:flex;flex-direction:column;gap:3px;padding:6px 7px;border-radius:8px;
+  background:var(--glass);border:1px solid var(--border-soft);min-width:0;
+}
+.coord-voice.anchor{border-color:rgba(96,165,250,.35)}
+.cv-label{font-size:8.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint)}
+.cv-dir{font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cv-dir.call{color:var(--green)}
+.cv-dir.put{color:var(--red)}
+.cv-dir.abstain{color:var(--text-faint);font-size:9.5px}
+.cv-dir.agree{color:var(--green)}
+.cv-dir.disagree{color:var(--red)}
+.coord-foot{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.coord-updated{font-size:9px;color:var(--text-faint);font-family:var(--mono);letter-spacing:.03em}
+@media (max-width:520px){
+  .coord-voices{grid-template-columns:repeat(2,1fr)}
+}
+
 .module-list{display:none;flex-direction:column;gap:5px;max-height:230px;overflow-y:auto}
 .module-list.open{display:flex}
 .module-row{font-size:12px;color:var(--text-faint)}
