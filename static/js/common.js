@@ -42,29 +42,47 @@ const TICK_TAPE_MAX = 40;
 const HISTORY_MAX = 100;
 
 /* ─── MODULE NAMES — single source of truth (mirrors core.constants.MODULE_NAMES) ──
-   7 modules total: 5 shared + 1 OTC-specific (otc_pattern) + 1 Real-specific
-   (trend_follow). Each engine displays only its own 6 modules. */
+   FIX (TICK-EYE 2026-09-16 / STALE-LIST): this list had drifted badly — it
+   still referenced DELETED modules (running_tick, indicator, otc_pattern,
+   trend_follow) and missed all 9 modules added since (market_state, wickwall,
+   divergence, tickrun, multi_tf, momentum, bollinger_rsi, stochastic,
+   ema_ribbon, sr_bounce) plus the new tick_eye. Now a faithful mirror of
+   core/constants.py — keep in sync when a module is added or removed there. */
 const MODULE_NAMES = [
   'candle_reaction',
-  'running_tick',
   'pattern',
-  'indicator',
   'key_level',
-  'otc_pattern',     // OTC engine's 6th module
-  'trend_follow',    // Real engine's 6th module
+  'market_state',
+  'wickwall',
+  'divergence',
+  'tickrun',
+  'multi_tf',
+  'momentum',
+  'bollinger_rsi',
+  'stochastic',
+  'ema_ribbon',
+  'sr_bounce',
+  'tick_eye',
 ];
+// Both engines now run the same module set (mirrors core/constants.py).
+const OTC_MODULES  = MODULE_NAMES;
+const REAL_MODULES = MODULE_NAMES;
 const MODULE_DISPLAY = {
   'candle_reaction': 'Candle Reaction',
-  'running_tick':    'Running Tick',
   'pattern':         'Pattern',
-  'indicator':       'Indicator',
   'key_level':       'Key Level',
-  'otc_pattern':     'OTC Pattern',
-  'trend_follow':    'Trend Follow',
+  'market_state':    'Market State',
+  'wickwall':        'Wick Wall',
+  'divergence':      'Divergence',
+  'tickrun':         'Tick Run (Sweep/Absorb/Flip)',
+  'multi_tf':        'Multi-Timeframe',
+  'momentum':        'RSI + MACD Momentum',
+  'bollinger_rsi':   'Bollinger + RSI',
+  'stochastic':      'Stochastic',
+  'ema_ribbon':      'EMA Ribbon',
+  'sr_bounce':       'S/R Bounce',
+  'tick_eye':        'Tick Eye (মানুষের চোখ)',
 };
-// Active engine's 6-module set (5 shared + engine-specific).
-const OTC_MODULES  = ['candle_reaction','running_tick','pattern','indicator','key_level','otc_pattern'];
-const REAL_MODULES = ['candle_reaction','running_tick','pattern','indicator','key_level','trend_follow'];
 
 /* ─── STATE (reset on every initApp call) ────────────────────────────────── */
 let ws = null, reconnectTimer = null, reconnectAttempts = 0;
@@ -1126,6 +1144,132 @@ function renderModuleBreakdown(pred){
         div.className = 'theory-item ' + (isPut ? 'put-vote' : 'call-vote');
         div.innerHTML = '<span class="theory-name">' + esc(r) + '</span>';
         theoriesList.appendChild(div);
+      });
+    }
+  }
+}
+
+/* ─── TICK-EYE (2026-09-16): live "human eye" view of the running candle ── */
+/* Server feed.py attaches msg.tick_eye to tick broadcasts (recomputed
+   every few broadcasts / on new highs-lows). Renders the running
+   candle's tick anatomy: countdown, ending velocity, final flow,
+   close position, late flip, tick burst, late wick, and the eye's net
+   verdict with human-readable Bengali reasons. */
+let currentTickEye = null;
+function renderTickEye(te){
+  if(!te) return;
+  currentTickEye = te;
+  // Phase chip + countdown
+  const phase = te.phase || '—';
+  const secs  = (te.seconds_left != null) ? te.seconds_left : '—';
+  _setText('te-phase', phase === 'LAST10' ? 'শেষ ১০ সেকেন্ড' :
+                    phase === 'LATE' ? 'লেট' :
+                    phase === 'MID' ? 'মিড' :
+                    phase === 'EARLY' ? 'আর্লি' : phase);
+  const phaseEl = $('te-phase');
+  if(phaseEl){
+    phaseEl.className = 'te-phase-chip ' + (phase === 'LAST10' ? 'last10' :
+                          phase === 'LATE' ? 'late' : '');
+  }
+  _setText('te-secs', secs + 's');
+  if(secs !== '—' && phaseEl){
+    phaseEl.textContent += ' · ' + secs + 's';
+  }
+  // Verdict
+  const dir = te.eye_direction || 'NEUTRAL';
+  const str = te.eye_strength || 0;
+  const verdictEl = $('te-verdict');
+  if(verdictEl){
+    verdictEl.textContent = dir === 'CALL' ? 'CALL ঘেঁষা' :
+                            dir === 'PUT'  ? 'PUT ঘেঁষা' : 'নিরপেক্ষ';
+    verdictEl.className = 'te-verdict-value ' +
+      (dir === 'CALL' ? 'call' : dir === 'PUT' ? 'put' : 'neutral');
+    verdictEl.textContent += ' (' + str + '%)';
+  }
+  if(!te.ready){
+    const rs = $('te-reasons');
+    if(rs){ rs.innerHTML = ''; (te.eye_reasons || []).forEach(r => {
+      const li = document.createElement('li'); li.textContent = r; rs.appendChild(li);
+    }); }
+    return;
+  }
+  // Ending velocity
+  const vel = te.velocity;
+  if(vel != null){
+    const vTxt = (vel > 0 ? '▲ +' : vel < 0 ? '▼ ' : '○ ') + Math.round(vel * 100) + '%';
+    _setText('te-velocity', vTxt);
+    const vEl = $('te-velocity');
+    if(vEl) vEl.className = 'te-value ' + (vel > 0.05 ? 'up' : vel < -0.05 ? 'down' : '');
+  }
+  // Final flow
+  if(te.buy_pct_final != null){
+    const f = te.buy_pct_final;
+    const fTxt = f + '% বাই / ' + (100 - f) + '% সেল';
+    _setText('te-flow', fTxt);
+    const fEl = $('te-flow');
+    if(fEl) fEl.className = 'te-value ' + (f >= 70 ? 'up' : f <= 30 ? 'down' : '');
+  }
+  // Close position
+  if(te.close_position != null){
+    const cp = Math.round(te.close_position * 100);
+    _setText('te-cpos', cp + '%');
+    const cEl = $('te-cpos');
+    if(cEl) cEl.className = 'te-value ' + (cp >= 75 ? 'up' : cp <= 25 ? 'down' : '');
+  }
+  // Late flip
+  const lf = te.late_flip;
+  if(lf && lf.detected){
+    const flipEl = $('te-flip');
+    if(flipEl){
+      flipEl.textContent = (lf.from_color === 'RED' ? 'লাল→' : 'সবুজ→') +
+                           (lf.to_color === 'GREEN' ? 'সবুজ' : 'লাল') +
+                           (lf.is_real ? ' ✓রিয়েল' : ' ⚠স্পাইক');
+      flipEl.className = 'te-value ' + (lf.is_real
+        ? (lf.to_color === 'GREEN' ? 'up' : 'down')
+        : 'spike');
+    }
+  } else {
+    _setText('te-flip', 'নেই');
+    const fe = $('te-flip'); if(fe) fe.className = 'te-value';
+  }
+  // Tick burst
+  const tb = te.tick_burst;
+  if(tb){
+    _setText('te-burst', tb.is_burst ? ('×' + tb.ratio + ' ⚡') : 'স্বাভাবিক');
+    const bEl = $('te-burst');
+    if(bEl) bEl.className = 'te-value ' + (tb.is_burst ? 'spike' : '');
+  }
+  // Late wick
+  const lw = te.late_wick;
+  if(lw && lw.rejected){
+    _setText('te-wick', lw.side === 'UPPER' ? 'উপর✗ রিজেক্ট' : 'নিচ✗ রিজেক্ট');
+    const wEl = $('te-wick');
+    if(wEl) wEl.className = 'te-value ' + (lw.side === 'UPPER' ? 'down' : 'up');
+  } else {
+    _setText('te-wick', 'নেই');
+    const we = $('te-wick'); if(we) we.className = 'te-value';
+  }
+  // Tick rate
+  if(te.tick_count != null && te.seconds_left != null){
+    const elapsed = Math.max(1, 60 - te.seconds_left);
+    _setText('te-rate', (te.tick_count / elapsed).toFixed(1) + '/s (' + te.tick_count + ')');
+  } else if(te.tick_count != null){
+    _setText('te-rate', te.tick_count + ' টিক');
+  }
+  // Reasons (XSS-safe: textContent, never innerHTML)
+  const rs = $('te-reasons');
+  if(rs){
+    rs.innerHTML = '';
+    const reasons = te.eye_reasons || [];
+    if(!reasons.length){
+      const li = document.createElement('li');
+      li.textContent = 'চোখে স্পষ্ট কিছু দেখা যাচ্ছে না — ব্যালান্সড টিক';
+      rs.appendChild(li);
+    } else {
+      reasons.forEach(r => {
+        const li = document.createElement('li');
+        li.textContent = r;
+        rs.appendChild(li);
       });
     }
   }
@@ -3233,6 +3377,8 @@ function onTick(msg){
   }
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed addTapeTick(c.close) call — dead code (#tick-tape-inner doesn't exist).
   if(msg.micro) renderMicro(msg.micro);
+  // TICK-EYE (2026-09-16): live human-eye anatomy of the running candle.
+  if(msg.tick_eye) renderTickEye(msg.tick_eye);
   if(msg.running_conf){
     runningConf = msg.running_conf;
     if(currentMicro) renderMicro(currentMicro);

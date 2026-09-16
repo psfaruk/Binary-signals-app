@@ -60,6 +60,18 @@ ALLOWED_PAIRS_REAL = (
     "EURGBP",        # EUR/GBP
     "AUDUSD",        # AUD/USD
     "USDJPY",        # USD/JPY
+    # REAL-MAJORS (USER-2026-09-16): "আর কিছু পেয়ার অ্যাড করতে হবে real
+    # মার্কেট মেজর গুলো" — the 4 classic majors that were missing
+    # (GBP/USD, USD/CHF, USD/CAD, NZD/USD) plus the 3 most-liquid JPY
+    # crosses (EUR/JPY, GBP/JPY, AUD/JPY). All are weekday real-market
+    # instruments on Quotex. → 11 Real pairs total.
+    "GBPUSD",        # GBP/USD (Cable)
+    "USDCHF",        # USD/CHF
+    "USDCAD",        # USD/CAD (Loonie)
+    "NZDUSD",        # NZD/USD (Kiwi)
+    "EURJPY",        # EUR/JPY cross
+    "GBPJPY",        # GBP/JPY cross (the Beast)
+    "AUDJPY",        # AUD/JPY cross
 )
 
 ALLOWED_PAIRS = frozenset(ALLOWED_PAIRS_OTC + ALLOWED_PAIRS_REAL)
@@ -157,6 +169,12 @@ MODULE_NAMES = (
     "stochastic",
     "ema_ribbon",
     "sr_bounce",
+    # TICK-EYE (2026-09-16): the human-eye tick anatomy module (ending
+    # velocity, late flip, close position, wick rejection, tick burst on
+    # the just-closed candle's tick sequence). Registered here so the
+    # module-learning loop (db.per_module_accuracy → PairWeightAdapter)
+    # can see and calibrate its votes from day one.
+    "tick_eye",
 )
 
 # Human-readable display names for the UI.
@@ -174,6 +192,7 @@ MODULE_DISPLAY_NAMES = {
     "stochastic":      "Stochastic",
     "ema_ribbon":      "EMA Ribbon",
     "sr_bounce":       "S/R Bounce",
+    "tick_eye":        "Tick Eye (মানুষের চোখ)",
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -277,12 +296,17 @@ OTC_MODULES = (
     "stochastic",      # Stochastic(14,3,3) crossover — 55-60% expected WR
     "ema_ribbon",      # EMA(5/8/13) ribbon trend — 55-62% expected WR
     "sr_bounce",       # S/R bounce with candle confirmation — 60-68% expected WR
+    # TICK-EYE (2026-09-16): human-eye tick anatomy (user request: "টিক
+    # মানুষের মতোই কাজে লাগানো যাবে") — conservative low weight, per-pair
+    # adapter calibrates from live data.
+    "tick_eye",
 )
 REAL_MODULES = (
     "candle_reaction", "pattern", "key_level",
     "market_state", "wickwall", "divergence", "tickrun",
     "multi_tf", "momentum",
     "bollinger_rsi", "stochastic", "ema_ribbon", "sr_bounce",
+    "tick_eye",
 )
 
 # Allowed candle periods (seconds). Whitelisted to prevent bogus streams

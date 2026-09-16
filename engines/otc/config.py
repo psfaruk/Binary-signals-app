@@ -51,6 +51,11 @@ DEFAULT_WEIGHTS = {
     "stochastic":      1.5,   # Stoch crossover — 55-60% expected WR
     "ema_ribbon":      1.2,   # EMA(5/8/13) trend — 55-62% expected WR
     "sr_bounce":       1.8,   # S/R + candle confirm — 60-68% expected WR
+    # TICK-EYE (2026-09-16): human-eye tick anatomy (user: "টিক মানুষের
+    # মতোই কাজে লাগানো যাবে") — conservative start; OTC feeds mean-revert,
+    # so the late-flip continuation read may invert — the per-pair adapter
+    # will learn the true sign from live graded signals.
+    "tick_eye":        1.0,
 }
 
 # Pair-specific strategy weights based on Task 3 research.

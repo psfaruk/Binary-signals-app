@@ -337,6 +337,31 @@
                             </div>
                         </div>
 
+                        <!-- TICK-EYE (2026-09-16): live "human eye" view of the
+                             running candle — মানুষের চোখের মতো টিক পড়া.
+                             common.js renderTickEye() writes to #te-* elements. -->
+                        <div class="tick-eye-panel" id="tick-eye-section">
+                            <div class="panel-section-header">
+                                <h4>টিক আই <span class="te-eye-icon" title="মানুষের চোখের মতো লাইভ টিক বিশ্লেষণ">👁</span></h4>
+                                <span class="te-phase-chip" id="te-phase">—</span>
+                            </div>
+                            <div class="te-verdict-row">
+                                <span class="te-verdict-label">চোখে যা দেখা যাচ্ছে</span>
+                                <span class="te-verdict-value" id="te-verdict">—</span>
+                            </div>
+                            <div class="te-grid">
+                                <div class="te-item"><span class="te-label">সেকেন্ড বাকি</span><span class="te-value" id="te-secs">—</span></div>
+                                <div class="te-item"><span class="te-label">শেষ ভেলোসিটি</span><span class="te-value" id="te-velocity">—</span></div>
+                                <div class="te-item"><span class="te-label">শেষ ফ্লো</span><span class="te-value" id="te-flow">—</span></div>
+                                <div class="te-item"><span class="te-label">ক্লোজ পজিশন</span><span class="te-value" id="te-cpos">—</span></div>
+                                <div class="te-item"><span class="te-label">লেট ফ্লিপ</span><span class="te-value" id="te-flip">—</span></div>
+                                <div class="te-item"><span class="te-label">টিক বার্স্ট</span><span class="te-value" id="te-burst">—</span></div>
+                                <div class="te-item"><span class="te-label">লেট উইক</span><span class="te-value" id="te-wick">—</span></div>
+                                <div class="te-item"><span class="te-label">টিক রেট</span><span class="te-value" id="te-rate">—</span></div>
+                            </div>
+                            <ul class="te-reasons" id="te-reasons"><li>টিকের অপেক্ষায়…</li></ul>
+                        </div>
+
                         <!-- Share signal table — common.js owns this -->
                         <div class="share-panel" id="share-signal-section">
                             <div class="share-header share-signal-header">

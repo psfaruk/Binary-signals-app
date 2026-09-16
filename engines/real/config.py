@@ -26,6 +26,9 @@ DEFAULT_WEIGHTS = {
     "stochastic":      1.5,
     "ema_ribbon":      1.2,
     "sr_bounce":       1.8,
+    # TICK-EYE (2026-09-16): human-eye tick anatomy — conservative 1.0,
+    # per-pair adapter calibrates from live win rates.
+    "tick_eye":        1.0,
 }
 
 # Real-pair strategy mapping (Task 3 research)
@@ -58,6 +61,60 @@ PAIR_CONFIGS = {
                     "ema_ribbon": 2.5,
                     "momentum": 2.0,
                     "bollinger_rsi": 1.5},
+    },
+    # ── REAL-MAJORS (USER-2026-09-16): 7 new real-market pairs ─────────────
+    # Weights follow the same Task-3 research heuristics used above:
+    # trend-friendly pairs → EMA ribbon + momentum; range pairs → BB + RSI
+    # + stochastic; volatile crosses → S/R bounce + wickwall.
+    "GBPUSD": {
+        "profile": "calibrated", "description": "GBPUSD: trend + S/R (volatile major)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "ema_ribbon": 2.2,
+                    "sr_bounce": 2.2,
+                    "momentum": 1.8,
+                    "tick_eye": 1.2},   # cable respects closing momentum
+    },
+    "USDCHF": {
+        "profile": "calibrated", "description": "USDCHF: range-bound major (safe-haven mirror of EURUSD)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "bollinger_rsi": 2.4,
+                    "stochastic": 2.0,
+                    "sr_bounce": 2.0},
+    },
+    "USDCAD": {
+        "profile": "calibrated", "description": "USDCAD: balanced major (oil-correlated, trends on sessions)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "ema_ribbon": 2.0,
+                    "bollinger_rsi": 2.0,
+                    "sr_bounce": 1.8},
+    },
+    "NZDUSD": {
+        "profile": "calibrated", "description": "NZDUSD: range + BB (commodity dollar, mean-reverting intraday)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "bollinger_rsi": 2.3,
+                    "stochastic": 1.8,
+                    "ema_ribbon": 0.9},
+    },
+    "EURJPY": {
+        "profile": "calibrated", "description": "EURJPY: trend-friendly cross (risk-sentiment proxy)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "ema_ribbon": 2.4,
+                    "momentum": 2.0,
+                    "pattern": 2.5},
+    },
+    "GBPJPY": {
+        "profile": "calibrated", "description": "GBPJPY: volatile cross — S/R + wick rejection primary",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "sr_bounce": 2.5,
+                    "wickwall": 2.3,
+                    "tick_eye": 1.2},   # late-flip anatomy matters most here
+    },
+    "AUDJPY": {
+        "profile": "calibrated", "description": "AUDJPY: trend + momentum (risk-sentiment cross)",
+        "weights": {**DEFAULT_WEIGHTS,
+                    "ema_ribbon": 2.3,
+                    "momentum": 2.0,
+                    "bollinger_rsi": 1.6},
     },
 }
 

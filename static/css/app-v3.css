@@ -444,20 +444,64 @@ svg{display:block}
 }
 
 /* ─── Module engine panel ───────────────────────────────────────────────── */
-.module-panel,.market-state-panel,.micro-panel,.share-panel,.home-card,.stat-card{
+.module-panel,.market-state-panel,.micro-panel,.share-panel,.home-card,.stat-card,.tick-eye-panel{
   background:var(--card);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
   backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
 }
-.module-panel,.market-state-panel,.micro-panel,.share-panel{
+.module-panel,.market-state-panel,.micro-panel,.share-panel,.tick-eye-panel{
   padding:13px 14px;
   box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 10px 30px rgba(0,0,0,.28);
 }
-.module-panel h4,.market-state-panel h4,.micro-panel h4,.share-panel h4{
+.module-panel h4,.market-state-panel h4,.micro-panel h4,.share-panel h4,.tick-eye-panel h4{
   font-size:11px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;
   color:var(--text-dim);margin-bottom:10px;
 }
 .panel-section-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .panel-section-header h4{margin-bottom:0}
+
+/* ─── TICK-EYE panel (2026-09-16): live human-eye view of the running candle */
+.tick-eye-panel{margin-top:12px}
+.te-eye-icon{font-size:13px;vertical-align:middle;opacity:.9;cursor:help}
+.te-phase-chip{
+  font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;
+  padding:3px 8px;border-radius:12px;
+  background:var(--glass);border:1px solid var(--border);color:var(--text-faint);
+}
+.te-phase-chip.late{color:var(--yellow);border-color:rgba(251,191,36,.35)}
+.te-phase-chip.last10{
+  color:var(--red);border-color:rgba(251,113,133,.45);
+  animation:dot-pulse 1s ease-in-out infinite;
+}
+.te-verdict-row{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:7px 10px;border-radius:9px;margin-bottom:10px;
+  background:var(--glass);border:1px solid var(--border-soft);
+}
+.te-verdict-label{font-size:10.5px;color:var(--text-faint);font-weight:700}
+.te-verdict-value{font-family:var(--mono);font-size:12px;font-weight:800}
+.te-verdict-value.call{color:var(--green)}
+.te-verdict-value.put{color:var(--red)}
+.te-verdict-value.neutral{color:var(--text-faint)}
+.te-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:9px}
+.te-item{
+  display:flex;flex-direction:column;gap:2px;padding:6px 7px;border-radius:8px;
+  background:var(--glass);border:1px solid var(--border-soft);min-width:0;
+}
+.te-label{font-size:8.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint)}
+.te-value{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.te-value.up{color:var(--green)}
+.te-value.down{color:var(--red)}
+.te-value.spike{color:var(--yellow)}
+.te-reasons{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px;max-height:120px;overflow-y:auto}
+.te-reasons li{
+  font-size:10.5px;color:var(--text-dim);line-height:1.45;
+  padding:4px 8px;border-radius:7px;
+  background:rgba(148,163,184,.05);border-left:2px solid var(--border);
+}
+@media (max-width:520px){
+  .te-grid{grid-template-columns:repeat(2,1fr)}
+}
+
 .module-list{display:none;flex-direction:column;gap:5px;max-height:230px;overflow-y:auto}
 .module-list.open{display:flex}
 .module-row{font-size:12px;color:var(--text-faint)}

@@ -105,13 +105,18 @@ ANY_CONF_PER_NET_SCORE = 4              # honest evidence-quality bonus (net//4)
 # direction; only real theory votes (or the ML model, via feed.py) do.
 
 # Cluster → member modules. A module name may appear in exactly one cluster.
+# TICK-EYE (2026-09-16): the human-eye tick-anatomy module joins the MICRO
+# cluster alongside tickrun — it reads the same raw-tick evidence class
+# (intra-candle microstructure), so it must NOT count as an independent
+# confluence cluster (that would inflate cluster counts — the exact bug
+# CONFLUENCE-V1 was written to kill).
 CLUSTERS = {
     "TREND":    ("ema_ribbon", "multi_tf"),
     "MOMENTUM": ("momentum", "stochastic"),
     "MEANREV":  ("bollinger_rsi", "divergence"),
     "LEVEL":    ("key_level", "sr_bounce", "wickwall"),
     "PATTERN":  ("pattern",),
-    "MICRO":    ("tickrun", "market_state", "candle_reaction"),
+    "MICRO":    ("tickrun", "market_state", "candle_reaction", "tick_eye"),
 }
 MODULE_TO_CLUSTER = {}
 for _c, _members in CLUSTERS.items():

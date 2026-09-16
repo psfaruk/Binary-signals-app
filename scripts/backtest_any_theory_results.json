@@ -1,50 +1,50 @@
 {
- "edge": "persistence",
- "candles": 500,
+ "edge": "none",
+ "candles": 400,
  "signal_mode": "any_theory",
  "aggregate": {
-  "candles": 3255,
-  "coverage_pct": 99.94,
-  "win_rate": 58.59,
+  "candles": 2555,
+  "coverage_pct": 99.96,
+  "win_rate": 50.59,
   "fallback_violations": 0,
   "by_source": {
    "strategy_any": {
-    "correct": 1798,
-    "wrong": 1291
+    "correct": 1230,
+    "wrong": 1204
    },
    "strategy_strict": {
-    "correct": 104,
-    "wrong": 55
+    "correct": 61,
+    "wrong": 58
    },
    "ml_model": {
-    "correct": 4,
-    "wrong": 1
+    "correct": 1,
+    "wrong": 0
    }
   }
  },
  "pairs": [
   {
    "asset": "USDZAR_otc",
-   "total": 465,
-   "covered": 465,
+   "total": 365,
+   "covered": 365,
    "coverage_pct": 100.0,
-   "win_rate": 57.4,
-   "graded": 465,
+   "win_rate": 51.8,
+   "graded": 365,
    "by_source": {
     "strategy_any": {
-     "correct": 248,
-     "wrong": 197,
+     "correct": 177,
+     "wrong": 169,
      "draw": 0,
-     "win_rate": 55.7
+     "win_rate": 51.2
     },
     "strategy_strict": {
-     "correct": 17,
-     "wrong": 1,
+     "correct": 11,
+     "wrong": 7,
      "draw": 0,
-     "win_rate": 94.4
+     "win_rate": 61.1
     },
     "ml_model": {
-     "correct": 2,
+     "correct": 1,
      "wrong": 0,
      "draw": 0,
      "win_rate": 100.0
@@ -55,165 +55,147 @@
   },
   {
    "asset": "AUDJPY_otc",
-   "total": 465,
-   "covered": 464,
-   "coverage_pct": 99.8,
-   "win_rate": 58.2,
-   "graded": 464,
+   "total": 365,
+   "covered": 365,
+   "coverage_pct": 100.0,
+   "win_rate": 49.3,
+   "graded": 365,
    "by_source": {
     "strategy_any": {
-     "correct": 261,
-     "wrong": 191,
+     "correct": 175,
+     "wrong": 176,
      "draw": 0,
-     "win_rate": 57.7
+     "win_rate": 49.9
     },
     "strategy_strict": {
-     "correct": 8,
-     "wrong": 3,
+     "correct": 5,
+     "wrong": 9,
      "draw": 0,
-     "win_rate": 72.7
-    },
-    "ml_model": {
-     "correct": 1,
-     "wrong": 0,
-     "draw": 0,
-     "win_rate": 100.0
+     "win_rate": 35.7
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 0.6
   },
   {
    "asset": "NZDJPY_otc",
-   "total": 465,
-   "covered": 465,
+   "total": 365,
+   "covered": 365,
    "coverage_pct": 100.0,
-   "win_rate": 57.0,
-   "graded": 465,
+   "win_rate": 50.1,
+   "graded": 365,
    "by_source": {
     "strategy_any": {
-     "correct": 243,
-     "wrong": 188,
+     "correct": 173,
+     "wrong": 172,
      "draw": 0,
-     "win_rate": 56.4
-    },
-    "strategy_strict": {
-     "correct": 22,
-     "wrong": 12,
-     "draw": 0,
-     "win_rate": 64.7
-    }
-   },
-   "fallback_violations": [],
-   "secs": 0.8
-  },
-  {
-   "asset": "NZDCAD_otc",
-   "total": 465,
-   "covered": 465,
-   "coverage_pct": 100.0,
-   "win_rate": 58.9,
-   "graded": 465,
-   "by_source": {
-    "strategy_any": {
-     "correct": 257,
-     "wrong": 182,
-     "draw": 0,
-     "win_rate": 58.5
-    },
-    "strategy_strict": {
-     "correct": 17,
-     "wrong": 9,
-     "draw": 0,
-     "win_rate": 65.4
-    }
-   },
-   "fallback_violations": [],
-   "secs": 0.8
-  },
-  {
-   "asset": "USDNGN_otc",
-   "total": 465,
-   "covered": 465,
-   "coverage_pct": 100.0,
-   "win_rate": 60.2,
-   "graded": 465,
-   "by_source": {
-    "strategy_any": {
-     "correct": 269,
-     "wrong": 177,
-     "draw": 0,
-     "win_rate": 60.3
+     "win_rate": 50.1
     },
     "strategy_strict": {
      "correct": 10,
-     "wrong": 8,
+     "wrong": 10,
      "draw": 0,
-     "win_rate": 55.6
-    },
-    "ml_model": {
-     "correct": 1,
-     "wrong": 0,
-     "draw": 0,
-     "win_rate": 100.0
+     "win_rate": 50.0
     }
    },
    "fallback_violations": [],
-   "secs": 0.8
+   "secs": 0.6
+  },
+  {
+   "asset": "NZDCAD_otc",
+   "total": 365,
+   "covered": 364,
+   "coverage_pct": 99.7,
+   "win_rate": 53.3,
+   "graded": 364,
+   "by_source": {
+    "strategy_any": {
+     "correct": 188,
+     "wrong": 162,
+     "draw": 0,
+     "win_rate": 53.7
+    },
+    "strategy_strict": {
+     "correct": 6,
+     "wrong": 8,
+     "draw": 0,
+     "win_rate": 42.9
+    }
+   },
+   "fallback_violations": [],
+   "secs": 0.6
+  },
+  {
+   "asset": "USDNGN_otc",
+   "total": 365,
+   "covered": 365,
+   "coverage_pct": 100.0,
+   "win_rate": 47.1,
+   "graded": 365,
+   "by_source": {
+    "strategy_any": {
+     "correct": 166,
+     "wrong": 184,
+     "draw": 0,
+     "win_rate": 47.4
+    },
+    "strategy_strict": {
+     "correct": 6,
+     "wrong": 9,
+     "draw": 0,
+     "win_rate": 40.0
+    }
+   },
+   "fallback_violations": [],
+   "secs": 0.6
   },
   {
    "asset": "GBPNZD_otc",
-   "total": 465,
-   "covered": 465,
+   "total": 365,
+   "covered": 365,
    "coverage_pct": 100.0,
-   "win_rate": 59.1,
-   "graded": 465,
+   "win_rate": 49.3,
+   "graded": 365,
    "by_source": {
     "strategy_any": {
-     "correct": 256,
-     "wrong": 179,
+     "correct": 167,
+     "wrong": 175,
      "draw": 0,
-     "win_rate": 58.9
+     "win_rate": 48.8
     },
     "strategy_strict": {
-     "correct": 19,
+     "correct": 13,
      "wrong": 10,
      "draw": 0,
-     "win_rate": 65.5
-    },
-    "ml_model": {
-     "correct": 0,
-     "wrong": 1,
-     "draw": 0,
-     "win_rate": 0.0
+     "win_rate": 56.5
     }
    },
    "fallback_violations": [],
-   "secs": 0.8
+   "secs": 0.6
   },
   {
    "asset": "EURNZD_otc",
-   "total": 465,
-   "covered": 464,
-   "coverage_pct": 99.8,
-   "win_rate": 59.3,
-   "graded": 464,
+   "total": 365,
+   "covered": 365,
+   "coverage_pct": 100.0,
+   "win_rate": 53.2,
+   "graded": 365,
    "by_source": {
     "strategy_any": {
-     "correct": 264,
-     "wrong": 177,
+     "correct": 184,
+     "wrong": 166,
      "draw": 0,
-     "win_rate": 59.9
+     "win_rate": 52.6
     },
     "strategy_strict": {
-     "correct": 11,
-     "wrong": 12,
+     "correct": 10,
+     "wrong": 5,
      "draw": 0,
-     "win_rate": 47.8
+     "win_rate": 66.7
     }
    },
    "fallback_violations": [],
-   "secs": 0.8
+   "secs": 0.6
   }
  ]
 }

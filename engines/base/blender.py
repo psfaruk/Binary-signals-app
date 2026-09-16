@@ -55,6 +55,7 @@ from engines.base.modules import (
     ema_ribbon as mod_ema_ribbon,
     sr_bounce as mod_sr_bounce,
 )
+from engines.base.modules import tick_eye as mod_tick_eye
 from engines.base.per_pair import PairWeightAdapter
 
 MIN_CANDLES_FOR_PREDICTION = 30  # honest indicator warmup (RSI14, MACD26+9)
@@ -65,7 +66,7 @@ __all__ = ["predict", "BlenderConfig", "MIN_CANDLES_FOR_PREDICTION",
 MODULE_ORDER = (
     "candle_reaction", "pattern", "key_level", "market_state", "wickwall",
     "divergence", "tickrun", "multi_tf", "momentum", "bollinger_rsi",
-    "stochastic", "ema_ribbon", "sr_bounce",
+    "stochastic", "ema_ribbon", "sr_bounce", "tick_eye",
 )
 
 
@@ -127,6 +128,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     all_results += mod_stochastic.analyze(candles, ctx)
     all_results += mod_ema_ribbon.analyze(candles, ctx)
     all_results += mod_sr_bounce.analyze(candles, ctx)
+    # TICK-EYE (2026-09-16): human-eye tick anatomy of the just-closed
+    # candle (ending velocity, late flip, close position, wick reject,
+    # tick burst) — runs on the same base_ticks tickrun receives.
+    all_results += mod_tick_eye.analyze(candles, ticks, ctx)
 
     # ── Step 3: per-module net collapse (dedup double-counted groups) ──────
     # CONFLUENCE FIX: the old engine let one module emit several results into

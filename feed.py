@@ -223,6 +223,11 @@ STRENGTH_GATE_LAST_SECS = int(os.environ.get("QX_STRENGTH_GATE_LAST_SECS", "30")
 RUNCONF_MIN_TICKS = int(os.environ.get("QX_RUNCONF_MIN_TICKS", "5"))
 # _apply_strength_gate minimum ticks.
 STRENGTH_GATE_MIN_TICKS = int(os.environ.get("QX_STRENGTH_GATE_MIN_TICKS", "10"))
+# TICK-EYE (2026-09-16): recompute the live tick-eye snapshot at most every
+# N tick broadcasts (the eye is recomputed immediately when a NEW high/low
+# forms regardless of the counter). 5 ≈ 2-4 updates/second on OTC feeds —
+# smooth enough for the human-eye panel, cheap enough for 30+ streams.
+TICK_EYE_BROADCAST_EVERY = int(os.environ.get("QX_TICK_EYE_BCAST_EVERY", "5"))
 
 # ── Fallback display-name helper ─────────────────────────────────────────────
 def _api_to_display(api_name: str) -> str:
@@ -304,6 +309,16 @@ _USER_REAL_PAIRS = [
     # trades exactly 15 pairs: 11 OTC + 4 Real"). Signals for a pair outside
     # the allowlist are invisible to /api/winrate, /api/signals/* and every
     # history view — dead weight + confusing. Aligned to the 15-pair list.
+    # REAL-MAJORS (USER-2026-09-16): "আর কিছু পেয়ার অ্যাড করতে হবে real
+    # মার্কেট মেজর গুলো" — 7 new real majors/crosses, synced with
+    # core/constants.ALLOWED_PAIRS_REAL (11 real pairs total).
+    "GBPUSD",        # GBP/USD real (Cable)
+    "USDCHF",        # USD/CHF real
+    "USDCAD",        # USD/CAD real (Loonie)
+    "NZDUSD",        # NZD/USD real (Kiwi)
+    "EURJPY",        # EUR/JPY real cross
+    "GBPJPY",        # GBP/JPY real cross
+    "AUDJPY",        # AUD/JPY real cross
 ]
 
 # OTC pair list (used for otc_pairs_list + fallback)
@@ -4624,6 +4639,28 @@ class QuotexFeed:
                             "running_conf":  self._running_confirmation(stream),
                             "micro":         micro_snap,
                         }
+                        # ── TICK-EYE LIVE (2026-09-16) ─────────────────────────
+                        # The "human eye" view of the RUNNING candle (user:
+                        # "টিক মানুষের মতোই কাজে লাগানো যাবে"). Computed on a
+                        # bounded tail of the tick buffer (≤400 ticks) every
+                        # ~TICK_EYE_BROADCAST_EVERY broadcasts — cheap by
+                        # design, and the UI panel renders from this field.
+                        try:
+                            _te_count = getattr(stream, '_tick_eye_bcast_count', 0) + 1
+                            stream._tick_eye_bcast_count = _te_count
+                            if _te_count % TICK_EYE_BROADCAST_EVERY == 0 or cur_high != getattr(stream, '_tick_eye_last_hi', None) or cur_low != getattr(stream, '_tick_eye_last_lo', None):
+                                from core.tick_eye import live_eye
+                                msg["tick_eye"] = live_eye(
+                                    list(stream.ticks)[-400:],
+                                    stream.candle_open_price,
+                                    stream.period,
+                                    stream.candle_open_time)
+                                stream._tick_eye_last_hi = cur_high
+                                stream._tick_eye_last_lo = cur_low
+                        except Exception as _te_exc:
+                            # Never let the eye break the tick pipeline.
+                            print(f"[feed] tick-eye compute failed for "
+                                  f"{stream.asset}: {type(_te_exc).__name__}: {_te_exc}")
                         # FIX (2026-07-13): always send prediction if gate has opened
                         # (not just on pred_changed — that was blocking real-time updates)
                         if not (stream.signal_delay_until > 0 and time.time() < stream.signal_delay_until):
