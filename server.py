@@ -2724,6 +2724,18 @@ async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
         buyer_pct = micro.get("buy_pct")
         seller_pct = micro.get("sell_pct")
 
+        # SIGNAL-ROADMAP (2026-09-17): per-factor breakdown of WHY the
+        # signal fired — বায়ার/সেলার, হোল্ড, রিজেকশন, রাউন্ড নাম্বার,
+        # ওভারটেক, কারা জিতছে (top 3 speaking factors + micro_vote).
+        roadmap = pred.get("roadmap") or {}
+        road_factors = [
+            {"label": f.get("label"), "dir": f.get("dir"), "pts": f.get("pts")}
+            for f in (roadmap.get("factors") or [])
+            if f.get("dir") in ("CALL", "PUT")
+        ][:3]
+        road_summary = roadmap.get("summary_bn")
+        micro_vote = roadmap.get("micro_vote")
+
         # Last tick recency
         last_tick = getattr(stream, 'last_real_tick_wall', 0)
         last_update = round(now - last_tick, 0) if last_tick > 0 else None
@@ -2743,6 +2755,11 @@ async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
             "last_update_sec_ago": last_update,
             "live": is_live,
             "reasons": top_reasons,
+            "roadmap": {
+                "factors": road_factors,
+                "micro_vote": micro_vote,
+                "summary": road_summary,
+            },
         })
 
     return {

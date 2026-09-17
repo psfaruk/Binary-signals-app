@@ -298,6 +298,28 @@
                             </div>
                         </div>
 
+                        <!-- SIGNAL-ROADMAP (2026-09-17): সিগন্যাল ডিরেকশনের
+                             রোডম্যাপ — বায়ার/সেলার, হোল্ড, রিজেকশন/রিয়েকশন,
+                             রাউন্ড নাম্বার, ওভারটেক, কারা জিতছে — প্রতিটি
+                             ফ্যাক্টর কোন দিকে পয়েন্ট করছে তা সিগন্যালের
+                             সাথেই দেখায়। common.js renderRoadmap() writes
+                             to #roadmap-* elements. -->
+                        <div class="roadmap-panel" id="roadmap-section">
+                            <div class="panel-section-header">
+                                <h4>সিগন্যাল রোডম্যাপ <span class="te-eye-icon" title="সিগন্যাল কেন এই দিকে — ছয় ফ্যাক্টরের হিসাব">🗺️</span></h4>
+                                <span class="roadmap-vote-chip" id="roadmap-vote">—</span>
+                            </div>
+                            <div class="roadmap-summary" id="roadmap-summary">রোডম্যাপের অপেক্ষায়…</div>
+                            <div class="roadmap-score-row">
+                                <span class="roadmap-score call" id="roadmap-call-pts">কল 0</span>
+                                <span class="roadmap-vs">vs</span>
+                                <span class="roadmap-score put" id="roadmap-put-pts">পুট 0</span>
+                            </div>
+                            <div class="roadmap-factors" id="roadmap-factors">
+                                <div class="roadmap-factor"><span class="rf-label">—</span><span class="rf-note">ফ্যাক্টরের অপেক্ষায়…</span></div>
+                            </div>
+                        </div>
+
                         <!-- Market state — common.js writes to #ms-* elements -->
                         <div class="market-state-panel">
                             <h4>মার্কেট স্টেট</h4>
@@ -384,6 +406,18 @@
                                 <div class="coord-voice"><span class="cv-label">চোখ</span><span class="cv-dir" id="cv-eye">—</span></div>
                                 <div class="coord-voice"><span class="cv-label">মডেল</span><span class="cv-dir" id="cv-model">—</span></div>
                                 <div class="coord-voice"><span class="cv-label">রান-কনফার্ম</span><span class="cv-dir" id="cv-runconf">—</span></div>
+                            </div>
+                            <!-- SIGNAL-ROADMAP (2026-09-17): রানিং ক্যান্ডেলের
+                                 লাইভ ফ্যাক্টর — বায়ার/সেলার, হোল্ড, রিজেকশন,
+                                 রাউন্ড, ওভারটেক, কারা জিতছে — সিগন্যাল
+                                 ভেরিফিকেশনের সাথে প্রতি টিকে। -->
+                            <div class="coord-livefactors" id="coord-livefactors">
+                                <div class="clf-chip"><span class="clf-label">বায়ার/সেলার</span><span class="clf-value" id="clf-bs">—</span></div>
+                                <div class="clf-chip"><span class="clf-label">হোল্ড</span><span class="clf-value" id="clf-hold">—</span></div>
+                                <div class="clf-chip"><span class="clf-label">রিয়েকশন</span><span class="clf-value" id="clf-react">—</span></div>
+                                <div class="clf-chip"><span class="clf-label">রাউন্ড</span><span class="clf-value" id="clf-round">—</span></div>
+                                <div class="clf-chip"><span class="clf-label">ওভারটেক</span><span class="clf-value" id="clf-overtake">—</span></div>
+                                <div class="clf-chip"><span class="clf-label">জিতছে</span><span class="clf-value" id="clf-winner">—</span></div>
                             </div>
                             <div class="coord-foot">
                                 <span id="coord-updated" class="coord-updated">—</span>

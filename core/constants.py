@@ -175,6 +175,11 @@ MODULE_NAMES = (
     # module-learning loop (db.per_module_accuracy → PairWeightAdapter)
     # can see and calibrate its votes from day one.
     "tick_eye",
+    # SIGNAL-ROADMAP (2026-09-17): the user's six factors (buyer/seller,
+    # hold, rejection/reaction, round numbers, overtake, winner) as a
+    # module vote — first consumer of the micro dict feed.py has always
+    # passed. Registered so the learning loop calibrates it from day one.
+    "micro_flow",
 )
 
 # Human-readable display names for the UI.
@@ -193,6 +198,7 @@ MODULE_DISPLAY_NAMES = {
     "ema_ribbon":      "EMA Ribbon",
     "sr_bounce":       "S/R Bounce",
     "tick_eye":        "Tick Eye (মানুষের চোখ)",
+    "micro_flow":      "Micro Flow (রোডম্যাপ ফ্যাক্টর)",
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -300,6 +306,9 @@ OTC_MODULES = (
     # মানুষের মতোই কাজে লাগানো যাবে") — conservative low weight, per-pair
     # adapter calibrates from live data.
     "tick_eye",
+    # SIGNAL-ROADMAP (2026-09-17): the six-factor micro-flow module —
+    # buyer/seller, hold, rejection, round numbers, overtake, winner.
+    "micro_flow",
 )
 REAL_MODULES = (
     "candle_reaction", "pattern", "key_level",
@@ -307,6 +316,7 @@ REAL_MODULES = (
     "multi_tf", "momentum",
     "bollinger_rsi", "stochastic", "ema_ribbon", "sr_bounce",
     "tick_eye",
+    "micro_flow",
 )
 
 # Allowed candle periods (seconds). Whitelisted to prevent bogus streams

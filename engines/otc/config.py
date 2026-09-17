@@ -56,6 +56,11 @@ DEFAULT_WEIGHTS = {
     # so the late-flip continuation read may invert — the per-pair adapter
     # will learn the true sign from live graded signals.
     "tick_eye":        1.0,
+    # SIGNAL-ROADMAP (2026-09-17): the six-factor micro-flow module
+    # (buyer/seller, hold, rejection, round numbers, overtake, winner).
+    # Conservative 1.0 start; the per-pair adapter calibrates from live
+    # graded signals — the roadmap REASONS are already visible per signal.
+    "micro_flow":      1.0,
 }
 
 # Pair-specific strategy weights based on Task 3 research.

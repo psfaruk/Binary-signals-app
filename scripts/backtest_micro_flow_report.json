@@ -1,0 +1,11 @@
+{
+  "pass": 25,
+  "fail": 0,
+  "latency": {
+    "factors_us": 7.281172999682894,
+    "roadmap_us": 11.569376999887027,
+    "live_factors_us": 2.633888000218576,
+    "module_us": 7.706549999966229,
+    "coordination_us": 8.705755499704537
+  }
+}

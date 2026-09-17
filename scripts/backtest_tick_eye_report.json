@@ -1,139 +1,139 @@
 {
-  "generated": "2026-09-16 15:28:54",
-  "candles": 5000,
+  "generated": "2026-09-17 15:42:49",
+  "candles": 3000,
   "results": {
     "none": {
       "edge": "none",
-      "candles": 5000,
-      "seed": 21,
+      "candles": 3000,
+      "seed": 7,
       "phi": 0.12,
       "flip_prob": 0.3,
-      "votes": 741,
-      "coverage_pct": 14.9,
-      "correct": 376,
-      "wrong": 365,
+      "votes": 449,
+      "coverage_pct": 15.1,
+      "correct": 230,
+      "wrong": 219,
       "draws": 0,
-      "win_rate_pct": 50.74,
-      "wilson_lb_pct": 47.15,
-      "flips_seen": 1175,
-      "real_flips": 95,
-      "spike_flips": 1080,
+      "win_rate_pct": 51.22,
+      "wilson_lb_pct": 46.61,
+      "flips_seen": 698,
+      "real_flips": 66,
+      "spike_flips": 632,
       "conditional": {
         "real": {
-          "n": 84,
-          "wr": 55.95,
-          "wilson_lb": 45.31
+          "n": 54,
+          "wr": 51.85,
+          "wilson_lb": 38.85
         },
         "spike": {
-          "n": 81,
-          "wr": 48.15,
-          "wilson_lb": 37.6
+          "n": 29,
+          "wr": 58.62,
+          "wilson_lb": 40.74
         },
         "noflip": {
-          "n": 576,
-          "wr": 50.35,
-          "wilson_lb": 46.28
+          "n": 366,
+          "wr": 50.55,
+          "wilson_lb": 45.45
         }
       },
-      "avg_module_latency_ms": 0.349,
+      "avg_module_latency_ms": 0.301,
       "by_confidence_bucket": {
         "50": {
-          "wr": 49.6,
-          "n": 423
+          "wr": 52.3,
+          "n": 262
         },
         "60": {
-          "wr": 52.2,
-          "n": 318
+          "wr": 49.7,
+          "n": 187
         }
       }
     },
     "flip_persistence": {
       "edge": "flip_persistence",
-      "candles": 5000,
-      "seed": 21,
+      "candles": 3000,
+      "seed": 7,
       "phi": 0.12,
       "flip_prob": 0.3,
-      "votes": 1256,
-      "coverage_pct": 25.3,
-      "correct": 831,
-      "wrong": 425,
+      "votes": 716,
+      "coverage_pct": 24.2,
+      "correct": 481,
+      "wrong": 235,
       "draws": 0,
-      "win_rate_pct": 66.16,
-      "wilson_lb_pct": 63.5,
-      "flips_seen": 1072,
-      "real_flips": 243,
-      "spike_flips": 829,
+      "win_rate_pct": 67.18,
+      "wilson_lb_pct": 63.66,
+      "flips_seen": 659,
+      "real_flips": 140,
+      "spike_flips": 519,
       "conditional": {
         "real": {
-          "n": 197,
-          "wr": 68.53,
-          "wilson_lb": 61.74
+          "n": 118,
+          "wr": 79.66,
+          "wilson_lb": 71.52
         },
         "spike": {
-          "n": 62,
-          "wr": 48.39,
-          "wilson_lb": 36.41
+          "n": 38,
+          "wr": 47.37,
+          "wilson_lb": 32.48
         },
         "noflip": {
-          "n": 997,
-          "wr": 66.8,
-          "wilson_lb": 63.82
+          "n": 560,
+          "wr": 65.89,
+          "wilson_lb": 61.87
         }
       },
-      "avg_module_latency_ms": 0.356,
+      "avg_module_latency_ms": 0.3,
       "by_confidence_bucket": {
         "50": {
-          "wr": 63.8,
-          "n": 669
+          "wr": 64.9,
+          "n": 367
         },
         "60": {
-          "wr": 68.8,
-          "n": 587
+          "wr": 69.6,
+          "n": 349
         }
       }
     },
     "spike_noise": {
       "edge": "spike_noise",
-      "candles": 5000,
-      "seed": 21,
+      "candles": 3000,
+      "seed": 7,
       "phi": 0.12,
       "flip_prob": 0.3,
-      "votes": 1063,
-      "coverage_pct": 21.4,
-      "correct": 546,
-      "wrong": 517,
+      "votes": 645,
+      "coverage_pct": 21.8,
+      "correct": 324,
+      "wrong": 321,
       "draws": 0,
-      "win_rate_pct": 51.36,
-      "wilson_lb_pct": 48.36,
-      "flips_seen": 1790,
-      "real_flips": 107,
-      "spike_flips": 1683,
+      "win_rate_pct": 50.23,
+      "wilson_lb_pct": 46.38,
+      "flips_seen": 1054,
+      "real_flips": 53,
+      "spike_flips": 1001,
       "conditional": {
         "real": {
-          "n": 100,
-          "wr": 42.0,
-          "wilson_lb": 32.8
+          "n": 46,
+          "wr": 43.48,
+          "wilson_lb": 30.21
         },
         "spike": {
-          "n": 129,
-          "wr": 68.22,
-          "wilson_lb": 59.75
+          "n": 79,
+          "wr": 67.09,
+          "wilson_lb": 56.15
         },
         "noflip": {
-          "n": 834,
-          "wr": 49.88,
-          "wilson_lb": 46.49
+          "n": 520,
+          "wr": 48.27,
+          "wilson_lb": 44.0
         }
       },
-      "avg_module_latency_ms": 0.355,
+      "avg_module_latency_ms": 0.305,
       "by_confidence_bucket": {
         "50": {
-          "wr": 48.3,
-          "n": 666
+          "wr": 47.6,
+          "n": 424
         },
         "60": {
-          "wr": 56.4,
-          "n": 397
+          "wr": 55.2,
+          "n": 221
         }
       }
     }

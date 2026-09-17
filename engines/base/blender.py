@@ -56,6 +56,8 @@ from engines.base.modules import (
     sr_bounce as mod_sr_bounce,
 )
 from engines.base.modules import tick_eye as mod_tick_eye
+from engines.base.modules import micro_flow as mod_micro_flow
+from core import roadmap as _roadmap
 from engines.base.per_pair import PairWeightAdapter
 
 MIN_CANDLES_FOR_PREDICTION = 30  # honest indicator warmup (RSI14, MACD26+9)
@@ -66,7 +68,7 @@ __all__ = ["predict", "BlenderConfig", "MIN_CANDLES_FOR_PREDICTION",
 MODULE_ORDER = (
     "candle_reaction", "pattern", "key_level", "market_state", "wickwall",
     "divergence", "tickrun", "multi_tf", "momentum", "bollinger_rsi",
-    "stochastic", "ema_ribbon", "sr_bounce", "tick_eye",
+    "stochastic", "ema_ribbon", "sr_bounce", "tick_eye", "micro_flow",
 )
 
 
@@ -132,6 +134,12 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # candle (ending velocity, late flip, close position, wick reject,
     # tick burst) — runs on the same base_ticks tickrun receives.
     all_results += mod_tick_eye.analyze(candles, ticks, ctx)
+    # SIGNAL-ROADMAP (2026-09-17): the user's six factors (buyer/seller,
+    # hold, rejection/reaction, round number, overtake, winner) from the
+    # just-closed candle's microstructure — the micro dict feed.py has
+    # always passed and the blender always dropped. First consumer.
+    if micro:
+        all_results += mod_micro_flow.analyze(candles, micro, ctx)
 
     # ── Step 3: per-module net collapse (dedup double-counted groups) ──────
     # CONFLUENCE FIX: the old engine let one module emit several results into
@@ -237,6 +245,23 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     pair_profile = weight_adapter.get_profile(asset)
     result["reasons"] = all_reasons
     result["regime"] = ctx.regime
+    # SIGNAL-ROADMAP (2026-09-17): every prediction carries the factor
+    # roadmap (বায়ার/সেলার, হোল্ড, রিজেকশন, রাউন্ড নাম্বার, ওভারটেক,
+    # কারা জিতছে) so the signal point shows WHY the direction fired —
+    # computed from the same micro dict the micro_flow module consumed.
+    # try/except: the roadmap is presentation + evidence, it must never
+    # break the prediction path (fail-open with no roadmap block).
+    try:
+        _eye_anatomy = None
+        if ticks and len(ticks) >= 12 and candles:
+            from core.tick_eye import analyze_candle_ticks as _act
+            _eye_anatomy = _act(list(ticks), candles[-1].get("open"), 60)
+        result["roadmap"] = _roadmap.build_roadmap(
+            micro, candles, eye_anatomy=_eye_anatomy,
+            final_signal=result.get("signal"))
+    except Exception as _rm_exc:
+        print(f"[blender] roadmap build failed (fail-open): "
+              f"{type(_rm_exc).__name__}: {_rm_exc}")
     result["modules"] = _module_breakdown(grouped_results, module_names,
                                           final_signal=result["signal"])
     result["asset"] = asset

@@ -2371,6 +2371,19 @@ class QuotexFeed:
                 "ml_emit": emit_flag,
                 "reasons": reasons,
             })
+            # SIGNAL-ROADMAP (2026-09-17): the blender built the roadmap
+            # while the module engine was still NEUTRAL — re-stamp each
+            # factor's agree marker against the ML direction so the UI
+            # chips light correctly (✓ supports / ✗ opposes the signal).
+            # Pure dict fix-up; never blocks the signal path.
+            try:
+                _rm = sub.get("roadmap")
+                if isinstance(_rm, dict):
+                    for _f in _rm.get("factors") or []:
+                        if _f.get("dir") in ("CALL", "PUT"):
+                            _f["agree"] = (_f["dir"] == direction)
+            except Exception:
+                pass
             print(f"[feed] {stream.asset}: module engine silent — ML model "
                   f"T+1 supplies the signal ({direction}, p={prob:.3f})")
             return sub
@@ -4820,7 +4833,8 @@ class QuotexFeed:
                                         else getattr(stream, "_last_eye", None),
                                     stream.prediction,
                                     getattr(stream, "_coord_model_voice", None),
-                                    _runconf)
+                                    _runconf,
+                                    micro_snap)
                                 msg["coordination"] = _coord
                                 stream._last_coordination = _coord
                         except Exception as _c_exc:

@@ -63,6 +63,7 @@ const MODULE_NAMES = [
   'ema_ribbon',
   'sr_bounce',
   'tick_eye',
+  'micro_flow',
 ];
 // Both engines now run the same module set (mirrors core/constants.py).
 const OTC_MODULES  = MODULE_NAMES;
@@ -82,6 +83,7 @@ const MODULE_DISPLAY = {
   'ema_ribbon':      'EMA Ribbon',
   'sr_bounce':       'S/R Bounce',
   'tick_eye':        'Tick Eye (মানুষের চোখ)',
+  'micro_flow':      'Micro Flow (রোডম্যাপ ফ্যাক্টর)',
 };
 
 /* ─── STATE (reset on every initApp call) ────────────────────────────────── */
@@ -925,6 +927,11 @@ function renderSignal(pred){
   // on NEUTRAL (everything gray with the reject-gate tooltip).
   renderConfluenceChips(pred);
 
+  // SIGNAL-ROADMAP (2026-09-17): the WHY panel — বায়ার/সেলার, হোল্ড,
+  // রিজেকশন, রাউন্ড নাম্বার, ওভারটেক, কারা জিতছে — each factor's lean
+  // vs the signal, at the signal point itself.
+  renderRoadmap(pred.roadmap, pred);
+
   // Regime display — clean format (no debug-looking output).
   // FIX (UI-P1-15/16, 2026-07-21): drop the "(str=0.85)" debug suffix;
   // the strength number is shown in Market State as a label.
@@ -1033,6 +1040,78 @@ function renderSignal(pred){
   // tab's pair drill-in live card (no-op unless that view is open and the
   // drilled pair is the live-subscribed pair).
   _updatePairLiveCard(pred);
+}
+
+/* ─── SIGNAL-ROADMAP (2026-09-17) ─────────────────────────────────────────
+   সিগন্যাল ডিরেকশনের রোডম্যাপ — the six-factor WHY behind every CALL/PUT:
+   বায়ার/সেলার, হোল্ড, রিজেকশন/রিয়েকশন, রাউন্ড নাম্বার, ওভারটেক, কারা
+   জিতছে। Server (core/roadmap.py → blender) attaches pred.roadmap to
+   EVERY prediction. XSS-safe: textContent / className only. */
+function renderRoadmap(road, pred){
+  const factorsEl = $('roadmap-factors');
+  if(!factorsEl) return;
+  if(!road){
+    _setText('roadmap-summary', 'রোডম্যাপ ডেটা এখনো নেই');
+    const vc = $('roadmap-vote');
+    if(vc){ vc.textContent = '—'; vc.className = 'roadmap-vote-chip abstain'; }
+    return;
+  }
+
+  const summaryEl = $('roadmap-summary');
+  if(summaryEl) summaryEl.textContent = road.summary_bn || '—';
+
+  _setText('roadmap-call-pts', 'কল ' + (road.call_pts || 0));
+  _setText('roadmap-put-pts',  'পুট '  + (road.put_pts  || 0));
+
+  // Vote chip — the roadmap's own net (what the six factors support)
+  const vc = $('roadmap-vote');
+  if(vc){
+    const mv = road.micro_vote;
+    vc.textContent = mv === 'CALL' ? 'মাইক্রো-কল'
+                   : mv === 'PUT'  ? 'মাইক্রো-পুট' : 'ভোট নেই';
+    vc.className = 'roadmap-vote-chip ' + (
+      mv === 'CALL' ? 'call' : mv === 'PUT' ? 'put' : 'abstain');
+  }
+
+  // Factor rows — speaking factors first (server already sorts), each
+  // row: label · dir chip · pts · note. agree=true → green border (the
+  // factor supports the signal), agree=false → red (it opposes).
+  factorsEl.textContent = '';
+  (road.factors || []).forEach(f => {
+    const row = document.createElement('div');
+    const dir = f.dir;
+    row.className = 'roadmap-factor' + (
+      dir === 'CALL' ? ' support-call' : dir === 'PUT' ? ' support-put' : '');
+
+    const lbl = document.createElement('span');
+    lbl.className = 'rf-label';
+    lbl.textContent = f.label || f.key || '';
+    row.appendChild(lbl);
+
+    const dirEl = document.createElement('span');
+    dirEl.className = 'rf-dir ' + (dir === 'CALL' ? 'call' :
+                        dir === 'PUT' ? 'put' : 'abstain');
+    dirEl.textContent = dir === 'CALL' ? 'কল' : dir === 'PUT' ? 'পুট' : 'নিরপেক্ষ';
+    // Signal-relative marker: does this factor stand WITH the signal?
+    if(f.agree === true)  dirEl.textContent += ' ✓';
+    if(f.agree === false) dirEl.textContent += ' ✗';
+    row.appendChild(dirEl);
+
+    if(f.pts){
+      const pts = document.createElement('span');
+      pts.className = 'rf-pts';
+      pts.textContent = f.pts + 'পি';
+      row.appendChild(pts);
+    }
+
+    if(f.note){
+      const note = document.createElement('span');
+      note.className = 'rf-note';
+      note.textContent = f.note;
+      row.appendChild(note);
+    }
+    factorsEl.appendChild(row);
+  });
 }
 
 /* CONFLUENCE-V1 (2026-09-02): cluster agreement chips.
@@ -1361,6 +1440,60 @@ function renderCoordination(coord){
   // Phase + age (age also refreshed by the 100ms local timer)
   _setText('coord-phase', coord.phase ? 'ফেজ: ' + coord.phase : '');
   _setText('coord-updated', 'আপডেট 0ms আগে');
+
+  // SIGNAL-ROADMAP (2026-09-17): রানিং ক্যান্ডেলের লাইভ ফ্যাক্টর —
+  // বায়ার/সেলার, হোল্ড, রিয়েকশন, রাউন্ড, ওভারটেক, কারা জিতছে।
+  renderLiveFactors(coord.live_factors);
+}
+
+/* SIGNAL-ROADMAP (2026-09-17): the running candle's factor chips inside the
+   coordination panel — the user's "একটি রানিং ক্যান্ডেল এর সকল ডেটা" answer,
+   live per tick. XSS-safe: textContent only. */
+function renderLiveFactors(lf){
+  if(!lf) return;
+  const bp = typeof lf.buyer_pct === 'number' ? Math.round(lf.buyer_pct) : null;
+  const dirCls = d => d === 'CALL' ? 'call' : d === 'PUT' ? 'put' : 'abstain';
+  const leanTxt = d => d === 'CALL' ? 'কল' : d === 'PUT' ? 'পুট' : '—';
+
+  // বায়ার/সেলার — percentage + lean
+  const bsEl = $('clf-bs');
+  if(bsEl){
+    bsEl.textContent = bp != null ? (bp + '% / ' + (100 - bp) + '%') : '—';
+    bsEl.className = 'clf-value ' + dirCls((lf.leans || {}).buyer_seller);
+  }
+  // হোল্ড — the price being defended
+  const holdEl = $('clf-hold');
+  if(holdEl){
+    holdEl.textContent = lf.hold_price != null ? fmtPrice(lf.hold_price) : '—';
+    holdEl.className = 'clf-value';
+  }
+  // রিয়েকশন — BUYER/SELLER/EXHAUST lean
+  const reactEl = $('clf-react');
+  if(reactEl){
+    const r = lf.reaction || lf.last_react;
+    reactEl.textContent = r ? String(r) : '—';
+    reactEl.className = 'clf-value ' + dirCls((lf.leans || {}).rejection);
+  }
+  // রাউন্ড — nearest round level
+  const roundEl = $('clf-round');
+  if(roundEl){
+    roundEl.textContent = lf.round_level != null
+      ? fmtPrice(lf.round_level) + (lf.round_strength === 'BIG' ? ' ⭐' : '')
+      : '—';
+    roundEl.className = 'clf-value';
+  }
+  // ওভারটেক — phase transfer
+  const otEl = $('clf-overtake');
+  if(otEl){
+    otEl.textContent = leanTxt((lf.leans || {}).overtake);
+    otEl.className = 'clf-value ' + dirCls((lf.leans || {}).overtake);
+  }
+  // কারা জিতছে — ending direction
+  const winEl = $('clf-winner');
+  if(winEl){
+    winEl.textContent = leanTxt((lf.leans || {}).winner);
+    winEl.className = 'clf-value ' + dirCls((lf.leans || {}).winner);
+  }
 }
 
 /* COORDINATION-MS: 100ms local timer — keeps the candle countdown AND the

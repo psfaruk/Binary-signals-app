@@ -50,13 +50,23 @@ DESIGN CONSTRAINTS (repo lessons, see core/constants.py):
     live evidence still supports it.
 
 Public API:
-  compute_coordination(eye, prediction, model_voice, runconf) -> dict
+  compute_coordination(eye, prediction, model_voice, runconf, micro=None) -> dict
+    `micro` (optional) — the RUNNING candle's live microstructure snapshot
+    (feed.py's micro_snap, already computed this tick). When present the
+    payload gains a `live_factors` block: buyer/seller, hold, rejection,
+    round number, overtake, winner states of the RUNNING candle vs the
+    signal — the user's "একটি রানিং ক্যান্ডেল এর সকল ডেটা" answer at
+    verification time. Pure O(1) dict reads (measured < 5 µs); it NEVER
+    joins the voting weights — display + data only, the voice math is
+    byte-identical with or without it.
 """
 
 from __future__ import annotations
 
 import os
 import time
+
+from core import roadmap as _roadmap
 
 # ── Tunables (env-overridable, repo convention) ──────────────────────────────
 # Voice base weights (normalised over PRESENT voices only).
@@ -99,7 +109,8 @@ def _agree(dir_a: str | None, anchor: str) -> bool:
 def compute_coordination(eye: dict | None,
                          prediction: dict | None,
                          model_voice: dict | None,
-                         runconf: str | None) -> dict:
+                         runconf: str | None,
+                         micro: dict | None = None) -> dict:
     """Merge the four voices at THIS tick into one coordination state.
 
     Parameters (all already computed by the tick pipeline — this function
@@ -111,6 +122,9 @@ def compute_coordination(eye: dict | None,
       model_voice  — cached ML T+1 voice for THIS candle:
                      {direction, probability, emit, state} or None
       runconf      — 'CONFIRMING' | 'OPPOSING' | None
+      micro        — optional live microstructure snapshot of the RUNNING
+                     candle (feed.py micro_snap); adds the `live_factors`
+                     display block without touching the voice math.
     """
     t0 = time.perf_counter()
 
@@ -134,7 +148,7 @@ def compute_coordination(eye: dict | None,
     if sig not in ("CALL", "PUT"):
         return _finish("NO_SIGNAL", None, voices_out,
                        "এই ক্যান্ডেলে কোনো CALL/PUT সিগন্যাল নেই — "
-                       "কোঅর্ডিনেশন করার অঙ্কর নেই।", t0, phase_of(eye))
+                       "কোঅর্ডিনেশন করার অঙ্কর নেই।", t0, phase_of(eye), micro, eye)
 
     # ── Voice 1: EYE (running candle analysis) ─────────────────────────────
     eye_w = 0.0
@@ -237,7 +251,7 @@ def compute_coordination(eye: dict | None,
     if total_w <= 0:
         return _finish("WAITING", None, voices_out,
                        "সিগন্যাল আছে, কিন্তু অন্য ভয়েসগুলো এখনো প্রস্তুত না — "
-                       "কোঅর্ডিনেশনের অপেক্ষায়।", t0, phase_of(eye))
+                       "কোঅর্ডিনেশনের অপেক্ষায়।", t0, phase_of(eye), micro, eye)
 
     agree_w = 0.0
     for v in voices_out:
@@ -259,7 +273,8 @@ def compute_coordination(eye: dict | None,
         summary = (f"কোঅর্ডিনেশন মাত্র {alignment}% — রানিং ক্যান্ডেলের প্রমাণ "
                    f"সিগন্যালের বিপরীতে যাচ্ছে।")
 
-    return _finish(state, alignment, voices_out, summary, t0, phase_of(eye))
+    return _finish(state, alignment, voices_out, summary, t0, phase_of(eye),
+                   micro, eye)
 
 
 def phase_of(eye: dict | None) -> str | None:
@@ -268,10 +283,11 @@ def phase_of(eye: dict | None) -> str | None:
 
 
 def _finish(state: str, alignment, voices: list, summary_bn: str,
-            t0: float, phase: str | None) -> dict:
+            t0: float, phase: str | None, micro: dict | None = None,
+            eye: dict | None = None) -> dict:
     """Stamp ms-proof fields and return the coordination payload."""
     compute_us = int((time.perf_counter() - t0) * 1_000_000)
-    return {
+    out = {
         "state": state,                       # state machine label
         "signal_state": state.split("_")[0] if state.startswith("ALIGNED")
                         else state,
@@ -282,3 +298,13 @@ def _finish(state: str, alignment, voices: list, summary_bn: str,
         "server_ms": int(time.time() * 1000), # server timestamp (ms)
         "compute_us": compute_us,             # compute time (microseconds)
     }
+    # SIGNAL-ROADMAP (2026-09-17): the running candle's full factor story
+    # (buyer/seller, hold, rejection, round number, overtake, winner) —
+    # DISPLAY ONLY, never joins the voice weights above. Wrapped in
+    # try/except: a display block must never break the coordination.
+    if micro is not None:
+        try:
+            out["live_factors"] = _roadmap.live_factors(micro, eye)
+        except Exception:
+            pass
+    return out

@@ -29,6 +29,9 @@ DEFAULT_WEIGHTS = {
     # TICK-EYE (2026-09-16): human-eye tick anatomy — conservative 1.0,
     # per-pair adapter calibrates from live win rates.
     "tick_eye":        1.0,
+    # SIGNAL-ROADMAP (2026-09-17): six-factor micro-flow module — same
+    # conservative start; adapter learns the true per-pair weight.
+    "micro_flow":      1.0,
 }
 
 # Real-pair strategy mapping (Task 3 research)

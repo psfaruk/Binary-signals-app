@@ -502,6 +502,86 @@ svg{display:block}
   .te-grid{grid-template-columns:repeat(2,1fr)}
 }
 
+/* ─── SIGNAL-ROADMAP panel (2026-09-17): সিগন্যাল ডিরেকশনের রোডম্যাপ —
+   ছয় ফ্যাক্টর (বায়ার/সেলার, হোল্ড, রিজেকশন, রাউন্ড, ওভারটেক, জয়ী) ——— */
+.roadmap-panel{
+  background:var(--card);border:1px solid var(--border-soft);border-radius:var(--radius-lg);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  padding:13px 14px;margin-top:12px;
+  box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 10px 30px rgba(0,0,0,.28);
+}
+.roadmap-panel h4{
+  font-size:11px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--text-dim);margin-bottom:0;
+}
+.roadmap-vote-chip{
+  font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;
+  padding:3px 8px;border-radius:12px;
+  background:var(--glass);border:1px solid var(--border);color:var(--text-faint);
+}
+.roadmap-vote-chip.call{color:var(--green);border-color:rgba(52,211,153,.45)}
+.roadmap-vote-chip.put{color:var(--red);border-color:rgba(251,113,133,.45)}
+.roadmap-vote-chip.abstain{color:var(--text-faint)}
+.roadmap-summary{
+  font-size:10.5px;color:var(--text-dim);font-weight:600;line-height:1.45;
+  padding:7px 10px;border-radius:9px;margin-bottom:8px;
+  background:var(--glass);border:1px solid var(--border-soft);
+}
+.roadmap-score-row{
+  display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:9px;
+}
+.roadmap-score{font-family:var(--mono);font-size:12px;font-weight:800}
+.roadmap-score.call{color:var(--green)}
+.roadmap-score.put{color:var(--red)}
+.roadmap-vs{font-size:9.5px;color:var(--text-faint);font-weight:700;letter-spacing:.1em}
+.roadmap-factors{display:flex;flex-direction:column;gap:5px}
+.roadmap-factor{
+  display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:9px;
+  background:var(--glass);border:1px solid var(--border-soft);min-width:0;
+}
+.roadmap-factor.support-call{border-color:rgba(52,211,153,.3)}
+.roadmap-factor.support-put{border-color:rgba(251,113,133,.3)}
+.rf-label{
+  font-size:9px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--text-faint);flex:0 0 auto;min-width:86px;
+}
+.rf-dir{
+  font-family:var(--mono);font-size:10px;font-weight:800;letter-spacing:.05em;
+  padding:2px 7px;border-radius:10px;flex:0 0 auto;
+}
+.rf-dir.call{color:var(--green);background:var(--green-bg)}
+.rf-dir.put{color:var(--red);background:var(--red-bg)}
+.rf-dir.abstain{color:var(--text-faint);background:var(--glass)}
+.rf-pts{font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--text-faint);flex:0 0 auto}
+.rf-note{
+  font-size:10.5px;color:var(--text-dim);line-height:1.4;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;
+}
+@media (max-width:520px){
+  .rf-note{display:none}
+  .rf-label{min-width:70px}
+}
+
+/* ─── Coordination live-factor chips (SIGNAL-ROADMAP 2026-09-17) ─────────── */
+.coord-livefactors{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px;
+}
+.clf-chip{
+  display:flex;flex-direction:column;gap:2px;padding:5px 7px;border-radius:8px;
+  background:var(--glass);border:1px solid var(--border-soft);min-width:0;
+}
+.clf-label{font-size:8px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--text-faint)}
+.clf-value{
+  font-family:var(--mono);font-size:10.5px;font-weight:700;color:var(--text);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.clf-value.call{color:var(--green)}
+.clf-value.put{color:var(--red)}
+.clf-value.abstain{color:var(--text-faint)}
+@media (max-width:520px){
+  .coord-livefactors{grid-template-columns:repeat(2,1fr)}
+}
+
 /* ─── COORDINATION panel (COORDINATION-MS 2026-09-16): রানিং ক্যান্ডেল
    এনালাইসিস × মডিউল সিগন্যাল × মডেল ইঞ্জিন — প্রতি টিকে মিলিয়ে ——— */
 .coord-panel{

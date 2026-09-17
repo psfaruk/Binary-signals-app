@@ -116,7 +116,8 @@ CLUSTERS = {
     "MEANREV":  ("bollinger_rsi", "divergence"),
     "LEVEL":    ("key_level", "sr_bounce", "wickwall"),
     "PATTERN":  ("pattern",),
-    "MICRO":    ("tickrun", "market_state", "candle_reaction", "tick_eye"),
+    "MICRO":    ("tickrun", "market_state", "candle_reaction", "tick_eye",
+                 "micro_flow"),
 }
 MODULE_TO_CLUSTER = {}
 for _c, _members in CLUSTERS.items():
