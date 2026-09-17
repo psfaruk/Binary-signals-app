@@ -59,6 +59,43 @@
 - ✅ সব endpoint test পাস করেছে
 - ✅ API key creation, verification, snapshot save সব কাজ করছে
 
+### Phase 10 — RAILWAY-500MB-FIX (2026-09-17): Storage Bounded + ms-Latency Verified
+
+**সমস্যা:** Railway free plan এ Volume মাত্র 500 MB। পুরোনো retention ছিল 90 দিন +
+cleanup প্রতি 6 ঘণ্টায় — candle_micro (ticks_json সহ ~3-5 KB/row) + signal_log +
+module_votes মিলে ~150 MB/দিন বাড়ত। Volume full হলে SQLite লেখা fail করে
+(SQLITE_FULL) → অ্যাপ crash-loop এ যায়।
+
+**ফিক্স (নিয়মটি হুবহু আপনার নির্দেশ অনুযায়ী):**
+- ✅ `core/retention.py` (নতুন): **পেয়ারের OHLC রেকর্ড (candle_micro) সেভ থাকে মাত্র
+  4 ঘণ্টা** (`QX_RETENTION_OHLC_SECS=14400`)
+- ✅ **বাকি সব ডেটা 30 মিনিট** সেভ থাকে (`QX_RETENTION_DATA_SECS=1800`) — এরপর
+  সকল backdate ডাটা অটো ডিলিট
+- ✅ প্রতি 60 সেকেন্ডে পাস চলে (daemon thread) — batched delete, তাই DB lock হয় না
+- ✅ প্রতি পাসের পর `wal_checkpoint(TRUNCATE)` + freelist বেশি হলে `VACUUM` —
+  **ফাইল সাইজ সত্যিই ছোট হয়** (শুধু row delete করলে SQLite ফাইল ছোট হয় না)
+- ✅ Storage watchdog: data-dir 350 MB (soft) / 450 MB (hard) + disk-free floor ছুঁলে
+  জোর করে prune + সব backup ডিলিট → Volume কখনো full হবে না
+- ✅ Backup: 8 কপি × 15 মিনিট → **2 কপি × 30 মিনিট**
+- ✅ Bounded state টেবিল (api_keys, model_registry, agent_models, algorithm_state,
+  _meta) time-prune হয় না — এগুলো কখনো বাড়ে না এবং auth/learning ভাঙবে
+- ✅ **MS-LATENCY:** feed.py এর tick pipeline এ live gauge — tick dequeue → analysis
+  → broadcast পর্যন্ত EMA/max মিলিসেকেন্ডে মাপা হয়; রেজাল্ট `GET /api/latency` এ
+  (`within_1ms` = সরাসরি হ্যাঁ/না উত্তর) + Railway log এ প্রতি 5 মিনিটে লাইন
+- ✅ Hot-loop এর ভেতরের `import` গুলো module-level এ সরানো হয়েছে
+- ✅ Backtest: `scripts/verify_retention_policy.py` + `scripts/verify_ms_latency.py`
+
+**Deploy এর পর verify করুন:**
+```bash
+curl -s https://YOUR-APP.up.railway.app/api/latency | python3 -m json.tool
+# দেখুন: retention.policy (4h/30min), storage.data_dir_mb, tick_pipeline.within_1ms
+```
+
+**দীর্ঘমেয়াদি history দরকার হলে** (ঐচ্ছিক): Supabase bridge ইতিমধ্যে আছে —
+Railway Variables এ `SUPABASE_URL` + `SUPABASE_ANON_KEY` সেট করলে 30 মিনিটের
+আগের সব ডেটা Supabase (ফ্রি 500 MB Postgres) তে mirror হয়ে থাকবে, লোকাল
+SQLite ছোট থাকবে।
+
 ---
 
 ## 🚀 Railway Deployment Steps

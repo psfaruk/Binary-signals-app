@@ -55,6 +55,23 @@ from collections import deque  # noqa: E402
 # Same applies to `_key_levels` / `_round_level` used during candle analysis.
 import db as _db                                  # noqa: E402
 from core.analysis import _key_levels, _round_level  # noqa: E402
+# MS-LATENCY (2026-09-17): hot-loop imports hoisted to module level.
+# The tick pipeline previously did `from core.tick_eye import live_eye`
+# and `from core.coordination import compute_coordination` INSIDE the
+# per-tick loop — Python caches modules, but sys.modules lookup + the
+# import machinery still cost ~1-3 µs on EVERY tick × 22 pairs. On the
+# millisecond-latency path these are now resolved once at import time.
+# try/except keeps the feed alive even if an optional engine is broken.
+try:                                               # noqa: E402
+    from core.tick_eye import live_eye as _live_eye
+except Exception as _eye_imp_exc:                 # noqa: E402
+    _live_eye = None
+    print(f"[feed] tick_eye unavailable ({_eye_imp_exc}) — eye fields off")
+try:                                               # noqa: E402
+    from core.coordination import compute_coordination as _compute_coordination
+except Exception as _coord_imp_exc:               # noqa: E402
+    _compute_coordination = None
+    print(f"[feed] coordination unavailable ({_coord_imp_exc}) — coordination off")
 import os      # noqa: E402
 import re      # noqa: E402
 import time    # noqa: E402
@@ -179,6 +196,17 @@ RECENT_ACCURACY_N = int(os.environ.get("RECENT_ACCURACY_N", "50"))
 TIMER_GRACE = float(os.environ.get("TIMER_GRACE", "7.0"))
 PER_STREAM_STALE_SECS = int(os.environ.get("PER_STREAM_STALE_SECS", "60"))
 HOUSEKEEP_SECS = int(os.environ.get("HOUSEKEEP_SECS", "5"))
+# RAILWAY-500MB-FIX (2026-09-17): the DB retention pass cadence. Was 6 HOURS
+# — on a 500 MB Railway volume the DB grows ~2 MB/minute, so a 6 h gap let
+# ~700 MB accumulate between passes. Now the 4h-OHLC/30-min-data policy in
+# core/retention.py is re-applied every QX_RETENTION_INTERVAL_SECS (default
+# 60 s) so backdated rows auto-delete continuously and the volume can never
+# fill up. Aligned with core/retention.INTERVAL_SECS, clamped to >= 30 s.
+try:
+    RETENTION_INTERVAL_SECS = max(30, int(os.environ.get(
+        "QX_RETENTION_INTERVAL_SECS", "60")))
+except ValueError:
+    RETENTION_INTERVAL_SECS = 60
 WATCHDOG_INTERVAL = float(os.environ.get("WATCHDOG_INTERVAL", "30.0"))
 GLOBAL_STALE_SECS = int(os.environ.get("GLOBAL_STALE_SECS", "180"))
 # FIX (2026-07-28 / SUBSCRIPTION-CAP): maximum number of always-on 1m
@@ -880,6 +908,18 @@ class QuotexFeed:
         # filled the Railway volume to 83% (2026-07-08 incident). Now also
         # re-run periodically from the manager loop.
         self._last_db_cleanup: float = 0.0
+        # MS-LATENCY gauges (2026-09-17): end-to-end tick pipeline latency —
+        # measured from tick dequeue to broadcast completion. The user's
+        # requirement is "সকল ডেটা ও এনালাইসিস মিলি সেকেন্ড এর কম সময়ে আপডেট"
+        # — these gauges PROVE it continuously (see latency_stats() and
+        # GET /api/latency in server.py).
+        self._lat_proc_ms_ema: float = 0.0      # dequeue→broadcast EMA (ms)
+        self._lat_proc_ms_max: float = 0.0      # worst sample since boot
+        self._lat_age_ms_ema: float = 0.0       # broker-ts→broadcast EMA (ms)
+        self._lat_age_ms_max: float = 0.0
+        self._lat_samples: int = 0
+        self._lat_last_ts: float = 0.0
+        self._lat_last_log: float = 0.0
 
         # ── Higher Timeframe (HTF) trend cache ──
         # Key = (asset, period) — see FIX below.
@@ -1661,6 +1701,29 @@ class QuotexFeed:
             # FIX (DEEP-AUDIT-2026-07-26 / F-01-55): hardcode False with a
             # comment — frontend code that read this is dead.
             "sim_mode": False,  # sim mode permanently disabled
+        }
+
+    def latency_stats(self) -> dict:
+        """MS-LATENCY (2026-09-17): live tick-pipeline latency report.
+
+        User requirement: "সকল ডেটা ও এনালাইসিস মিলি সেকেন্ড এর কম সময়ে
+        আপডেট হচ্ছে কিনা" — these gauges measure, on every broadcast batch,
+        the wall time from tick dequeue to completed WS send (proc_ms) and
+        how fresh the broker timestamp of the newest tick was at that moment
+        (age_ms). Served by GET /api/latency so the answer is a number,
+        not a guess. `within_1ms` compares the EMA against the 1 ms budget.
+        """
+        n = self._lat_samples
+        return {
+            "tick_proc_ms_ema": round(self._lat_proc_ms_ema, 3),
+            "tick_proc_ms_max": round(self._lat_proc_ms_max, 3),
+            "data_age_ms_ema": round(self._lat_age_ms_ema, 1),
+            "data_age_ms_max": round(self._lat_age_ms_max, 1),
+            "samples": n,
+            "last_sample_ts": self._lat_last_ts or None,
+            "last_sample_age_s": round(time.time() - self._lat_last_ts, 1)
+                                  if self._lat_last_ts else None,
+            "within_1ms": bool(n > 0 and self._lat_proc_ms_ema < 1.0),
         }
 
     async def shutdown(self) -> None:
@@ -4049,6 +4112,12 @@ class QuotexFeed:
                 # Mark all these ticks as seen
                 stream.last_tick_ts = float(new_ticks[-1]["time"])
                 stream.last_real_tick_wall = time.time()   # feed is alive
+                # MS-LATENCY: start the end-to-end stopwatch for this batch —
+                # from tick arrival (dequeue) through every analysis stage to
+                # the completed broadcast. Broker timestamp of the newest tick
+                # is captured too so data-freshness (age) can be reported.
+                _lat_t0 = time.perf_counter()
+                _lat_tick_ts = float(new_ticks[-1]["time"])
 
                 # ── Find if any tick crossed a candle boundary ────────────────
                 boundary_idx = None
@@ -4715,12 +4784,14 @@ class QuotexFeed:
                         # coordination below always sees the freshest eye.
                         _eye = None
                         try:
-                            from core.tick_eye import live_eye
-                            _eye = live_eye(
-                                list(stream.ticks)[-400:],
-                                stream.candle_open_price,
-                                stream.period,
-                                stream.candle_open_time)
+                            # MS-LATENCY: module-level _live_eye (no import
+                            # machinery on the hot path).
+                            if _live_eye is not None:
+                                _eye = _live_eye(
+                                    list(stream.ticks)[-400:],
+                                    stream.candle_open_price,
+                                    stream.period,
+                                    stream.candle_open_time)
                             stream._last_eye = _eye
                             _te_count = getattr(stream, '_tick_eye_bcast_count', 0) + 1
                             stream._tick_eye_bcast_count = _te_count
@@ -4741,15 +4812,17 @@ class QuotexFeed:
                         # coordination state. Pure function over data already
                         # computed this tick; measured < 100µs per call.
                         try:
-                            from core.coordination import compute_coordination
-                            _coord = compute_coordination(
-                                _eye if _eye is not None
-                                    else getattr(stream, "_last_eye", None),
-                                stream.prediction,
-                                getattr(stream, "_coord_model_voice", None),
-                                _runconf)
-                            msg["coordination"] = _coord
-                            stream._last_coordination = _coord
+                            # MS-LATENCY: module-level _compute_coordination
+                            # (no import machinery on the hot path).
+                            if _compute_coordination is not None:
+                                _coord = _compute_coordination(
+                                    _eye if _eye is not None
+                                        else getattr(stream, "_last_eye", None),
+                                    stream.prediction,
+                                    getattr(stream, "_coord_model_voice", None),
+                                    _runconf)
+                                msg["coordination"] = _coord
+                                stream._last_coordination = _coord
                         except Exception as _c_exc:
                             # Never let the coordination break the tick pipeline.
                             print(f"[feed] coordination compute failed for "
@@ -4769,6 +4842,41 @@ class QuotexFeed:
                         stream._last_bcast_close = cur_close
 
                         await self._broadcast(msg)
+
+                        # ── MS-LATENCY gauge (2026-09-17) ─────────────────────
+                        # One sample per broadcast batch: tick dequeue →
+                        # (analysis: running candle + micro + eye + coordination)
+                        # → JSON serialize → WS send to every viewer. This is
+                        # THE number that answers "ডেটা ও এনালাইসিস কি
+                        # মিলিসেকেন্ডের কম সময়ে আপডেট হচ্ছে?" — see
+                        # latency_stats() → GET /api/latency.
+                        try:
+                            _proc_ms = (time.perf_counter() - _lat_t0) * 1000.0
+                            _age_ms = max(0.0, (time.time() - _lat_tick_ts) * 1000.0)
+                            _alpha = 0.05   # EMA smoothing over ~20 samples
+                            self._lat_proc_ms_ema = (
+                                _proc_ms if self._lat_samples == 0
+                                else (1 - _alpha) * self._lat_proc_ms_ema + _alpha * _proc_ms)
+                            self._lat_age_ms_ema = (
+                                _age_ms if self._lat_samples == 0
+                                else (1 - _alpha) * self._lat_age_ms_ema + _alpha * _age_ms)
+                            if _proc_ms > self._lat_proc_ms_max:
+                                self._lat_proc_ms_max = _proc_ms
+                            if _age_ms > self._lat_age_ms_max:
+                                self._lat_age_ms_max = _age_ms
+                            self._lat_samples += 1
+                            self._lat_last_ts = time.time()
+                            # Periodic log line so latency is visible in
+                            # Railway logs without hitting the API.
+                            if self._lat_last_ts - self._lat_last_log > 300:
+                                self._lat_last_log = self._lat_last_ts
+                                print(f"[feed] MS-LATENCY: tick→broadcast "
+                                      f"ema={self._lat_proc_ms_ema:.2f}ms "
+                                      f"max={self._lat_proc_ms_max:.1f}ms "
+                                      f"data-age ema={self._lat_age_ms_ema:.0f}ms "
+                                      f"({self._lat_samples} samples)")
+                        except Exception:
+                            pass  # gauges must never break the tick pipeline
 
             except asyncio.CancelledError:
                 raise
@@ -5417,8 +5525,11 @@ class QuotexFeed:
                 # ticks even if one broadcast fails.
                 print(f"[feed] broadcast error (non-fatal, type={msg.get('type','?')}): {_e}")
         self._broadcast = _safe_broadcast
-        _db.init()          # create DB tables if not exist
-        _db.cleanup()       # prune rows older than 7 days
+        # RAILWAY-500MB-FIX (2026-09-17): to_thread — cleanup is blocking
+        # sqlite3 I/O and run() executes on the event loop; a full first pass
+        # on a bloated 500 MB volume would freeze every stream for seconds.
+        _db.init()          # create DB tables if not exist (starts retention daemon)
+        await asyncio.to_thread(_db.cleanup)   # apply 4h-OHLC / 30-min policy
 
         # FIX (H4, 2026-07-19): record this manager task so the
         # _fallback_to_sim_if_stuck can cancel it cleanly. Without this,
@@ -5660,11 +5771,17 @@ class QuotexFeed:
                 # NOTE (refactor 2026-07-14): mute refresh block
                 # removed — prediction engine no longer uses theories.
 
-                # ── DB row-count cleanup every 6 hours ─────────────────────
-                # asyncio.to_thread: _db.cleanup() is blocking sqlite3 I/O
-                # (holds db._lock) — same reasoning as every other DB call
-                # on this event loop (see _authenticate in server.py).
-                if time.time() - self._last_db_cleanup > 6 * 3600:
+                # ── DB retention pass (RAILWAY-500MB-FIX 2026-09-17) ──────
+                # Was every 6 HOURS with a 90-day retention default — the DB
+                # grew ~2 MB/min on 22 pairs, so a 6 h gap = ~700 MB on a
+                # 500 MB volume → SQLITE_FULL → crash-loop. Now: the policy
+                # (candle_micro = pair OHLC keeps 4 h; everything else keeps
+                # 30 min) is re-applied every RETENTION_INTERVAL_SECS (60 s
+                # default) in a worker thread. WAL truncate + conditional
+                # VACUUM + disk watchdog live in core/retention.py's own
+                # daemon; this call is a belt-and-braces re-apply from the
+                # feed loop (e.g. if that daemon failed to start).
+                if time.time() - self._last_db_cleanup > RETENTION_INTERVAL_SECS:
                     self._last_db_cleanup = time.time()
                     try:
                         await asyncio.to_thread(_db.cleanup)

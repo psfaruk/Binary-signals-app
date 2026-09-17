@@ -270,6 +270,10 @@ _PUBLIC_READ_PREFIXES = (
     "/api/algorithm-changes",
     "/api/status",
     "/api/monitoring",
+    # MS-LATENCY (2026-09-17): public read-only latency + storage report —
+    # the verifiable answer to "ডেটা/এনালাইসিস কি মিলিসেকেন্ডে আপডেট হয়,
+    # ভলিউম কি আর ফুল হবে না" (same sensitivity as /api/status).
+    "/api/latency",
     "/healthz",
     "/api/token-status",  # token import status (read-only)
     "/api/auth/state",  # first-run check

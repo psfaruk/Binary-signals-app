@@ -2297,6 +2297,32 @@ async def streaming_status():
     }
 
 
+@app.get("/api/latency")
+async def latency_report():
+    """MS-LATENCY + RAILWAY-500MB-FIX live report (2026-09-17).
+
+    Two verifiable answers in one endpoint:
+      1. "সকল ডেটা ও এনালাইসিস কি মিলিসেকেন্ডের কম সময়ে আপডেট হচ্ছে?"
+         → feed.latency_stats(): tick dequeue → analysis → broadcast EMA
+           (within_1ms is the direct yes/no), plus broker-tick data age.
+      2. "রেলওয়ে ভলিউম কি আর ফুল হবে না?"
+         → core.retention.retention_info(): the 4h-OHLC/30-min-data policy,
+           current DB/WAL/data-dir sizes vs the soft/hard caps, and the
+           per-table row counts deleted by the last retention pass.
+    Public read — same sensitivity as /api/status.
+    """
+    payload = {
+        "server_ts": time.time(),
+        "tick_pipeline": feed.latency_stats(),
+    }
+    try:
+        from core import retention as _retention
+        payload["retention"] = _retention.retention_info()
+    except Exception as _ret_exc:
+        payload["retention"] = {"error": f"{type(_ret_exc).__name__}: {_ret_exc}"}
+    return payload
+
+
 def _active_analyzer() -> str:
     """Which signal analyzer feed.py is actually running.
 

@@ -47,8 +47,14 @@ except Exception as _mkdir_exc:
 
 
 _BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH) or ".", "backups")
-_BACKUP_KEEP = int(os.environ.get("QX_DB_BACKUP_KEEP", "8"))
-_BACKUP_INTERVAL = int(os.environ.get("QX_DB_BACKUP_SECS", "900"))   # 15 min; 0 = off
+_BACKUP_KEEP = int(os.environ.get("QX_DB_BACKUP_KEEP", "2"))
+# RAILWAY-500MB-FIX (2026-09-17): backup cadence 15 min → 30 min and keep
+# 8 → 2 copies. Each backup is a FULL copy of signals.db — with the old
+# defaults 8 × DB-size sat in <db_dir>/backups (8 × 175 MB on the
+# production volume = 1.4 GB-equivalent churn on a 500 MB disk).
+# Retention now bounds the DB itself (see core/retention.py), so 2 recent
+# copies are plenty for corruption recovery.
+_BACKUP_INTERVAL = int(os.environ.get("QX_DB_BACKUP_SECS", "1800"))  # 30 min; 0 = off
 
 
 def _db_is_empty(path: str) -> bool:
@@ -270,6 +276,15 @@ _cursor = _write_cursor
 
 def init():
     _log_persistence_status()
+    # RAILWAY-500MB-FIX (2026-09-17): the 4h-OHLC / 30-min-everything-else
+    # auto-delete daemon starts HERE so every entrypoint (server lifespan,
+    # feed.run, minter) gets bounded storage after deploy. Idempotent;
+    # skips backtest/tmp DB_PATHs and QX_RETENTION_ENABLED=0.
+    try:
+        from core import retention as _retention
+        _retention.start()
+    except Exception as _ret_exc:
+        print(f"[db] retention daemon start failed (non-fatal): {_ret_exc}")
     with _cursor() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS _meta (
             key TEXT PRIMARY KEY,
@@ -1919,19 +1934,36 @@ def clear_all_signals():
 
 
 def cleanup(days=None):
-    """Delete rows older than `days`. Returns (deleted_candle_micro, deleted_signal_log).
+    """Delete rows older than the retention policy. Returns counts.
 
-    FIX (CONFLUENCE-V1 2026-09-02): default retention raised 7 → 90 days
-    (env QX_RETENTION_DAYS). The old 7-day cleanup ran at startup + every 6h
-    and silently made the UI's "30 days" / "All time" chips cap at 7 days —
-    the win-rate dashboard could never show what it claimed. 90 days keeps
-    those windows meaningful while still bounding DB growth.
+    RAILWAY-500MB-FIX (2026-09-17): when `days` is None (the production
+    path — feed.run() startup + the 60 s scheduler) this now delegates to
+    core/retention.apply_retention(): candle_micro (the pair OHLC
+    records) keeps the last 4 HOURS, every other table keeps 30 MINUTES,
+    then all backdated rows auto-delete. The old default of 90 days let
+    the DB grow ~150 MB/day on 22 pairs until the 500 MB Railway volume
+    filled and every write failed (the deploy crash).
+
+    An explicit `days` (backtest scripts, operator calls) keeps the legacy
+    day-based behavior: prune candle_micro + signal_log + otc_predictions
+    older than `days`.
     """
     if days is None:
         try:
-            days = int(os.environ.get("QX_RETENTION_DAYS", "90"))
-        except ValueError:
-            days = 90
+            from core import retention as _retention
+        except Exception as _imp_exc:
+            print(f"[db] retention module unavailable, falling back to "
+                  f"legacy 30-day cleanup: {_imp_exc}")
+            days = 30
+        else:
+            stats = _retention.apply_retention()
+            deleted_cm = stats.get("candle_micro", 0)
+            if not isinstance(deleted_cm, int):
+                deleted_cm = 0
+            deleted_sl = sum(
+                v for k, v in stats.items()
+                if k not in ("__meta__", "candle_micro") and isinstance(v, int))
+            return deleted_cm, deleted_sl
     if not isinstance(days, int) or days < 1:
         raise ValueError(f"cleanup: days must be a positive int, got {days!r}")
 
