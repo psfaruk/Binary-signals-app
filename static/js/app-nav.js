@@ -128,6 +128,7 @@
             // and exposed as window._refreshTokenStatus for common.js).
             const live = !!data.live;
             const dead = !!data.token_dead;
+            const transient = data.status === 'transient_disconnect';
             const stored = data.stored_token && data.stored_token.stored;
             if (live) {
                 icon.textContent = '●';
@@ -140,6 +141,18 @@
                 icon.className = 'token-status-icon warn';
                 label.textContent = 'টোকেন এক্সপায়ার্ড';
                 sub.textContent = data.message || 'নতুন টোকেন ইমপোর্ট করুন।';
+            } else if (transient) {
+                // FIX (FALSE-TOKEN-EXPIRED-2026-09-18 / FT-10 UI): a
+                // transient drop is NOT token expiry — show an explicit
+                // "auto-reconnecting" state instead of a vague "connecting"
+                // so the operator does not paste a fresh token for nothing.
+                icon.textContent = '●';
+                icon.className = 'token-status-icon warn';
+                label.textContent = 'সাময়িক ডিসকানেক্ট — অটো-রিকানেক্ট চলছে';
+                sub.textContent = data.message
+                    || ('টোকেন ঠিকই আছে — rejects: ' +
+                        (data.consecutive_rejects != null ? data.consecutive_rejects : '—') +
+                        '। ১-২ মিনিটেই ডেটা ফিরে আসবে।');
             } else if (stored) {
                 icon.textContent = '●';
                 icon.className = 'token-status-icon warn';

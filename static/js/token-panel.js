@@ -114,6 +114,14 @@
     if (!state.notLiveSince) state.notLiveSince = now;
     if (now - state.notLiveSince < NO_DATA_GRACE_MS) return; // transient
     if (dismissedRecently()) return;                         // user closed it
+    // FIX (FALSE-TOKEN-EXPIRED-2026-09-18 / FT-11 UI): if the backend says
+    // this is a transient_disconnect (rejects below the dead threshold),
+    // do NOT tell the operator to paste a new token — the token is valid
+    // and auto-retry is healing it. Only nag for a real sustained outage.
+    if (s.status === 'transient_disconnect'
+        && (s.consecutive_rejects || 0) < 3) {
+      return;
+    }
     if (now - state.lastNodataNag > NAG_RETRY_MS) {
       state.lastNodataNag = now;
       open(true);

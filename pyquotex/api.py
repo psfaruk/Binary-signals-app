@@ -136,6 +136,23 @@ class QuotexAPI:
         self.profit_today: float | None = None
         # FIX (DEEP-AUDIT-2026-07-26 / F-16-11): heartbeat_task removed.
 
+        # FIX (FALSE-TOKEN-EXPIRED-2026-09-18 / FT-01, ported from branch
+        # fix/false-token-expired aa6cf5e which was never merged): track
+        # consecutive `authorization/reject` events so we can distinguish
+        # TRANSIENT rejects (concurrent-session bump when the operator opens
+        # the browser, server-side hiccup, rate-limit, Engine.IO ping timeout,
+        # Cloudflare idle-close) from a truly dead/expired token. Previously
+        # ANY single reject immediately set `websocket_error_reason` to
+        # "token invalid, expired, or revoked" — which surfaced to the
+        # operator as "Qx token মেয়াদ নাই" even though the token was still
+        # valid for hours. Feed then backed off, no data flowed, no module
+        # ran, no signal. Threshold = 3 (matches the raw WS backend
+        # quotex_ws.py policy). Counter resets on any successful auth
+        # (`_h_auth_ok`).
+        self._consecutive_rejects: int = 0
+        self._reject_threshold: int = 3
+        self._token_dead_at: float = 0.0
+
         # Last time an inbound frame arrived; used by the stale watchdog
         # in :class:`pyquotex.ws.client.WebsocketClient` to decide when
         # to recycle a silent connection.
@@ -193,6 +210,14 @@ class QuotexAPI:
         # CONNECTED (was previously done by the substring-matched branch).
         self.state.auth_status = AuthStatus.AUTHENTICATED
         self.state.status = WebsocketStatus.CONNECTED
+        # FIX (FALSE-TOKEN-EXPIRED-2026-09-18 / FT-02): successful auth
+        # resets the consecutive-reject counter and clears the dead flag.
+        # Any prior transient rejects are forgiven — the token IS working.
+        # Without this, one reject + one success would still leave
+        # websocket_error_reason blaming the token for the rest of the
+        # session.
+        self._consecutive_rejects = 0
+        self._token_dead_at = 0.0
         await self.event_registry.set_event(
             "auth_changed", self.state.auth_status
         )
@@ -324,21 +349,51 @@ class QuotexAPI:
                 _evt_name = None
 
             if _evt_name == "authorization/reject":
+                # FIX (FALSE-TOKEN-EXPIRED-2026-09-18 / FT-03): do NOT
+                # immediately declare "token expired" on a single reject
+                # event. Quotex sends `authorization/reject` for several
+                # transient reasons:
+                #   - concurrent session bump (operator opened the browser)
+                #   - server-side rate-limit / hiccup
+                #   - brief auth-token rotation
+                # Only after `_reject_threshold` (3) CONSECUTIVE rejects do
+                # we declare the token dead. The counter resets on any
+                # successful auth (`_h_auth_ok`).
+                self._consecutive_rejects = getattr(
+                    self, "_consecutive_rejects", 0
+                ) + 1
                 logger.warning(
-                    "Websocket authorization rejected: %s", msg_str[:200]
-                )
-                # FIX (2026-07-27 / lost-error-detail): this used to be set to
-                # the same generic "Websocket connection rejected." string as
-                # every other WS failure (see _on_error below), so an actual
-                # dead/expired token and a Cloudflare block on the connecting
-                # IP were indistinguishable once they reached feed.py's logs.
-                # This branch is the ONE case where Quotex itself responded
-                # and explicitly rejected the session token — say so plainly.
-                self.state.websocket_error_reason = (
-                    "authorization rejected by Quotex "
-                    "(token invalid, expired, or revoked)"
+                    "Websocket authorization rejected (%dx): %s",
+                    self._consecutive_rejects, msg_str[:200]
                 )
                 self.state.auth_status = AuthStatus.FAILED
+
+                if self._consecutive_rejects >= self._reject_threshold:
+                    # Threshold reached — token is REALLY dead/expired.
+                    # Now we can definitively say so.
+                    logger.error(
+                        "Token marked DEAD after %d consecutive rejects — "
+                        "operator must refresh QX_TOKEN via /api/set-token",
+                        self._consecutive_rejects
+                    )
+                    # FIX (2026-07-27 / lost-error-detail) retained: this is
+                    # now the ONE case (3+ consecutive) where Quotex itself
+                    # has really rejected the session token — say so plainly.
+                    self.state.websocket_error_reason = (
+                        f"authorization rejected by Quotex "
+                        f"({self._consecutive_rejects}x consecutive) — "
+                        f"token is invalid, expired, or revoked. "
+                        f"Refresh QX_TOKEN via /api/set-token"
+                    )
+                    self._token_dead_at = time.time()
+                else:
+                    # Transient reject — DO NOT blame the token in the
+                    # message. Tell feed.py this is recoverable.
+                    self.state.websocket_error_reason = (
+                        f"transient authorization reject "
+                        f"({self._consecutive_rejects}/{self._reject_threshold}) "
+                        f"— NOT necessarily token expiry; will auto-retry"
+                    )
                 await self.event_registry.set_event(
                     "auth_changed", self.state.auth_status
                 )
