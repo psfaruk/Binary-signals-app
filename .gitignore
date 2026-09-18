@@ -54,6 +54,10 @@ settings/
 .coverage
 htmlcov/
 data/
+# SIGNAL-HISTORY-GATE (2026-09-18): the live production signal captures
+# under scripts/data/ are backtest INPUTS (not regenerable ML outputs) —
+# they must stay in the repo for backtest_history_gate.py to reproduce.
+!scripts/data/
 
 # ─── ML runtime artefacts (SYNTH 2026-09-14) ────────────────────────
 # trained bundle files land next to the DB (models_dir()); backtest

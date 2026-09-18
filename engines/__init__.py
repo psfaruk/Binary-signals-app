@@ -166,6 +166,32 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     result = copy.deepcopy(result)
     result["category"] = category
 
+    # ── SIGNAL-HISTORY-GATE (USER-2026-09-18) ──────────────────────────────
+    # "যেকোন সিগন্যাল প্রধান করার পূর্বে, ওই সিগন্যাল হিস্টোরি গুলো বা
+    #  অন্যন্য ডেটা গুলো যদি এনালাইসিস করে তারপর সিগন্যাল প্রোভাইড করবে।
+    #  এক পেয়ার এর ডেটা অন্য পেয়ার এর সাথে মিলিয়ে দেখবে। কোন পেয়ার এ
+    #  সঠিক সিগন্যাল বেশি দিচ্ছে, সেই গুলো ভালোভাবে যাচাই করে সিগন্যাল
+    #  প্রধান করবে।"
+    # Before the signal is provided, analyse this pair's graded signal
+    # history (the 200-row ledger kept by core/retention.py) + the
+    # cross-pair fleet data: pairs that are proven losers (below the
+    # shrunk-WR floor / far below the fleet median), in a loss-streak
+    # cooldown, or broken on the candidate direction are converted to
+    # NEUTRAL (result["_history_gate_suppressed"] = True) so feed.py's
+    # ML fallback does NOT resurrect them. Verified-good pairs get a
+    # small confidence boost. Default ON (QX_HISTORY_GATE=1); fails open
+    # on any internal error — the signal always flows.
+    try:
+        if (os.environ.get("QX_HISTORY_GATE", "1") == "1"
+                and asset
+                and result.get("signal") in ("CALL", "PUT")):
+            from core.signal_history_gate import apply_history_gate
+            result = apply_history_gate(
+                result, asset, period=period, category=category)
+    except Exception as _hg_exc:
+        print(f"[engines] history-gate failed (fail-open) for "
+              f"{asset}: {type(_hg_exc).__name__}: {_hg_exc}")
+
     # Apply pair confidence penalty (preserves direction, dampens conviction).
     # FIX (PHASE-2-FIX, 2026-08-13): the <25 → NEUTRAL hard-cutoff is now
     # env-gated via QX_PAIR_PENALTY_NEUTRAL (default "0"). With every-candle-

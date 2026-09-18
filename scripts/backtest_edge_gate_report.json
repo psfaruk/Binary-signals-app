@@ -1,5 +1,5 @@
 {
- "generated_at": 1789298003.8582978,
+ "generated_at": 1789740877.9377189,
  "payout": 0.85,
  "breakeven_pct": 54.05,
  "pairs": 6,
@@ -11,34 +11,34 @@
    "out_of_sample_t2": 10248,
    "modes": {
     "old_t1": {
-     "emitted": 623,
-     "wins": 303,
-     "losses": 320,
+     "emitted": 1369,
+     "wins": 675,
+     "losses": 694,
      "draws": 0,
      "suppressed_by_guard": 0,
-     "win_rate_pct": 48.64,
-     "ev_per_signal": -0.1002,
-     "total_pnl_units": -62.45
+     "win_rate_pct": 49.31,
+     "ev_per_signal": -0.0878,
+     "total_pnl_units": -120.25
     },
     "old_t2": {
-     "emitted": 460,
-     "wins": 244,
-     "losses": 216,
+     "emitted": 1244,
+     "wins": 630,
+     "losses": 614,
      "draws": 0,
      "suppressed_by_guard": 0,
-     "win_rate_pct": 53.04,
-     "ev_per_signal": -0.0188,
-     "total_pnl_units": -8.6
+     "win_rate_pct": 50.64,
+     "ev_per_signal": -0.0632,
+     "total_pnl_units": -78.5
     },
     "new_t1": {
-     "emitted": 174,
-     "wins": 89,
-     "losses": 85,
+     "emitted": 256,
+     "wins": 133,
+     "losses": 123,
      "draws": 0,
-     "suppressed_by_guard": 97,
-     "win_rate_pct": 51.15,
-     "ev_per_signal": -0.0537,
-     "total_pnl_units": -9.35
+     "suppressed_by_guard": 413,
+     "win_rate_pct": 51.95,
+     "ev_per_signal": -0.0389,
+     "total_pnl_units": -9.95
     },
     "new_t2": {
      "emitted": 0,
@@ -67,34 +67,34 @@
    "out_of_sample_t2": 10248,
    "modes": {
     "old_t1": {
-     "emitted": 455,
-     "wins": 271,
-     "losses": 184,
+     "emitted": 1352,
+     "wins": 778,
+     "losses": 574,
      "draws": 0,
      "suppressed_by_guard": 0,
-     "win_rate_pct": 59.56,
-     "ev_per_signal": 0.1019,
-     "total_pnl_units": 46.35
+     "win_rate_pct": 57.54,
+     "ev_per_signal": 0.0645,
+     "total_pnl_units": 87.3
     },
     "old_t2": {
-     "emitted": 384,
-     "wins": 198,
-     "losses": 186,
+     "emitted": 1371,
+     "wins": 696,
+     "losses": 675,
      "draws": 0,
      "suppressed_by_guard": 0,
-     "win_rate_pct": 51.56,
-     "ev_per_signal": -0.0461,
-     "total_pnl_units": -17.7
+     "win_rate_pct": 50.77,
+     "ev_per_signal": -0.0608,
+     "total_pnl_units": -83.4
     },
     "new_t1": {
-     "emitted": 296,
-     "wins": 172,
-     "losses": 124,
+     "emitted": 664,
+     "wins": 422,
+     "losses": 242,
      "draws": 0,
-     "suppressed_by_guard": 72,
-     "win_rate_pct": 58.11,
-     "ev_per_signal": 0.075,
-     "total_pnl_units": 22.2
+     "suppressed_by_guard": 269,
+     "win_rate_pct": 63.55,
+     "ev_per_signal": 0.1757,
+     "total_pnl_units": 116.7
     },
     "new_t2": {
      "emitted": 0,
@@ -122,7 +122,7 @@
  "verdict": [
   "CHECK: new rule still emits on zero-edge data",
   "PASS: provisional models never emit",
-  "old-rule fair WR=48.64% vs break-even 54.05% \u2014 this is the measured shape of the user's '\u09b2\u09b8 \u09ac\u09c7\u09b6\u09bf \u09b9\u099a\u09cd\u099b\u09c7'"
+  "old-rule fair WR=49.31% vs break-even 54.05% \u2014 this is the measured shape of the user's '\u09b2\u09b8 \u09ac\u09c7\u09b6\u09bf \u09b9\u099a\u09cd\u099b\u09c7'"
  ],
- "secs": 20.2
+ "secs": 27.0
 }

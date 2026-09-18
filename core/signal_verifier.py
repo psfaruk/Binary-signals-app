@@ -409,7 +409,16 @@ def _layer5_historical_pattern(signal: str, asset: str, hour: int) -> Dict:
 
     # Try DB lookup
     try:
-        db_path = os.environ.get("QX_DB_PATH", "/app/data/signals.db")
+        # FIX (2026-09-18): was `os.environ.get("QX_DB_PATH", "/app/data/signals.db")`
+        # — a nonexistent env var plus a Railway-only hardcoded fallback, so the
+        # layer silently returned {"verdict": "PASS", "reason": "no DB"} everywhere
+        # else. Use the canonical db.DB_PATH resolver (honours DB_PATH env,
+        # works locally, in backtests and on Railway).
+        try:
+            import db as _db
+            db_path = _db.DB_PATH
+        except Exception:
+            db_path = os.environ.get("DB_PATH", "signals.db")
         if not os.path.exists(db_path):
             return {"verdict": "PASS", "reason": "no DB"}
 

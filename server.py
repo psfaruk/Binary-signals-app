@@ -2582,6 +2582,22 @@ async def breakeven_check(asset: str, period: int = 60, payout: int = None):
 # PAIR HEALTH ENDPOINTS (DEEP-FIX-2026-08-07)
 # ═══════════════════════════════════════════════════════════════════════════
 
+@app.get("/api/history-gate")
+async def history_gate(period: int = 60):
+    """SIGNAL-HISTORY-GATE (USER-2026-09-18) — the pre-signal verification
+    report: per-pair graded history (n, raw/shrunk win rate, Wilson LB,
+    CALL/PUT splits, loss streak), the fleet median from cross-pair
+    comparison, and the current mode per pair (learning / cooldown /
+    suppressed-pair / below-fleet / active / verified-good). This is the
+    'কোন পেয়ার এ সঠিক সিগন্যাল বেশি দিচ্ছে' list the engine trusts before
+    providing any signal (core/signal_history_gate.py)."""
+    try:
+        from core.signal_history_gate import gate_report
+        return await asyncio.to_thread(gate_report, period)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.get("/api/pair-health")
 async def pair_health():
     """Per-pair health report — disabled pairs, consecutive loss tracking."""

@@ -51,7 +51,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 3.6
+   "secs": 3.8
   },
   {
    "asset": "AUDJPY_otc",
@@ -81,7 +81,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 1.1
   },
   {
    "asset": "NZDJPY_otc",
@@ -105,7 +105,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 1.1
   },
   {
    "asset": "NZDCAD_otc",
@@ -129,7 +129,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 1.1
   },
   {
    "asset": "USDNGN_otc",
@@ -159,7 +159,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 1.1
   },
   {
    "asset": "GBPNZD_otc",
@@ -189,7 +189,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 1.1
   },
   {
    "asset": "EURNZD_otc",
@@ -213,7 +213,7 @@
     }
    },
    "fallback_violations": [],
-   "secs": 0.9
+   "secs": 1.1
   }
  ]
 }

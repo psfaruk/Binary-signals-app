@@ -1,33 +1,39 @@
 """
-core/retention.py — RAILWAY-500MB-FIX (2026-09-17): bounded-storage retention.
+core/retention.py — bounded-storage retention.
 
-USER REQUIREMENT (verbatim):
-  "শুধু মাত্র পেয়ার এর ohlc রেকর্ড সেভ রাখবেন, 4 ঘণ্টার এর, বাকি যত ডেটা
-   সেভ হওয়ার কথা সব কিছু সেভ থাকবে মাত্র 30 মিনিট, এর পরে সকল backdate
-   ডাটা অটো ডিলিট হয়ে যাবে। এতে করে রেল ওয়ে ভলিউম full হবে না।
-   অ্যাপ ক্র্যাশ ও করবে না।"
+USER REQUIREMENT (2026-09-18, verbatim — supersedes the 2026-09-17 4h/30min
+policy):
+  "প্রয়জন হলে প্রত্যেক পেয়ার এ 12 ঘণ্টার ক্যান্ডেল ডেটা, 200 টি সিগন্যাল
+   হিস্টোরি ও অন্যান্য 60 মিনিটের ডেটা, সেভ রাখো। অন্যন্য সকল ডেটা
+   60 মিনিট মাত্র।"
+  = candle data per pair: 12 HOURS · signal history: 200 ROWS PER PAIR ·
+    everything else: 60 MINUTES.
 
-WHY THE APP WAS CRASHING ON RAILWAY (root cause, measured):
-  The free plan caps the attached Volume at 500 MB. The old retention
-  default was **90 days** and the cleanup pass ran only every 6 hours.
-  Growth math: candle_micro carries ticks_json (~3-5 KB/row) and gets one
-  row per closed candle per pair → 22 pairs × 1440 candles/day ≈ 31,700
-  rows/day ≈ 100-150 MB/day from candle_micro ALONE, plus signal_log,
-  module_votes, theory_votes, otc_predictions and friends. The production
-  volume had already reached 175 MB (see brain.py STRAT-FIX note). When the
-  volume hits 500 MB every SQLite write fails with SQLITE_FULL /
-  "database or disk is full" → the signal engine's DB calls raise → the
-  feed/stream loops degrade → Railway restart-loops the container.
+WHY THIS MATTERS (the 2026-09-17 30-min policy was silently starving every
+learning mechanism — root cause of "সিগন্যাল ভুল হচ্ছে"):
+  With signal_log wiped every 30 min, the per-pair weight adapter saw ≤30
+  samples against its 200-sample saturation, the ML edge-guard never left
+  "learning", time/hourly patterns were wiped before they could form, and
+  /api/winrate?days=7 actually reported the last 30 minutes. The 200-rows-
+  per-pair policy keeps ~3.3 h of graded history per pair alive — enough for
+  core/signal_history_gate.py to verify which pairs/directions are actually
+  profitable BEFORE emitting (USER-2026-09-18 directive) — while staying
+  bounded for the 500 MB Railway volume.
 
 THE POLICY (this module, applied every 60 s in a daemon thread):
   1. candle_micro  — the PAIR OHLC RECORDS — keep the last
-                    QX_RETENTION_OHLC_SECS (default 4 hours = 14400 s).
-  2. EVERY other time-series table — signals, predictions, module votes,
+                    QX_RETENTION_OHLC_SECS (default 12 hours = 43200 s).
+  2. signal_log    — THE SIGNAL HISTORY — keep the newest
+                    QX_RETENTION_SIGNAL_ROWS (default 200) rows PER
+                    (asset, period) — COUNT-based, not time-based, exactly
+                    per the user requirement. ≈ 29 pairs × 200 rows ≈ 6k
+                    rows ≈ 9-12 MB — safely bounded.
+  3. EVERY other time-series table — predictions, module votes,
                     theory votes, quality metrics, brain records, algo
                     changes, share snapshots, aggregate pattern rows —
-                    keep only QX_RETENTION_DATA_SECS (default 30 min =
-                    1800 s). Everything older is auto-deleted, always.
-  3. Bounded runtime state tables are NOT time-pruned because they can
+                    keep only QX_RETENTION_DATA_SECS (default 60 min =
+                    3600 s). Everything older is auto-deleted, always.
+  4. Bounded runtime state tables are NOT time-pruned because they can
      never grow (PRIMARY-KEY-replaced, fixed row count) and deleting them
      would break auth/learning/model-serving:
        _meta, model_registry, api_keys, agent_models, algorithm_state.
@@ -72,8 +78,12 @@ import time
 import db as _db
 
 # ── Policy windows (env-overridable, repo convention) ───────────────────────
-OHLC_SECS = int(os.environ.get("QX_RETENTION_OHLC_SECS", "14400"))   # 4 h
-DATA_SECS = int(os.environ.get("QX_RETENTION_DATA_SECS", "1800"))    # 30 min
+OHLC_SECS = int(os.environ.get("QX_RETENTION_OHLC_SECS", "43200"))  # 12 h
+DATA_SECS = int(os.environ.get("QX_RETENTION_DATA_SECS", "3600"))   # 60 min
+# USER-2026-09-18: signal history is COUNT-based (newest N rows per
+# (asset, period)), not time-based. 200 rows/pair ≈ 3.3 h of every-candle
+# history — enough for the pre-signal history gate to verify a pair.
+SIGNAL_ROWS = max(20, int(os.environ.get("QX_RETENTION_SIGNAL_ROWS", "200")))
 INTERVAL_SECS = max(15, int(os.environ.get("QX_RETENTION_INTERVAL_SECS", "60")))
 ENABLED = os.environ.get("QX_RETENTION_ENABLED", "1") == "1"
 
@@ -98,14 +108,15 @@ _BATCH = 2000   # delete batch size — keeps lock windows tiny
 
 
 # ── The policy table spec ───────────────────────────────────────────────────
-# (table, time column, bucket) — bucket: "ohlc" (4 h) or "data" (30 min).
+# (table, time column, bucket) — bucket: "ohlc" (12 h) or "data" (60 min).
+# signal_log is NOT here: it is count-pruned per (asset, period) by
+# _prune_signal_log_by_count() — see USER-2026-09-18 requirement above.
 # Time columns are all epoch seconds. INTEGER columns are preferred where
 # an index exists (ctime on the hot tables) so the DELETEs stay index-driven.
 _POLICY: tuple[tuple[str, str, str], ...] = (
-    # ── THE pair OHLC records — 4 HOURS ─────────────────────────────────
+    # ── THE pair OHLC records — 12 HOURS ────────────────────────────────
     ("candle_micro",            "ctime",         "ohlc"),
-    # ── Everything else — 30 MINUTES ────────────────────────────────────
-    ("signal_log",              "ctime",         "data"),
+    # ── Everything else — 60 MINUTES ────────────────────────────────────
     ("otc_predictions",         "signal_time",   "data"),
     ("module_votes",            "ctime",         "data"),
     ("theory_votes",            "ctime",         "data"),
@@ -228,6 +239,56 @@ def _delete_batches(cur: sqlite3.Connection.cursor,
     return total
 
 
+def _prune_signal_log_by_count(cur: sqlite3.Connection.cursor,
+                                keep_rows: int) -> int:
+    """USER-2026-09-18: keep only the newest `keep_rows` signal_log rows
+    PER (asset, period) — the "200 টি সিগন্যাল হিস্টোরি" requirement.
+
+    Count-based, not time-based: a pair that signals once per minute keeps
+    ~3.3 h of graded history; slow hours keep proportionally longer
+    history. Bounded: ≤ ~30 pairs × keep_rows rows total (~6k rows ≈ 9-12
+    MB with reasons JSON), so the 500 MB Railway volume math still holds.
+
+    Implementation: one GROUP BY to find over-budget (asset, period)
+    groups, then per-group delete everything BELOW the keep_rows-th newest
+    (ctime, id) — the same deterministic ordering the winrate endpoints
+    use, so pruned rows are always the OLDEST of that pair.
+    """
+    try:
+        cur.execute(
+            "SELECT asset, period, COUNT(*) AS n FROM signal_log "
+            "GROUP BY asset, period")
+        groups = cur.fetchall()
+    except sqlite3.Error:
+        return 0
+    deleted = 0
+    for asset, period, n in groups:
+        if n <= keep_rows:
+            continue
+        try:
+            cur.execute(
+                "DELETE FROM signal_log WHERE id IN ("
+                "  SELECT id FROM signal_log s"
+                "  WHERE s.asset = ? AND s.period = ?"
+                "    AND s.id NOT IN ("
+                "      SELECT id FROM signal_log s2"
+                "      WHERE s2.asset = s.asset AND s2.period = s.period"
+                "      ORDER BY s2.ctime DESC, s2.id DESC LIMIT ?"
+                "    )"
+                ")",
+                (asset, period, keep_rows))
+            deleted += cur.rowcount
+        except sqlite3.Error as exc:
+            print(f"[retention] signal_log count-prune failed for "
+                  f"{asset}@{period}s (non-fatal): {exc}")
+            try:
+                conn = cur.connection
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+    return deleted
+
+
 # ── core pass ───────────────────────────────────────────────────────────────
 def apply_retention(ohlc_secs: int | None = None,
                     data_secs: int | None = None) -> dict:
@@ -249,6 +310,12 @@ def apply_retention(ohlc_secs: int | None = None,
         conn = _db._conn()
         try:
             cur = conn.cursor()
+            # ── signal_log: COUNT-based, newest 200 rows per (asset, period)
+            try:
+                stats["signal_log"] = _prune_signal_log_by_count(cur, SIGNAL_ROWS)
+            except sqlite3.Error as exc:
+                print(f"[retention] signal_log count-prune failed (non-fatal): {exc}")
+                stats["signal_log"] = f"error: {exc}"
             for table, col, bucket in _POLICY:
                 window = ohlc if bucket == "ohlc" else data
                 cutoff = now - window
@@ -362,7 +429,8 @@ def _loop() -> None:
                 if k != "__meta__" and isinstance(v, int))
             if deleted:
                 print(f"[retention] pass: pruned {deleted} rows "
-                      f"(OHLC>{OHLC_SECS // 60}min, data>{DATA_SECS // 60}min)")
+                      f"(OHLC>{OHLC_SECS // 60}min, signal_log>{SIGNAL_ROWS}/pair, "
+                      f"data>{DATA_SECS // 60}min)")
         except Exception as exc:
             failures += 1
             print(f"[retention] pass failed (non-fatal, #{failures}): {exc}")
@@ -410,8 +478,9 @@ def start() -> bool:
             target=_loop, name="qx-retention", daemon=True)
         _thread.start()
         _started = True
-    print(f"[retention] RAILWAY-500MB-FIX active: candle_micro "
-          f"(pair OHLC) kept {OHLC_SECS // 60} min; ALL other data kept "
+    print(f"[retention] USER-2026-09-18 policy active: candle_micro "
+          f"(pair OHLC) kept {OHLC_SECS // 60} min; signal_log kept newest "
+          f"{SIGNAL_ROWS} rows per pair; ALL other data kept "
           f"{DATA_SECS // 60} min; pass every {INTERVAL_SECS}s; "
           f"dir caps soft={_DIR_SOFT_MB:.0f}MB hard={_DIR_HARD_MB:.0f}MB")
     return True
@@ -424,6 +493,7 @@ def retention_info() -> dict:
         "policy": {
             "ohlc_secs": OHLC_SECS,
             "data_secs": DATA_SECS,
+            "signal_rows_per_pair": SIGNAL_ROWS,
             "interval_secs": INTERVAL_SECS,
             "enabled": ENABLED,
             "thread_running": bool(_thread and _thread.is_alive()),

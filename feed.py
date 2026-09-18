@@ -2568,6 +2568,14 @@ class QuotexFeed:
         # পাস হলেই সিগন্যাল দিবে। মডিউল ইঞ্জিন থেকে সিগন্যাল আসলো না —
         # ML model থেকে সিগন্যাল টি আসবে।"
         #
+        # SIGNAL-HISTORY-GATE (2026-09-18): when the NEUTRAL came from the
+        # history gate suppressing an unverified pair/direction
+        # (result["_history_gate_suppressed"] — USER-2026-09-18 "analyze
+        # history BEFORE providing any signal" directive), the ML fallback
+        # must NOT resurrect it — that would defeat the gate entirely.
+        # The ML hand-off below only fires for GENUINE module-engine
+        # NEUTRALs (zero theories voted).
+        #
         # Source hierarchy per candle:
         #   1. STRATEGY (module) engine — any ONE theory/module vote wins
         #      (confluence_v1_any / confluence_v1 strict pass). This is the
@@ -2580,7 +2588,9 @@ class QuotexFeed:
         # The joint gate (core/joint_gate.py) NO LONGER rejects to NEUTRAL —
         # it grades the signal (ML voice + 5-layer verifier) and adjusts
         # confidence only, so every candle keeps its CALL/PUT direction.
-        if result is not None and result.get("signal") == "NEUTRAL":
+        if (result is not None
+                and result.get("signal") == "NEUTRAL"
+                and not result.get("_history_gate_suppressed")):
             ml_sub = self._ml_source_signal(
                 result, ml_payload, stream, closed)
             if ml_sub is not None:
@@ -3581,6 +3591,28 @@ class QuotexFeed:
                         accuracy == "correct", stream.period)
             except Exception as _tg_exc:
                 print(f"[feed] target-gate note failed for {stream.asset}: {_tg_exc}")
+
+            # PAIR-HEALTH WIRING (2026-09-18): core/pair_health.py's monitor
+            # existed since DEEP-FIX-2026-08-07 but record_trade_outcome()
+            # was NEVER called anywhere, so /api/pair-health always reported
+            # every pair healthy and the QX_PAIR_HEALTH_GATE env was a no-op.
+            # Feed every graded outcome now — the 8-consecutive-loss
+            # cooldown (30 min) finally works.
+            try:
+                from core.pair_health import record_trade_outcome as _ph_rec
+                _ph_rec(stream.asset, accuracy == "correct")
+            except Exception as _ph_exc:
+                print(f"[feed] pair-health record failed for "
+                      f"{stream.asset}: {_ph_exc}")
+
+            # SIGNAL-HISTORY-GATE (2026-09-18): a fresh grade changes this
+            # pair's shrunk WR / streak / direction splits — drop its cached
+            # analysis so the next candle's gate decision uses fresh data.
+            try:
+                from core.signal_history_gate import invalidate_cache as _hg_inv
+                _hg_inv(stream.asset)
+            except Exception:
+                pass
 
 
         # BRAIN-LEARNED (2026-07-20): loss cluster protection.

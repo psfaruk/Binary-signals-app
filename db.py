@@ -1077,6 +1077,16 @@ def log_signal(asset, period, ctime, signal, score, confidence,
                         content = parts[i+1] if i+1 < len(parts) else ''
                         dir_match = _re.search(r'(?:→|->)\s*(CALL|PUT)\b', content)
                         if not dir_match:
+                            # FIX (2026-09-18): the CONFLUENCE-V1 blender writes
+                            # module votes as "[<module>] <CALL|PUT> net=..."
+                            # (blender.py: deliberately WITHOUT the "→" arrow so
+                            # _extract_theory_votes skips them). The arrow-only
+                            # regex left module_votes EMPTY since CONFLUENCE-V1
+                            # shipped — /api/pair-deep-stats returned nothing and
+                            # the module_votes learning loop was dead. Accept the
+                            # arrow-less leading-direction format too.
+                            dir_match = _re.match(r'\s*(CALL|PUT)\b', content)
+                        if not dir_match:
                             continue
                         direction = dir_match.group(1)
                         if (mod, direction) in seen:
