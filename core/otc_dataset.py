@@ -83,6 +83,48 @@ def load_candles_from_db(db_path, period=60, days=None):
             "buy_pct": r["buy_pct"], "sell_pct": r["sell_pct"],
             "tick_count": r["tick_count"], "is_fight": r["is_fight"],
         })
+
+    # SUPABASE-BACKFILL (2026-09-18): local candle_micro is pruned by
+    # core/retention.py (default: keep only the last 4h), so a `days=`
+    # window wider than that used to come back almost empty with no
+    # warning. When local coverage starts later than the requested
+    # cutoff, pull the missing older slice from the Supabase mirror
+    # (core/supabase_sync.py) and merge it in. Best-effort: any Supabase
+    # problem leaves the local-only result unchanged.
+    try:
+        import supabase_sync
+        if supabase_sync.enabled():
+            local_times = [c["time"] for lst in grouped.values() for c in lst]
+            oldest_local = min(local_times) if local_times else None
+            if oldest_local is None or oldest_local > cutoff + 60:
+                extra = supabase_sync.fetch_candles(
+                    period=period, since_ctime=cutoff,
+                    until_ctime=oldest_local)
+                added = 0
+                for r in extra:
+                    if r.get("open") is None or r.get("close") is None:
+                        continue
+                    key = (r["asset"], int(r["ctime"]))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    grouped[r["asset"]].append({
+                        "time": int(r["ctime"]),
+                        "open": float(r["open"]), "high": float(r["high"]),
+                        "low": float(r["low"]), "close": float(r["close"]),
+                        "buy_pct": r.get("buy_pct"),
+                        "sell_pct": r.get("sell_pct"),
+                        "tick_count": r.get("tick_count"),
+                        "is_fight": r.get("is_fight"),
+                    })
+                    added += 1
+                if added:
+                    for asset in grouped:
+                        grouped[asset].sort(key=lambda c: c["time"])
+    except Exception as exc:
+        print(f"[otc_dataset] Supabase backfill skipped (non-fatal): "
+              f"{type(exc).__name__}: {exc}")
+
     return dict(grouped)
 
 

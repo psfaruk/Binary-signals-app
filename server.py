@@ -300,6 +300,28 @@ async def lifespan(app: FastAPI):
             print("[server] algorithm monitor initialized")
         except Exception as _e:
             print(f"[server] algorithm monitor init failed (non-fatal): {_e}")
+        # SUPABASE-SYNC-FIX (2026-09-18): sitecustomize.py's start() call
+        # only fires under Python's automatic sitecustomize import, which
+        # scans sys.path[0] = the directory of the script being *executed*.
+        # run_service.sh launches `exec uvicorn server:app ...` — the
+        # uvicorn console-script, not `python server.py` — so sys.path[0]
+        # is uvicorn's own install dir, never the repo root, and
+        # sitecustomize.py was silently never imported: the bridge never
+        # started under this deployment's actual launch command (confirmed
+        # live: SUPABASE_URL/KEY were correctly set and the app ran for
+        # hours with signal_log/candle_micro/otc_predictions/model_registry
+        # all still at 0 rows on Supabase). Starting it explicitly here
+        # removes that dependency on *how* the process happens to be
+        # launched.
+        try:
+            import supabase_sync
+            if supabase_sync.start():
+                print("[server] Supabase persistence bridge started")
+            else:
+                print("[server] Supabase bridge not started "
+                      "(SUPABASE_URL/KEY not set — local-only mode)")
+        except Exception as _e:
+            print(f"[server] Supabase bridge init failed (non-fatal): {_e}")
 
     await asyncio.to_thread(_sync_init)
     _PATTERNS_INITIALIZED = True

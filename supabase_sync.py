@@ -126,6 +126,66 @@ def sync_once() -> dict[str, int]:
     return counts
 
 
+# ───────────────────── read-back (2026-09-18 backfill) ────────────────────
+# core/retention.py prunes local SQLite (candle_micro > QX_RETENTION_OHLC_SECS,
+# default 4h; everything else > QX_RETENTION_DATA_SECS, default 30min) to stop
+# the disk-full crashes fixed in RAILWAY-500MB-FIX. That made the Supabase
+# mirror above the only place older rows survive — but nothing ever read them
+# back, so training/backtests silently saw only the last few hours even when
+# they asked for a `days=` window. fetch_candles() closes that gap: it is the
+# read counterpart to the write path above, used by
+# core.otc_dataset.load_candles_from_db to backfill whatever local retention
+# has already pruned. Best-effort like the sync above — never raises; callers
+# must treat [] as "no Supabase data available" and keep going.
+def _read_headers() -> dict[str, str]:
+    return {"apikey": _KEY, "Authorization": f"Bearer {_KEY}"}
+
+
+def fetch_candles(period: int = 60, since_ctime: int = 0,
+                   until_ctime: int | None = None,
+                   page_size: int = 1000) -> list[dict[str, Any]]:
+    """Read candle_micro rows back from the Supabase mirror.
+
+    Returns rows shaped like the local SQLite query in
+    core.otc_dataset.load_candles_from_db (asset, ctime, open, high, low,
+    close, buy_pct, sell_pct, tick_count, is_fight). Returns [] if the
+    bridge is disabled or on any request failure — never raises.
+    """
+    if not _ENABLED:
+        return []
+    cols = "asset,ctime,open,high,low,close,buy_pct,sell_pct,tick_count,is_fight"
+    out: list[dict[str, Any]] = []
+    offset = 0
+    try:
+        with httpx.Client(timeout=25.0) as client:
+            while True:
+                params = [
+                    ("select", cols),
+                    ("period", f"eq.{period}"),
+                    ("ctime", f"gt.{since_ctime}"),
+                    ("order", "ctime.asc"),
+                    ("limit", str(page_size)),
+                    ("offset", str(offset)),
+                ]
+                if until_ctime is not None:
+                    params.append(("ctime", f"lt.{until_ctime}"))
+                resp = client.get(f"{_URL}/rest/v1/candle_micro",
+                                   headers=_read_headers(), params=params)
+                resp.raise_for_status()
+                batch = resp.json()
+                if not isinstance(batch, list) or not batch:
+                    break
+                out.extend(batch)
+                if len(batch) < page_size:
+                    break
+                offset += page_size
+    except Exception as exc:
+        print(f"[supabase-sync] fetch_candles failed (non-fatal): "
+              f"{type(exc).__name__}: {exc}")
+        return []
+    return out
+
+
 def _loop() -> None:
     print(f"[supabase-sync] enabled → {_URL} every {_INTERVAL}s")
     time.sleep(20)
