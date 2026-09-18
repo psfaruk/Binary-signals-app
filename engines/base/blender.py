@@ -82,14 +82,13 @@ class BlenderConfig:
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
-            period: int = 60, config=None, recent_accuracy=None) -> dict:
+            period: int = 60, config=None) -> dict:
     """Run all strategy modules + the strict confluence engine.
 
-    NOTE (CONFLUENCE-V1): `recent_accuracy` is accepted for API
-    compatibility but is deliberately UNUSED — adaptive confidence
-    inflation/deflation from small samples (n<150) was one of the audit's
-    top confidence-corruption sources. Honest confidence is computed only
-    from current-candle evidence.
+    NOTE (CONFLUENCE-V1): honest confidence is computed only from
+    current-candle evidence — no adaptive inflation/deflation from small
+    accuracy samples (one of the audit's top confidence-corruption
+    sources).
     """
     if config is None:
         raise ValueError("BlenderConfig is required — pass engines.{otc,real}.config.CONFIG")
@@ -267,8 +266,6 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     result["asset"] = asset
     result["profile"] = pair_profile
     result["htf_trend"] = htf_trend
-    if recent_accuracy is not None:
-        result["recent_accuracy_ignored"] = True
 
     return result
 

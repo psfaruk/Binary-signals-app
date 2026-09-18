@@ -68,9 +68,11 @@ never blocks a signal):
 
 PUBLIC API:
   apply_history_gate(result, asset, period, category) -> result'
-      Returns the prediction dict, possibly converted to NEUTRAL
-      (result["_history_gate_suppressed"] = True + reasons) or with an
-      adjusted confidence and a result["history_gate"] audit block.
+      Returns the prediction dict with either the SAME direction (with
+      confidence adjustments + a result["history_gate"] audit block) or a
+      FADED direction (result["history_faded"] = True) when the ledger
+      measured this direction anti-predictive. NEVER NEUTRAL anymore —
+      every candle keeps a CALL/PUT.
   gate_report() -> full per-pair report for /api/history-gate.
 
 DESIGN NOTES:
@@ -82,9 +84,9 @@ DESIGN NOTES:
   * Fail-open everywhere: any exception → signal allowed unchanged.
   * Env master switch QX_HISTORY_GATE (default "1" — ON per the
     2026-09-18 directive; set "0" to restore unconditional every-candle).
-  * NEUTRAL results from this gate are NOT graded by _grade_and_log
-    (existing app semantics: only CALL/PUT rows enter signal_log), so a
-    suppressed pair does not pollute its own history stats.
+  * The gate no longer suppresses to NEUTRAL: every candle keeps a
+    CALL/PUT, so every emitted row is graded and the ledger keeps
+    learning from the FADED direction's real outcomes.
 """
 
 from __future__ import annotations
@@ -115,6 +117,14 @@ GOOD_BOOST = float(os.environ.get("QX_HG_GOOD_BOOST", "1.05"))
 LEARNING_DAMP = float(os.environ.get("QX_HG_LEARNING_DAMP", "0.97"))
 LOOKBACK_N = int(os.environ.get("QX_HG_LOOKBACK_N", "200"))          # == retention rows per pair
 SHRINKAGE_K = float(os.environ.get("QX_HG_SHRINKAGE_K", "12"))       # Jeffreys prior strength
+
+# EVERY-CANDLE FADE POLICY (USER-2026-09-18): a direction the ledger has
+# MEASURED to be anti-predictive is FADED (inverted), never suppressed —
+# the candle always keeps a CALL/PUT and the measured inversion becomes
+# the edge instead of a hidden loss.
+FADE_CONF_PENALTY = int(os.environ.get("QX_HG_FADE_CONF_PENALTY", "8"))
+FADE_CONF_CAP = int(os.environ.get("QX_HG_FADE_CONF_CAP", "60"))
+FLEET_PENALTY = float(os.environ.get("QX_HG_FLEET_PENALTY", "0.85"))
 
 # Cache TTL — the gate runs once per candle per pair (~1/min), the report
 # endpoint a bit more often; 45 s keeps DB load trivial without serving
@@ -453,30 +463,21 @@ def apply_history_gate(result: dict, asset: str, period: int = 60,
             "put_wr": a["put"]["wr"], "put_n": a["put"]["n"],
         }
 
-        # 1 ── STREAK COOLDOWN FIRST (checked before learning mode): 6
-        #     straight losses is p=1.6% under a fair coin — informative
-        #     even when the pair is brand new (n = 6). Catches intraday
-        #     regime changes / broker algorithm flips fast.
+        # 1 ── STREAK FADE FIRST (checked before learning mode): 6 straight
+        #     losses is p=1.6% under a fair coin — recent regime-change
+        #     evidence even on a brand-new pair (n = 6). FADED, not
+        #     suppressed: the candle still gets the direction history
+        #     supports.
+        fade_reason = None
         if a["streak_losses"] >= STREAK_LIMIT:
-            audit["mode"] = "cooldown"
-            audit["verdict"] = "suppress"
-            reasons.append(
-                f"[HISTORY-GATE] {asset}: {a['streak_losses']} consecutive "
-                f"losses (limit {STREAK_LIMIT}) — pair in regime-change "
-                f"cooldown, signal suppressed for this candle")
-            result["signal"] = "NEUTRAL"
-            result["strength"] = "NEUTRAL"
-            result["confidence"] = 0
-            result["_history_gate_suppressed"] = True
-            result.setdefault("reasons", []).extend(reasons)
-            audit["reasons"] = reasons
-            result["history_gate"] = audit
-            return result
+            fade_reason = (f"{a['streak_losses']} consecutive losses "
+                           f"(limit {STREAK_LIMIT}) — recent regime-change "
+                           f"evidence")
 
         # 2 ── LEARNING MODE: never judge a pair's QUALITY on < MIN_SAMPLES
-        #     signals (a 6-loss streak above is the exception — it is
-        #     regime evidence, not quality evidence).
-        if a["n"] < MIN_SAMPLES:
+        #     signals (the streak fade above is regime evidence, not
+        #     quality evidence).
+        if not fade_reason and a["n"] < MIN_SAMPLES:
             audit["mode"] = "learning"
             audit["verdict"] = "allow"
             audit["note"] = (f"{a['n']}/{MIN_SAMPLES} graded signals — "
@@ -488,47 +489,48 @@ def apply_history_gate(result: dict, asset: str, period: int = 60,
             return result
 
         # 3 ── PAIR FLOOR: shrunk WR below the hard floor.
-        if a["shrunk_wr"] < PAIR_MIN_WR:
-            audit["mode"] = "suppressed-pair"
-            audit["verdict"] = "suppress"
-            reasons.append(
-                f"[HISTORY-GATE] {asset}: shrunk WR {a['shrunk_wr']:.1f}% "
-                f"< {PAIR_MIN_WR:.0f}% floor over last {a['n']} signals "
-                f"(raw {a['wr']:.1f}%) — pair not verified profitable, "
-                f"signal suppressed")
-            result["signal"] = "NEUTRAL"
-            result["strength"] = "NEUTRAL"
-            result["confidence"] = 0
-            result["_history_gate_suppressed"] = True
-            result.setdefault("reasons", []).extend(reasons)
-            audit["reasons"] = reasons
-            result["history_gate"] = audit
-            return result
+        if not fade_reason and a["shrunk_wr"] < PAIR_MIN_WR:
+            fade_reason = (f"shrunk WR {a['shrunk_wr']:.1f}% < "
+                           f"{PAIR_MIN_WR:.0f}% floor over last {a['n']} "
+                           f"signals (raw {a['wr']:.1f}%)")
 
         # 4 ── DIRECTION FLOOR: this specific CALL/PUT side is broken.
         d = a[signal.lower()]
-        if d["n"] >= DIR_MIN_SAMPLES:
+        if not fade_reason and d["n"] >= DIR_MIN_SAMPLES:
             d_shrunk = shrunk_win_rate(d["wins"], d["n"])
             if d_shrunk < DIR_MIN_WR:
-                audit["mode"] = "suppressed-direction"
-                audit["verdict"] = "suppress"
-                reasons.append(
-                    f"[HISTORY-GATE] {asset}: {signal} side shrunk WR "
-                    f"{d_shrunk:.1f}% < {DIR_MIN_WR:.0f}% floor over "
-                    f"{d['n']} {signal} signals (raw {d['wr']:.1f}%) — "
-                    f"this direction is not verified, signal suppressed")
-                result["signal"] = "NEUTRAL"
-                result["strength"] = "NEUTRAL"
-                result["confidence"] = 0
-                result["_history_gate_suppressed"] = True
-                result.setdefault("reasons", []).extend(reasons)
-                audit["reasons"] = reasons
-                result["history_gate"] = audit
-                return result
-            audit["direction_shrunk_wr"] = d_shrunk
+                fade_reason = (f"{signal} side shrunk WR {d_shrunk:.1f}% < "
+                               f"{DIR_MIN_WR:.0f}% floor over {d['n']} "
+                               f"{signal} signals (raw {d['wr']:.1f}%)")
+            else:
+                audit["direction_shrunk_wr"] = d_shrunk
+
+        if fade_reason:
+            _opp = "PUT" if signal == "CALL" else "CALL"
+            _orig_conf = result.get("confidence") or 0
+            _new_conf = max(50, min(FADE_CONF_CAP,
+                                    int(round(_orig_conf - FADE_CONF_PENALTY))))
+            reasons.append(
+                f"[HISTORY-GATE] {asset}: FADE {signal}→{_opp} — "
+                f"{fade_reason} (measured anti-predictive — the candle "
+                f"still gets a signal, in the direction history supports. "
+                f"confidence {_orig_conf}→{_new_conf})")
+            audit["mode"] = "faded"
+            audit["verdict"] = "fade"
+            audit["faded_from"] = signal
+            audit["reasons"] = reasons
+            result["signal"] = _opp
+            result["confidence"] = _new_conf
+            result["strength"] = "WEAK"
+            result["history_faded"] = True
+            result.setdefault("reasons", []).extend(reasons)
+            result["history_gate"] = audit
+            return result
 
         # 5 ── FLEET RELATIVE: cross-pair comparison (one pair's data
-        #     matched against the other pairs — "মিলিয়ে দেখবে").
+        #     matched against the other pairs — "মিলিয়ে দেখবে"). A
+        #     fleet-laggard direction is NOT inverted by this gate — it
+        #     gets a confidence penalty (capital-quality signal).
         try:
             fleet = _fleet_stats(period)
             if (fleet["median_shrunk_wr"] is not None
@@ -536,24 +538,22 @@ def apply_history_gate(result: dict, asset: str, period: int = 60,
                     and a["shrunk_wr"] <
                         fleet["median_shrunk_wr"] - FLEET_DROP_PP):
                 audit["mode"] = "below-fleet"
-                audit["verdict"] = "suppress"
+                audit["verdict"] = "penalize"
                 audit["fleet_median_shrunk_wr"] = fleet["median_shrunk_wr"]
+                _orig = result.get("confidence") or 0
+                result["confidence"] = max(1, int(round(_orig * FLEET_PENALTY)))
                 reasons.append(
                     f"[HISTORY-GATE] {asset}: shrunk WR "
                     f"{a['shrunk_wr']:.1f}% is "
                     f"{fleet['median_shrunk_wr'] - a['shrunk_wr']:.1f}pp "
                     f"below the fleet median {fleet['median_shrunk_wr']:.1f}% "
                     f"across {fleet['judged_pairs']} verified pairs — "
-                    f"capital moves to better pairs, signal suppressed")
-                result["signal"] = "NEUTRAL"
-                result["strength"] = "NEUTRAL"
-                result["confidence"] = 0
-                result["_history_gate_suppressed"] = True
-                result.setdefault("reasons", []).extend(reasons)
+                    f"confidence penalty (confidence {_orig} → "
+                    f"{result['confidence']})")
                 audit["reasons"] = reasons
-                result["history_gate"] = audit
-                return result
-            audit["fleet_median_shrunk_wr"] = fleet["median_shrunk_wr"]
+                result.setdefault("reasons", []).extend(reasons)
+            else:
+                audit["fleet_median_shrunk_wr"] = fleet["median_shrunk_wr"]
         except Exception as _fleet_exc:
             audit["fleet_error"] = f"{type(_fleet_exc).__name__}: {_fleet_exc}"
 

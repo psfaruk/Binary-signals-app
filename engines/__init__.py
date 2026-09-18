@@ -21,7 +21,7 @@ def category_of(asset: str) -> str:
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
-            period: int = 60, category: str = None, recent_accuracy=None) -> dict:
+            period: int = 60, category: str = None) -> dict:
     """Route to the correct engine based on `category` (auto-detected from asset if None)."""
     if isinstance(category, str):
         category = category.lower()
@@ -159,28 +159,23 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
 
     result = engine.predict(
         candles, ticks, micro, asset=asset,
-        htf_trend=htf_trend, period=period,
-        recent_accuracy=recent_accuracy)
+        htf_trend=htf_trend, period=period)
 
     # Echo resolved category + deep-copy to isolate from engine internals.
     result = copy.deepcopy(result)
     result["category"] = category
 
-    # ── SIGNAL-HISTORY-GATE (USER-2026-09-18) ──────────────────────────────
+    # ── SIGNAL-HISTORY-GATE (USER-2026-09-18, FADE POLICY) ───────────────
     # "যেকোন সিগন্যাল প্রধান করার পূর্বে, ওই সিগন্যাল হিস্টোরি গুলো বা
-    #  অন্যন্য ডেটা গুলো যদি এনালাইসিস করে তারপর সিগন্যাল প্রোভাইড করবে।
-    #  এক পেয়ার এর ডেটা অন্য পেয়ার এর সাথে মিলিয়ে দেখবে। কোন পেয়ার এ
-    #  সঠিক সিগন্যাল বেশি দিচ্ছে, সেই গুলো ভালোভাবে যাচাই করে সিগন্যাল
-    #  প্রধান করবে।"
+    #  অন্যন্য ডেটা গুলো যদি এনালাইসিস করে তারপর সিগন্যাল প্রোভাইড করবে।"
     # Before the signal is provided, analyse this pair's graded signal
     # history (the 200-row ledger kept by core/retention.py) + the
-    # cross-pair fleet data: pairs that are proven losers (below the
-    # shrunk-WR floor / far below the fleet median), in a loss-streak
-    # cooldown, or broken on the candidate direction are converted to
-    # NEUTRAL (result["_history_gate_suppressed"] = True) so feed.py's
-    # ML fallback does NOT resurrect them. Verified-good pairs get a
-    # small confidence boost. Default ON (QX_HISTORY_GATE=1); fails open
-    # on any internal error — the signal always flows.
+    # cross-pair fleet data. Measured anti-predictive directions (loss
+    # streak / shrunk-WR floor / direction floor) are FADED to the
+    # opposite direction (result["history_faded"] = True) — the candle
+    # ALWAYS keeps a CALL/PUT, and the measured inversion becomes the
+    # edge. Fleet-laggards get a confidence penalty. Verified-good pairs
+    # get a small boost. Default ON (QX_HISTORY_GATE=1); fails open.
     try:
         if (os.environ.get("QX_HISTORY_GATE", "1") == "1"
                 and asset

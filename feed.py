@@ -2320,10 +2320,6 @@ class QuotexFeed:
         # called from a background tracker (signature allows None). Use
         # the `period` arg in that case instead of crashing on stream.period.
         _period_for_pred = stream.period if stream is not None else period
-        # FIX (BUG-I, 2026-07-20): pass recent_accuracy from the per-candle
-        # cache so the blender can apply accuracy-aware self-correction.
-        # stream.cached_accuracy is refreshed once at candle open by _run_eoc.
-        _recent_acc = getattr(stream, 'cached_accuracy', None) if stream is not None else None
         # FIX (LIVE-DB-AUDIT-2026-07-25 / AUDIT-LIVE-3-12): wrap
         # predict_from_candle in asyncio.to_thread so the CPU-bound
         # prediction work doesn't block the event loop. Previously this
@@ -2336,8 +2332,7 @@ class QuotexFeed:
             predict_from_candle, list(candles),
             ticks=list(ticks) if ticks else [],
             micro=_micro_for_pred, asset=asset,
-            htf_trend=htf_trend, period=_period_for_pred,
-            recent_accuracy=_recent_acc)
+            htf_trend=htf_trend, period=_period_for_pred)
         return result, micro_hist
 
     def _ml_t1_from_db(self, asset: str, period: int,
@@ -2418,9 +2413,15 @@ class QuotexFeed:
                 model_version = t1.get("model_version")
             model_status = model_status or t1.get("model_status") or "verified"
             emit_flag = bool(t1.get("emit"))
-            guard_state = None
-            if isinstance(t1.get("guard"), dict):
-                guard_state = t1["guard"].get("state")
+            if not emit_flag:
+                # ML's own quality gates / edge-guard said NO TRADE for this
+                # candle — the model voice abstains (no false signal from a
+                # source that failed its own checks); the fade default
+                # supplies the direction instead.
+                print(f"[feed] {stream.asset}: ML T+1 exists but "
+                      f"emit=False — model voice abstains, fade default "
+                      f"supplies the signal")
+                return None
 
             # Honest confidence: 50 + the model's calibrated edge over a
             # coin flip (|p-0.5|*100), capped below MAX like the strategy
@@ -2440,12 +2441,6 @@ class QuotexFeed:
                 reasons.append(
                     "_ML_SOURCE_EMIT: the model's own quality gates passed "
                     "(emit=True) — verified model voice.")
-            if guard_state == "suspended":
-                reasons.append(
-                    "_ML_SOURCE_GUARD: edge-guard has this pair suspended "
-                    "(live win rate below break-even) — confidence penalty "
-                    "applied by the source gate, signal still shown per the "
-                    "every-candle requirement.")
 
             sub = dict(base)
             sub.update({
@@ -2488,6 +2483,51 @@ class QuotexFeed:
                   f"{type(_ml_exc).__name__}: {_ml_exc}")
             return None
 
+    def _fade_default_signal(self, result: dict, stream: _AssetStream,
+                             closed: list[dict]) -> dict:
+        """FADE DEFAULT (USER-2026-09-18): neither the strategy engine nor
+        the ML model spoke for this candle — the measured anti-momentum
+        body-fade supplies a deterministic direction so EVERY candle keeps
+        a CALL/PUT. (Live ledger: following the last body won 45.5%, so
+        the fade is the honest default.) Honest low-band confidence 50.
+        """
+        direction = "CALL"
+        basis = "default"
+        if closed:
+            try:
+                last = closed[-1]
+                o = float(last.get("open", 0.0))
+                c = float(last.get("close", 0.0))
+                if c > o:
+                    direction, basis = "PUT", "body_fade"
+                elif c < o:
+                    direction, basis = "CALL", "body_fade"
+            except Exception:
+                pass
+        base = result if isinstance(result, dict) else {}
+        reasons = list(base.get("reasons") or [])
+        reasons.append(
+            f"_FADE_DEFAULT: no strategy theory voted and no verified ML "
+            f"signal exists — anti-momentum {basis} supplies {direction} "
+            f"so the candle is never silent (measured: body-follow 45.5% "
+            f"→ fade is the honest default).")
+        sub = dict(base)
+        sub.update({
+            "signal": direction,
+            "confidence": 50,
+            "raw_confidence": 50,
+            "strength": "WEAK",
+            "score": 0,
+            "signal_source": "fade_default",
+            "strategy": "fade_default",
+            "strategy_reason": f"no theory + no ML voice — {basis} fade",
+            "signal_quality": "LOW",
+            "reasons": reasons,
+        })
+        print(f"[feed] {stream.asset}: no strategy theory and no ML voice "
+              f"— fade default supplies {direction}")
+        return sub
+
     async def _run_eoc(self, stream: _AssetStream,
                 actual_open: float | None = None,
                 ml_payload: dict | None = None) -> dict | None:
@@ -2525,37 +2565,6 @@ class QuotexFeed:
         # exact moment (they accumulate after this call). LIVE re-eval picks
         # up once ticks come in, via the periodic re-eval in the stream loop.
 
-        # Refresh the per-candle accuracy cache ONCE here (at candle open).
-        # All subsequent LIVE re-evals in the last 10s will reuse this cached
-        # value instead of hitting the DB ~5-10 times per candle.
-        # asyncio.to_thread: sqlite3 I/O would otherwise block the shared
-        # event loop for every one of the ~38 concurrent streams (2026-07-10).
-        # FIX (AUDIT-CORE #4, 2026-07-21): raised n from 20 to 50 for more
-        # stable accuracy stats. With n=20, a single win/loss swings the
-        # reported accuracy by 5%, which can flip the blender between
-        # "boost ×1.05" and "dampen ×0.85" mode on every candle — causing
-        # erratic confidence thrashing. n=50 needs ~3 consecutive
-        # wins/losses to move the same 5%, smoothing the self-correction.
-        # Env-configurable for advanced tuning.
-        try:
-            # FIX (DEEP-AUDIT-2026-07-26 / F-01-71): use module-level
-            # RECENT_ACCURACY_N instead of reading env on every EOC.
-            _acc_n = RECENT_ACCURACY_N
-        except (TypeError, ValueError):
-            _acc_n = 50
-        _acc_n = max(8, min(_acc_n, 200))
-        try:
-            stream.cached_accuracy = await asyncio.to_thread(
-                _db.recent_accuracy, stream.asset, stream.period, n=_acc_n)
-        except Exception as _e:
-            # FIX (DEEP-AUDIT-2026-07-26 / F-01-38): log DB failures so the
-            # silent degradation to "no self-correction" is visible.
-            print(f"[feed] recent_accuracy DB query failed for "
-                  f"{stream.asset}@{stream.period}s: {_e}")
-            stream.cached_accuracy = (None, 0)
-        # FIX (2026-07-13): removed cached_accuracy_at + live_signal_history
-        # assignments (both were dead fields — set but never read).
-
         result, micro_hist = await self._analyze_core(
             stream.asset, stream.period, closed, base_ticks,
             running_ticks=None, stream=stream)
@@ -2588,13 +2597,22 @@ class QuotexFeed:
         # The joint gate (core/joint_gate.py) NO LONGER rejects to NEUTRAL —
         # it grades the signal (ML voice + 5-layer verifier) and adjusts
         # confidence only, so every candle keeps its CALL/PUT direction.
-        if (result is not None
-                and result.get("signal") == "NEUTRAL"
-                and not result.get("_history_gate_suppressed")):
+        # ── SOURCE-GATE (USER-2026-09-18): every candle gets a CALL/PUT ──
+        # Source chain: 1) STRATEGY engine result stands (strict
+        # confluence or any-one-theory; the history gate now FADES
+        # measured-bad directions instead of suppressing, so this is
+        # never NEUTRAL on gate grounds). 2) ML MODEL — only when the
+        # strategy engine abstained (zero theories voted) AND the ML's
+        # own quality gates passed (emit=True): its frozen T+1 direction
+        # supplies the signal. 3) FADE DEFAULT — if neither engine spoke,
+        # the measured anti-momentum body-fade supplies the direction.
+        if result is not None and result.get("signal") == "NEUTRAL":
             ml_sub = self._ml_source_signal(
                 result, ml_payload, stream, closed)
             if ml_sub is not None:
                 result = ml_sub
+            else:
+                result = self._fade_default_signal(result, stream, closed)
 
         if result is not None and result.get("signal") in ("CALL", "PUT"):
             try:

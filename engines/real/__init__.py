@@ -6,11 +6,10 @@ CONFIG = _REAL_CONFIG
 
 
 def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
-            period: int = 60, recent_accuracy=None) -> dict:
+            period: int = 60) -> dict:
     """Real engine prediction — routes to the shared blender with Real config."""
     return _base_predict(candles, ticks=ticks, micro=micro, asset=asset,
-                         htf_trend=htf_trend, period=period, config=_REAL_CONFIG,
-                         recent_accuracy=recent_accuracy)
+                         htf_trend=htf_trend, period=period, config=_REAL_CONFIG)
 
 
 __all__ = ["predict", "CONFIG"]
