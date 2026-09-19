@@ -22,6 +22,7 @@
   var wrState = { market:'all', window:7 };
   var wrTimer = null;
   var wrLoading = false;
+  var wrPairFilterWired = false;
 
   function $(id){ return document.getElementById(id); }
 
@@ -176,6 +177,65 @@
     });
   }
 
+  /* ─── PAIR-SELECTION-ROADMAP (USER-2026-09-19): রেজাল্ট-tab pair box ──
+     #wr-pair-filter (in the pane header) is the ONE control that owns
+     this tab: "সব পেয়ার" → View A list; a specific pair → View B
+     drill-in (same as tapping a row). Options are rebuilt from every
+     /api/winrate payload — grouped OTC / REAL — and the currently drilled
+     pair is ALWAYS kept listed (even when the market/window chips would
+     filter it out) so the dropdown never goes blank mid-drill. */
+  function rebuildPairFilter(pairs){
+    var sel = $('wr-pair-filter');
+    if(!sel) return;
+    var cur = sel.value || 'all';
+    var sig = ['all'].concat(pairs.map(function(p){ return p.asset; })).join(',');
+    if(sel.dataset.sig === sig) return;          // nothing new — don't touch
+    sel.dataset.sig = sig;
+    // Preserve a drilled pair that the current chips filter out of the
+    // payload (e.g. drill EURUSD_otc, then flip মার্কেট chip to Real).
+    var extra = (cur !== 'all' && !pairs.some(function(p){ return p.asset === cur; }))
+      ? cur : null;
+    var otc = [], real = [];
+    pairs.forEach(function(p){
+      (p.category === 'real' ? real : otc).push(p.asset);
+    });
+    function grp(list, label){
+      if(!list.length) return '';
+      var h = '<optgroup label="' + label + '">';
+      list.forEach(function(a){
+        h += '<option value="' + esc(a) + '">' + esc(displayFor(a)) + '</option>';
+      });
+      return h + '</optgroup>';
+    }
+    var html = '<option value="all">সব পেয়ার</option>'
+      + grp(otc, 'OTC') + grp(real, 'Real');
+    if(extra){
+      html += '<optgroup label="বর্তমান">' +
+        '<option value="' + esc(extra) + '">' + esc(displayFor(extra)) +
+        ' (বর্তমান পেয়ার)</option></optgroup>';
+    }
+    sel.innerHTML = html;
+    // keep the selection if it still exists, else back to সব পেয়ার
+    var still = ['all'].concat(otc, real, extra ? [extra] : []).indexOf(cur) >= 0;
+    sel.value = still ? cur : 'all';
+  }
+
+  function wirePairFilter(){
+    if(wrPairFilterWired) return;
+    var sel = $('wr-pair-filter');
+    if(!sel) return;
+    wrPairFilterWired = true;
+    sel.addEventListener('change', function(){
+      var v = sel.value;
+      if(v === 'all'){
+        try{ global.dispatchEvent(new CustomEvent('wr:closepair')); }catch(_){}
+      } else if(v){
+        try{ global.dispatchEvent(new CustomEvent('wr:openpair',
+          { detail: { asset: v } })); }catch(_){}
+      }
+    });
+  }
+
   function fetchWinrate(){
     if(wrLoading) return;
     wrLoading = true;
@@ -196,6 +256,8 @@
                               window: wrState.window, market: wrState.market };
         renderHero(data.overall, wrState.window);
         renderPairRows(data.pairs);
+        rebuildPairFilter(data.pairs || []);
+        wirePairFilter();
         // Pair view open? refresh its hero with the fresh numbers.
         if(typeof global._wrPairHeroRefresh === 'function'){
           try{ global._wrPairHeroRefresh(); }catch(_){}
@@ -329,6 +391,7 @@
     wireChips('wr-market-filter', 'mkt', function(v){ wrState.market = v; });
     wireChips('wr-window-filter', 'window', function(v){ wrState.window = parseInt(v, 10) || 0; });
     wirePairRows();
+    wirePairFilter();                       // PAIR-SELECTION-ROADMAP 2026-09-19
     fetchPsychology();   // PSYCHOLOGY-FIX 2026-09-11
 
     var refreshBtn = $('wr-refresh-btn');

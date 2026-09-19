@@ -20,6 +20,7 @@
     var _pollTimer = null;
     var _inflight = false;
     var _lastData = null;
+    var _pairFilterWired = false;
 
     function $(id) { return document.getElementById(id); }
 
@@ -84,6 +85,119 @@
     }
 
     // ── renderers ────────────────────────────────────────────────────────
+    // ── PAIR-SELECTION-ROADMAP (USER-2026-09-19): মডেল-tab pair box ──────
+    // #mdl-pair-filter (pane header) filters ALL THREE tables at once
+    // (ট্রেইনিং / লাইভ প্রেডিকশন / মডেল × পেয়ার) — pure client-side from
+    // the cached overview payload, so switching pairs is instant and
+    // never re-hits the server. "সব পেয়ার" = no filter (default).
+    function pairFilterVal() {
+        var sel = $('mdl-pair-filter');
+        return (sel && sel.value && sel.value !== 'all') ? sel.value : null;
+    }
+
+    function displayFor(asset) {
+        var a = String(asset || '');
+        if (a === 'BRLUSD_otc') return 'BRL/USD';
+        var base = a.replace(/_otc$/, '');
+        if (base.length === 6) base = base.slice(0, 3) + '/' + base.slice(3);
+        else if (base.length === 7) base = base.slice(0, 3) + '/' + base.slice(3);
+        return base + (a.slice(-4) === '_otc' ? ' OTC' : '');
+    }
+
+    function rebuildPairFilter(d) {
+        var sel = $('mdl-pair-filter');
+        if (!sel) return;
+        var cur = sel.value || 'all';
+        var seen = {};
+        var add = function(a) {
+            if (!a || a === '__global__' || seen[a]) return;
+            seen[a] = 1;
+        };
+        var pairs = (d.daemon && d.daemon.pairs) || {};
+        Object.keys(pairs).forEach(add);
+        Object.keys(d.candles || {}).forEach(add);
+        (d.live || []).forEach(function(r) { add(r.asset); });
+        var mp = d.model_performance;
+        (mp && mp.rows ? mp.rows : []).forEach(function(r) { add(r.asset); });
+        var otc = [], real = [];
+        Object.keys(seen).sort().forEach(function(a) {
+            (a.slice(-4) === '_otc' ? otc : real).push(a);
+        });
+        var sig = ['all'].concat(otc, real).join(',');
+        if (sel.dataset.sig === sig) return;   // unchanged — don't rebuild
+        sel.dataset.sig = sig;
+        var html = '<option value="all">সব পেয়ার</option>';
+        function grp(list, label) {
+            if (!list.length) return '';
+            var h = '<optgroup label="' + label + '">';
+            list.forEach(function(a) {
+                h += '<option value="' + esc(a) + '">' +
+                     esc(displayFor(a)) + '</option>';
+            });
+            return h + '</optgroup>';
+        }
+        html += grp(otc, 'OTC') + grp(real, 'Real');
+        // Keep a topbar-synced pair that has no model rows yet listed too
+        // (same "extra" rule as the রেজাল্ট tab), so a rebuild can never
+        // silently reset a selection the user just made.
+        var extra = (cur !== 'all' && ['all'].concat(otc, real).indexOf(cur) < 0)
+            ? cur : null;
+        if (extra) {
+            html += '<optgroup label="চার্ট পেয়ার"><option value="' +
+                esc(extra) + '">' + esc(displayFor(extra)) +
+                ' (চার্ট পেয়ার)</option></optgroup>';
+        }
+        sel.innerHTML = html;
+        var still = ['all'].concat(otc, real, extra ? [extra] : []).indexOf(cur) >= 0;
+        sel.value = still ? cur : 'all';
+    }
+
+    function setPairFilter(asset) {
+        var sel = $('mdl-pair-filter');
+        if (!sel || !asset) return false;
+        var has = ['all'].concat([].slice.call(sel.options))
+            .some(function(o) { return o.value === asset; });
+        // Topbar sync may name a pair this tab hasn't listed yet (e.g. it
+        // has no model rows at all) — add it on the fly so the select never
+        // silently ignores the user's choice.
+        if (!has) {
+            var o = document.createElement('option');
+            o.value = asset;
+            o.textContent = displayFor(asset) + ' (চার্ট পেয়ার)';
+            sel.appendChild(o);
+        }
+        sel.value = asset;
+        return true;
+    }
+
+    function wirePairFilter() {
+        if (_pairFilterWired) return;
+        var sel = $('mdl-pair-filter');
+        if (!sel) return;
+        _pairFilterWired = true;
+        sel.addEventListener('change', function() {
+            if (_lastData) {
+                renderPairs(_lastData);
+                renderLivePreds(_lastData);
+                renderModelPerf(_lastData);
+            }
+        });
+        // PAIR-SELECTION-ROADMAP: topbar pair change while the মডেল tab is
+        // the ACTIVE pane → filter the tables to that pair instantly.
+        window.addEventListener('app:pair-changed', function(ev) {
+            var asset = ev && ev.detail && ev.detail.asset;
+            if (!asset) return;
+            var pane = $('pane-models');
+            if (!pane || !pane.classList.contains('active')) return;
+            setPairFilter(asset);
+            if (_lastData) {
+                renderPairs(_lastData);
+                renderLivePreds(_lastData);
+                renderModelPerf(_lastData);
+            }
+        });
+    }
+
     function renderDaemon(d) {
         var st = d.daemon || {};
         var chip = $('mdl-state-chip');
@@ -181,9 +295,16 @@
         }
         names.sort();
 
+        // PAIR-SELECTION-ROADMAP (2026-09-19): পেয়ার ফিল্টার
+        var pf = pairFilterVal();
+        if (pf) names = names.filter(function(a) { return a === pf; });
+
         if (!names.length) {
             tbody.innerHTML = '<tr><td colspan="8" class="mdl-loading">' +
-                'এখনো কোনো রান হয়নি — "এখনই ট্রেইন করুন" চাপুন</td></tr>';
+                (pf
+                    ? 'এই পেয়ারে এখনো কোনো ট্রেইনিং ডেটা নেই — "সব পেয়ার" বেছে নিন'
+                    : 'এখনো কোনো রান হয়নি — "এখনই ট্রেইন করুন" চাপুন') +
+                '</td></tr>';
             return;
         }
 
@@ -335,10 +456,15 @@
             return;
         }
         var rows = Array.isArray(live) ? live : [];
+        // PAIR-SELECTION-ROADMAP (2026-09-19): পেয়ার ফিল্টার
+        var pfL = pairFilterVal();
+        if (pfL) rows = rows.filter(function(r) { return r.asset === pfL; });
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="5" class="mdl-loading">' +
-                'এখনো কোনো active মডেল নেই — ট্রেইন হওয়ার পর প্রতি ক্যান্ডেলে ' +
-                'T+1/T+2 ফ্রিজ হবে</td></tr>';
+                (pfL
+                    ? 'এই পেয়ারে এখনো কোনো লাইভ প্রেডিকশন নেই'
+                    : 'এখনো কোনো active মডেল নেই — ট্রেইন হওয়ার পর প্রতি ক্যান্ডেলে ' +
+                      'T+1/T+2 ফ্রিজ হবে') + '</td></tr>';
             return;
         }
         var html = '';
@@ -411,10 +537,15 @@
             return;
         }
         var rows = mp.rows || [];
+        // PAIR-SELECTION-ROADMAP (2026-09-19): পেয়ার ফিল্টার
+        var pfM = pairFilterVal();
+        if (pfM) rows = rows.filter(function(r) { return r.asset === pfM; });
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="8" class="mdl-loading">' +
-                'এখনো কোনো গ্রেড করা প্রেডিকশন নেই — মডেল ফ্রিজ করা শুরু করলেই ' +
-                'এখানে ফলাফল আসবে</td></tr>';
+                (pfM
+                    ? 'এই পেয়ারে এখনো কোনো গ্রেড করা প্রেডিকশন নেই'
+                    : 'এখনো কোনো গ্রেড করা প্রেডিকশন নেই — মডেল ফ্রিজ করা শুরু করলেই ' +
+                      'এখানে ফলাফল আসবে') + '</td></tr>';
             var noteEl2 = $('mdl-mperf-note');
             if (noteEl2) noteEl2.textContent =
                 'টেবিলটি otc_predictions টেবিলের সেটেল হওয়া রো থেকে তৈরি — ' +
@@ -562,6 +693,8 @@
             .then(function(d) {
                 if (!d) return;
                 _lastData = d;
+                rebuildPairFilter(d);
+                wirePairFilter();
                 renderDaemon(d);
                 renderPairs(d);
                 renderLivePreds(d);
@@ -593,6 +726,7 @@
     function init() {
         var btn = $('mdl-force-btn');
         if (btn) btn.addEventListener('click', forceTrain);
+        wirePairFilter();   // PAIR-SELECTION-ROADMAP 2026-09-19
         // poll only while the pane is visible
         setInterval(function() {
             var pane = $('pane-models');

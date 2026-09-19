@@ -2616,6 +2616,12 @@ function openPairResult(asset){
   window._historyPagesLoaded = 1;
   listView.hidden = true;
   pairView.hidden = false;
+  // PAIR-SELECTION-ROADMAP (USER-2026-09-19): keep the রেজাল্ট tab's own
+  // pair dropdown in sync — it is the one control that owns this tab
+  // ("সব পেয়ার" = list, specific pair = drill-in). Set WITHOUT firing
+  // change (we are already opening the drill; the handler must not run).
+  const wrFilter = $('wr-pair-filter');
+  if(wrFilter && wrFilter.value !== asset) wrFilter.value = asset;
   const name = (window._wrDebug && window._wrDebug.displayFor)
     ? window._wrDebug.displayFor(asset) : asset;
   _setText('wr-title', name);
@@ -2652,6 +2658,10 @@ function closePairResult(opts){
   const pairView = $('wr-view-pair');
   if(listView) listView.hidden = false;
   if(pairView) pairView.hidden = true;
+  // PAIR-SELECTION-ROADMAP (USER-2026-09-19): back to the all-pairs list →
+  // the tab's own pair dropdown goes back to "সব পেয়ার" silently.
+  const wrFilter = $('wr-pair-filter');
+  if(wrFilter && wrFilter.value !== 'all') wrFilter.value = 'all';
   _setText('wr-title', 'রেজাল্ট');
   _setText('wr-subtitle', 'সব পেয়ারের Call/Put উইন রেট — বিস্তারিত দেখতে পেয়ারে ক্লিক করুন');
   if(!o.keepData){
@@ -3908,49 +3918,28 @@ function wireEvents(){
       send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
              category: currentCategory });
       setTimeout(loadServerHistory, 500);
+      // PAIR-SELECTION-ROADMAP (USER-2026-09-19): "পেয়ার সিলেকশন বাটন শুধু
+      // চার্ট পরিবর্তনের সময় কাজ করে" — announce the new pair to the whole
+      // app. The রেজাল্ট tab drills into this pair and the মডেল tab filters
+      // its tables to it (each reacts only while it is the ACTIVE pane, so
+      // background tabs keep whatever the user left them on).
+      try{
+        window.dispatchEvent(new CustomEvent('app:pair-changed',
+          { detail: { asset: currentAsset } }));
+      }catch(_){}
     });
   }
 
-  // ── TIMEFRAME SELECTOR (2026-09-19) ─────────────────────────────────────
-  // The candle period was hardcoded to 60s with no UI. #tf-select (next to
-  // the pair selector) now re-subscribes the SAME pair at the chosen
-  // period; the server scopes candles/predictions per (asset, period).
-  const tfSelect = $('tf-select');
-  if(tfSelect){
-    // Restore last choice per browser.
-    try{
-      const savedTf = localStorage.getItem('timeframePeriod');
-      if(savedTf && [...tfSelect.options].some(o => o.value === savedTf)){
-        tfSelect.value = savedTf;
-        currentPeriod = parseInt(savedTf, 10) || 60;
-      }
-    }catch(_){}
-    tfSelect.addEventListener('change', () => {
-      const newPeriod = parseInt(tfSelect.value, 10);
-      if(!newPeriod || newPeriod === currentPeriod) return;
-      currentPeriod = newPeriod;
-      try{ localStorage.setItem('timeframePeriod', String(newPeriod)); }catch(_){}
-      // Fresh chart for the new timeframe — same reset the pair switch does,
-      // minus the pair/payout work.
-      signalHistory = []; totalCorrect = 0; totalSignals = 0;
-      window._historyPagesLoaded = 1;
-      renderHistory(); renderAccuracy();
-      candleData = []; tapePrices = []; tapeDir = [];
-      modelPredCandles = [];
-      if(candleSeries) candleSeries.setData([]);
-      if(ghostSeries) ghostSeries.setData([]);
-      showChartLoading();
-      currentMicro = null; runningConf = null;
-      runningCandleOpenTime = 0;
-      lastPrediction = null;
-      alertedCandleOpenTime = 0;
-      alertedSignalDirection = null;
-      renderPending();
-      send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
-             category: currentCategory });
-      setTimeout(loadServerHistory, 500);
-    });
-  }
+  // ── SINGLE-TIMEFRAME (USER-2026-09-19) ──────────────────────────────────
+  // "একাধিক টাইমফ্রেম বাটন দরকার নাই" — the #tf-select dropdown (M1..M30)
+  // is REMOVED. The app runs on ONE timeframe (M1/60s); the higher
+  // timeframes (5m/15m) are analyzed in the BACKGROUND by the engine's
+  // multi_tf module from the same 1-minute stream, so no user-facing
+  // timeframe control exists or is needed. Browsers that saved a
+  // non-60 period while the dropdown existed are cleaned up here so
+  // they can't keep the chart on a stale timeframe.
+  try{ localStorage.removeItem('timeframePeriod'); }catch(_){}
+  currentPeriod = 60;
 
   // ── TAB BAR: switch between Home / Chart Signal / History / Setting
   // FIX (UI-FIX-2026-08-13): new 4-tab system uses .nav-item (sidebar) and
@@ -3975,6 +3964,20 @@ function wireEvents(){
     const asset = ev && ev.detail && ev.detail.asset;
     if(asset) openPairResult(asset);
   });
+  // PAIR-SELECTION-ROADMAP (USER-2026-09-19): the topbar #pair-select now
+  // works inside the রেজাল্ট tab too. If the user changes the pair while
+  // the রেজাল্ট pane is the ACTIVE one, drill straight into that pair's
+  // logs + live signal (View B) — exactly what picking a pair means here.
+  window.addEventListener('app:pair-changed', (ev) => {
+    const asset = ev && ev.detail && ev.detail.asset;
+    if(!asset) return;
+    const pane = document.getElementById('pane-winrate');
+    if(!pane || !pane.classList.contains('active')) return;
+    if(asset !== wrPairViewAsset) openPairResult(asset);
+  });
+  // PAIR-SELECTION-ROADMAP (USER-2026-09-19): the tab's own dropdown went
+  // back to "সব পেয়ার" (winrate.js owns the box) — mirror that here.
+  window.addEventListener('wr:closepair', () => { closePairResult(); });
   const wrBackBtn = $('wr-back-btn');
   if(wrBackBtn && !wrBackBtn.dataset.wired){
     wrBackBtn.dataset.wired = '1';

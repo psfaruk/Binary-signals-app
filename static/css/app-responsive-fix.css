@@ -254,18 +254,92 @@
   .chart-panel{scrollbar-width:thin}
 }
 
-/* ─── Timeframe selector (topbar, next to pair-select) ─────────────────── */
-.tf-select{
-  height:38px;min-width:86px;max-width:110px;
-  padding:0 8px;border-radius:10px;
-  background:var(--glass);border:1px solid var(--border);
-  color:var(--text);font-family:inherit;font-size:12.5px;font-weight:700;
-  cursor:pointer;
+/* ─── SINGLE-TIMEFRAME (USER-2026-09-19): "একাধিক টাইমফ্রেম বাটন দরকার নাই"
+       — the .tf-select rules are deleted along with the dropdown itself.
+       The app runs on ONE timeframe (M1/60s); 5m/15m are analyzed in the
+       background by the engine's multi_tf module. ─── */
+
+/* ============================================================================
+   PAIR-SELECTION-ROADMAP (USER-2026-09-19) — pane-header pair boxes
+
+   USER REQ: "পেয়ার সিলেকশন শুধু চার্ট পরিবর্তনের সময় কাজ করে — রেজাল্ট
+   ট্যাব বা মডেল ট্যাবে সঠিকভাবে কাজ করছে না।"
+
+   #wr-pair-filter (রেজাল্ট) and #mdl-pair-filter (মডেল) sit in the pane
+   header: title on the left, pair box on the right; on phones the box
+   moves UNDER the title at full width. Both reuse .filter-select so they
+   inherit the app's standard dropdown look.
+   ============================================================================ */
+.pane-header-row{
+  display:flex;align-items:flex-start;justify-content:space-between;
+  gap:10px;flex-wrap:wrap;
 }
-.tf-select:focus{outline:none;border-color:rgba(56,189,248,.45)}
-.tf-select option{background:#0b1322;color:var(--text)}
+.pane-header-row .pane-header-text{min-width:0;flex:1}
+.pane-header-row .pane-header-actions{
+  flex:0 0 auto;display:flex;align-items:center;
+  padding-top:2px;            /* optical alignment with the title line */
+}
+.pane-pair-select{
+  min-width:150px;max-width:220px;height:36px;
+  font-size:12px;
+}
 @media (max-width: 779px){
-  .tf-select{flex:0 0 auto;height:40px;min-width:78px}
+  .pane-header-row .pane-header-actions{width:100%;padding-top:0}
+  .pane-pair-select{flex:1 1 auto;min-width:0;max-width:none;width:100%}
+}
+
+/* ============================================================================
+   MOBILE FILTER ALIGNMENT FIX (USER-2026-09-19)
+
+   USER REQ: "মোবাইল UI তে ফিল্টারিং অপশন গুলোর আলাইনমেন্ট টিক থাকবে"
+
+   Measured problems at 390px (রেজাল্ট tab):
+   - the মার্কেট and সময় chip groups wrapped onto two rows whose chips
+     started at different x-offsets (labels "মার্কেট"=23px vs "সময়"=18px
+     wide) — nothing lined up in columns;
+   - the refresh button (30px tall) sat 1px lower than the chips (32px)
+     and floated far right of row 2, disjointed;
+   - View B's CALL/PUT + WIN/LOSS chip groups shared one squeezed row.
+
+   FIX (≤779px): every filter group becomes a full-width BLOCK with its
+   chips on an equal-column grid — 4 columns for the toolbar groups, 3 for
+   the history chips — so every chip column lines up perfectly under the
+   one above. The refresh button gets its own full-width row at the SAME
+   height as a chip (36px incl. border) with the same left edge.
+   ============================================================================ */
+@media (max-width: 779px){
+  /* Uniform control heights: chips, refresh, and the pair box all 34px +
+     1px borders = 36px total, aligned on the same left edge. */
+  .wr-chip{height:34px;display:inline-flex;align-items:center;justify-content:center;
+           padding:0 4px;text-align:center;box-sizing:border-box;
+           overflow:hidden;white-space:nowrap}
+  .wr-toolbar .wr-refresh-btn,
+  .btn-secondary.wr-refresh-btn{height:36px;box-sizing:border-box;width:100%}
+
+  /* Every toolbar group = one full-width block: label on its own row,
+     chips on a 4-column equal grid → the মার্কেট and সময় rows line up
+     column-for-column (they have 4 chips each). */
+  .wr-toolbar{display:flex;flex-direction:column;gap:8px}
+  .wr-toolbar .wr-group{
+    width:100%;display:grid;gap:6px;
+    grid-template-columns:repeat(4,minmax(0,1fr));align-items:center;
+  }
+  .wr-toolbar .wr-group-label{grid-column:1 / -1;margin:0;text-align:left}
+  .wr-toolbar .wr-chip{width:100%}
+
+  /* View B: direction + result chips stacked, each its own aligned
+     3-column row (each group has exactly 3 chips). */
+  .history-controls{display:flex;flex-direction:column;gap:6px}
+  .history-controls .wr-chips{
+    display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;
+  }
+  .history-controls .wr-chip{width:100%}
+}
+@media (max-width: 360px){
+  /* Very small phones: chips fall to a 2-column grid, still perfectly
+     aligned (label keeps its own full row either way). */
+  .wr-toolbar .wr-group{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .history-controls .wr-chips{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 
 /* ============================================================================

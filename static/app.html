@@ -113,18 +113,12 @@
             <div class="topbar-center">
                 <!-- common.js populates #pair-select -->
                 <select id="pair-select" class="pair-select" aria-label="Select pair"></select>
-                <!-- TIMEFRAME SELECTOR (2026-09-19): the app hardcoded 60s
-                     candles everywhere with no UI to change it — the single
-                     most conspicuously missing dropdown. common.js wires
-                     #tf-select to re-subscribe with the chosen period. -->
-                <select id="tf-select" class="tf-select" aria-label="Timeframe" title="ক্যান্ডেল টাইমফ্রেম">
-                    <option value="60" selected>M1 ক্যান্ডেল</option>
-                    <option value="120">M2</option>
-                    <option value="180">M3</option>
-                    <option value="300">M5</option>
-                    <option value="900">M15</option>
-                    <option value="1800">M30</option>
-                </select>
+                <!-- SINGLE-TIMEFRAME (USER-2026-09-19): "একাধিক টাইমফ্রেম
+                     বাটন দরকার নাই" — the multi-timeframe dropdown (#tf-select,
+                     M1..M30) is REMOVED. The app runs on ONE timeframe (M1/60s);
+                     the higher timeframes are analyzed in the BACKGROUND by
+                     the engine (multi_tf module aggregates 5m/15m from the
+                     1m stream — no user-facing control needed or wanted). -->
                 <div class="price-display">
                     <span class="price-label">Price</span>
                     <div class="price-row">
@@ -497,8 +491,29 @@
                   গুলো দেখাবে, লাইভ সিগন্যাল সহ।" -->
             <section class="tab-pane" data-pane="winrate" id="pane-winrate">
                 <div class="pane-header">
-                    <h2 id="wr-title">রেজাল্ট</h2>
-                    <p class="pane-subtitle" id="wr-subtitle">সব পেয়ারের Call/Put উইন রেট — বিস্তারিত দেখতে পেয়ারে ক্লিক করুন</p>
+                    <div class="pane-header-row">
+                        <div class="pane-header-text">
+                            <h2 id="wr-title">রেজাল্ট</h2>
+                            <p class="pane-subtitle" id="wr-subtitle">সব পেয়ারের Call/Put উইন রেট — বিস্তারিত দেখতে পেয়ারে ক্লিক করুন</p>
+                        </div>
+                        <!-- PAIR-SELECTION-ROADMAP (USER-2026-09-19): "পেয়ার
+                             সিলেকশন রেজাল্ট ট্যাব/মডেল ট্যাবে কাজ করে না" —
+                             ONE dropdown that owns the whole রেজাল্ট tab:
+                               "সব পেয়ার" → View A (all-pairs list, previous
+                                              2026-09-07 default behavior)
+                               specific pair → View B drill-in (that pair's
+                                               logs + live signal) — and it
+                                               stays visible in View B so the
+                                               pair can be switched without
+                                               going back to the list.
+                             winrate.js populates the options from the live
+                             /api/winrate payload (grouped OTC / REAL). -->
+                        <div class="pane-header-actions">
+                            <select id="wr-pair-filter" class="filter-select pane-pair-select" aria-label="রেজাল্ট পেয়ার ফিল্টার" title="কোন পেয়ারের রেজাল্ট দেখবেন">
+                                <option value="all">সব পেয়ার</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- ═══ VIEW A: ALL-PAIRS RESULT LIST (default) ═══ -->
@@ -680,8 +695,23 @@
                    3. results       → প্রেডিকশন গুলোর আসল গ্রেডেড ফলাফল -->
             <section class="tab-pane" data-pane="models" id="pane-models">
                 <div class="pane-header">
-                    <h2>মডেল ট্রেইনিং</h2>
-                    <p class="pane-subtitle">কোন পেয়ারের মডেল কতটুকু ট্রেইন হলো ও আসল রেজাল্ট</p>
+                    <div class="pane-header-row">
+                        <div class="pane-header-text">
+                            <h2>মডেল ট্রেইনিং</h2>
+                            <p class="pane-subtitle">কোন পেয়ারের মডেল কতটুকু ট্রেইন হলো ও আসল রেজাল্ট</p>
+                        </div>
+                        <!-- PAIR-SELECTION-ROADMAP (USER-2026-09-19): pair box
+                             for the মডেল tab — filters ALL THREE tables at
+                             once (পেয়ার-অনুযায়ী ট্রেইনিং / লাইভ প্রেডিকশন /
+                             মডেল × পেয়ার পারফরম্যান্স). "সব পেয়ার" = no
+                             filter (default). models-panel.js populates the
+                             options from /api/prediction/overview. -->
+                        <div class="pane-header-actions">
+                            <select id="mdl-pair-filter" class="filter-select pane-pair-select" aria-label="মডেল পেয়ার ফিল্টার" title="কোন পেয়ারের মডেল দেখবেন">
+                                <option value="all">সব পেয়ার</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="mdl-warn" id="mdl-warn" style="display:none">
