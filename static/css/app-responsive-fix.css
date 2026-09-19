@@ -206,3 +206,99 @@
 .settings-section{min-width:0}
 .wr-pairlist{min-width:0}
 .history-list{min-width:0}
+
+/* ============================================================================
+   DESKTOP CHART-IN-VIEW FIX (2026-09-19)
+
+   USER REQ: "ডেস্কটপ পিসি তে চার্ট ভালো দেখায় না। চার্ট নিচের দিকে স্ক্রিন
+   এর বাহিরে চলে যাচ্ছে। চার্ট থাকবে চোখের সামনে, সহজ।"
+
+   ROOT CAUSE (measured at 1366×768 / 1920×1080 / 1024×768): the shell used
+   min-height:100vh (content-driven, floor 768px) and .chart-layout's single
+   implicit grid row was auto — so the row sized itself to the right rail's
+   ~1850px of stacked panels. The chart container inherited that height and
+   its bottom edge sat ~1160px BELOW the viewport at every desktop width.
+
+   FIX: on ≥1024px the shell gets a FIXED 100dvh height so the flex chain
+   (.app-main → .tab-panes → .tab-pane, all flex:1 + min-height:0) becomes
+   a real viewport-bounded box; the chart grid row is clamped with
+   grid-template-rows:minmax(0,1fr) so the chart fills exactly the visible
+   area and the right rail scrolls INSIDE itself. Every tab except chart
+   scrolls internally (overflow-y:auto) so long content (winrate tables,
+   model tables, settings) stays reachable. Verified: chart bottom edge
+   now ≤ viewport height at 1024/1366/1920 widths.
+   ============================================================================ */
+@media (min-width: 1024px){
+  .app-shell{
+    height:100vh;         /* fallback */
+    height:100dvh;        /* mobile-browser-bars-safe (desktop: same as 100vh) */
+  }
+  .app-main{
+    overflow-y:auto;
+    overscroll-behavior:contain;
+    scrollbar-width:thin;
+    scrollbar-color:rgba(148,163,184,.35) transparent;
+  }
+  /* Long tabs scroll INSIDE the pane; the chart tab stays fixed-fit. */
+  .tab-pane.active[data-pane="home"],
+  .tab-pane.active[data-pane="winrate"],
+  .tab-pane.active[data-pane="models"],
+  .tab-pane.active[data-pane="setting"]{
+    overflow-y:auto;
+    overscroll-behavior:contain;
+    padding-right:4px;
+  }
+  /* THE chart fix: the grid row can never outgrow the viewport box. */
+  .chart-layout{grid-template-rows:minmax(0,1fr)}
+  .chart-container{min-height:260px}   /* was 430px — overflowed short viewports */
+  .chart-panel{scrollbar-width:thin}
+}
+
+/* ─── Timeframe selector (topbar, next to pair-select) ─────────────────── */
+.tf-select{
+  height:38px;min-width:86px;max-width:110px;
+  padding:0 8px;border-radius:10px;
+  background:var(--glass);border:1px solid var(--border);
+  color:var(--text);font-family:inherit;font-size:12.5px;font-weight:700;
+  cursor:pointer;
+}
+.tf-select:focus{outline:none;border-color:rgba(56,189,248,.45)}
+.tf-select option{background:#0b1322;color:var(--text)}
+@media (max-width: 779px){
+  .tf-select{flex:0 0 auto;height:40px;min-width:78px}
+}
+
+/* ============================================================================
+   RIGHT-RAIL REORGANIZATION (2026-09-19)
+
+   USER REQ: "অ্যাপ টি আমার কাছে এলোমেলো লাগছে" — nine stacked panels
+   (~1850px) made the chart tab disorganized and pushed everything below
+   the fold. The analysis panels are now COLLAPSIBLE and collapsed by
+   default: signal box + future-candle card stay visible beside the
+   chart; each analysis panel opens on demand with one tap.
+   ============================================================================ */
+.panel-section-header{cursor:pointer;user-select:none}
+.collapsible-panel{position:relative}
+.collapsible-panel .panel-toggle{
+  margin-left:auto;flex:0 0 auto;
+  width:26px;height:26px;border-radius:8px;
+  display:inline-flex;align-items:center;justify-content:center;
+  background:var(--glass);border:1px solid var(--border);
+  color:var(--text-dim);font-size:12px;line-height:1;
+  cursor:pointer;transition:transform .18s, color .18s;
+}
+.collapsible-panel .panel-toggle:hover{color:var(--accent);border-color:rgba(56,189,248,.4)}
+.collapsible-panel:not(.collapsed) .panel-toggle{transform:rotate(180deg)}
+/* Collapsed: hide everything except the header row. The panels keep their
+   JS render targets — display:none would stop some renderers from finding
+   elements? No — display:none elements are still in the DOM and findable;
+   this is safe and also skips their paint cost. */
+.collapsible-panel.collapsed > *:not(.panel-section-header):not(.share-header){
+  display:none;
+}
+.collapsible-panel.collapsed{
+  padding-bottom:2px;
+}
+/* Module panel: the legacy .module-list needs .open — the new pattern
+   drives it from the panel's own .collapsed state instead. */
+.collapsible-panel:not(.collapsed) .module-list{display:flex}

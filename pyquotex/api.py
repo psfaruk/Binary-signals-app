@@ -170,11 +170,19 @@ class QuotexAPI:
         ] = {
             "s_authorization": self._h_auth_ok,
             "instruments/list": self._h_instruments_list,
+            "instruments/update": self._h_instruments_update,
+            "chart_notification/update": self._h_chart_notification,
             "trader/history": self._h_trader_history,
             "balance": self._h_balance,
             "candle-generated": self._h_candle_generated,
             "sentiment": self._h_sentiment,
         }
+
+        # FIX (WEEKEND-STALE-INSTRUMENTS-2026-09-19): live per-asset open
+        # state pushed by Quotex via chart_notification/update. Populated
+        # by _h_chart_notification; read by feed.py to detect weekend /
+        # holiday closes even between full instruments refreshes.
+        self.asset_open_state: dict[str, bool] = {}
 
     # ------------------------------------------------------------------
     # Subscription tracking (replayed by WebsocketClient after reconnect)
@@ -234,6 +242,61 @@ class QuotexAPI:
         else:
             self.instruments = data
             await self.event_registry.set_event("instruments_ready", data)
+
+    async def _h_instruments_update(self, data: Any) -> None:
+        """FIX (WEEKEND-STALE-INSTRUMENTS-2026-09-19): Quotex pushes
+        per-instrument changes (open/closed flips, payout changes) as
+        ``instruments/update`` — usually a list with one instrument entry.
+        Previously this event had NO handler and was silently dropped, so a
+        connection opened before the Friday close kept every real pair
+        "open" in the cached list for the whole weekend. Merge each pushed
+        entry into ``self.instruments`` (match by symbol at index 1, same
+        tuple layout as instruments/list)."""
+        if not isinstance(data, list):
+            return
+        entries = data if (data and isinstance(data[0], (list, tuple))) else [data]
+        for inst in entries:
+            try:
+                if not isinstance(inst, (list, tuple)) or len(inst) < 2:
+                    continue
+                name = inst[1]
+                if not name:
+                    continue
+                merged = False
+                for i, existing in enumerate(self.instruments or []):
+                    if (isinstance(existing, (list, tuple))
+                            and len(existing) > 1 and existing[1] == name):
+                        self.instruments[i] = list(inst)
+                        merged = True
+                        break
+                if not merged:
+                    self.instruments.append(list(inst))
+            except Exception as merge_err:
+                logger.debug("instruments/update merge failed: %s", merge_err)
+
+    async def _h_chart_notification(self, data: Any) -> None:
+        """FIX (WEEKEND-STALE-INSTRUMENTS-2026-09-19): Quotex pushes
+        ``chart_notification/update`` when an asset opens/closes (weekend,
+        daily break, holiday). Previously the reply to our per-asset
+        ``chart_notification/get`` probe was discarded — the raw-WS backend
+        (quotex_ws.py) tracked it but this vendored client never did. Store
+        the per-asset open flag so feed.py can honor Quotex's own
+        open/closed state at any moment."""
+        try:
+            if not isinstance(data, dict):
+                return
+            asset = data.get("asset") or data.get("instrument")
+            if not asset:
+                return
+            inner = data.get("data")
+            if isinstance(inner, dict) and "isOpened" in inner:
+                self.asset_open_state[asset] = bool(inner["isOpened"])
+            elif "is_open" in data:
+                self.asset_open_state[asset] = bool(data["is_open"])
+            elif "isOpened" in data:
+                self.asset_open_state[asset] = bool(data["isOpened"])
+        except Exception as cn_err:
+            logger.debug("chart_notification parse failed: %s", cn_err)
 
     async def _h_trader_history(self, data: Any) -> None:
         await self.event_registry.set_event("history_ready", data)

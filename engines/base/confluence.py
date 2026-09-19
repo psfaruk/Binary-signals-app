@@ -488,13 +488,17 @@ def evaluate(grouped_results, ctx, config, asset="", htf_trend="SIDEWAYS",
         # FIX (TREND-DIR-EXACT-2026-09-07): was `"UP" in str(regime_name)` —
         # any future regime token containing "UP" (e.g. "RUPTURE") would
         # silently map to CALL. Exact-match the known trend regimes instead.
+        # FIX (UNKNOWN-REGIME-DEFAULT-2026-09-19): unknown trending regimes
+        # used to default trend_dir="PUT", silently rejecting every CALL as
+        # "counter-trend" — a one-sided bias. An unrecognized regime now
+        # imposes NO trend restriction (the other gates still apply).
         if regime_name in ("TREND_UP", "UPTREND"):
             trend_dir = "CALL"
         elif regime_name in ("TREND_DOWN", "DOWNTREND"):
             trend_dir = "PUT"
         else:
-            trend_dir = "CALL" if "UP" in str(regime_name) else "PUT"
-        if signal != trend_dir:
+            trend_dir = None
+        if trend_dir is not None and signal != trend_dir:
             reasons.append(
                 f"_POSITION_GATE: regime={regime_name} but {signal} is "
                 f"counter-trend → NEUTRAL. Counter-trend reversals in a "
@@ -502,7 +506,9 @@ def evaluate(grouped_results, ctx, config, asset="", htf_trend="SIDEWAYS",
             return _gate_exit(reasons, module_votes, cluster_votes, ctx,
                               asset, htf_trend, candles,
                               gate="position_counter_trend")
-        position_reason = f"with-trend continuation in {regime_name}"
+        # Unknown regime earns no with-trend bonus (no false +5).
+        if trend_dir is not None:
+            position_reason = f"with-trend continuation in {regime_name}"
     elif _is_ranging:
         if pos is None:
             reasons.append("_POSITION_GATE: RANGE regime but range position "
@@ -551,11 +557,17 @@ def evaluate(grouped_results, ctx, config, asset="", htf_trend="SIDEWAYS",
                               asset, htf_trend, candles, gate="noise")
 
     # ── Step 3: HONEST confidence (no manufactured calibration) ────────────
-    # base 55 for the minimum viable 3-cluster agreement; each extra cluster
-    # adds +7 (real independent evidence); score quality adds up to +8;
-    # regime/position coherence +5; HTF alignment +5. Hard cap 92 — never
-    # claim near-certainty on a 1-minute binary bet.
-    confidence = 55 + 7 * (n_agree - MIN_AGREE_CLUSTERS)
+    # FIX (STRICT-CONF-REACHABLE-2026-09-19): base was 55 with MIN_CONFIDENCE
+    # 65 — the minimum 3-cluster agreement could reach at most 55+8=63
+    # without BOTH +5 bonuses, so a clean 3-cluster zero-opposition setup
+    # was mathematically REJECTED and production fell through to the
+    # single-module any-theory layer (measured ~50.5% WR). Base 60 makes a
+    # genuine 3-cluster confluence pass on its own evidence (60..68), while
+    # weak-evidence 3-cluster setups (score < 15) still fail; each extra
+    # cluster adds +7; score quality adds up to +8; regime/position
+    # coherence +5; HTF alignment +5. Hard cap 92 — never claim
+    # near-certainty on a 1-minute binary bet.
+    confidence = 60 + 7 * (n_agree - MIN_AGREE_CLUSTERS)
     confidence += min(8, int(cluster_score // 3))
     if position_reason:
         confidence += 5

@@ -31,6 +31,18 @@
     }
     let prefs = loadPrefs();
 
+    // FIX (SOUND-SYNC-2026-09-19): the topbar 🔔 bell and the Settings sound
+    // checkbox were two disconnected controls — toggling the bell never
+    // persisted the preference or updated the checkbox, so the next page
+    // load resurrected the old state. common.js's bell handler calls this
+    // hook so both controls + localStorage stay in sync from either side.
+    window.__syncSoundPref = function(on) {
+        prefs.sound = !!on;
+        savePrefs(prefs);
+        const soundEl = document.getElementById('pref-sound');
+        if (soundEl) soundEl.checked = !!on;
+    };
+
     // ── Home tab data ────────────────────────────────────────────────────
     async function loadHomeData() {
         try {

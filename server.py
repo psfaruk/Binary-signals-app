@@ -1251,9 +1251,13 @@ async def get_pairs_by_category(category: str):
         return {"category": "real", "pairs": all_pairs["real_pairs"], "payout_floor": all_pairs["payout_floor_real"]}
     if cat == "otc":
         return {"category": "otc", "pairs": all_pairs["otc_pairs"], "payout_floor": all_pairs["payout_floor_otc"]}
+    # FIX (2026-09-19): alltime_otc is a first-class category everywhere
+    # else (WS subscribe, market chips) — this endpoint 404'd on it.
+    if cat == "alltime_otc":
+        return {"category": "alltime_otc", "pairs": all_pairs.get("alltime_otc_pairs", []), "payout_floor": 0}
     raise HTTPException(
         status_code=404,
-        detail=f"unknown category {category!r}; expected 'real' or 'otc'")
+        detail=f"unknown category {category!r}; expected 'real', 'otc' or 'alltime_otc'")
 
 @app.get("/api/db-download")
 async def download_db(request: Request):
@@ -1906,10 +1910,28 @@ async def api_winrate(period: int = 60, days: Optional[int] = None,
               streak_type, streak_count, last_ctime
     """
     try:
+        # FIX (2026-09-19): support category=alltime_otc — the 18 all-time
+        # OTC pairs are ordinary _otc assets in the DB, so filter the otc
+        # result set down to the all-time allowlist after the query.
+        _db_category = category if category in ('otc', 'real') else None
+        if category == 'alltime_otc':
+            _db_category = 'otc'
         data = _db.get_directional_winrate(
-            period=period, days=days,
-            category=category if category in ('otc', 'real') else None,
+            period=period, days=days, category=_db_category,
         )
+        if category == 'alltime_otc':
+            _alltime = {p.get("asset") for p in feed._alltime_otc_pairs_list}
+            if isinstance(data.get("pairs"), list):
+                data["pairs"] = [r for r in data["pairs"]
+                                 if r.get("asset") in _alltime]
+            # Recompute the overall block over the filtered rows.
+            _g = sum(r.get("graded", 0) for r in data["pairs"])
+            _w = sum(round(r.get("win_pct", 0) / 100.0 * r.get("graded", 0))
+                     for r in data["pairs"])
+            if isinstance(data.get("overall"), dict) and _g:
+                data["overall"]["graded"] = _g
+                data["overall"]["correct"] = _w
+                data["overall"]["win_pct"] = round(100.0 * _w / _g, 1)
         return {"ok": True, **data}
     except Exception as e:
         _logger.exception("winrate endpoint failed")
@@ -2841,9 +2863,14 @@ async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
         micro_vote = roadmap.get("micro_vote")
 
         # Last tick recency
+        # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): last_real_tick_wall is honest
+        # again (the re-arm no longer fakes it), and a latched market_closed
+        # stream can never report live — the old code showed "live: true"
+        # for closed weekend markets forever.
         last_tick = getattr(stream, 'last_real_tick_wall', 0)
         last_update = round(now - last_tick, 0) if last_tick > 0 else None
-        is_live = last_tick > 0 and (now - last_tick) < 120
+        is_live = (last_tick > 0 and (now - last_tick) < 120
+                   and not getattr(stream, 'market_closed', False))
 
         rows.append({
             "pair": asset,
@@ -3540,7 +3567,8 @@ async def share_signals():
             "confidence": round(confidence, 1) if confidence else 0,
             "strength": strength,
             "last_update": last_update,
-            "live": last_tick > 0 and (now - last_tick) < 120,
+            "live": (last_tick > 0 and (now - last_tick) < 120
+                     and not getattr(stream, 'market_closed', False)),
         })
 
     return {

@@ -20,11 +20,25 @@ class AssetsMixin:
     """Methods related to instruments, assets metadata, and payouts."""
 
     async def get_instruments(
-            self, timeout: int = DEFAULT_TIMEOUT
+            self, timeout: int = DEFAULT_TIMEOUT, refresh: bool = False
     ) -> list[Any]:
-        """Get instruments using a true event-driven approach."""
+        """Get instruments using a true event-driven approach.
+
+        FIX (WEEKEND-STALE-INSTRUMENTS-2026-09-19): the old code returned the
+        per-connection cache unconditionally (``if self.api.instruments``),
+        so a connection established Friday evening kept reporting real pairs
+        as ``open=True`` for the ENTIRE weekend — Quotex pushes per-instrument
+        open/close changes via ``instruments/update``, which the dispatch
+        table now merges, but the full list itself was never re-requested.
+        ``refresh=True`` clears the cache and re-requests the full list so
+        periodic pair-list reloads see the live open/closed state (weekend
+        market close, holiday sessions, payout changes).
+        """
         if not self.api or not await self.check_connect():
             return []
+
+        if refresh:
+            self.api.instruments = []
 
         if self.api.instruments and len(self.api.instruments) > 0:
             return self.api.instruments

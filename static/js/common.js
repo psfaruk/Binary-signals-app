@@ -781,6 +781,10 @@ function renderPending(){
     theoriesList.classList.remove('open');
     const toggle = $('theories-toggle');
     if(toggle){ toggle.classList.remove('open'); toggle.setAttribute('aria-expanded','false'); }
+    // RIGHT-RAIL-REORG (2026-09-19): pair switch folds the module panel
+    // back to its header (fresh pair → fresh analysis, avoid stale tall list).
+    const mp = document.getElementById('module-panel');
+    if(mp) mp.classList.add('collapsed');
   }
 
   alertedCandleOpenTime = 0;
@@ -3037,6 +3041,12 @@ function handleMsg(msg){
     case 'signals':  onServerSignals(msg.signals, msg.asset, msg.period); break;
     case 'pairs':    renderPairs(msg); break;             // ← BUG-1 FIX: pass msg, not msg.pairs
     case 'stale':    onStale(msg); break;
+    // WEEKEND-LIVE-CANDLE-FIX (2026-09-19): the server latched this stream's
+    // market as CLOSED (weekend real market / Quotex closed flag / zero
+    // ticks for multiple candles). Show a clear closed-state overlay instead
+    // of a chart that keeps "updating" fabricated candles. The chart keeps
+    // the last REAL candles; the first tick after reopen clears this.
+    case 'market_closed': onMarketClosed(msg); break;
     case 'otc_pred': onOtcPred(msg); break;   // OTC-PREDICT-ENGINE (PART 30)
     case 'status':   break;   // keepalive pong — silently consume
     case 'error':
@@ -3051,6 +3061,12 @@ function handleMsg(msg){
           statusText = 'RECONNECTING';
           reasonText = 'Reconnecting to broker (' + Math.round(msg.retry_after || 30) + 's)';
         }
+        if(statusText === 'MARKET_CLOSED'){
+          // New-stream rejection: the market for this pair is closed right
+          // now (weekend/holiday). Show the dedicated closed overlay.
+          onMarketClosed({asset: msg.asset, period: msg.period, reason: reasonText});
+          break;
+        }
         showChartLoading();
         const staleOverlay = $('stale-overlay');
         const staleMsg = $('stale-msg');
@@ -3061,6 +3077,30 @@ function handleMsg(msg){
       }
       break;
   }
+}
+
+// WEEKEND-LIVE-CANDLE-FIX (2026-09-19): market-closed overlay handler.
+// The server stops fabricating candles on a dead market and tells the
+// viewer; paint an honest "market closed" state with a one-tap switch to
+// OTC (24/7) instead of a frozen or fake-updating chart.
+function onMarketClosed(msg){
+  if(!msg) return;
+  // Only react to frames for the pair we are watching.
+  if(msg.asset && msg.asset !== currentAsset) return;
+  const overlay = $('chart-loading-overlay');
+  const txt = $('chart-loading-text');
+  if(overlay){
+    overlay.classList.add('show');
+    if(txt){
+      txt.innerHTML = '⛔ মার্কেট এখন বন্ধ' +
+        (msg.reason ? (' — ' + msg.reason) : '') +
+        '<div style="margin-top:10px;font-size:12px;color:#94a3b8">' +
+        'রিয়েল মার্কেট সপ্তাহান্তে/ছুটির দিনে বন্ধ থাকে। OTC পেয়ার ২৪/৭ চলে।</div>';
+    }
+  }
+  // Hide the stale overlay (market_closed supersedes "stale data").
+  const staleOverlay = $('stale-overlay');
+  if(staleOverlay) staleOverlay.classList.remove('show');
 }
 
 function showError(text){
@@ -3871,6 +3911,47 @@ function wireEvents(){
     });
   }
 
+  // ── TIMEFRAME SELECTOR (2026-09-19) ─────────────────────────────────────
+  // The candle period was hardcoded to 60s with no UI. #tf-select (next to
+  // the pair selector) now re-subscribes the SAME pair at the chosen
+  // period; the server scopes candles/predictions per (asset, period).
+  const tfSelect = $('tf-select');
+  if(tfSelect){
+    // Restore last choice per browser.
+    try{
+      const savedTf = localStorage.getItem('timeframePeriod');
+      if(savedTf && [...tfSelect.options].some(o => o.value === savedTf)){
+        tfSelect.value = savedTf;
+        currentPeriod = parseInt(savedTf, 10) || 60;
+      }
+    }catch(_){}
+    tfSelect.addEventListener('change', () => {
+      const newPeriod = parseInt(tfSelect.value, 10);
+      if(!newPeriod || newPeriod === currentPeriod) return;
+      currentPeriod = newPeriod;
+      try{ localStorage.setItem('timeframePeriod', String(newPeriod)); }catch(_){}
+      // Fresh chart for the new timeframe — same reset the pair switch does,
+      // minus the pair/payout work.
+      signalHistory = []; totalCorrect = 0; totalSignals = 0;
+      window._historyPagesLoaded = 1;
+      renderHistory(); renderAccuracy();
+      candleData = []; tapePrices = []; tapeDir = [];
+      modelPredCandles = [];
+      if(candleSeries) candleSeries.setData([]);
+      if(ghostSeries) ghostSeries.setData([]);
+      showChartLoading();
+      currentMicro = null; runningConf = null;
+      runningCandleOpenTime = 0;
+      lastPrediction = null;
+      alertedCandleOpenTime = 0;
+      alertedSignalDirection = null;
+      renderPending();
+      send({ type: 'subscribe', asset: currentAsset, period: currentPeriod,
+             category: currentCategory });
+      setTimeout(loadServerHistory, 500);
+    });
+  }
+
   // ── TAB BAR: switch between Home / Chart Signal / History / Setting
   // FIX (UI-FIX-2026-08-13): new 4-tab system uses .nav-item (sidebar) and
   // .bn-item (bottom nav) instead of old .tab-btn. Wire both.
@@ -3947,6 +4028,12 @@ function wireEvents(){
       soundBtn.setAttribute('aria-pressed', String(soundEnabled));
       soundBtn.setAttribute('aria-label', soundEnabled ? 'Mute sounds' : 'Unmute sounds');
       soundBtn.classList.toggle('on', soundEnabled);
+      // FIX (SOUND-SYNC-2026-09-19): persist the choice + keep the Settings
+      // checkbox in sync (previously the bell was a session-only toggle that
+      // the saved preferences overwrote on every page load).
+      if(typeof window.__syncSoundPref === 'function'){
+        try{ window.__syncSoundPref(soundEnabled); }catch(_){}
+      }
       if(soundEnabled){
         if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
         if(audioCtx.state === 'suspended'){
@@ -3956,22 +4043,52 @@ function wireEvents(){
     });
   }
 
-  // 6-Module Engine toggle (collapse/expand).
-  const theoriesToggle = $('theories-toggle');
-  if(theoriesToggle){
-    theoriesToggle.addEventListener('click', () => {
-      const theoriesList = $('theories-list');
-      if(!theoriesList) return;
-      const isOpen = theoriesList.classList.toggle('open');
-      theoriesToggle.classList.toggle('open', isOpen);
-      theoriesToggle.setAttribute('aria-expanded', String(isOpen));
-    });
-    theoriesToggle.addEventListener('keydown', e => {
-      if(e.key === 'Enter' || e.key === ' '){
-        e.preventDefault(); theoriesToggle.click();
-      }
-    });
-  }
+  // ── RIGHT-RAIL REORG (2026-09-19): generic collapsible panels ──────────
+  // Every .collapsible-panel in the chart-tab rail folds to its header and
+  // remembers its state per browser. The module panel keeps its legacy
+  // .module-list.open mechanism in sync so both CSS generations work.
+  const RAIL_COLLAPSE_PREFIX = 'railPanelCollapsed:';
+  document.querySelectorAll('.collapsible-panel').forEach(panel => {
+    const pid = panel.id || (panel.className.match(/([\w-]+)-panel/) || [])[1] || 'panel';
+    const btn = panel.querySelector('.panel-toggle');
+    const header = panel.querySelector('.panel-section-header');
+    // Restore persisted state (default: collapsed, set in markup).
+    let stored = null;
+    try{ stored = localStorage.getItem(RAIL_COLLAPSE_PREFIX + pid); }catch(_){}
+    if(stored !== null) panel.classList.toggle('collapsed', stored === '1');
+    const syncAria = () => {
+      const isCollapsed = panel.classList.contains('collapsed');
+      if(btn) btn.setAttribute('aria-expanded', String(!isCollapsed));
+      // Module panel: keep the legacy .module-list.open flag in sync.
+      const ml = panel.querySelector('.module-list');
+      if(ml) ml.classList.toggle('open', !isCollapsed);
+    };
+    syncAria();
+    const togglePanel = () => {
+      panel.classList.toggle('collapsed');
+      syncAria();
+      try{
+        localStorage.setItem(
+          RAIL_COLLAPSE_PREFIX + pid,
+          panel.classList.contains('collapsed') ? '1' : '0');
+      }catch(_){}
+      // Chart height may change when the rail shrinks/grows — re-fit.
+      try{ window.dispatchEvent(new Event('resize')); }catch(_){}
+    };
+    if(btn){
+      btn.addEventListener('click', ev => { ev.stopPropagation(); togglePanel(); });
+      btn.addEventListener('keydown', e => {
+        if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); togglePanel(); }
+      });
+    }
+    if(header){
+      header.addEventListener('click', ev => {
+        // Don't hijack other buttons living in the same header row.
+        if(ev.target.closest('.icon-btn-sm') && ev.target !== btn) return;
+        togglePanel();
+      });
+    }
+  });
 
   // Signal detail modal — close button + click-outside.
   const detailClose = $('detail-close');
@@ -4468,6 +4585,9 @@ function setShareSignalCollapsed(collapsed, persist){
   const sec = document.getElementById('share-signal-section');
   if(!sec) return;
   sec.classList.toggle('is-collapsed', !!collapsed);
+  // RIGHT-RAIL-REORG (2026-09-19): keep the generic collapsible class in
+  // sync so the shared .collapsed CSS + panel-toggle arrow both work.
+  sec.classList.toggle('collapsed', !!collapsed);
   const btn = document.getElementById('share-signal-toggle');
   if(btn){
     btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');

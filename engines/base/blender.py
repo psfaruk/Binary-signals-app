@@ -155,6 +155,22 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         call_score = sum(r.score for r in results if r.direction == "CALL")
         put_score = sum(r.score for r in results if r.direction == "PUT")
         if call_score == 0 and put_score == 0:
+            # FIX (NEUTRAL-RECORDS-2026-09-19): modules that emitted only
+            # NEUTRAL/abstain results used to be DROPPED here, so their
+            # carefully-written abstain reasons (sr_bounce's zone guards,
+            # pattern's insufficient-geometry notes…) never reached the UI —
+            # the module just showed "not fired". Keep a zero-weight record
+            # so the breakdown can display WHY it abstained.
+            grouped_results.append(ModuleResult(
+                module_name=mname,
+                direction="NEUTRAL",
+                score=0,
+                confidence=0,
+                signal_type=(results[0].signal_type if results else "CONTINUATION"),
+                reliability=(results[0].reliability if results else "MEDIUM"),
+                group=(results[0].group if results else "OTHER"),
+                reasons=[r.reasons[0] if r.reasons else "abstained"
+                         for r in results][:3] or ["no directional vote"]))
             continue
         if call_score == put_score:
             # module split 50/50 → it abstains; keep zero-weight record so
@@ -204,7 +220,21 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         if isinstance(w, dict):
             w = w.get(r.direction, 1.0)
         new_score = r.score * t_mult * w
-        if new_score < 0.20:
+        # FIX (MUTE-BYPASS-2026-09-19): the old `new_score < 0.20` threshold
+        # plus `max(1, int(round(new_score)))` RESURRECTED any raw score >= 2
+        # as a full integer vote even under a ×0.15 anti-predictive weight
+        # (e.g. 4 × 0.15 = 0.6 → round → 1 = one full vote). The learned
+        # mute was therefore largely theatre: muted modules still counted as
+        # full cluster members and could still be the "best module" that
+        # decides the any-theory direction. Two-part fix:
+        #   (a) a learned weight in the anti-predictive band (<= 0.35, i.e.
+        #       measured WR < ~47%) mutes the vote REGARDLESS of raw score —
+        #       strong raw evidence from a proven-wrong direction is still
+        #       wrong evidence;
+        #   (b) otherwise the vote dies when the scaled score is below half
+        #       a vote (< 0.50); survivors use round-half-up so a genuine
+        #       0.5-1.5 scaled score becomes exactly one vote.
+        if w <= 0.35 or new_score < 0.50:
             _orig_dir = r.direction
             r.direction = "NEUTRAL"
             r.score = 0
@@ -212,9 +242,10 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
             r.reasons.append(
                 f"[LEARNED-MUTE] per-pair learned win rate for "
                 f"{r.module_name}/{_orig_dir} is in the anti-predictive "
-                f"band — vote suppressed (weight={w:.2f})")
+                f"band — vote suppressed (weight={w:.2f}, "
+                f"scaled_score={new_score:.2f})")
             continue
-        r.score = max(1, int(round(new_score)))
+        r.score = max(1, int(new_score + 0.5))
 
     # ── Step 5: STRICT CONFLUENCE — the single decision authority ──────────
     all_reasons = []

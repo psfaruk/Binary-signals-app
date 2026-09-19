@@ -769,8 +769,11 @@ svg{display:block}
   .app-shell{display:block;min-height:100vh;min-height:100dvh}
   .app-sidebar{display:none}
   .app-main{padding:0 12px 26px}
-  /* ALIGN-FIX 2026-09-08: keep the same 4-col grid as panels (order-proof). */
-  .app-bottomnav{display:grid;grid-template-columns:repeat(4,1fr)}
+  /* FIX (BOTTOMNAV-5COLS-2026-09-19): the markup has FIVE tabs (home,
+     chart, result, models, settings) but the grid was repeat(4,1fr) —
+     the 5th (সেটিংস) rendered outside the nav background, below the
+     fold, unreachable on phones. */
+  .app-bottomnav{display:grid;grid-template-columns:repeat(5,1fr)}
   /* MKT-SWITCH-FIX 2026-09-08: cascade-order-proof resurrects. app-v3.css
      loads AFTER app-v3-panels.css, so a v3 base display:none beats every
      panels @media show-rule at equal specificity (the panels rules are
@@ -778,7 +781,7 @@ svg{display:block}
      matter how the sheets are ordered in the future. */
   body .mobile-menu-toggle{display:inline-flex}
   body .topbar-brand-mobile{display:block}
-  body .app-bottomnav{display:grid;grid-template-columns:repeat(4,1fr)}
+  body .app-bottomnav{display:grid;grid-template-columns:repeat(5,1fr)}
   .app-main{padding-bottom:calc(76px + env(safe-area-inset-bottom, 0px))}
 
   /* Chart: stack the side panel UNDER the chart */

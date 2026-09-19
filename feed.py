@@ -213,10 +213,18 @@ GLOBAL_STALE_SECS = int(os.environ.get("GLOBAL_STALE_SECS", "180"))
 # streams to run simultaneously. Quotex's server silently drops ticks
 # when too many pairs are subscribed at once (observed: 40+ pairs →
 # some pairs get 0 ticks even though subscription succeeded). Capping
-# to 15 ensures all subscribed pairs actually receive ticks. The cap
+# ensures all subscribed pairs actually receive ticks. The cap
 # prioritizes all-time OTC pairs (always tradeable) + highest-payout
 # pairs. Set to 0 for unlimited (legacy behavior, not recommended).
-MAX_ALWAYS_ON_STREAMS = int(os.environ.get("MAX_ALWAYS_ON_STREAMS", "16"))
+# FIX (ALWAYS-ON-STARVATION-2026-09-19): default raised 16 → 24. The
+# allowlist now has EIGHTEEN priority-0 all-time OTC pairs (PAIR-EXPAND
+# 2026-09-14), so a 16 cap meant (a) two OTC pairs never got pre-warmed
+# and (b) NO real pair ever earned a pre-warm slot — while the 30s
+# watchdog re-created the demoted streams anyway, creating a
+# demote/evict/recreate cycle every 5 minutes. 24 = all 18 all-time OTC
+# + the 6 highest-payout real pairs; still safely below the ~40 pair
+# tick-drop threshold.
+MAX_ALWAYS_ON_STREAMS = int(os.environ.get("MAX_ALWAYS_ON_STREAMS", "24"))
 # Loss-cluster cooldown: 5 wrong in a row → 30-min cooldown.
 LOSS_COOLDOWN_SEC = int(os.environ.get("QX_LOSS_COOLDOWN_SEC", "1800"))
 LOSS_COOLDOWN_THRESHOLD = int(os.environ.get("QX_LOSS_THRESHOLD", "5"))
@@ -264,6 +272,46 @@ STRENGTH_GATE_MIN_TICKS = int(os.environ.get("QX_STRENGTH_GATE_MIN_TICKS", "10")
 # live_eye is O(400) single-pass (≈100µs) — safe at full tick rate; keep the
 # env override for a constrained deployment to re-throttle if ever needed.
 TICK_EYE_BROADCAST_EVERY = int(os.environ.get("QX_TICK_EYE_BCAST_EVERY", "1"))
+
+# ── MARKET-CLOSED DETECTION (WEEKEND-LIVE-CANDLE-FIX 2026-09-19) ──────────────
+# USER REPORT: "সাপ্তাহিক বন্ধ রিয়েল মার্কেট, কিন্তু আমি দেখতে পাচ্ছি সেই পেয়ার
+# গুলো ও লাইভ ক্যান্ডেল আপডেট হচ্চে" — weekend real market closed but the chart
+# kept drawing live candles. Root causes fixed in this patch:
+#   1. instruments cache never refreshed (see _load_pairs refresh=True)
+#   2. the timer-close fallback fabricated a flat candle EVERY period even
+#      with ZERO ticks → the chart looked alive on a dead market
+#   3. the stale re-arm debounce faked last_real_tick_wall so the global
+#      stale-reconnect never fired (see _stream_loop)
+# Consecutive tick-less candle closes after which a stream is declared
+# market-closed (fabrication stops, viewers are told, no signals fire).
+MARKET_CLOSED_EMPTY_CLOSES = int(os.environ.get("QX_MARKET_CLOSED_EMPTY_CLOSES", "2"))
+# Re-subscribe probe cadence for streams latched market_closed — slow enough
+# not to hammer Quotex on a dead market all weekend, fast enough to recover
+# a false latch (feed hiccup misread as a market close) within minutes.
+REARM_PROBE_SECS = int(os.environ.get("QX_REARM_PROBE_SECS", "600"))
+# Forex real market NEVER trades Saturday, and only reopens late Sunday
+# (~21:00/22:00 UTC depending on DST). Local weekend guard for REAL pairs
+# (Sat 00:00 UTC → Sun 21:00 UTC) as a belt-and-braces on top of Quotex's
+# own open flag — Quotex itself follows exactly this schedule.
+REAL_WEEKEND_OPEN_UTC_HOUR = int(os.environ.get("QX_REAL_WEEKEND_OPEN_UTC_HOUR", "21"))
+
+
+def _real_market_weekend_closed(now: float | None = None) -> bool:
+    """True when the REAL forex market is definitely closed by the weekend:
+    any time Saturday, or Sunday before ~21:00 UTC. OTC pairs are 24/7 and
+    never affected. Conservative by design — weekday sessions and the exact
+    Friday close are left to Quotex's own `open` flag + tick-activity
+    detection, so we never wrongly HIDE a tradeable market; we only
+    guarantee the weekend can never show as live."""
+    import datetime as _dt
+    ts = time.time() if now is None else now
+    dt = _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc)
+    if dt.weekday() == 5:            # Saturday
+        return True
+    if dt.weekday() == 6 and dt.hour < REAL_WEEKEND_OPEN_UTC_HOUR:  # Sunday early
+        return True
+    return False
+
 
 # ── Fallback display-name helper ─────────────────────────────────────────────
 def _api_to_display(api_name: str) -> str:
@@ -370,6 +418,33 @@ _FOREX_BASES = (
 
 # All 11 OTC pairs are "all-time" — 24/7, no payout floor, always-on.
 _ALLTIME_OTC_ASSETS = frozenset(_USER_OTC_PAIRS)
+
+# FIX (ALLTIME-DISPLAY-DRIFT-2026-09-19): canonical display names for ALL 18
+# all-time OTC pairs. This used to be TWO diverging copies (one in __init__,
+# one in _load_pairs) that both predated the PAIR-EXPAND 2026-09-14 batch —
+# USDARS/AUDJPY/NZDJPY/NZDCAD/USDNGN/GBPNZD/EURNZD fell back to the raw
+# "XXXXXX" string with no slash. One module-level source of truth now.
+_ALLTIME_DISPLAY = {
+    "USDBDT_otc": "USD/BDT",
+    "BRLUSD_otc": "BRL/USD",   # User specified BRL/USD (not USD/BRL)
+    "USDPKR_otc": "USD/PKR",
+    "USDCOP_otc": "USD/COP",
+    "USDMXN_otc": "USD/MXN",
+    "USDIDR_otc": "USD/IDR",
+    "NZDUSD_otc": "NZD/USD",
+    "USDINR_otc": "USD/INR",
+    "USDZAR_otc": "USD/ZAR",
+    "USDDZD_otc": "USD/DZD",
+    "USDPHP_otc": "USD/PHP",
+    # PAIR-EXPAND (USER-2026-09-14) — the 7 new OTC pairs.
+    "USDARS_otc": "USD/ARS",
+    "AUDJPY_otc": "AUD/JPY",
+    "NZDJPY_otc": "NZD/JPY",
+    "NZDCAD_otc": "NZD/CAD",
+    "USDNGN_otc": "USD/NGN",
+    "GBPNZD_otc": "GBP/NZD",
+    "EURNZD_otc": "EUR/NZD",
+}
 
 # NOTE: _FOREX_BASES is defined above (line 290) from _USER_OTC_PAIRS + _USER_REAL_PAIRS.
 # This old definition is removed — it only derived bases from _FOREX_OTC (OTC pairs)
@@ -679,6 +754,16 @@ class _AssetStream:
     candle_open_is_real: bool = False
     last_tick_ts: float = 0.0
     last_real_tick_wall: float = 0.0
+    # ── MARKET-CLOSED DETECTION (WEEKEND-LIVE-CANDLE-FIX 2026-09-19) ──────
+    # candle_tick_count: real ticks observed during the CURRENT candle —
+    # the timer-close fallback may only fabricate a close when this is > 0.
+    # _empty_closes: consecutive candles that closed with ZERO real ticks.
+    # market_closed: latched once _empty_closes >= MARKET_CLOSED_EMPTY_CLOSES
+    # (fabrication + signals stop; cleared the moment a real tick arrives).
+    candle_tick_count: int = 0
+    _empty_closes: int = 0
+    market_closed: bool = False
+    _last_rearm_wall: float = 0.0   # honest debounce clock (never fakes tick wall)
     prediction: dict | None = None
     # Chop guard: consecutive losses in the CURRENT (regime, zone). See
     # ZONE_LOSS_GUARD / QuotexFeed._run_eoc.
@@ -885,25 +970,14 @@ class QuotexFeed:
         self._pairs_list: list[dict] = list(_DEFAULT_PAIRS)
         self._real_pairs_list: list[dict] = []   # populated by _load_pairs
         self._otc_pairs_list:  list[dict] = list(_DEFAULT_PAIRS)  # default to OTC list (matches old behavior)
-        # FIX (DATA-FLOW-2026-07-22): all-time OTC pair list — 6 exotic pairs
-        # that bypass the payout floor and are always-on. Populated in
+        # FIX (DATA-FLOW-2026-07-22): all-time OTC pair list — the exotic
+        # pairs that bypass the payout floor and are always-on. Populated in
         # _load_pairs with live payout data; defaults below so the list is
         # non-empty even before _load_pairs runs.
         # Display names use canonical ISO order (USD first) even when the
         # Quotex symbol is non-standard (e.g. BRLUSD_otc → "USD/BRL").
-        _ALLTIME_DISPLAY = {
-            "USDBDT_otc": "USD/BDT",
-            "BRLUSD_otc": "BRL/USD",   # User specified BRL/USD (not USD/BRL)
-            "USDPKR_otc": "USD/PKR",
-            "USDCOP_otc": "USD/COP",
-            "USDMXN_otc": "USD/MXN",
-            "USDIDR_otc": "USD/IDR",
-            "NZDUSD_otc": "NZD/USD",
-            "USDINR_otc": "USD/INR",
-            "USDZAR_otc": "USD/ZAR",
-            "USDDZD_otc": "USD/DZD",
-            "USDPHP_otc": "USD/PHP",
-        }
+        # FIX (ALLTIME-DISPLAY-DRIFT-2026-09-19): uses the single
+        # module-level _ALLTIME_DISPLAY map (all 18 pairs, slash display).
         self._alltime_otc_pairs_list: list[dict] = [
             {"asset": a, "display": _ALLTIME_DISPLAY.get(a, a.replace("_otc","")),
              "status": "otc", "payout": 85, "locked": False,
@@ -1084,6 +1158,30 @@ class QuotexFeed:
             print(f"[feed] HTF trend fetch failed for {asset} (period={period}): {exc}")
             return "SIDEWAYS"
 
+    def _asset_market_closed(self, asset: str) -> bool:
+        """WEEKEND-LIVE-CANDLE-FIX (2026-09-19): is THIS asset's market
+        closed right now? Decision order (most authoritative first):
+          1. OTC pairs (_otc suffix) are 24/7 — closed only if Quotex's
+             refreshed pair list explicitly says status="closed".
+          2. REAL forex pairs: closed through the local weekend guard
+             (Saturday + Sunday before ~21:00 UTC — forex never trades
+             then, regardless of any stale flag), or when the refreshed
+             pair list says status="closed".
+        Fail-open (returns False = treat as open) when the pair list has no
+        entry — a missing entry must not silence a live market; the
+        tick-activity latch in _stream_loop is the backstop for that case.
+        """
+        try:
+            pair = next((p for p in self._pairs_list
+                         if p.get("asset") == asset), None)
+            if pair is not None and pair.get("status") == "closed":
+                return True
+            if not asset.endswith("_otc") and _real_market_weekend_closed():
+                return True
+            return False
+        except Exception:
+            return False
+
     def available_pairs(self) -> dict:
         """Return the current forex pair lists and payout floors for /api/pairs.
 
@@ -1151,9 +1249,42 @@ class QuotexFeed:
         from the 3-dot menu in the topbar.
         """
         try:
-            instruments = await self._client.get_instruments()
+            # FIX (WEEKEND-STALE-INSTRUMENTS-2026-09-19): refresh=True forces
+            # the client to re-request the full instruments list instead of
+            # returning the per-connection cache. Previously a connection
+            # opened Friday evening kept every real pair status="live" for
+            # the whole weekend (Quotex's instruments/update pushes were
+            # dropped by the vendored client) → the pair list, ensure_stream
+            # gate and always-on reconciler all believed a dead market was
+            # tradeable. Both backends support the flag now; a failed
+            # refresh falls back to the previous snapshot.
+            try:
+                instruments = await self._client.get_instruments(refresh=True)
+            except TypeError:
+                instruments = await self._client.get_instruments()
             if not instruments:
                 return
+
+            # Live per-asset open state pushed by chart_notification/update
+            # (vendored pyquotex now tracks it; raw-WS always did).
+            _open_state = {}
+            try:
+                _open_state = getattr(self._client, "api", None) \
+                    and getattr(self._client.api, "asset_open_state", None) or {}
+                if not isinstance(_open_state, dict):
+                    _open_state = {}
+            except Exception:
+                _open_state = {}
+            try:
+                _raw_open = getattr(self._client, "_asset_open_state", None)
+                if isinstance(_raw_open, dict):
+                    _open_state = {**_raw_open, **_open_state}
+            except Exception:
+                pass
+
+            # Local weekend guard for REAL forex pairs — Quotex's own
+            # schedule: no forex trading Saturday, reopen late Sunday UTC.
+            _weekend_closed = _real_market_weekend_closed()
 
             # Group by logical base name (forex only)
             # FIX (DEEP-AUDIT-2026-07-26 / F-01-65): named constants for the
@@ -1169,6 +1300,18 @@ class QuotexFeed:
                     continue
 
                 is_open = bool(i[_OPEN_IDX])
+                # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): authoritative open
+                # state = Quotex's live push (chart_notification/update) if
+                # we have one for THIS asset, else the (now-refreshed)
+                # instruments flag. REAL forex pairs are additionally forced
+                # closed through the local weekend guard — the market cannot
+                # be live on Saturday / early-Sunday UTC no matter what a
+                # stale flag says.
+                _pushed_open = _open_state.get(name)
+                if _pushed_open is not None:
+                    is_open = bool(_pushed_open)
+                if not is_otc and _weekend_closed:
+                    is_open = False
                 payout  = i[_PAYOUT_IDX]   # 1-minute payout %, same field pyquotex's
                 try:              # own get_payout_by_asset()/get_payment() read
                     payout = int(payout) if payout is not None else None
@@ -1255,19 +1398,8 @@ class QuotexFeed:
             # instrument list (rare), keep the default 85% payout.
             # Display name uses canonical ISO order (USD first) even when
             # Quotex's symbol is non-standard (BRLUSD_otc → "USD/BRL").
-            _ALLTIME_DISPLAY = {
-                "USDBDT_otc": "USD/BDT",
-                "BRLUSD_otc": "BRL/USD",
-                "USDPKR_otc": "USD/PKR",
-                "USDCOP_otc": "USD/COP",
-                "USDMXN_otc": "USD/MXN",
-                "USDIDR_otc": "USD/IDR",
-                "NZDUSD_otc": "NZD/USD",
-                "USDINR_otc": "USD/INR",
-                "USDZAR_otc": "USD/ZAR",
-                "USDDZD_otc": "USD/DZD",
-                "USDPHP_otc": "USD/PHP",
-            }
+            # FIX (ALLTIME-DISPLAY-DRIFT-2026-09-19): single module-level
+            # _ALLTIME_DISPLAY map — the local copy was 7 pairs stale.
             alltime_otc_pairs = []
             for at_pair in self._alltime_otc_pairs_list:
                 # Find matching instrument in the OTC list (by asset name).
@@ -1423,6 +1555,21 @@ class QuotexFeed:
                 return {"ok": False, "status": "locked", "payout": pair.get("payout"),
                         "reason": f"Needs {floor}% payout "
                                   f"(currently {pair.get('payout', '?')}%)"}
+
+            # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): refuse to START a stream
+            # for a market that is closed right now (weekend real market /
+            # Quotex closed flag). Previously a weekend subscribe to a real
+            # pair succeeded (stale instruments said "live"), loaded Friday's
+            # history, and the timer-close fabricated fresh candles on top —
+            # the "weekend live candles" complaint. Existing viewers keep
+            # their stream; this only gates BRAND NEW streams.
+            if self._asset_market_closed(asset):
+                _why = ("weekend (real forex market closed)"
+                        if (not asset.endswith("_otc")
+                            and _real_market_weekend_closed())
+                        else "market closed (Quotex)")
+                return {"ok": False, "status": "market_closed",
+                        "reason": _why}
 
             if time.time() < self._cooldown_until:
                 return {"ok": False, "status": "cooldown",
@@ -2539,6 +2686,30 @@ class QuotexFeed:
         closed = list(stream.candles)
         base_ticks = list(stream.ticks)
 
+        # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): never predict off a candle
+        # that had no real ticks (fabricated/flat weekend candle, dead feed).
+        # The degenerate-candle check further down only suppresses the DB
+        # row — this guard stops the prediction + broadcast entirely, so a
+        # closed market can never manufacture CALL/PUT signals.
+        if stream.candle_tick_count == 0 or not base_ticks:
+            return None
+        # Asset-level closed check (weekend guard + Quotex pair status).
+        # Latches the stream closed so the timer-close stops fabricating and
+        # the initial history-seed can't paint a "live" prediction on a dead
+        # market (the exact user complaint: weekend real pairs updating).
+        if self._asset_market_closed(stream.asset):
+            if not stream.market_closed:
+                stream.market_closed = True
+                stream._empty_closes = MARKET_CLOSED_EMPTY_CLOSES
+                print(f"[feed] MARKET-CLOSED: {stream.asset}@"
+                      f"{stream.period}s — market status says closed "
+                      f"(weekend/Quotex flag); signals + fabrication stopped")
+            return None
+        # Defensive: a latched-closed stream must never emit either (the
+        # latch clears on the first real tick — see the tick-arrival path).
+        if getattr(stream, "market_closed", False):
+            return None
+
         # BRAIN-LEARNED: loss cluster cooldown — skip prediction if pair
         # is in cooldown after 5+ consecutive losses.
         # FIX: wrap in try/except to NEVER block the prediction pipeline.
@@ -2599,20 +2770,30 @@ class QuotexFeed:
         # confidence only, so every candle keeps its CALL/PUT direction.
         # ── SOURCE-GATE (USER-2026-09-18): every candle gets a CALL/PUT ──
         # Source chain: 1) STRATEGY engine result stands (strict
-        # confluence or any-one-theory; the history gate now FADES
-        # measured-bad directions instead of suppressing, so this is
-        # never NEUTRAL on gate grounds). 2) ML MODEL — only when the
+        # confluence or any-one-theory). 2) ML MODEL — only when the
         # strategy engine abstained (zero theories voted) AND the ML's
         # own quality gates passed (emit=True): its frozen T+1 direction
         # supplies the signal. 3) FADE DEFAULT — if neither engine spoke,
         # the measured anti-momentum body-fade supplies the direction.
+        # FIX (HISTORY-SUPPRESS-2026-09-19): the marker
+        # result["_history_gate_suppressed"] (set by the history gate when
+        # the pair/direction is measured bad — streak, pair floor,
+        # direction floor) must NOT be resurrected by the ML model or the
+        # fade-default: a measured-bad pair gets an honest NO SIGNAL. The
+        # comment above describing this contract existed since 2026-09-18
+        # but the marker was never set (the gate faded instead) — the
+        # marker is live now.
         if result is not None and result.get("signal") == "NEUTRAL":
-            ml_sub = self._ml_source_signal(
-                result, ml_payload, stream, closed)
-            if ml_sub is not None:
-                result = ml_sub
+            if result.get("_history_gate_suppressed"):
+                print(f"[feed] {stream.asset}: history gate suppressed this "
+                      f"candle — no signal (ML/fade-default bypassed)")
             else:
-                result = self._fade_default_signal(result, stream, closed)
+                ml_sub = self._ml_source_signal(
+                    result, ml_payload, stream, closed)
+                if ml_sub is not None:
+                    result = ml_sub
+                else:
+                    result = self._fade_default_signal(result, stream, closed)
 
         if result is not None and result.get("signal") in ("CALL", "PUT"):
             try:
@@ -3849,6 +4030,14 @@ class QuotexFeed:
         stream.candle_open_time    = new_open_time
         stream.candle_open_price   = first_tick
         stream.candle_open_is_real = open_is_real
+        # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): the new candle's tick counter
+        # — a REAL boundary tick (open_is_real=True) counts as 1; a
+        # placeholder seed from the timer-close does NOT (it's the last OLD
+        # price, not a market tick). The timer-close emptiness check reads
+        # this to decide whether the candle is real or the market went
+        # silent.
+        stream.candle_tick_count   = 1 if open_is_real else 0
+        stream._empty_closes = 0
         stream.ticks.clear()
         stream.ticks.append(first_tick)
         self._track_tick(stream, first_tick)   # keep tracked high/low fresh
@@ -4051,6 +4240,11 @@ class QuotexFeed:
             if not stream.ticks:
                 stream.ticks.append(new_last["close"])
                 self._track_tick(stream, new_last["close"])
+                # WEEKEND-LIVE-CANDLE-FIX: history-seed counts as one real
+                # observation (it's a REAL closed candle's close) so the
+                # initial prediction may fire on a live market; the
+                # asset-closed check inside _run_eoc handles dead markets.
+                stream.candle_tick_count = max(1, stream.candle_tick_count)
             # Reset micro cache + recompute prediction (cheap, no DB I/O
             # for the prediction engine itself; _run_eoc does the to_thread).
             self._reset_micro_cache(stream)
@@ -4072,6 +4266,9 @@ class QuotexFeed:
         stream.ticks.clear()
         stream.ticks.append(last["close"])
         self._track_tick(stream, last["close"])
+        # WEEKEND-LIVE-CANDLE-FIX: history-seed = one real observation (see
+        # watchdog-merge path above for the rationale).
+        stream.candle_tick_count = 1
         stream.candle_open_is_real = False
         stream.last_tick_ts         = 0.0
         # Fresh stream — clear caches so the first broadcast forces a fresh
@@ -4142,8 +4339,24 @@ class QuotexFeed:
                 # tears down self._client, which would kill every other
                 # viewer's stream too. A GLOBAL "everything is stale" backstop
                 # lives in the manager loop (run()) instead.
+                #
+                # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): two changes —
+                #   (a) market_closed streams re-arm at a SLOW probe cadence
+                #       (REARM_PROBE_SECS) instead of never — a false latch
+                #       (feed hiccup misread as a close) still recovers via
+                #       the re-subscribe, while a truly dead market stops
+                #       hammering Quotex every 90s all weekend, and
+                #   (b) the debounce now uses its own honest clock
+                #       (_last_rearm_wall) instead of faking
+                #       last_real_tick_wall — the old fake is what blinded the
+                #       global stale-reconnect (GLOBAL_STALE_SECS) for the
+                #       whole weekend, so the instruments cache never
+                #       refreshed (see TODO F-01-44, now resolved).
+                _rearm_gap = (REARM_PROBE_SECS if stream.market_closed
+                              else STALE_SECS)
                 if (stream.last_real_tick_wall > 0
-                        and time.time() - stream.last_real_tick_wall > STALE_SECS):
+                        and time.time() - stream.last_real_tick_wall > STALE_SECS
+                        and time.time() - stream._last_rearm_wall > _rearm_gap):
                     print(f"[feed] STALE: {stream.asset}@{stream.period}s "
                           f"— re-arming stream")
                     try:
@@ -4153,13 +4366,11 @@ class QuotexFeed:
                     except Exception as _e:
                         print(f"[silent-except] feed.py:3380 {type(_e).__name__}: {_e}")  # FIX (CRASH-FIX-2026-07-26 / EXC-003): was silent `pass`
                         pass
-                    # FIX (DEEP-AUDIT-2026-07-26 / F-01-32): the audit
-                    # suggested removing this line — but it serves as a
-                    # debounce so we don't re-arm again before this re-arm
-                    # has a chance to receive ticks. Keep, but rename the
-                    # intent in a comment so future readers know it's
-                    # intentionally not "real" tick wall time.
-                    stream.last_real_tick_wall = time.time()  # re-arm debounce
+                    # Debounce on its OWN clock — last_real_tick_wall keeps
+                    # telling the truth (no tick has arrived), so the manager's
+                    # global stale check can still fire a reconnect that
+                    # refreshes the instruments list on a fully-silent market.
+                    stream._last_rearm_wall = time.time()
                     await self._broadcast({"type": "stale", "asset": stream.asset,
                                            "period": stream.period})
                     await asyncio.sleep(2)
@@ -4172,12 +4383,67 @@ class QuotexFeed:
                 # feeds — it waits a short grace past the boundary so a late
                 # final tick can still shape the true close before we grade and
                 # log the candle.
+                #
+                # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): the timer-close used to
+                # fabricate a flat candle EVERY period even when the market was
+                # dead (zero ticks all weekend) — that fabricated close was
+                # broadcast as a normal "eoc" so the chart kept "updating" on a
+                # closed market and _run_eoc even emitted signals off flat
+                # candles. Now a candle that received ZERO real ticks is never
+                # fabricated-closed: we just advance the open-time window. After
+                # MARKET_CLOSED_EMPTY_CLOSES consecutive empty windows the
+                # stream latches market_closed (fabrication + signals stop,
+                # viewers get a "market_closed" frame, the chart freezes on the
+                # last REAL candle). The first real tick unlatches everything.
                 now = time.time()
                 if (stream.candle_open_time > 0
                         and now >= stream.candle_open_time + stream.period + TIMER_GRACE):
                     expected_new = _floor_to_period(now, stream.period)
                     # Only ever move FORWARD in time (never reopen an older candle)
                     if expected_new > stream.candle_open_time:
+                        if stream.market_closed:
+                            # Latched closed — keep the window advancing so the
+                            # resume path starts a fresh candle, nothing else.
+                            stream.candle_open_time = expected_new
+                            stream.candle_tick_count = 0
+                            stream.candle_open_is_real = False
+                            continue
+                        if stream.candle_tick_count == 0:
+                            # EMPTY candle — no real tick arrived during the
+                            # whole window. Do NOT fabricate a close, do NOT
+                            # broadcast, do NOT run EOC.
+                            stream._empty_closes += 1
+                            if stream._empty_closes >= MARKET_CLOSED_EMPTY_CLOSES:
+                                stream.market_closed = True
+                                print(f"[feed] MARKET-CLOSED: {stream.asset}@"
+                                      f"{stream.period}s — {stream._empty_closes} "
+                                      f"consecutive candles with zero ticks; "
+                                      f"stopping candle fabrication + signals")
+                                # Reset the running-candle state so the first
+                                # real tick (market reopen) bootstraps a fresh
+                                # candle from its own timestamp.
+                                stream.candle_open_time = 0
+                                stream.candle_open_is_real = False
+                                stream.candle_open_price = 0.0
+                                stream.ticks.clear()
+                                stream.signal_delay_until = 0.0
+                                self._reset_micro_cache(stream)
+                                await self._broadcast({
+                                    "type": "market_closed",
+                                    "asset": stream.asset,
+                                    "period": stream.period,
+                                    "reason": "no ticks — market closed "
+                                              "(weekend/holiday)",
+                                })
+                            else:
+                                # First empty window — silently advance to the
+                                # next period, keep waiting for a late tick.
+                                stream.candle_open_time = expected_new
+                                stream.candle_open_is_real = False
+                            await asyncio.sleep(1)
+                            continue
+                        # Candle had real ticks — the original timer-close path.
+                        stream._empty_closes = 0
                         last_px = (list(stream.ticks)[-1] if stream.ticks
                                    else stream.candle_open_price)
                         print(f"[feed] timer-close {stream.asset}@{stream.period}s "
@@ -4270,6 +4536,19 @@ class QuotexFeed:
                 # Mark all these ticks as seen
                 stream.last_tick_ts = float(new_ticks[-1]["time"])
                 stream.last_real_tick_wall = time.time()   # feed is alive
+                # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): a REAL tick just
+                # arrived — (a) count it toward the running candle (the
+                # timer-close may only fabricate-close candles that actually
+                # had ticks), and (b) if the stream was latched market_closed,
+                # unlatch it: the market just reopened (or the silence was a
+                # feed hiccup, not a close). The next tick/bootstrap builds a
+                # fresh candle from its own timestamp.
+                stream.candle_tick_count += len(new_ticks)
+                if stream.market_closed:
+                    stream.market_closed = False
+                    stream._empty_closes = 0
+                    print(f"[feed] MARKET-REOPENED: {stream.asset}@"
+                          f"{stream.period}s — real tick after closed latch")
                 # MS-LATENCY: start the end-to-end stopwatch for this batch —
                 # from tick arrival (dequeue) through every analysis stage to
                 # the completed broadcast. Broker timestamp of the newest tick
@@ -5179,7 +5458,10 @@ class QuotexFeed:
                     # subscription belongs to a STALE client (post-rebuild)
                     # and skip stop_candles_stream on the new client.
                     stream._sub_client_id = id(self._client)
-                    stream.last_real_tick_wall = time.time()
+                    # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): re-arm is a
+                    # subscription REQUEST, not a tick — keep the tick wall
+                    # honest so stale/global reconnect checks still work.
+                    stream._last_rearm_wall = time.time()
 
                     # Re-register the event-driven tick callback if the new
                     # client supports it (raw-WS backend). The old callback
@@ -5455,15 +5737,20 @@ class QuotexFeed:
                 continue
             age = now - s.last_real_tick_wall
             if age > _per_stream_stale:
-                print(f"[feed] per-stream stale: {s.asset}@{s.period}s "
-                      f"no tick for {age:.0f}s — re-arming subscription")
-                try:
-                    asyncio.create_task(self._rearm_stream(s))
-                    # Reset the timer so we don't re-arm again before this
-                    # re-arm has a chance to receive ticks.
-                    s.last_real_tick_wall = now
-                except Exception as exc:
-                    print(f"[feed] per-stream re-arm failed for {s.asset}: {exc}")
+                # WEEKEND-LIVE-CANDLE-FIX (2026-09-19): market-closed streams
+                # probe slowly (REARM_PROBE_SECS) instead of every pass, and
+                # the debounce no longer fakes last_real_tick_wall (that fake
+                # is what kept the global stale-reconnect blind all weekend).
+                _probe_gap = REARM_PROBE_SECS if s.market_closed else _per_stream_stale
+                if age > _probe_gap and now - s._last_rearm_wall > _probe_gap:
+                    print(f"[feed] per-stream stale: {s.asset}@{s.period}s "
+                          f"no tick for {age:.0f}s — re-arming subscription")
+                    try:
+                        asyncio.create_task(self._rearm_stream(s))
+                        # Debounce on the honest re-arm clock only.
+                        s._last_rearm_wall = now
+                    except Exception as exc:
+                        print(f"[feed] per-stream re-arm failed for {s.asset}: {exc}")
 
     async def _sweep_idle_streams(self) -> None:
         """Evict streams with no interested viewers for > IDLE_TIMEOUT.
@@ -5916,16 +6203,15 @@ class QuotexFeed:
                 # client rebuild. The global rebuild is only needed when the
                 # WS connection itself is dead — every single stream silent
                 # for 3 minutes is a strong signal of that.
-                # TODO (DEEP-AUDIT-2026-07-26 / F-01-44): GLOBAL_STALE_SECS=180s
-                # is unreachable in practice — per-stream watchdog re-arms
-                # streams at PER_STREAM_STALE_SECS=60s, so last_real_tick_wall
-                # is reset before 180s ever elapses. Either lower
-                # GLOBAL_STALE_SECS below 60 (and accept duplicate re-arming)
-                # OR remove the global stale check entirely (per-stream is
-                # sufficient). SKIPPED for now: removal is risky without
-                # validating per-stream covers every silent-drop case.
-                # FIX (DEEP-AUDIT-2026-07-26 / F-01-72): use module-level
-                # GLOBAL_STALE_SECS instead of reading env every iteration.
+                # RESOLVED (WEEKEND-LIVE-CANDLE-FIX 2026-09-19 / ex-TODO
+                # F-01-44): this check used to be unreachable because the
+                # per-stream re-arm faked last_real_tick_wall on every pass.
+                # The re-arm now debounces on its own honest clock
+                # (_last_rearm_wall), so last_real_tick_wall reflects REAL
+                # ticks again and this backstop can actually fire. Weekend
+                # safety: the 18 always-on OTC pairs tick 24/7, so a healthy
+                # connection keeps `newest` fresh and no rebuild storm can
+                # happen while real markets are closed.
                 if self._streams:
                     newest = max((s.last_real_tick_wall
                                  for s in self._streams.values()), default=0.0)

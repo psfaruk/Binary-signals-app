@@ -40,10 +40,9 @@
     "QX_NOISE_ATR_RATIO": "0.20",
     "QX_RETENTION_DAYS": "90",
 
-    "_comment_LEGACY_FLAGS": "Legacy suppression flags from the old every-candle engine. They are inert under CONFLUENCE-V1 (the old blender fallbacks were deleted) and kept only so unrelated deploy tooling does not break on unknown vars.",
+    "_comment_LEGACY_FLAGS": "Legacy suppression flags from the old every-candle engine. They are inert under CONFLUENCE-V1 (the old blender fallbacks were deleted) and kept only so unrelated deploy tooling does not break on unknown vars. FIX (DUPLICATE-KEY-2026-09-19): this block used to ALSO set QX_PAIR_HEALTH_GATE=0 — a JSON duplicate key that silently overrode the =1 above it, so the 8-consecutive-loss cooldown celebrated in the 2026-09-18 notes was OFF in production (last-wins in every JSON parser). The duplicate is removed; QX_PAIR_HEALTH_GATE stays 1.",
     "QX_ALLOW_WEAK_SIGNALS": "0",
     "QX_BREAKEVEN_GATE": "0",
-    "QX_PAIR_HEALTH_GATE": "0",
     "QX_TRAP_HOUR": "0",
     "QX_CHOP_GUARD": "0",
     "QX_WEAK_NEUTRAL": "0",

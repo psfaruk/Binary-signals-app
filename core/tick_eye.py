@@ -474,11 +474,16 @@ def eye_verdict(anatomy: dict) -> tuple[str, int, list[str]]:
     # 75-95). One signal alone ≈ 25, two aligned ≈ 45-50, everything
     # aligned clamps at 85. The eye never claims 100 — it is honest about
     # uncertainty (repo lesson: inflated confidence is worse than none).
+    # FIX (EYE-NET-STRENGTH-2026-09-19): strength was the winning side's
+    # RAW points — a 50-vs-45 contested candle still read as a strong 50,
+    # so the ≥45 module gate fired on near-tie evidence. Strength is now
+    # the NET margin (winning minus losing), floored at 10 so a genuine
+    # single strong signal (e.g. velocity 30 vs 0) still registers.
     if call_pts > put_pts:
         direction = "CALL"
-        strength = int(round(call_pts))
+        strength = int(round(call_pts - put_pts))
     else:
         direction = "PUT"
-        strength = int(round(put_pts))
+        strength = int(round(put_pts - call_pts))
     strength = max(10, min(85, strength))
     return direction, strength, reasons

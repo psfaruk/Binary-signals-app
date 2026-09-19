@@ -70,9 +70,13 @@ PUBLIC API:
   apply_history_gate(result, asset, period, category) -> result'
       Returns the prediction dict with either the SAME direction (with
       confidence adjustments + a result["history_gate"] audit block) or a
-      FADED direction (result["history_faded"] = True) when the ledger
-      measured this direction anti-predictive. NEVER NEUTRAL anymore —
-      every candle keeps a CALL/PUT.
+      SUPPRESSED NEUTRAL (result["_history_gate_suppressed"] = True) when
+      the ledger measured this pair/direction anti-predictive. FIX
+      (FADE-REMOVAL-2026-09-19): the interim FADE policy (invert
+      CALL↔PUT + history_faded marker) was removed — inversion at these
+      sample sizes is gambler's fallacy and it fed a fade-feedback loop
+      in the ledger. A measured-bad pair honestly carries NO signal;
+      feed.py bypasses the ML/fade-default for suppressed candles.
   gate_report() -> full per-pair report for /api/history-gate.
 
 DESIGN NOTES:
@@ -84,9 +88,8 @@ DESIGN NOTES:
   * Fail-open everywhere: any exception → signal allowed unchanged.
   * Env master switch QX_HISTORY_GATE (default "1" — ON per the
     2026-09-18 directive; set "0" to restore unconditional every-candle).
-  * The gate no longer suppresses to NEUTRAL: every candle keeps a
-    CALL/PUT, so every emitted row is graded and the ledger keeps
-    learning from the FADED direction's real outcomes.
+  * Suppressed candles are NOT graded (NEUTRAL is never graded) — the
+    ledger only learns from signals the system actually stood behind.
 """
 
 from __future__ import annotations
@@ -118,12 +121,11 @@ LEARNING_DAMP = float(os.environ.get("QX_HG_LEARNING_DAMP", "0.97"))
 LOOKBACK_N = int(os.environ.get("QX_HG_LOOKBACK_N", "200"))          # == retention rows per pair
 SHRINKAGE_K = float(os.environ.get("QX_HG_SHRINKAGE_K", "12"))       # Jeffreys prior strength
 
-# EVERY-CANDLE FADE POLICY (USER-2026-09-18): a direction the ledger has
-# MEASURED to be anti-predictive is FADED (inverted), never suppressed —
-# the candle always keeps a CALL/PUT and the measured inversion becomes
-# the edge instead of a hidden loss.
-FADE_CONF_PENALTY = int(os.environ.get("QX_HG_FADE_CONF_PENALTY", "8"))
-FADE_CONF_CAP = int(os.environ.get("QX_HG_FADE_CONF_CAP", "60"))
+# FADE-REMOVAL (2026-09-19): the interim EVERY-CANDLE FADE policy constants
+# (FADE_CONF_PENALTY / FADE_CONF_CAP) were removed with the fade itself —
+# inversion at these sample sizes is gambler's fallacy and it fed a
+# fade-feedback loop in the ledger. Suppression carries no confidence to
+# penalize; FLEET_PENALTY below remains for the soft cross-pair penalty.
 FLEET_PENALTY = float(os.environ.get("QX_HG_FLEET_PENALTY", "0.85"))
 
 # Cache TTL — the gate runs once per candle per pair (~1/min), the report
@@ -463,21 +465,27 @@ def apply_history_gate(result: dict, asset: str, period: int = 60,
             "put_wr": a["put"]["wr"], "put_n": a["put"]["n"],
         }
 
-        # 1 ── STREAK FADE FIRST (checked before learning mode): 6 straight
-        #     losses is p=1.6% under a fair coin — recent regime-change
-        #     evidence even on a brand-new pair (n = 6). FADED, not
-        #     suppressed: the candle still gets the direction history
-        #     supports.
-        fade_reason = None
+        # 1 ── STREAK: 6 straight losses is intraday regime-change evidence
+        #     even on a brand-new pair (n = 6). FIX (FADE-REMOVAL-2026-09-19):
+        #     this used to INVERT the direction (CALL→PUT) — gambler's
+        #     fallacy. A 6-loss streak says "this pair is currently
+        #     unpredictable", NOT "the opposite direction wins": at ~50%
+        #     base rate the flipped coin loses just as often, and every
+        #     faded outcome re-entered the ledger feeding more fades (a
+        #     feedback loop). The honest action is the documented one —
+        #     SUPPRESS (NEUTRAL, no signal this candle).
+        suppress_reason = None
+        suppress_mode = None
         if a["streak_losses"] >= STREAK_LIMIT:
-            fade_reason = (f"{a['streak_losses']} consecutive losses "
-                           f"(limit {STREAK_LIMIT}) — recent regime-change "
-                           f"evidence")
+            suppress_reason = (f"{a['streak_losses']} consecutive losses "
+                               f"(limit {STREAK_LIMIT}) — pair is currently "
+                               f"unpredictable; no signal is the honest call")
+            suppress_mode = "cooldown"
 
         # 2 ── LEARNING MODE: never judge a pair's QUALITY on < MIN_SAMPLES
-        #     signals (the streak fade above is regime evidence, not
+        #     signals (the streak suppression above is regime evidence, not
         #     quality evidence).
-        if not fade_reason and a["n"] < MIN_SAMPLES:
+        if not suppress_reason and a["n"] < MIN_SAMPLES:
             audit["mode"] = "learning"
             audit["verdict"] = "allow"
             audit["note"] = (f"{a['n']}/{MIN_SAMPLES} graded signals — "
@@ -488,72 +496,85 @@ def apply_history_gate(result: dict, asset: str, period: int = 60,
             result["history_gate"] = audit
             return result
 
-        # 3 ── PAIR FLOOR: shrunk WR below the hard floor.
-        if not fade_reason and a["shrunk_wr"] < PAIR_MIN_WR:
-            fade_reason = (f"shrunk WR {a['shrunk_wr']:.1f}% < "
-                           f"{PAIR_MIN_WR:.0f}% floor over last {a['n']} "
-                           f"signals (raw {a['wr']:.1f}%)")
+        # 3 ── PAIR FLOOR: shrunk WR below the hard floor → the PAIR is
+        #     measured bad. Suppress (documented behavior; the fade variant
+        #     assumed the inverse edge which the sample size cannot support).
+        if not suppress_reason and a["shrunk_wr"] < PAIR_MIN_WR:
+            suppress_reason = (f"shrunk WR {a['shrunk_wr']:.1f}% < "
+                               f"{PAIR_MIN_WR:.0f}% floor over last {a['n']} "
+                               f"signals (raw {a['wr']:.1f}%) — pair is "
+                               f"measured unprofitable")
+            suppress_mode = "suppressed-pair"
 
         # 4 ── DIRECTION FLOOR: this specific CALL/PUT side is broken.
         d = a[signal.lower()]
-        if not fade_reason and d["n"] >= DIR_MIN_SAMPLES:
+        if not suppress_reason and d["n"] >= DIR_MIN_SAMPLES:
             d_shrunk = shrunk_win_rate(d["wins"], d["n"])
             if d_shrunk < DIR_MIN_WR:
-                fade_reason = (f"{signal} side shrunk WR {d_shrunk:.1f}% < "
-                               f"{DIR_MIN_WR:.0f}% floor over {d['n']} "
-                               f"{signal} signals (raw {d['wr']:.1f}%)")
+                suppress_reason = (f"{signal} side shrunk WR {d_shrunk:.1f}% < "
+                                   f"{DIR_MIN_WR:.0f}% floor over {d['n']} "
+                                   f"{signal} signals (raw {d['wr']:.1f}%) — "
+                                   f"this direction is measured broken")
+                suppress_mode = "suppressed-direction"
             else:
                 audit["direction_shrunk_wr"] = d_shrunk
 
-        if fade_reason:
-            _opp = "PUT" if signal == "CALL" else "CALL"
-            _orig_conf = result.get("confidence") or 0
-            _new_conf = max(50, min(FADE_CONF_CAP,
-                                    int(round(_orig_conf - FADE_CONF_PENALTY))))
+        # 4b ── FLEET RELATIVE (suppress variant, USER-2026-09-18 "capital
+        #     flows to the verified-best pairs"): when enough siblings are
+        #     judged, a pair far below the fleet median is suppressed — not
+        #     merely penalized. Checked after the pair/direction floors so
+        #     the more specific reason wins when both apply.
+        if not suppress_reason:
+            try:
+                fleet = _fleet_stats(period)
+                if (fleet["median_shrunk_wr"] is not None
+                        and fleet["judged_pairs"] >= FLEET_MIN_SIBLINGS
+                        and a["shrunk_wr"] <
+                            fleet["median_shrunk_wr"] - FLEET_DROP_PP):
+                    suppress_reason = (
+                        f"shrunk WR {a['shrunk_wr']:.1f}% is "
+                        f"{fleet['median_shrunk_wr'] - a['shrunk_wr']:.1f}pp "
+                        f"below the fleet median "
+                        f"{fleet['median_shrunk_wr']:.1f}% across "
+                        f"{fleet['judged_pairs']} verified pairs — capital "
+                        f"flows to the verified-best pairs")
+                    suppress_mode = "below-fleet"
+                    audit["fleet_median_shrunk_wr"] = fleet["median_shrunk_wr"]
+            except Exception as _fleet_exc:
+                audit["fleet_error"] = f"{type(_fleet_exc).__name__}: {_fleet_exc}"
+
+        if suppress_reason:
+            # SUPPRESS, never invert: the published direction stays whatever
+            # the theory voted — we simply refuse to publish it. feed.py
+            # reads the marker and does NOT resurrect the candle via the ML
+            # model or the fade-default (a suppressed pair gets NO signal,
+            # which is exactly what "no reliable signal" should look like).
             reasons.append(
-                f"[HISTORY-GATE] {asset}: FADE {signal}→{_opp} — "
-                f"{fade_reason} (measured anti-predictive — the candle "
-                f"still gets a signal, in the direction history supports. "
-                f"confidence {_orig_conf}→{_new_conf})")
-            audit["mode"] = "faded"
-            audit["verdict"] = "fade"
-            audit["faded_from"] = signal
+                f"[HISTORY-GATE] {asset}: SUPPRESS {signal} — "
+                f"{suppress_reason} (confidence "
+                f"{result.get('confidence') or 0}→0, no signal this candle)")
+            audit["mode"] = suppress_mode
+            audit["verdict"] = "suppress"
+            audit["suppressed_direction"] = signal
             audit["reasons"] = reasons
-            result["signal"] = _opp
-            result["confidence"] = _new_conf
-            result["strength"] = "WEAK"
-            result["history_faded"] = True
+            result["signal"] = "NEUTRAL"
+            result["confidence"] = 0
+            result["raw_confidence"] = 0
+            result["strength"] = "NEUTRAL"
+            result["_history_gate_suppressed"] = True
             result.setdefault("reasons", []).extend(reasons)
             result["history_gate"] = audit
             return result
 
-        # 5 ── FLEET RELATIVE: cross-pair comparison (one pair's data
-        #     matched against the other pairs — "মিলিয়ে দেখবে"). A
-        #     fleet-laggard direction is NOT inverted by this gate — it
-        #     gets a confidence penalty (capital-quality signal).
+        # 5 ── FLEET RELATIVE audit trail: far-below-fleet pairs were already
+        #     suppressed in 4b above; here we only record the fleet median on
+        #     the audit so /api/history-gate can show the cross-pair context
+        #     ("এক পেয়ার এর ডেটা অন্য পেয়ার এর সাথে মিলিয়ে দেখবে") for
+        #     allowed pairs too. The old confidence-penalty branch is gone —
+        #     the laggard case never reaches this line anymore.
         try:
             fleet = _fleet_stats(period)
-            if (fleet["median_shrunk_wr"] is not None
-                    and fleet["judged_pairs"] >= FLEET_MIN_SIBLINGS
-                    and a["shrunk_wr"] <
-                        fleet["median_shrunk_wr"] - FLEET_DROP_PP):
-                audit["mode"] = "below-fleet"
-                audit["verdict"] = "penalize"
-                audit["fleet_median_shrunk_wr"] = fleet["median_shrunk_wr"]
-                _orig = result.get("confidence") or 0
-                result["confidence"] = max(1, int(round(_orig * FLEET_PENALTY)))
-                reasons.append(
-                    f"[HISTORY-GATE] {asset}: shrunk WR "
-                    f"{a['shrunk_wr']:.1f}% is "
-                    f"{fleet['median_shrunk_wr'] - a['shrunk_wr']:.1f}pp "
-                    f"below the fleet median {fleet['median_shrunk_wr']:.1f}% "
-                    f"across {fleet['judged_pairs']} verified pairs — "
-                    f"confidence penalty (confidence {_orig} → "
-                    f"{result['confidence']})")
-                audit["reasons"] = reasons
-                result.setdefault("reasons", []).extend(reasons)
-            else:
-                audit["fleet_median_shrunk_wr"] = fleet["median_shrunk_wr"]
+            audit["fleet_median_shrunk_wr"] = fleet["median_shrunk_wr"]
         except Exception as _fleet_exc:
             audit["fleet_error"] = f"{type(_fleet_exc).__name__}: {_fleet_exc}"
 

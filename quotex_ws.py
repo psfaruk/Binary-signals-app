@@ -920,8 +920,14 @@ class QuotexWSClient:
             print(f"[silent-except] quotex_ws.py:1510 {type(_e).__name__}: {_e}")
             pass
 
-    async def get_instruments(self) -> list:
-        """Return cached instruments, refreshing once if empty (retries 3x)."""
+    async def get_instruments(self, refresh: bool = False) -> list:
+        """Return cached instruments, refreshing once if empty (retries 3x).
+
+        FIX (WEEKEND-STALE-INSTRUMENTS-2026-09-19): ``refresh=True`` forces a
+        full re-request so periodic pair-list reloads see live open/closed
+        state instead of the Friday-evening snapshot."""
+        if refresh:
+            self._instruments = []
         for _attempt in range(3):
             if not self._instruments:
                 await self._fetch_instruments()
@@ -935,25 +941,25 @@ class QuotexWSClient:
         return list(self._instruments)
 
     def get_payout_by_asset(self, asset: str) -> int | None:
-        """Return the cached 1-minute payout % for an asset, or None."""
+        """Return the cached 1-minute payout % for an asset, or None.
+
+        FIX (PAYOUT-CROSS-VARIANT-2026-09-19): this used to fall back to the
+        asset's _otc twin (or vice versa) when the exact symbol wasn't in the
+        cache — so a CLOSED real pair on the weekend inherited the OTC
+        variant's payout, and the UI displayed a live-looking payout for a
+        dead market. Real and OTC instruments have different payout schedules;
+        never mix them. Exact symbol or None."""
         if not asset:
             return None
-        # Build candidate asset names: literal + _otc variant
-        candidates: list[str] = [asset]
-        if asset.endswith("_otc"):
-            candidates.append(asset[:-4])
-        else:
-            candidates.append(f"{asset}_otc")
 
-        # First: try the payout cache (populated by _cache_payout).
-        for cand in candidates:
-            if cand in self._payouts:
-                return self._payouts[cand]
+        # Exact-symbol payout cache (populated by _cache_payout).
+        if asset in self._payouts:
+            return self._payouts[asset]
 
         for inst in self._instruments:
             if not inst or len(inst) <= 9:
                 continue
-            if inst[1] not in candidates:
+            if inst[1] != asset:
                 continue
             try:
                 payout = int(inst[len(inst) - 9])

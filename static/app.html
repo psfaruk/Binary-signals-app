@@ -113,6 +113,18 @@
             <div class="topbar-center">
                 <!-- common.js populates #pair-select -->
                 <select id="pair-select" class="pair-select" aria-label="Select pair"></select>
+                <!-- TIMEFRAME SELECTOR (2026-09-19): the app hardcoded 60s
+                     candles everywhere with no UI to change it — the single
+                     most conspicuously missing dropdown. common.js wires
+                     #tf-select to re-subscribe with the chosen period. -->
+                <select id="tf-select" class="tf-select" aria-label="Timeframe" title="ক্যান্ডেল টাইমফ্রেম">
+                    <option value="60" selected>M1 ক্যান্ডেল</option>
+                    <option value="120">M2</option>
+                    <option value="180">M3</option>
+                    <option value="300">M5</option>
+                    <option value="900">M15</option>
+                    <option value="1800">M30</option>
+                </select>
                 <div class="price-display">
                     <span class="price-label">Price</span>
                     <div class="price-row">
@@ -287,13 +299,15 @@
                             </div>
                         </div>
 
-                        <!-- Module breakdown — common.js renderModuleBreakdown() writes to #theories-list -->
-                        <div class="module-panel">
+                        <!-- Module breakdown — common.js renderModuleBreakdown() writes to #theories-list.
+                             RIGHT-RAIL-REORG (2026-09-19): collapsible, collapsed by default —
+                             the 15-module list is the tallest block in the rail. -->
+                        <div class="module-panel collapsible-panel collapsed" id="module-panel">
                             <div class="panel-section-header">
                                 <h4>মডিউল ইঞ্জিন</h4>
-                                <button class="icon-btn-sm" id="theories-toggle" type="button" aria-expanded="true">▾</button>
+                                <button class="icon-btn-sm panel-toggle" id="theories-toggle" type="button" aria-expanded="false">▾</button>
                             </div>
-                            <div class="module-list open" id="theories-list">
+                            <div class="module-list" id="theories-list">
                                 <div class="module-row">সিগন্যালের অপেক্ষায়…</div>
                             </div>
                         </div>
@@ -304,10 +318,11 @@
                              ফ্যাক্টর কোন দিকে পয়েন্ট করছে তা সিগন্যালের
                              সাথেই দেখায়। common.js renderRoadmap() writes
                              to #roadmap-* elements. -->
-                        <div class="roadmap-panel" id="roadmap-section">
+                        <div class="roadmap-panel collapsible-panel collapsed" id="roadmap-section">
                             <div class="panel-section-header">
                                 <h4>সিগন্যাল রোডম্যাপ <span class="te-eye-icon" title="সিগন্যাল কেন এই দিকে — ছয় ফ্যাক্টরের হিসাব">🗺️</span></h4>
                                 <span class="roadmap-vote-chip" id="roadmap-vote">—</span>
+                                <button class="icon-btn-sm panel-toggle" type="button" aria-expanded="false">▾</button>
                             </div>
                             <div class="roadmap-summary" id="roadmap-summary">রোডম্যাপের অপেক্ষায়…</div>
                             <div class="roadmap-score-row">
@@ -320,9 +335,13 @@
                             </div>
                         </div>
 
-                        <!-- Market state — common.js writes to #ms-* elements -->
-                        <div class="market-state-panel">
-                            <h4>মার্কেট স্টেট</h4>
+                        <!-- Market state — common.js writes to #ms-* elements.
+                             RIGHT-RAIL-REORG (2026-09-19): collapsible, collapsed by default. -->
+                        <div class="market-state-panel collapsible-panel collapsed">
+                            <div class="panel-section-header">
+                                <h4>মার্কেট স্টেট</h4>
+                                <button class="icon-btn-sm panel-toggle" type="button" aria-expanded="false">▾</button>
+                            </div>
                             <div class="ms-grid">
                                 <div class="ms-item"><span class="ms-label">ট্রেন্ড</span><span class="ms-value" id="ms-trend">—</span></div>
                                 <div class="ms-item"><span class="ms-label">জোন</span><span class="ms-value" id="ms-zone">—</span></div>
@@ -344,9 +363,13 @@
                             </div>
                         </div>
 
-                        <!-- Microstructure — common.js writes to #bs-buy, #bs-sell -->
-                        <div class="micro-panel panel-section--micro">
-                            <h4>মাইক্রোস্ট্রাকচার</h4>
+                        <!-- Microstructure — common.js writes to #bs-buy, #bs-sell.
+                             RIGHT-RAIL-REORG (2026-09-19): collapsible, collapsed by default. -->
+                        <div class="micro-panel panel-section--micro collapsible-panel collapsed">
+                            <div class="panel-section-header">
+                                <h4>মাইক্রোস্ট্রাকচার</h4>
+                                <button class="icon-btn-sm panel-toggle" type="button" aria-expanded="false">▾</button>
+                            </div>
                             <div class="micro-stats">
                                 <div class="micro-row">
                                     <span class="micro-label">Buyers</span>
@@ -362,10 +385,11 @@
                         <!-- TICK-EYE (2026-09-16): live "human eye" view of the
                              running candle — মানুষের চোখের মতো টিক পড়া.
                              common.js renderTickEye() writes to #te-* elements. -->
-                        <div class="tick-eye-panel" id="tick-eye-section">
+                        <div class="tick-eye-panel collapsible-panel collapsed" id="tick-eye-section">
                             <div class="panel-section-header">
                                 <h4>টিক আই <span class="te-eye-icon" title="মানুষের চোখের মতো লাইভ টিক বিশ্লেষণ">👁</span></h4>
                                 <span class="te-phase-chip" id="te-phase">—</span>
+                                <button class="icon-btn-sm panel-toggle" type="button" aria-expanded="false">▾</button>
                             </div>
                             <div class="te-verdict-row">
                                 <span class="te-verdict-label">চোখে যা দেখা যাচ্ছে</span>
@@ -387,10 +411,11 @@
                         <!-- COORDINATION-MS (2026-09-16): রানিং ক্যান্ডেল
                              এনালাইসিস × মডিউল সিগন্যাল × মডেল ইঞ্জিন — প্রতি
                              টিকে মিলিয়ে এক কোঅর্ডিনেশন সিগন্যাল -->
-                        <div class="coord-panel" id="coord-section">
+                        <div class="coord-panel collapsible-panel collapsed" id="coord-section">
                             <div class="panel-section-header">
                                 <h4>কোঅর্ডিনেশন সিগন্যাল <span class="te-eye-icon" title="রানিং ক্যান্ডেল এনালাইসিস + মডিউল + মডেল ইঞ্জিন — প্রতি টিকে মিলিয়ে">🧠</span></h4>
                                 <span class="coord-state-chip" id="coord-state">—</span>
+                                <button class="icon-btn-sm panel-toggle" type="button" aria-expanded="false">▾</button>
                             </div>
                             <div class="coord-summary-row">
                                 <span class="coord-summary" id="coord-summary">টিকের অপেক্ষায়…</span>
@@ -425,8 +450,9 @@
                             </div>
                         </div>
 
-                        <!-- Share signal table — common.js owns this -->
-                        <div class="share-panel" id="share-signal-section">
+                        <!-- Share signal table — common.js owns this.
+                             RIGHT-RAIL-REORG (2026-09-19): collapsed by default. -->
+                        <div class="share-panel collapsible-panel collapsed" id="share-signal-section">
                             <div class="share-header share-signal-header">
                                 <h4>শেয়ার সিগন্যাল</h4>
                                 <div class="share-actions">
@@ -483,6 +509,10 @@
                             <button class="wr-chip active" data-mkt="all" type="button">সব</button>
                             <button class="wr-chip" data-mkt="otc" type="button">OTC</button>
                             <button class="wr-chip" data-mkt="real" type="button">Real</button>
+                            <!-- FIX (2026-09-19): alltime_otc is a first-class market
+                                 category everywhere else — the result filter pretended
+                                 it didn't exist. -->
+                            <button class="wr-chip" data-mkt="alltime_otc" type="button">All-OTC</button>
                         </div>
                         <div class="wr-group" id="wr-window-filter">
                             <span class="wr-group-label">সময়</span>

@@ -60,9 +60,14 @@ def _rsi(closes, period=14):
 
 
 def _macd(closes):
-    """Compute MACD (12, 26, 9) and return (macd, signal, histogram)."""
+    """Compute MACD (12, 26, 9).
+
+    FIX (TUPLE-ARITY-2026-09-19): the insufficient-data paths returned a
+    3-tuple while the success path returns a 4-tuple — any refactor that
+    unpacked uniformly would crash. All paths now return the same arity.
+    """
     if len(closes) < 26:
-        return None, None, None
+        return None, None, None, None
 
     def _ema_series(values, period):
         k = 2.0 / (period + 1)
@@ -79,7 +84,7 @@ def _macd(closes):
     macd_line = [ema12[i] - ema26[i] for i in range(-min_len, 0)]
 
     if len(macd_line) < 9:
-        return None, None, None
+        return None, None, None, None
 
     signal = _ema_series(macd_line, 9)
 

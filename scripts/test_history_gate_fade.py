@@ -1,8 +1,13 @@
-"""Regression tests for the history-gate FADE policy (every-candle mode).
+"""Regression tests for the history-gate SUPPRESS policy (2026-09-19).
 
-The gate no longer suppresses signals to NEUTRAL — a direction the ledger
-has MEASURED anti-predictive is FADED (inverted) so the candle always
-keeps a CALL/PUT. Run:  py scripts/test_history_gate_fade.py
+FIX (FADE-REMOVAL-2026-09-19): the gate no longer INVERTS measured-bad
+directions (CALL↔PUT fade — gambler's fallacy at these sample sizes, and
+it fed a fade-feedback loop in the ledger). A direction/pair the ledger
+has MEASURED anti-predictive is now SUPPRESSED to NEUTRAL with the
+`_history_gate_suppressed` marker; feed.py bypasses the ML model and the
+fade-default for suppressed candles, so a measured-bad pair honestly
+carries NO signal. Run:  py scripts/test_history_gate_fade.py
+(filename kept for history; the policy is suppress, not fade).
 """
 import os
 import sqlite3
@@ -87,20 +92,24 @@ def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
 
 
-# ── Case 1: pair floor — shrunk WR 41.7% < 46% → FADE CALL→PUT
+# ── Case 1: pair floor — shrunk WR 41.7% < 46% → SUPPRESS (no inversion)
+#     (rows end with wrongs → the streak cooldown fires first; either mode
+#     is a valid suppression — what matters is NEVER inverting the signal.)
 add("EURUSD_otc", 30, 10)
 r = hg.apply_history_gate(base_result(), "EURUSD_otc", 60)
-check("pair-floor → faded CALL→PUT", r["signal"] == "PUT"
-      and r.get("history_faded") is True)
-check("faded confidence capped ≤60 and ≥50", 50 <= r["confidence"] <= 60)
-check("fade audit trail present", r["history_gate"]["verdict"] == "fade"
-      and r["history_gate"]["faded_from"] == "CALL")
+check("pair-floor/streak → suppressed to NEUTRAL (never inverted)",
+      r["signal"] == "NEUTRAL" and r.get("_history_gate_suppressed") is True)
+check("suppressed confidence zeroed", r["confidence"] == 0)
+check("suppress audit trail present",
+      r["history_gate"]["verdict"] == "suppress"
+      and r["history_gate"]["mode"] in
+      ("cooldown", "suppressed-pair"))
 
-# ── Case 2: healthy pair — no fade, confidence untouched
+# ── Case 2: healthy pair — no suppression, confidence untouched
 add("GBPUSD_otc", 30, 20, call_split=(20, 14))
 r = hg.apply_history_gate(base_result(), "GBPUSD_otc", 60)
 check("healthy pair → direction untouched", r["signal"] == "CALL"
-      and not r.get("history_faded") and r["confidence"] == 70)
+      and not r.get("_history_gate_suppressed") and r["confidence"] == 70)
 
 # ── Case 3: learning mode (n < 20) — damped confidence, no judgement
 add("USDBDT_otc", 5, 3)
@@ -109,19 +118,33 @@ check("learning mode → allow + conf damped",
       r["signal"] == "CALL" and r["confidence"] == 68
       and r["history_gate"]["mode"] == "learning")
 
-# ── Case 4: 6-loss streak → faded (regime-change evidence)
+# ── Case 4: 6-loss streak → suppressed (regime-change evidence, NOT flipped)
 add("USDZAR_otc", 20, 14, wrong_last=6)
 r = hg.apply_history_gate(base_result("PUT", 65), "USDZAR_otc", 60)
-check("loss streak → faded PUT→CALL", r["signal"] == "CALL"
-      and r.get("history_faded") is True)
+check("loss streak → suppressed to NEUTRAL (never flipped)",
+      r["signal"] == "NEUTRAL" and r.get("_history_gate_suppressed") is True
+      and r["history_gate"]["mode"] == "cooldown")
 
 # ── Case 5: direction floor — CALL side broken (37% shrunk) while the
-#     pair overall passes the 46% floor → fade CALL→PUT
+#     pair overall passes the 46% floor → suppress the CALL side only
 add("AUDCAD_otc", 20, 9, call_split=(15, 4))
 r = hg.apply_history_gate(base_result(), "AUDCAD_otc", 60)
-check("direction floor → faded CALL→PUT (pair floor passes)",
-      r["signal"] == "PUT" and r.get("history_faded") is True
+check("direction floor → CALL suppressed (pair floor passes)",
+      r["signal"] == "NEUTRAL" and r.get("_history_gate_suppressed") is True
+      and r["history_gate"]["mode"] == "suppressed-direction"
       and "CALL side" in str(r["reasons"]))
+# The OTHER direction on the same pair must not be blocked by the
+# DIRECTION floor (PUT side here is 5/5). NOTE: with this synthetic fleet
+# (GBPUSD 61.9%, USDZAR 62.5% medians) the pair may still be suppressed
+# by the separate below-fleet rule — that is correct behavior, not a
+# direction-floor leak; verify_history_gate.py test 7 covers the fleet
+# rule with fleet-neutral data.
+hg.invalidate_cache()
+r_put = hg.apply_history_gate(base_result("PUT", 70), "AUDCAD_otc", 60)
+check("direction floor did NOT block the opposite side",
+      r_put.get("history_gate", {}).get("mode") != "suppressed-direction"
+      and (r_put["signal"] == "PUT"
+           or r_put.get("history_gate", {}).get("mode") == "below-fleet"))
 
 conn.close()
 failed = [n for n, ok in checks if not ok]

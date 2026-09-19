@@ -204,10 +204,16 @@ def analyze(candles, ctx: MarketContext) -> list:
             _st("RANGE", 1, -1, "Price at top of range - fade zone")
         elif _zone == "SUPPORT":
             _st("RANGE", 1, +1, "Price at bottom of range - fade zone")
-    if _streak <= 1 and len(candles) >= 4:
+    if _streak <= 1 and len(candles) >= 4 and not is_doji:
+        # FIX (DOJI-CONSISTENCY-2026-09-19): the zigzag used `>=` (doji
+        # counted as bullish) while the current candle's is_bull uses `>`
+        # (doji = not bull) — a doji-ending alternation emitted a RANGE
+        # vote of -_cand_dir = +1, a structural CALL bias on flat candles.
+        # Now: strict compare everywhere, and a doji current candle never
+        # votes (no direction to fade from).
         _zz_len = 1
         for _i in range(len(candles) - 2, max(len(candles) - 8, 0), -1):
-            _d = (candles[_i]["close"] >= candles[_i]["open"])
+            _d = (candles[_i]["close"] > candles[_i]["open"])
             if _d != is_bull:
                 _zz_len += 1
             else:

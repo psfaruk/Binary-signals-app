@@ -13,9 +13,14 @@ __all__ = ["predict", "otc", "real", "category_of"]
 
 
 def category_of(asset: str) -> str:
-    """Return the category for an asset name ('EURUSD_otc' -> 'otc', 'EURUSD' -> 'real')."""
+    """Return the category for an asset name ('EURUSD_otc' -> 'otc', 'EURUSD' -> 'real').
+
+    FIX (2026-09-19): endswith("otc") matched ANY asset whose symbol happens
+    to end in those letters; the broker convention (and every other check in
+    feed.py / server.py) is the explicit "_otc" suffix. Align the router.
+    """
     asset_lower = (asset or "").lower()
-    if asset_lower.endswith("otc"):
+    if asset_lower.endswith("_otc"):
         return "otc"
     return "real"
 
@@ -165,16 +170,20 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     result = copy.deepcopy(result)
     result["category"] = category
 
-    # ── SIGNAL-HISTORY-GATE (USER-2026-09-18, FADE POLICY) ───────────────
+    # ── SIGNAL-HISTORY-GATE (USER-2026-09-18; SUPPRESS POLICY 2026-09-19) ──
     # "যেকোন সিগন্যাল প্রধান করার পূর্বে, ওই সিগন্যাল হিস্টোরি গুলো বা
     #  অন্যন্য ডেটা গুলো যদি এনালাইসিস করে তারপর সিগন্যাল প্রোভাইড করবে।"
     # Before the signal is provided, analyse this pair's graded signal
     # history (the 200-row ledger kept by core/retention.py) + the
-    # cross-pair fleet data. Measured anti-predictive directions (loss
-    # streak / shrunk-WR floor / direction floor) are FADED to the
-    # opposite direction (result["history_faded"] = True) — the candle
-    # ALWAYS keeps a CALL/PUT, and the measured inversion becomes the
-    # edge. Fleet-laggards get a confidence penalty. Verified-good pairs
+    # cross-pair fleet data. FIX (FADE-REMOVAL-2026-09-19): measured-bad
+    # pairs/directions (loss streak / shrunk-WR floor / direction floor)
+    # are SUPPRESSED to NEUTRAL (result["_history_gate_suppressed"]) —
+    # NOT inverted. The old FADE flipped CALL↔PUT on a 6-loss streak,
+    # which is gambler's fallacy at these sample sizes and created a
+    # fade-feedback loop in the ledger. A suppressed candle carries NO
+    # signal (feed.py bypasses the ML/fade-default for it) — honest
+    # abstention on pairs the data says are currently unpredictable.
+    # Fleet-laggards get a confidence penalty. Verified-good pairs
     # get a small boost. Default ON (QX_HISTORY_GATE=1); fails open.
     try:
         if (os.environ.get("QX_HISTORY_GATE", "1") == "1"

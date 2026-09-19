@@ -125,24 +125,48 @@ def analyze(candles, ctx: MarketContext) -> list:
                     break
 
     # SIGNAL 7: Trendline Breakout
-    # FIX (TRENDLINE-FIRE-2026-09-07, HIGH): the breakout conditions compared
-    # `close` against max(highs[-2], highs[-1]) / min(lows[-2], lows[-1]) —
-    # but highs[-1]/lows[-1] ARE the current candle's own high/low, and an
-    # OHLC invariant (close ≤ high, close ≥ low) makes both conditions
-    # IMPOSSIBLE (verified: 0/200k random candles). The branch could never
-    # fire, so key_level lost its only breakout-following vote. Now the
-    # close is compared against the PRIOR candles' extremes only
-    # (highs[:-1] / lows[:-1] — the descending/ascending channel the market
-    # actually has to escape).
+    # FIX (TRENDLINE-FIRE-2026-09-19): the previous two attempts compared the
+    # close against prior-candle extremes (max(highs[:-1]) etc.) while ALSO
+    # requiring a monotonic sequence — algebraically impossible (proven
+    # 0/200k random candles: a descending sequence's max prior high is
+    # highs[0], and close ≤ the last candle's own high < highs[0]). The
+    # branch NEVER fired, so key_level had no breakout-following vote.
+    # Correct geometry: fit a least-squares line through the PRIOR candles'
+    # highs (excluding the current candle), require a genuinely descending
+    # slope, project the line to the current bar, and call a breakout only
+    # when the close escapes ABOVE the projection by a small ATR buffer.
+    # Mirror logic for ascending lows → PUT breakdown.
     if len(candles) >= 12 and atr > 0:
         window = candles[-12:]
-        highs = [c["high"] for c in window[-TRENDLINE_WINDOW:]]
-        lows = [c["low"] for c in window[-TRENDLINE_WINDOW:]]
+        prior = window[:-1][-TRENDLINE_WINDOW:]
+        if len(prior) >= 6:
+            highs = [c["high"] for c in prior]
+            lows = [c["low"] for c in prior]
+            n = len(prior)
+            xs = list(range(n))
+            x_mean = sum(xs) / n
+            # Least-squares slope/intercept helper.
+            def _fit(ys):
+                y_mean = sum(ys) / n
+                denom = sum((x - x_mean) ** 2 for x in xs)
+                if denom == 0:
+                    return 0.0, y_mean
+                slope = sum((x - x_mean) * (y - y_mean)
+                            for x, y in zip(xs, ys)) / denom
+                intercept = y_mean - slope * x_mean
+                return slope, intercept
 
-        _tol = atr * 0.05
-        if highs[0] > highs[-1] and all(highs[i] >= highs[i+1] - _tol
-                                        for i in range(len(highs)-1)):
-            if close > max(highs[:-1]):
+            h_slope, h_inter = _fit(highs)
+            l_slope, l_inter = _fit(lows)
+            _buf = atr * 0.05
+            # Project each line to the CURRENT bar index (n = one past the
+            # last prior candle).
+            h_proj = h_inter + h_slope * n
+            l_proj = l_inter + l_slope * n
+
+            # CALL: descending resistance line broken upward.
+            if (h_slope < 0 and highs[0] > highs[-1]
+                    and close > h_proj + _buf):
                 _sig_type = "REVERSAL"
                 _score, _conf = 2, 56
                 if is_trending and trend_strength > 0.5:
@@ -154,10 +178,12 @@ def analyze(candles, ctx: MarketContext) -> list:
                 results.append(ModuleResult(
                     module_name="key_level", direction="CALL", score=_score, confidence=_conf,
                     signal_type=_sig_type, reliability="LEVEL", group="TRENDLINE",
-                    reasons=[f"Trendline breakout above descending highs -> CALL ({_sig_type})"]))
-        elif lows[0] < lows[-1] and all(lows[i] <= lows[i+1] + _tol
-                                        for i in range(len(lows)-1)):
-            if close < min(lows[:-1]):
+                    reasons=[f"Trendline breakout above descending highs "
+                             f"(projection {h_proj:.5g}, close {close:.5g}) "
+                             f"-> CALL ({_sig_type})"]))
+            # PUT: ascending support line broken downward.
+            elif (l_slope > 0 and lows[0] < lows[-1]
+                    and close < l_proj - _buf):
                 _sig_type = "REVERSAL"
                 _score, _conf = 2, 56
                 if is_trending and trend_strength > 0.5:
@@ -169,6 +195,8 @@ def analyze(candles, ctx: MarketContext) -> list:
                 results.append(ModuleResult(
                     module_name="key_level", direction="PUT", score=_score, confidence=_conf,
                     signal_type=_sig_type, reliability="LEVEL", group="TRENDLINE",
-                    reasons=[f"Trendline breakdown below ascending lows -> PUT ({_sig_type})"]))
+                    reasons=[f"Trendline breakdown below ascending lows "
+                             f"(projection {l_proj:.5g}, close {close:.5g}) "
+                             f"-> PUT ({_sig_type})"]))
 
     return results
