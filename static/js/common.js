@@ -3348,7 +3348,10 @@ function _predSlotHTML(labelBn, labelEn, slot){
     } else if(slot.reason && /guard_suspended/.test(slot.reason)){
       why = 'লাইভ জিৎ-হার break-even-এর নিচে — এই পেয়ারের সিগন্যাল সাময়িক বন্ধ';
     } else if(slot.reason && /model_not_verified/.test(slot.reason)){
-      why = 'মডেল এখনো প্রোভিশনাল — verified না হওয়া পর্যন্ত সিগন্যাল নেই';
+      // MODEL-STATUS-CLARITY (USER-2026-09-19): "মডেল এখনো প্রোভিশনাল" পড়ে
+      // ইউজার ভেবেছিলেন মডেল ট্রেইনই হয়নি। আসল কথাটা বলা হোক — মডেল
+      // চলছে, শুধু ভেরিফিকেশন চলছে।
+      why = 'মডেল চলছে ✓ — তবে ভেরিফিকেশন চলছে (প্রোভিশনাল)। লাইভ রেজাল্টে নিজের এজ প্রমাণ না হওয়া পর্যন্ত নিরাপত্তার জন্য সিগন্যাল দেবে না';
     } else if(slot.reason && /prob_below_band|coin_flip/.test(slot.reason)){
       why = 'প্রোবাবিলিটি ব্যান্ডের ভিতরে (' + pct + ') — সিগন্যাল নেই';
     } else if(slot.reason && /no_second_voice/.test(slot.reason)){
@@ -3468,7 +3471,22 @@ function renderPredictionCard(data){
   // FAST-TRAIN (2026-09-12): provisional models RUN, but the card must say
   // honestly that their edge is not proven yet (PART 29 transparency).
   const provChip = data.model_status === 'provisional'
-    ? '<span class="pred-model-chip provisional" title="মডেল চলছে, তবে unseen ডেটায় এখনো baseline ছাড়িনি — ফলাফল ট্র্যাক হচ্ছে">প্রোভিশনাল</span>'
+    ? '<span class="pred-model-chip provisional" title="মডেল চলছে ও প্রতি মিনিটে প্রেডিকশন দিচ্ছে — তবে unseen ডেটায় baseline ছাড়ানো এখনো প্রমাণ হয়নি। প্রমাণ হলেই সিগন্যাল চালু হবে">প্রোভিশনাল</span>'
+    : '';
+  // MODEL-STATUS-STRIP (USER-2026-09-19 "মডেল কি চলে?"): the card mixes three
+  // voices (classic box / ML NO TRADE / ঐতিহাসিক প্যাটার্ন মিল) and প্রোভিশনাল
+  // was being read as "not trained". One glance line now states the ML
+  // engine's actual state in plain Bengali — running, and why silent.
+  const mstat = data.model_version
+    ? '<div class="pred-engine-status">' +
+        '<span class="pes-dot pes-on" aria-hidden="true"></span><b>মডেল চলছে</b>' +
+        '<span class="pes-sep">·</span>প্রতি মিনিটে T+1/T+2 প্রেডিকশন ফ্রিজ ও গ্রেড হচ্ছে' +
+        (data.model_status === 'provisional'
+          ? '<span class="pes-sep">·</span><b class="pes-wait">ভেরিফায়েড নয় — এজ প্রমাণ হওয়া পর্যন্ত সিগন্যাল বন্ধ (নিরাপত্তা)</b>'
+          : data.model_status === 'verified'
+            ? '<span class="pes-sep">·</span><b class="pes-ok">ভেরিফায়েড ✓</b>'
+            : '') +
+      '</div>'
     : '';
   _predCardSignalTime = Number(data.signal_time) || 0;
   let body;
@@ -3557,15 +3575,21 @@ function renderPredictionCard(data){
       ? '<div class="pred-sub pred-chart-hint">👻 চার্টে ' + drawnN +
         'টি ফিউচার ক্যান্ডেল (T+1/T+2) হালকা রঙে আঁকা হচ্ছে — সম্ভাব্যতা যত বেশি, বডি তত বড়</div>'
       : '';
-    body = _predSlotHTML('পরবর্তী ক্যান্ডেল', 'NEXT CANDLE', t1) +
+    body = mstat +
+           _predSlotHTML('পরবর্তী ক্যান্ডেল', 'NEXT CANDLE', t1) +
            _predSlotHTML('দ্বিতীয় ক্যান্ডেল', '2ND CANDLE', t2) +
            chartHint +
            _unifiedStripHTML(t1, t2) +
            _histStripHTML(t1, t2) +
            '<div class="pred-footer">' +
-           '<span class="pred-quality">সিগন্যাল কোয়ালিটি: ' +
+           /* MODEL-STATUS-CLARITY (USER-2026-09-19): "সিগন্যাল কোয়ালিটি" ছিল
+              শুধু নামেই ambiguous — উপরের ক্লাসিক বক্স তখন CALL দেখাচ্ছে,
+              নিচে এই লাইন NO SIGNAL — দুই আলাদা সিস্টেম। "ML" উপসর্গটা
+              দিলে পরিষ্কার যে এই রায় মডেল কার্ডের। লক → সিলড: এটা ব্লক
+              নয়, সৎ গ্রেডিংয়ের সিল। */
+           '<span class="pred-quality">ML সিগন্যাল কোয়ালিটি: ' +
              '<b class="' + qClass + '">' + esc(qualityTxt) + '</b></span>' +
-           '<span class="pred-lock">🔒 প্রেডিকশন লক: ' +
+           '<span class="pred-lock" title="ক্যান্ডেল বন্ধ হওয়ার মুহূর্তে প্রেডিকশন সিল হয়ে যায় — পরে আর বদলানো যায় না, তাই রেজাল্ট সৎ থাকে">🔒 প্রেডিকশন সিলড: ' +
              (data.locked ? 'হ্যাঁ' : 'না') + '</span>' +
            '</div>' +
            '<div class="pred-countdown" id="pred-countdown"></div>' +

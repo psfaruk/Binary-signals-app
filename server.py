@@ -3167,6 +3167,13 @@ async def get_prediction_card(asset: str):
             "model_version": r["model_version"],
             "actual_result": r["actual_result"],
             "win_loss": r["win_loss"],
+            # MODEL-STATUS-CLARITY (USER-2026-09-19): the frozen reason string
+            # (edge_guard:model_not_verified / guard_suspended / …) was NOT
+            # returned by the REST card — a page reload replaced the honest
+            # "কেন NO TRADE" explanation with the generic অবিশ্বাস্য মাত্রা
+            # line. The WS slots carry reason (predictor.py PART 16 freeze);
+            # the REST rows must carry it too so the explanation survives.
+            "reason": r.get("reason") or "",
             "candle": candle,
             "strategy": strat,
             "strategy_agree": strat.get("agrees_with_ml") if strat else None,
