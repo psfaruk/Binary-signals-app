@@ -324,6 +324,47 @@
                             </div>
                         </div>
 
+                        <!-- ── GENERATOR FINGERPRINT (Task 12-d, 2026-09-29) ────
+                             USER: "Quotex ক্যান্ডেল কি কোনো সিস্টেমে তৈরি?
+                             pre-generate? নির্দিষ্ট লাইব্রেরি?" — core/
+                             otc_fingerprint.py's live verdict for the feed
+                             the app is ACTUALLY connected to (demo generator
+                             now; real Quotex when a token is set). Follows
+                             the selected pair; common.js renderFingerprint()
+                             polls /api/otc-fingerprint/{asset} every 20s and
+                             writes here (XSS-safe: textContent only). -->
+                        <div class="fingerprint-panel" id="fingerprint-panel">
+                            <div class="lp-header">
+                                <h4 class="lp-title">🔍 জেনারেটর ফিঙ্গারপ্রিন্ট</h4>
+                                <span class="fp-asset-chip" id="fp-asset" title="বর্তমানে নির্বাচিত পেয়ারের ফিঙ্গারপ্রিন্ট">—</span>
+                            </div>
+                            <div class="fp-subtitle">এই ফিড কোন সিস্টেমে তৈরি? — স্বয়ংক্রিয় চিহ্নিতকরণ</div>
+                            <div class="fp-demo-banner" id="fp-demo-banner" style="display:none">
+                                ⚠ ডেমো ফিড বিশ্লেষণ — আসল Quotex টোকেন দিলে আসল ফিডের রায় দেবে
+                            </div>
+                            <div class="fp-verdict-row">
+                                <span class="fp-verdict" id="fp-verdict">—</span>
+                                <span class="fp-verdict-meta" id="fp-verdict-meta"></span>
+                            </div>
+                            <div class="fp-pregen-row">
+                                <span class="fp-pregen-label">ক্যান্ডেল কি pre-generate / নির্দিষ্ট লাইব্রেরি?</span>
+                                <span class="fp-pregen" id="fp-pregen">—</span>
+                            </div>
+                            <div class="fp-meter-row">
+                                <span class="fp-meter-label">প্রেডিক্টেবিলিটি স্কোর</span>
+                                <div class="fp-meter" id="fp-meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-label="প্রেডিক্টেবিলিটি স্কোর">
+                                    <div class="fp-meter-fill" id="fp-meter-fill" style="width:0%"></div>
+                                </div>
+                                <span class="fp-meter-val" id="fp-meter-val">—</span>
+                            </div>
+                            <div class="fp-evidence" id="fp-evidence">
+                                <span class="fp-ev-note">ফিঙ্গারপ্রিন্টের অপেক্ষায়…</span>
+                            </div>
+                            <ul class="fp-notes" id="fp-notes" style="display:none"></ul>
+                            <div class="fp-cross-row" id="fp-cross-row" style="display:none"></div>
+                            <div class="fp-footer">প্রতি ২০ সেকেন্ডে রিফ্রেশ · সম্পূর্ণ বিশ্লেষণ: docs/OTC_GENERATOR_ANALYSIS.md</div>
+                        </div>
+
                         <div class="live-pred-panel" id="live-pred-panel">
                             <div class="lp-header">
                                 <h4 class="lp-title">রানিং ক্যান্ডেল প্রেডিকশন</h4>

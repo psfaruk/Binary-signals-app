@@ -102,6 +102,21 @@ except Exception as _nc_imp_exc:                  # noqa: E402
     _nc_get_engine = None
     print(f"[feed] next_candle unavailable ({_nc_imp_exc}) — "
           f"legacy signal chain active")
+# OTC-FINGERPRINT (Task 12-b, 2026-09-29): generator-fingerprint engine —
+# "এই ফিডটা কোন সিস্টেমে তৈরি?" (core/otc_fingerprint.py, validated 4/4
+# against known ground-truth feeds in Task 12-a).  CSE keeps its engine
+# registry inside core/next_candle.py (get_engine); otc_fingerprint has no
+# such accessor, so ONE module-level singleton is created HERE — feed.py
+# ingests into it (ticks, closed candles, backfilled history) and
+# server.py reads it for /api/otc-fingerprint.  It auto-analyzes whatever
+# feed the app is connected to (real Quotex OTC, real market, or demo).
+try:                                               # noqa: E402
+    from core.otc_fingerprint import FingerprintEngine as _FingerprintEngine
+    _fp_engine = _FingerprintEngine()
+except Exception as _fp_imp_exc:                   # noqa: E402
+    _fp_engine = None
+    print(f"[feed] otc_fingerprint unavailable ({_fp_imp_exc}) — "
+          f"feed fingerprinting off")
 import os      # noqa: E402
 import re      # noqa: E402
 import time    # noqa: E402
@@ -610,6 +625,66 @@ def _normalise(raw) -> list[dict]:
         except (TypeError, ValueError):
             continue
     return sorted(seen.values(), key=lambda x: x["time"])
+
+
+# ── OTC-FINGERPRINT history seeding (Task 12-b, 2026-09-29) ─────────────
+# The fingerprint engine APPENDS candles (it has no ingest_replace — see
+# the note in _nc_deep_seed), so history seeds must be forward-only and
+# deduped by the last ingested candle time: an out-of-order or duplicate
+# candle would corrupt the VR/Hurst/close-series axes.  Two seed sources
+# exist per asset and can land in either order: the base broker history
+# (~200 candles, loaded inline by _start_stream) and the CSE deep window
+# (QX_NC_SEED_CANDLES, default 3000, fetched by the _nc_deep_seed
+# background task).  The deep window is a SUPERSET of the base window, so
+# while the deep seed is in flight the base rows are stashed instead of
+# ingested; the stash is replayed only if the deep fetch fails (dedup
+# makes the replay a no-op when it succeeded).  All ingestion happens on
+# the event-loop thread (no to_thread) → these plain module-level
+# structures need no locks.
+_fp_deep_pending: set = set()        # assets whose deep seed is in flight
+_fp_base_rows: dict = {}             # base-seed rows stashed during flight
+
+
+def _fp_seed_history(asset: str, rows, deep: bool = False) -> None:
+    """FINGERPRINT (12-b): bulk-seed closed-candle history for `asset`.
+
+    Broker rows ({"time","open","high","low","close"} — demo + pyquotex
+    convention) are normalized to the engine's {"t","o","h","l","c"}
+    contract, then only rows NEWER than the last ingested candle are
+    ingested.  History carries no tick data → candles only (tick axes
+    accumulate live from the stream loop).
+    """
+    if _fp_engine is None or not rows:
+        return
+    try:
+        if not deep and asset in _fp_deep_pending:
+            _fp_base_rows[asset] = list(rows)
+            return
+        norm = []
+        for c in rows:
+            try:
+                t = float(c.get("t", c.get("time")) or 0)
+                if t <= 0:
+                    continue
+                norm.append({
+                    "t": t,
+                    "o": float(c.get("o", c.get("open"))),
+                    "h": float(c.get("h", c.get("high"))),
+                    "l": float(c.get("l", c.get("low"))),
+                    "c": float(c.get("c", c.get("close"))),
+                })
+            except (TypeError, ValueError):
+                continue
+        if not norm:
+            return
+        fp = _fp_engine.fp(asset)
+        last_t = fp.candles[-1]["t"] if fp.candles else 0.0
+        fresh = [r for r in norm if r["t"] > last_t]
+        if fresh:
+            _fp_engine.ingest_candles(asset, fresh)
+    except Exception as _fp_seed_exc:
+        print(f"[feed] fingerprint seed failed for {asset}: "
+              f"{type(_fp_seed_exc).__name__}: {_fp_seed_exc}")
 
 
 def _drop_price_contamination(candles: list[dict]) -> list[dict]:
@@ -4041,6 +4116,34 @@ class QuotexFeed:
                       f"{stream.asset}: {type(_nc_ing_exc).__name__}: "
                       f"{_nc_ing_exc}")
 
+        # FINGERPRINT (Task 12-b, 2026-09-29): feed the just-closed candle
+        # to the generator-fingerprint engine — the same values CSE gets
+        # ({"time","open","high","low","close"}) plus "tc": the real tick
+        # count of the candle (tick density per candle is a fingerprint
+        # axis).  O(1) inline (deque append + counters) — never blocks the
+        # close path.  Forward-only guard mirrors _fp_seed_history: the
+        # engine appends, so a repeated candle time must never re-enter.
+        if _fp_engine is not None and closed:
+            try:
+                _fp_last = None
+                _fp_fp = _fp_engine.fp(stream.asset)
+                if _fp_fp.candles:
+                    _fp_last = _fp_fp.candles[-1]["t"]
+                if _fp_last is None or closed["time"] > _fp_last:
+                    _fp_engine.ingest_candle(stream.asset, {
+                        "t":  closed["time"],
+                        "o":  closed["open"],
+                        "h":  closed["high"],
+                        "l":  closed["low"],
+                        "c":  closed["close"],
+                        "tc": (stream.candle_tick_count
+                               if stream.candle_tick_count > 0 else None),
+                    })
+            except Exception as _fp_close_exc:
+                print(f"[feed] fingerprint candle ingest failed for "
+                      f"{stream.asset}: {type(_fp_close_exc).__name__}: "
+                      f"{_fp_close_exc}")
+
         # Replace or append the closed candle in the history list
         if stream.candles and stream.candles[-1]["time"] == closed["time"]:
             stream.candles[-1] = closed
@@ -4453,9 +4556,21 @@ class QuotexFeed:
         Fire-and-forget: never blocks stream start; ingest is idempotent
         (older candles already processed are skipped by time); any failure
         just leaves the engine on the base seed.
+
+        FINGERPRINT (Task 12-b): the same deep window is replayed into the
+        generator-fingerprint engine (see _fp_seed_history) so the
+        fingerprint's candle axes are deep-backed immediately.  NOTE: the
+        fingerprint engine has no ingest_replace (unlike CSE) — if the deep
+        window arrives AFTER live candle closes were already ingested, the
+        forward-only dedup skips the (older) deep rows and the fingerprint
+        simply keeps running on the base seed + live closes.  Adding an
+        ingest_replace to core/otc_fingerprint.py is the clean follow-up.
         """
         if _nc_get_engine is None:
             return
+        _fp_track_deep = _fp_engine is not None
+        if _fp_track_deep:
+            _fp_deep_pending.add(asset)
         try:
             target = int(os.environ.get("QX_NC_SEED_CANDLES", "3000"))
             if target <= 300:
@@ -4485,9 +4600,23 @@ class QuotexFeed:
             print(f"[feed] next-candle deep seed: {asset}@{period}s "
                   f"+{len(candles)} candles "
                   f"(n_train={eng.n_train})")
+            # FINGERPRINT (12-b): same deep window → fingerprint engine
+            # (forward-only dedup inside; candles only — no tick data in
+            # history).
+            _fp_seed_history(asset, candles, deep=True)
         except Exception as exc:
             print(f"[feed] next-candle deep seed skipped for {asset}: "
                   f"{type(exc).__name__}: {exc}")
+        finally:
+            if _fp_track_deep:
+                _fp_deep_pending.discard(asset)
+                # If the base history seed was stashed while this deep seed
+                # was in flight, replay it now — either the deep window
+                # failed (stash is the only history the fingerprint gets)
+                # or it succeeded (dedup makes this a no-op).
+                _fp_stash = _fp_base_rows.pop(asset, None)
+                if _fp_stash:
+                    _fp_seed_history(asset, _fp_stash)
 
     async def _start_stream(self, stream: _AssetStream) -> None:
         """Subscribe + load history for one stream. Raises on failure so the
@@ -4666,6 +4795,10 @@ class QuotexFeed:
                 except Exception as _nc_seed_exc:
                     print(f"[feed] next-candle seed failed for "
                           f"{asset}: {_nc_seed_exc}")
+            # FINGERPRINT (12-b): same (merged) history through the
+            # fingerprint engine — forward-only dedup inside, so preserved
+            # candles already seen are skipped.
+            _fp_seed_history(asset, stream.candles)
             # FIX (B6, audit 2026-09-29): this watchdog-restart path used to
             # OVERWRITE stream.prediction unconditionally — a mid-candle
             # restart could flip an already-broadcast CALL↔PUT (the exact
@@ -4714,6 +4847,11 @@ class QuotexFeed:
             except Exception as _nc_seed_exc:
                 print(f"[feed] next-candle seed failed for "
                       f"{asset}: {_nc_seed_exc}")
+        # FINGERPRINT (12-b): bulk-replay the broker history seed through
+        # the fingerprint engine too — the fingerprint is ready from
+        # backfilled history alone (>= MIN_CANDLES_FOR_REPORT) before the
+        # first live tick even arrives.
+        _fp_seed_history(asset, history)
         # Generate initial prediction from history so the ghost candle
         # appears immediately without waiting for the first EOC.
         stream.prediction = await self._run_eoc(stream, actual_open=last["close"])
@@ -4983,6 +5121,22 @@ class QuotexFeed:
                 # feed hiccup, not a close). The next tick/bootstrap builds a
                 # fresh candle from its own timestamp.
                 stream.candle_tick_count += len(new_ticks)
+                # FINGERPRINT (Task 12-b, 2026-09-29): every REAL tick feeds
+                # the generator-fingerprint engine.  This is the ONE funnel
+                # all backends drain through — raw-WS event callbacks, the
+                # legacy pyquotex polling path AND the QX_DEMO_FEED
+                # generator all arrive here after the dedup filter above —
+                # so ticks are ingested exactly once.  ingest_tick is O(1)
+                # and thread-safe; a failure must never break the tick
+                # pipeline (same contract as the latency gauges below).
+                if _fp_engine is not None:
+                    try:
+                        for _fpt in new_ticks:
+                            _fp_engine.ingest_tick(
+                                stream.asset,
+                                _fpt.get("time"), _fpt.get("price"))
+                    except Exception:
+                        pass
                 if stream.market_closed:
                     stream.market_closed = False
                     stream._empty_closes = 0

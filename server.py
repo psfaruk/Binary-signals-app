@@ -2971,6 +2971,109 @@ async def get_next_candle(asset: str, period: int = 60):
     }
 
 
+# ── OTC-FINGERPRINT API (Task 12-b, 2026-09-29) ──────────────────────────────
+# Generator-fingerprint engine (core/otc_fingerprint.py): "এই ফিডটা কোন
+# সিস্টেমে তৈরি?" — live classification of whatever feed the app is
+# connected to (real Quotex OTC, real market, or QX_DEMO_FEED).  feed.py
+# owns the ONE engine instance (module-level singleton `_fp_engine`) and
+# ingests every tick / closed candle / backfilled history candle into it;
+# these endpoints only READ it.  Report generation is the engine's heavy
+# pass (VR / Hurst / repetition search over the trailing window) →
+# offloaded via to_thread so the event loop (and the WS broadcasts) never
+# block on a poll.
+
+# Bengali labels for the verdict classifications (API-level concern — the
+# core module stays language-neutral).
+_FP_VERDICT_BN = {
+    "TRADE_DRIVEN_REAL":     "রিয়েল মার্কেট (আসল ট্রেড)",
+    "SYNTHETIC_RANDOM_WALK": "সিনথেটিক র‍্যান্ডম ওয়াক",
+    "SYNTHETIC_MEAN_REVERT": "সিনথেটিক মিয়ান-রিভার্সন",
+    "SYNTHETIC_TRENDING":    "সিনথেটিক ট্রেন্ডিং",
+    "SYNTHETIC_REGIME_MIX":  "সিনথেটিক রেজিম-সুইচিং",
+    "INCONCLUSIVE":          "অনির্ণায়িত",
+}
+
+
+def _fp_verdict_bn(rep: dict) -> dict:
+    """Attach verdict_bn (Bengali verdict label) to a report's verdict."""
+    out = dict(rep)
+    v = out.get("verdict")
+    if isinstance(v, dict):
+        v = dict(v)
+        cls = str(v.get("classification") or "")
+        if cls.startswith("OHLC_ONLY_"):
+            v["verdict_bn"] = f"OHLC-অনলি (প্রসেস: {v.get('process') or 'unknown'})"
+        else:
+            v["verdict_bn"] = _FP_VERDICT_BN.get(cls, cls)
+        out["verdict"] = v
+    return out
+
+
+@app.get("/api/otc-fingerprint")
+async def get_otc_fingerprint():
+    """OTC-FINGERPRINT — every asset's generator fingerprint, live.
+
+    USER (2026-09-29): "Quotex এর ক্যান্ডেল গুলো কোনো একটা সিস্টেম দিয়ে
+    তৈরি? pre-জেনারেট? নির্দিষ্ট কিছু ক্যান্ডেল?" — this endpoint answers
+    for the feed the app is ACTUALLY connected to:
+
+      assets          — per-asset report (only assets whose report is
+                        "ready"): tick/candle counts, 11 metric axes,
+                        verdict {classification, synthetic vs real
+                        evidence, process, pre_generated_blocks,
+                        predictability_score, notes} + verdict_bn.
+      cross_asset_sync — do multiple assets tick on the same seconds
+                        (one shared generator engine)?  null until
+                        enough seconds are sampled.
+      demo_feed       — true when running on the local demo generator
+                        (QX_DEMO_FEED=1) — never mistake it for a market.
+    """
+    eng = getattr(_feed_mod, "_fp_engine", None)
+    if eng is None:
+        return {"enabled": False, "assets": {}, "cross_asset_sync": None,
+                "demo_feed": _DEMO_FEED_ON, "generated_at": time.time(),
+                "error": "fingerprint engine unavailable "
+                         "(core/otc_fingerprint import failed)"}
+    rep = await asyncio.to_thread(eng.report)
+    assets = {a: _fp_verdict_bn(r) for a, r in (rep.get("assets") or {}).items()}
+    return {
+        "enabled": True,
+        "assets": assets,
+        "cross_asset_sync": rep.get("cross_asset_sync"),
+        "demo_feed": _DEMO_FEED_ON,
+        "generated_at": rep.get("generated_at"),
+    }
+
+
+@app.get("/api/otc-fingerprint/{asset}")
+async def get_otc_fingerprint_asset(asset: str):
+    """OTC-FINGERPRINT — one asset's generator fingerprint report.
+
+    Same report dict as the per-asset entries of /api/otc-fingerprint
+    (plus verdict_bn).  Returns {"error": ...} for an unknown asset or
+    one whose fingerprint is not ready yet (same style as
+    /api/live-prediction's "stream not running").
+    """
+    asset = asset.strip()
+    eng = getattr(_feed_mod, "_fp_engine", None)
+    if eng is None:
+        return {"asset": asset, "enabled": False, "ready": False,
+                "verdict": None, "demo_feed": _DEMO_FEED_ON,
+                "error": "fingerprint engine unavailable "
+                         "(core/otc_fingerprint import failed)"}
+    rep = await asyncio.to_thread(eng.report, asset)
+    if not rep.get("ready"):
+        return {"asset": asset, "enabled": True, "ready": False,
+                "verdict": None, "demo_feed": _DEMO_FEED_ON,
+                "error": "fingerprint not ready yet "
+                         f"(ticks={rep.get('ticks', 0)}, "
+                         f"candles={rep.get('candles', 0)} — "
+                         "warming up)"}
+    out = _fp_verdict_bn(rep)
+    out["demo_feed"] = _DEMO_FEED_ON
+    return out
+
+
 @app.get("/api/signals/latest")
 async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
     """Latest signal snapshot for all pairs — open public endpoint.

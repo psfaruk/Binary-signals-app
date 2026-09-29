@@ -1361,6 +1361,256 @@ function renderNextCandle(nc){
   }
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   GENERATOR FINGERPRINT PANEL (Task 12-d, 2026-09-29)
+   USER: "Quotex ক্যান্ডেল কি কোনো সিস্টেমে তৈরি? pre-generate? নির্দিষ্ট
+   লাইব্রেরি?" — renders core/otc_fingerprint.py's live verdict for the
+   SELECTED pair: classification badge, pre-generated-blocks answer,
+   predictability score, 11-axis evidence grid, technical notes, and
+   (from the all-assets report) cross-asset sync.
+
+   Data: /api/otc-fingerprint/{asset} every 20s (relative path — the
+   XTransformPort gateway patch in server.py rewrites same-origin fetch
+   URLs, exactly like the /api/next-candle poll above).
+   XSS-SAFE: textContent / createElement only — API strings (notes,
+   verdict labels, asset names) never touch innerHTML.
+   ═══════════════════════════════════════════════════════════════════ */
+let _fpPollTimer = null;      // 20s interval handle (no leaks on asset switch)
+let _fpTickCount = 0;         // cross-asset sync is polled every 3rd tick (60s)
+let _fpReqSeq = 0;            // asset-switch guard: stale fetches are dropped
+let _fpDemoOn = null;         // last known demo_feed flag (keeps banner on warmup)
+
+function _fpNum(v, d){
+  if(v == null) return null;
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  if(!isFinite(n)) return null;
+  const p = Math.pow(10, d == null ? 2 : d);
+  return String(Math.round(n * p) / p);
+}
+
+// classification → badge color class (SYNTHETIC_* amber, regime-mix violet,
+// real green, OHLC-only/inconclusive gray)
+function _fpVerdictClass(cls){
+  cls = String(cls || '');
+  if(cls === 'TRADE_DRIVEN_REAL') return 'real';
+  if(cls.indexOf('SYNTHETIC_REGIME_MIX') === 0) return 'regime';
+  if(cls.indexOf('SYNTHETIC_') === 0) return 'synthetic';
+  if(cls.indexOf('OHLC_ONLY_') === 0) return 'ohlc';
+  return 'inconclusive';
+}
+
+function _fpEvRow(grid, label, val, cls){
+  const row = document.createElement('div');
+  row.className = 'fp-ev-row';
+  const l = document.createElement('span');
+  l.className = 'fp-ev-label';
+  l.textContent = label;
+  const v = document.createElement('span');
+  v.className = 'fp-ev-val' + (cls ? ' ' + cls : '');
+  v.textContent = val;
+  row.appendChild(l); row.appendChild(v);
+  grid.appendChild(row);
+}
+
+function _fpSetAssetChip(asset){
+  const el = $('fp-asset');
+  if(el) el.textContent = asset ? String(asset).replace(/_otc$/i, ' · OTC') : '—';
+}
+
+function _fpSetDemoBanner(demo){
+  const el = $('fp-demo-banner');
+  if(el) el.style.display = (demo === true) ? '' : 'none';
+}
+
+// Not-ready / warming-up state: "ডেটা জমছে… (ticks N/300)" — the server's
+// not-ready response carries the tick count inside its error string.
+function renderFingerprintWarmup(j){
+  j = j || {};
+  _fpSetAssetChip(j.asset || currentAsset);
+  if(j.demo_feed != null) _fpDemoOn = j.demo_feed;
+  _fpSetDemoBanner(_fpDemoOn);
+  let txt = 'ডেটা জমছে…';
+  const m = /ticks=(\d+)/.exec(String(j.error || ''));
+  if(m) txt += ' (ticks ' + m[1] + '/300)';
+  else if(j.error && String(j.error).indexOf('unavailable') >= 0) txt = 'ফিঙ্গারপ্রিন্ট ইঞ্জিন অফ';
+  const vEl = $('fp-verdict');
+  if(vEl){ vEl.textContent = txt; vEl.className = 'fp-verdict inconclusive'; }
+  const mEl = $('fp-verdict-meta');
+  if(mEl) mEl.textContent = '';
+  const pgEl = $('fp-pregen');
+  if(pgEl){ pgEl.textContent = 'ডেটা জমছে…'; pgEl.className = 'fp-pregen na'; }
+  const fill = $('fp-meter-fill');
+  if(fill){ fill.style.width = '0%'; fill.className = 'fp-meter-fill'; }
+  _setText('fp-meter-val', '—');
+  const ev = $('fp-evidence');
+  if(ev){ ev.textContent = ''; const sp = document.createElement('span');
+    sp.className = 'fp-ev-note'; sp.textContent = txt; ev.appendChild(sp); }
+  const notes = $('fp-notes');
+  if(notes){ notes.textContent = ''; notes.style.display = 'none'; }
+}
+
+function renderFingerprint(data){
+  if(!data) return;
+  const set = (id, txt) => { const el = $(id); if(el) el.textContent = txt; };
+  _fpSetAssetChip(data.asset || currentAsset);
+  if(data.demo_feed != null) _fpDemoOn = data.demo_feed;
+  _fpSetDemoBanner(_fpDemoOn);
+
+  const v = data.verdict || {};
+  const cls = String(v.classification || '');
+
+  // verdict badge (Bengali label from the API, English fallback)
+  const vEl = $('fp-verdict');
+  if(vEl){
+    vEl.textContent = v.verdict_bn || cls || '—';
+    vEl.className = 'fp-verdict ' + _fpVerdictClass(cls);
+    vEl.title = cls || '';
+  }
+  // process + evidence tally (small muted meta line)
+  const mEl = $('fp-verdict-meta');
+  if(mEl){
+    let meta = 'প্রসেস: ' + (v.process || 'unknown');
+    if(v.synthetic_evidence != null || v.real_evidence != null){
+      meta += ' · সিনথেটিক প্রমাণ ' + _fpNum(v.synthetic_evidence, 1) +
+              ' vs রিয়েল ' + _fpNum(v.real_evidence, 1);
+    }
+    mEl.textContent = meta;
+  }
+
+  // pre-generated block library answer
+  const pgEl = $('fp-pregen');
+  if(pgEl){
+    const pg = v.pre_generated_blocks;
+    if(pg === true){
+      pgEl.textContent = 'হ্যাঁ — ফিক্সড লাইব্রেরি ধরা পড়েছে!';
+      pgEl.className = 'fp-pregen yes';
+    } else if(pg === false){
+      pgEl.textContent = 'না — প্রতিটি টিক নতুন করে জেনারেট হয়';
+      pgEl.className = 'fp-pregen no';
+    } else {
+      pgEl.textContent = 'ডেটা জমছে…';
+      pgEl.className = 'fp-pregen na';
+    }
+  }
+
+  // predictability meter: <60 gray, 60-75 amber, >75 green
+  const score = Math.max(0, Math.min(100,
+    parseInt(v.predictability_score, 10) || 0));
+  const fill = $('fp-meter-fill');
+  if(fill){
+    fill.style.width = score + '%';
+    fill.className = 'fp-meter-fill ' +
+      (score > 75 ? 'high' : score >= 60 ? 'mid' : 'low');
+  }
+  const meterEl = $('fp-meter');
+  if(meterEl) meterEl.setAttribute('aria-valuenow', String(score));
+  set('fp-meter-val', score + '/100');
+
+  // evidence grid — 11 axes, compact 2-col rows (missing axes are skipped)
+  const ev = $('fp-evidence');
+  if(ev){
+    ev.textContent = '';
+    const m = data.metrics || {};
+    // টিক ক্যাডেন্স
+    const cad = [];
+    if(m.tick_gap_cv != null) cad.push('gap-CV ' + _fpNum(m.tick_gap_cv, 2));
+    if(m.ticks_per_sec_mean != null) cad.push(_fpNum(m.ticks_per_sec_mean, 2) + ' t/s');
+    if(cad.length) _fpEvRow(ev, 'টিক ক্যাডেন্স', cad.join(' · '));
+    // প্রতি-ক্যান্ডেল টিক (mean ± std)
+    if(m.tpc_mean != null){
+      const std = (m.tpc_cv != null && isFinite(m.tpc_mean * m.tpc_cv))
+        ? ' ± ' + _fpNum(m.tpc_mean * m.tpc_cv, 1) : '';
+      _fpEvRow(ev, 'প্রতি-ক্যান্ডেল টিক', _fpNum(m.tpc_mean, 1) + std);
+    }
+    // ভ্যারিয়েন্স রেশিও VR(5)
+    if(m.vr_q5 != null)
+      _fpEvRow(ev, 'ভ্যারিয়েন্স রেশিও VR(5)', _fpNum(m.vr_q5, 2));
+    // হার্স্ট
+    if(m.hurst != null)
+      _fpEvRow(ev, 'হার্স্ট', _fpNum(m.hurst, 2));
+    // রিটার্ন কার্টোসিস
+    if(m.ret_kurtosis != null)
+      _fpEvRow(ev, 'রিটার্ন কার্টোসিস', _fpNum(m.ret_kurtosis, 2));
+    // উইকএন্ড কন্টিনিউইটি
+    if(m.weekend_present === true)
+      _fpEvRow(ev, 'উইকএন্ড কন্টিনিউইটি', 'চলমান (২৪/৭)');
+    else if(m.weekend_present === false)
+      _fpEvRow(ev, 'উইকএন্ড কন্টিনিউইটি', 'বন্ধ (উইকএন্ড গ্যাপ)');
+    // রিপিটিশন (exact return-tuple duplicates — the block-library test)
+    if(m.tick_return_dupe_count != null)
+      _fpEvRow(ev, 'রিপিটিশন', m.tick_return_dupe_count + '× ডুপ্লিকেট ক্রম',
+        v.pre_generated_blocks ? 'bad' : '');
+    // আওয়ারলি σ
+    if(m.hourly_sigma_cv != null)
+      _fpEvRow(ev, 'আওয়ারলি σ', 'CV ' + _fpNum(m.hourly_sigma_cv, 2));
+    // ডেটা
+    _fpEvRow(ev, 'ডেটা', (data.ticks != null ? data.ticks : '—') +
+      ' টিক · ' + (data.candles != null ? data.candles : '—') + ' ক্যান্ডেল');
+  }
+
+  // notes — technical evidence, English as-is, small muted list
+  const notesEl = $('fp-notes');
+  if(notesEl){
+    notesEl.textContent = '';
+    const notes = (v.notes || []).slice(0, 12);
+    for(const n of notes){
+      const li = document.createElement('li');
+      li.textContent = String(n);
+      notesEl.appendChild(li);
+    }
+    notesEl.style.display = notes.length ? '' : 'none';
+  }
+}
+
+// cross-asset sync row (comes from the ALL-assets report only)
+function renderFingerprintCross(cas){
+  const row = $('fp-cross-row');
+  if(!row) return;
+  if(!cas){ row.style.display = 'none'; return; }
+  row.style.display = '';
+  row.className = 'fp-cross-row' + (cas.shared_engine ? ' shared' : '');
+  row.textContent = '🔗 ক্রস-অ্যাসেট সিঙ্ক: co-tick ' + _fpNum(cas.co_tick_rate, 2) +
+    ' (lift ' + (cas.lift != null ? _fpNum(cas.lift, 2) : '—') + ') — ' +
+    (cas.shared_engine ? 'এক শেয়ার্ড ইঞ্জিন সব পেয়ার চালায়' : 'স্বাধীন টিক ঘড়ি');
+}
+
+// one poll tick: per-asset report always; cross-asset sync every 3rd tick.
+function _fpTick(){
+  const asset = currentAsset || '';
+  if(!asset) return;
+  const seq = ++_fpReqSeq;
+  fetch('/api/otc-fingerprint/' + encodeURIComponent(asset))
+    .then(r => r.ok ? r.json() : null)
+    .then(j => {
+      // drop stale responses (asset switched while in flight)
+      if(seq !== _fpReqSeq || !j || asset !== currentAsset) return;
+      if(j.ready && j.verdict) renderFingerprint(j);
+      else renderFingerprintWarmup(j);
+    })
+    .catch(() => {});
+  _fpTickCount++;
+  if(_fpTickCount % 3 === 1){
+    fetch('/api/otc-fingerprint')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        if(seq !== _fpReqSeq || !j) return;
+        renderFingerprintCross(j.cross_asset_sync);
+      })
+      .catch(() => {});
+  }
+}
+
+function stopFingerprintPolling(){
+  if(_fpPollTimer){ clearInterval(_fpPollTimer); _fpPollTimer = null; }
+  _fpReqSeq++;  // invalidate any in-flight fetches
+}
+function startFingerprintPolling(){
+  stopFingerprintPolling();          // never stack intervals on initApp re-entry
+  _fpTickCount = 0;
+  _fpTick();
+  _fpPollTimer = setInterval(_fpTick, 20000);
+}
+
 function renderLivePred(lp){
   if(!lp) return;
   const set = (id, txt) => { const el = $(id); if(el) el.textContent = txt; };
@@ -3132,6 +3382,8 @@ function setCategory(newCat){
     // Clear all intervals/timeouts
     if(typeof _countdownInterval !== 'undefined' && _countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
     if(typeof _keepaliveInterval !== 'undefined' && _keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
+    // GENERATOR-FINGERPRINT (12-d): same teardown before navigation.
+    if(typeof _fpPollTimer !== 'undefined' && _fpPollTimer){ clearInterval(_fpPollTimer); _fpPollTimer = null; _fpReqSeq++; }
     if(typeof staleTimeout !== 'undefined' && staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
     if(typeof chartLoadingTimeout !== 'undefined' && chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
     if(typeof reconnectTimer !== 'undefined' && reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -4258,6 +4510,15 @@ function wireEvents(){
     if(!pane || !pane.classList.contains('active')) return;
     if(asset !== wrPairViewAsset) openPairResult(asset);
   });
+  // GENERATOR-FINGERPRINT (Task 12-d): the fingerprint panel follows the
+  // topbar pair selection — neutral warmup state + immediate re-poll for
+  // the new pair (no stale verdict flash; the 20s interval keeps running).
+  window.addEventListener('app:pair-changed', (ev) => {
+    const asset = ev && ev.detail && ev.detail.asset;
+    if(!asset) return;
+    renderFingerprintWarmup({ asset: asset });
+    _fpTick();
+  });
   // PAIR-SELECTION-ROADMAP (USER-2026-09-19): the tab's own dropdown went
   // back to "সব পেয়ার" (winrate.js owns the box) — mirror that here.
   window.addEventListener('wr:closepair', () => { closePairResult(); });
@@ -4639,6 +4900,11 @@ function initApp(category){
     el.textContent = `🕐 ${h}:${m}:${s}`;
   }, 1000);
 
+  // GENERATOR-FINGERPRINT (Task 12-d): poll the selected pair's
+  // fingerprint report every 20s (starts with an immediate tick; the
+  // interval is cleared first so initApp re-entry can't stack timers).
+  startFingerprintPolling();
+
   _keepaliveInterval = setInterval(() => {
     if(ws && ws.readyState === WebSocket.OPEN){
       send({ type: 'status' });
@@ -4693,6 +4959,8 @@ function onPageHide(){
     if(_countdownInterval){ clearInterval(_countdownInterval); _countdownInterval = null; }
     if(_brokerTimeInterval){ clearInterval(_brokerTimeInterval); _brokerTimeInterval = null; }
     if(_keepaliveInterval){ clearInterval(_keepaliveInterval); _keepaliveInterval = null; }
+    // GENERATOR-FINGERPRINT (12-d): stop the 20s poll + drop in-flight fetches.
+    if(typeof stopFingerprintPolling === 'function') stopFingerprintPolling();
     if(staleTimeout){ clearTimeout(staleTimeout); staleTimeout = null; }
     if(chartLoadingTimeout){ clearTimeout(chartLoadingTimeout); chartLoadingTimeout = null; }
     if(reconnectTimer){ clearTimeout(reconnectTimer); reconnectTimer = null; }
