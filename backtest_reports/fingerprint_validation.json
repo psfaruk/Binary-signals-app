@@ -1,5 +1,5 @@
 {
-  "validated_at": 1790668170.6466553,
+  "validated_at": 1790673436.0586433,
   "results": {
     "real_market_BTCUSDT": {
       "classification": "OHLC_ONLY_RANDOM_WALK",
@@ -18,7 +18,7 @@
     },
     "synthetic_otclike_DEMO": {
       "classification": "SYNTHETIC_REGIME_MIX",
-      "synthetic_evidence": 2.0,
+      "synthetic_evidence": 3.0,
       "real_evidence": 0.0,
       "process": "trending",
       "regime_mixing": true,
@@ -26,6 +26,7 @@
       "predictability_score": 76,
       "notes": [
         "tick density very regular (CV=0.0025) \u2014 fixed-cadence generator",
+        "tick return shape kurt=4.35 on a metronome cadence \u2014 synthetic feed",
         "VR(5)=3.129 > 1 \u2014 trending process",
         "exact return-sequences near-unique (0 dupes, chance ~0.4) \u2014 no fixed candle library, fresh generation"
       ]
@@ -41,15 +42,15 @@
       "notes": [
         "tick density very regular (CV=0.0) \u2014 fixed-cadence generator",
         "per-second tick count near-constant (CV=0.0) \u2014 metronome feed",
-        "tick returns near-Gaussian (kurt=-0.02) \u2014 RNG output",
+        "tick returns near-Gaussian (kurt=-0.02) on a metronome cadence \u2014 RNG output",
         "VR(5)\u22480.911 \u2014 random-walk-like",
         "exact return-sequences near-unique (0 dupes, chance ~0.4) \u2014 no fixed candle library, fresh generation"
       ]
     },
     "blocklib_BLOCKLIB": {
       "classification": "SYNTHETIC_MEAN_REVERT",
-      "synthetic_evidence": 7.5,
-      "real_evidence": 2.0,
+      "synthetic_evidence": 8.0,
+      "real_evidence": 0.0,
       "process": "mean_reverting",
       "regime_mixing": false,
       "pre_generated_blocks": true,
@@ -57,7 +58,7 @@
       "notes": [
         "tick density very regular (CV=0.0) \u2014 fixed-cadence generator",
         "per-second tick count near-constant (CV=0.0) \u2014 metronome feed",
-        "tick returns fat-tailed (kurt=158.87) \u2014 real order flow",
+        "fat tails (kurt=158.87) ON a metronome cadence \u2014 designed spike/wick mimicry, not order flow",
         "VR(5)=0.248 << 1 \u2014 mean-reverting process",
         "exact return-sequences repeat 53458\u00d7 (chance expects ~0.4) \u2014 PRE-GENERATED BLOCK LIBRARY"
       ]
@@ -176,7 +177,7 @@
       },
       "verdict": {
         "classification": "SYNTHETIC_REGIME_MIX",
-        "synthetic_evidence": 2.0,
+        "synthetic_evidence": 3.0,
         "real_evidence": 0.0,
         "process": "trending",
         "regime_mixing": true,
@@ -184,6 +185,7 @@
         "predictability_score": 76,
         "notes": [
           "tick density very regular (CV=0.0025) \u2014 fixed-cadence generator",
+          "tick return shape kurt=4.35 on a metronome cadence \u2014 synthetic feed",
           "VR(5)=3.129 > 1 \u2014 trending process",
           "exact return-sequences near-unique (0 dupes, chance ~0.4) \u2014 no fixed candle library, fresh generation"
         ]
@@ -272,7 +274,7 @@
         "notes": [
           "tick density very regular (CV=0.0) \u2014 fixed-cadence generator",
           "per-second tick count near-constant (CV=0.0) \u2014 metronome feed",
-          "tick returns near-Gaussian (kurt=-0.02) \u2014 RNG output",
+          "tick returns near-Gaussian (kurt=-0.02) on a metronome cadence \u2014 RNG output",
           "VR(5)\u22480.911 \u2014 random-walk-like",
           "exact return-sequences near-unique (0 dupes, chance ~0.4) \u2014 no fixed candle library, fresh generation"
         ]
@@ -352,8 +354,8 @@
       },
       "verdict": {
         "classification": "SYNTHETIC_MEAN_REVERT",
-        "synthetic_evidence": 7.5,
-        "real_evidence": 2.0,
+        "synthetic_evidence": 8.0,
+        "real_evidence": 0.0,
         "process": "mean_reverting",
         "regime_mixing": false,
         "pre_generated_blocks": true,
@@ -361,7 +363,7 @@
         "notes": [
           "tick density very regular (CV=0.0) \u2014 fixed-cadence generator",
           "per-second tick count near-constant (CV=0.0) \u2014 metronome feed",
-          "tick returns fat-tailed (kurt=158.87) \u2014 real order flow",
+          "fat tails (kurt=158.87) ON a metronome cadence \u2014 designed spike/wick mimicry, not order flow",
           "VR(5)=0.248 << 1 \u2014 mean-reverting process",
           "exact return-sequences repeat 53458\u00d7 (chance expects ~0.4) \u2014 PRE-GENERATED BLOCK LIBRARY"
         ]
