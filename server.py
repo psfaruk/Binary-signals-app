@@ -2932,6 +2932,45 @@ async def get_live_prediction(asset: str, period: int = 60):
     }
 
 
+@app.get("/api/next-candle/{asset}")
+async def get_next_candle(asset: str, period: int = 60):
+    """NEXT-CANDLE ENGINE (CSE v1) — THE single-strategy signal source.
+
+    USER (2026-09-29): "যখন একটি ক্যান্ডেল শুরু হবে 0 সেকেন্ড এ ওই শুরু হওয়া
+    ক্যান্ডেল টি red হবে নাকি গ্রিন হবে এটার প্রেডিকশন" — at every candle's
+    0-second open, the engine predicts THAT candle's color from the
+    previous closed candles' anatomy + sequence. One strategy
+    (user: "একটা স্ট্রাটেজি সঠিক হলে একটাই যথেষ্ট").
+
+      prediction — the locked 0-second prediction for the RUNNING candle:
+                   direction, calibrated p_green, last-3-candle pattern,
+                   empirical pattern-transition stats, top factors,
+                   state (PRIOR/BLENDED/LOCAL), n_train, blend weight.
+      stats      — the engine's honest self-measured accuracy on THIS
+                   feed: every candle graded at close (doji skipped),
+                   rolling accuracy, last-20, max wrong streak.
+    """
+    asset = asset.strip()
+    try:
+        from core import next_candle as _nc
+        engine = _nc.get_engine(asset, period)
+        payload = engine.current()
+        stats = engine.stats_public()
+    except Exception as exc:
+        return {"asset": asset, "period": period, "enabled": False,
+                "prediction": None, "stats": None,
+                "error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "asset": asset,
+        "period": period,
+        "enabled": _nc.enabled(),
+        "engine": "CSE",
+        "version": "next_candle_v1",
+        "prediction": payload,
+        "stats": stats,
+    }
+
+
 @app.get("/api/signals/latest")
 async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
     """Latest signal snapshot for all pairs — open public endpoint.

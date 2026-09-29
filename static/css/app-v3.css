@@ -1006,3 +1006,49 @@ svg{display:block}
   border-top:1px dashed var(--border-soft);padding-top:7px;}
 .lp-acc-label{font-size:.66rem;color:var(--text-faint);}
 .lp-acc-val{font-size:.7rem;font-weight:700;color:var(--text-dim);font-family:var(--mono);}
+
+/* ══════════════════════════════════════════════════════════════════
+   NEXT-CANDLE ENGINE (CSE v1, 2026-09-29) — পরের ক্যান্ডেল প্রেডিকশন
+   (০ সেকেন্ড): THE single-strategy panel. Direction locked at candle
+   open; pattern transition stats; per-candle graded accuracy.
+   ══════════════════════════════════════════════════════════════════ */
+.next-candle-panel{
+  margin-top:12px;padding:14px;border:1px solid rgba(148,163,184,.18);
+  border-radius:12px;background:rgba(15,23,42,.55);
+}
+.nc-state-chip{
+  font-size:10px;font-weight:700;letter-spacing:.04em;
+  padding:3px 8px;border-radius:999px;text-transform:uppercase;
+  border:1px solid rgba(148,163,184,.35);color:var(--text-muted,#94a3b8);
+}
+.nc-state-chip.local{border-color:rgba(52,211,153,.55);color:#34d399;background:rgba(52,211,153,.08)}
+.nc-state-chip.blended{border-color:rgba(251,191,36,.55);color:#fbbf24;background:rgba(251,191,36,.08)}
+.nc-state-chip.prior{border-color:rgba(148,163,184,.45);color:#94a3b8;background:rgba(148,163,184,.08)}
+.nc-direction-row{display:flex;align-items:center;gap:10px;margin:10px 0 8px;flex-wrap:wrap}
+.nc-direction{
+  font-size:18px;font-weight:800;letter-spacing:.02em;padding:6px 12px;
+  border-radius:10px;line-height:1.2;
+}
+.nc-direction.call{color:#34d399;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.4)}
+.nc-direction.put{color:#f87171;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.4)}
+.nc-conf{font-size:15px;font-weight:800;color:var(--text)}
+.nc-prob{font-size:11px;color:var(--text-muted,#94a3b8)}
+.nc-pattern-row{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  margin:8px 0;padding:8px 10px;border-radius:10px;
+  background:rgba(148,163,184,.07);font-size:13px;
+}
+.nc-pattern-label{font-size:11px;color:var(--text-muted,#94a3b8)}
+.nc-pattern{font-size:16px;letter-spacing:2px}
+.nc-pattern-arrow{color:var(--text-muted,#94a3b8);font-weight:700}
+.nc-pattern-next{font-size:18px;font-weight:800}
+.nc-pattern-next.call{text-shadow:0 0 10px rgba(52,211,153,.65)}
+.nc-pattern-next.put{text-shadow:0 0 10px rgba(248,113,113,.65)}
+.nc-pattern-stat{font-size:11px;color:var(--text-muted,#94a3b8);margin-left:auto}
+.nc-factors{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.nc-meta-row{display:flex;flex-wrap:wrap;gap:8px;font-size:10.5px;color:var(--text-muted,#94a3b8)}
+.nc-meta{padding:2px 7px;border-radius:7px;background:rgba(148,163,184,.1)}
+@media (max-width:640px){
+  .nc-direction{font-size:15px}
+  .nc-pattern-stat{margin-left:0;width:100%}
+}

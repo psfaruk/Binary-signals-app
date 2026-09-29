@@ -83,6 +83,25 @@ except Exception as _live_candle_imp_exc:         # noqa: E402
     _predict_live = None
     print(f"[feed] live_candle unavailable ({_live_candle_imp_exc}) — "
           f"live prediction off")
+# NEXT-CANDLE ENGINE — "Candle Sequence Engine" (CSE v1, 2026-09-29).
+# THE single-strategy signal source (USER: "একটা স্ট্রাটেজি সঠিক হলে একটাই
+# যথেষ্ট"): at the 0-second open of every NEW candle it predicts THAT
+# candle's color (GREEN/CALL vs RED/PUT) from the anatomy + sequence of
+# the previous closed candles only.  Replaces the legacy chain (theory
+# votes → ML fallback → body-fade) as the source of every signal.
+# Global prior (real-market trained) + per-asset ONLINE adaptation +
+# calibrated blend; graded every candle.  Backtest:
+# scripts/backtest_next_candle_report.json.  QX_NEXT_CANDLE=0 → rollback.
+try:                                               # noqa: E402
+    from core import next_candle as _nc
+    _nc_enabled = _nc.enabled()
+    _nc_get_engine = _nc.get_engine
+except Exception as _nc_imp_exc:                  # noqa: E402
+    _nc = None
+    _nc_enabled = False
+    _nc_get_engine = None
+    print(f"[feed] next_candle unavailable ({_nc_imp_exc}) — "
+          f"legacy signal chain active")
 import os      # noqa: E402
 import re      # noqa: E402
 import time    # noqa: E402
@@ -2702,6 +2721,97 @@ class QuotexFeed:
               f"— fade default supplies {direction}")
         return sub
 
+    def _next_candle_result(self, stream: _AssetStream, closed: list[dict],
+                            actual_open: float | None) -> dict | None:
+        """NEXT-CANDLE (CSE v1): turn the engine's 0-second prediction for
+        the just-OPENED candle into the standard signal-result dict.
+
+        The engine (core/next_candle.py) ingested the previous candle at
+        close-time and already produced the locked prediction for the new
+        candle — this only shapes it for the pipeline/UI/DB contract.
+        Direction is LOCKED at 0s for the whole candle (user requirement:
+        the prediction is for the candle that just started, made from the
+        candles that already closed — never flipped mid-candle).
+        """
+        if _nc_get_engine is None:
+            return None
+        engine = _nc_get_engine(stream.asset, stream.period)
+        payload = engine.current()
+        if not isinstance(payload, dict) \
+                or payload.get("direction") not in ("CALL", "PUT"):
+            return None
+        expected_target = closed[-1]["time"] + stream.period \
+            if closed else None
+        if payload.get("target_time") != expected_target:
+            # stale payload (missed ingest / mid-stream restart) — never
+            # broadcast a prediction for the wrong candle
+            print(f"[feed] {stream.asset}: CSE payload stale "
+                  f"(target={payload.get('target_time')} "
+                  f"expected={expected_target}) — legacy chain")
+            return None
+
+        direction = payload["direction"]
+        conf = int(max(50, min(75, payload.get("confidence", 50))))
+        strength = "STRONG" if conf >= 62 else ("MEDIUM" if conf >= 55 else "WEAK")
+        p_green = payload.get("p_green")
+        emoji = "🟢 GREEN (CALL)" if direction == "CALL" else "🔴 RED (PUT)"
+        factors = payload.get("factors") or []
+
+        reasons = [
+            f"_NEXT_CANDLE (CSE v1): নতুন ক্যান্ডেল শুরুর ০ সেকেন্ডে এই ক্যান্ডেলের "
+            f"রঙের প্রেডিকশন — {emoji}, সম্ভাবনা "
+            f"{round((p_green if direction == 'CALL' else 1 - p_green) * 100, 1) if p_green else '?'}% "
+            f"(calibrated)। শুধুমাত্র আগের বন্ধ হওয়া ক্যান্ডেলগুলোর বিশ্লেষণ থেকে।",
+            f"_PATTERN: শেষ ৩ ক্যান্ডেল {payload.get('pattern_emoji') or payload.get('pattern')} "
+            f"→ এই প্যাটার্নের পর ঐতিহাসিকভাবে "
+            f"{(payload.get('pattern_stats') or {}).get('p3_green_rate')}",
+        ]
+        if factors:
+            top = ", ".join(
+                f"{f.get('label')} ({'+' if (f.get('contribution') or 0) >= 0 else ''}" 
+                f"{round(f.get('contribution') or 0, 3)})" for f in factors[:4])
+            reasons.append(f"_TOP_FACTORS: {top}")
+
+        # roadmap factors for the UI chips (agree markers against direction)
+        rm_factors = []
+        for f in factors:
+            contrib = f.get("contribution") or 0.0
+            rm_factors.append({
+                "name": f.get("label") or f.get("name"),
+                "dir": "CALL" if contrib > 0 else "PUT",
+                "agree": (contrib > 0) == (direction == "CALL"),
+                "detail": f"value={f.get('value')} w·z={round(contrib, 3)}",
+            })
+
+        result = {
+            "signal": direction,
+            "confidence": conf,
+            "raw_confidence": conf,
+            "strength": strength,
+            "score": 0,
+            "signal_source": "next_candle",
+            "strategy": "next_candle_v1",
+            "strategy_reason": (
+                f"CSE v1 — ০ সেকেন্ডে নতুন ক্যান্ডেলের রঙ: {emoji}, "
+                f"p={p_green} (state={payload.get('state')}, "
+                f"n_train={payload.get('n_train')})"),
+            "signal_quality": "CSE",
+            "verified": True,
+            "verification": {
+                "rejected": False,
+                "reason": "single-strategy CSE engine (calibrated, "
+                          "direction locked at 0s)",
+            },
+            "reasons": reasons,
+            "roadmap": {"factors": rm_factors},
+            "next_candle": payload,
+            "regime": {},
+        }
+        return {**result,
+                "candle": _pred_candle(closed, direction, stream.period,
+                                       actual_open),
+                "payout": stream.payout}
+
     async def _run_eoc(self, stream: _AssetStream,
                 actual_open: float | None = None,
                 ml_payload: dict | None = None) -> dict | None:
@@ -2762,6 +2872,30 @@ class QuotexFeed:
         # running_ticks=None here: the NEW candle's ticks are empty at this
         # exact moment (they accumulate after this call). LIVE re-eval picks
         # up once ticks come in, via the periodic re-eval in the stream loop.
+
+        # ── NEXT-CANDLE ENGINE (CSE v1) — THE signal source ────────────
+        # USER (2026-09-29): "যখন একটি ক্যান্ডেল শুরু হবে 0 সেকেন্ড এ ওই শুরু
+        # হওয়া ক্যান্ডেল টি red হবে নাকি গ্রিন হবে এটার প্রেডিকশন... একটা
+        # স্ট্রাটেজি সঠিক হলে একটাই যথেষ্ট।"  One strategy, one voice: the
+        # engine's 0-second prediction for the JUST-OPENED candle IS the
+        # signal.  The legacy chain below (theory votes → ML fallback →
+        # body-fade → joint gate) remains as the QX_NEXT_CANDLE=0 rollback.
+        if _nc_enabled and len(closed) >= 64:
+            try:
+                _nc_result = self._next_candle_result(
+                    stream, closed, actual_open)
+                if _nc_result is not None:
+                    # LIVE re-eval base snapshots stay consistent; the CSE
+                    # direction itself is LOCKED at 0s (no mid-candle flip)
+                    stream.base_candles = [dict(c) for c in closed]
+                    stream.base_ticks = base_ticks
+                    stream._live_reeval_ticks = 0
+                    stream._coord_model_voice = None
+                    return _nc_result
+            except Exception as _nc_exc:
+                print(f"[feed] next-candle result failed for "
+                      f"{stream.asset}: {type(_nc_exc).__name__}: "
+                      f"{_nc_exc} — legacy chain this candle")
 
         result, micro_hist = await self._analyze_core(
             stream.asset, stream.period, closed, base_ticks,
@@ -3891,6 +4025,22 @@ class QuotexFeed:
         # rolling accuracy the panel + /api/live-prediction expose.
         self._grade_live_pred(stream, closed)
 
+        # NEXT-CANDLE (CSE v1, 2026-09-29): ingest the just-closed candle
+        # into the engine — this (a) grades the engine's 0-second prediction
+        # made for THIS candle, (b) appends it to the online training
+        # window, and (c) produces the LOCKED prediction for the candle
+        # that is starting now (read by _run_eoc a few lines below).
+        # Thread-offloaded: the periodic refit (every 50 candles) is a
+        # ~0.2s numpy fit — never blocks the event loop.
+        if _nc_enabled and closed:
+            try:
+                _eng = _nc_get_engine(stream.asset, stream.period)
+                await asyncio.to_thread(_eng.ingest, dict(closed))
+            except Exception as _nc_ing_exc:
+                print(f"[feed] next-candle ingest failed for "
+                      f"{stream.asset}: {type(_nc_ing_exc).__name__}: "
+                      f"{_nc_ing_exc}")
+
         # Replace or append the closed candle in the history list
         if stream.candles and stream.candles[-1]["time"] == closed["time"]:
             stream.candles[-1] = closed
@@ -4292,6 +4442,53 @@ class QuotexFeed:
 
     # ── Per-stream lifecycle ──────────────────────────────────────────────────
 
+    async def _nc_deep_seed(self, asset: str, period: int) -> None:
+        """NEXT-CANDLE (CSE): background DEEP history seed.
+
+        The base stream history (200 candles) only warms the engine's PRIOR
+        mode.  This background fetch pulls a deep window (QX_NC_SEED_CANDLES,
+        default 3000) so the LOCAL adapted model is fitted from minute one
+        — the research showed frozen/prior weights are regime-blind while
+        the adapted model captures the feed's own sequence structure.
+        Fire-and-forget: never blocks stream start; ingest is idempotent
+        (older candles already processed are skipped by time); any failure
+        just leaves the engine on the base seed.
+        """
+        if _nc_get_engine is None:
+            return
+        try:
+            target = int(os.environ.get("QX_NC_SEED_CANDLES", "3000"))
+            if target <= 300:
+                return  # deep seed disabled — base seed only
+            window = target * max(period, 1)
+            raw = await asyncio.wait_for(
+                self._client.get_historical_candles(
+                    asset, amount_of_seconds=window, period=period,
+                    max_workers=1),
+                timeout=30.0)
+            candles = _normalise(raw) if raw else []
+            # drop any still-open candle (T > now-60 ⇒ covering the present)
+            now = time.time()
+            candles = [dict(c) for c in candles
+                       if (c.get("time") or 0) + period <= now + 1]
+            if not candles:
+                return
+            eng = _nc_get_engine(asset, period)
+            # The deep window OVERLAPS the base seed's timestamps — a
+            # coherent RESET+replay beats idempotent skip (which would
+            # discard the entire deep history).  Only replace when the
+            # deep window is genuinely deeper than what the engine has.
+            if len(candles) > getattr(eng, "n_train", 0) + 400:
+                await asyncio.to_thread(eng.ingest_replace, candles)
+            else:
+                await asyncio.to_thread(eng.ingest_many, candles)
+            print(f"[feed] next-candle deep seed: {asset}@{period}s "
+                  f"+{len(candles)} candles "
+                  f"(n_train={eng.n_train})")
+        except Exception as exc:
+            print(f"[feed] next-candle deep seed skipped for {asset}: "
+                  f"{type(exc).__name__}: {exc}")
+
     async def _start_stream(self, stream: _AssetStream) -> None:
         """Subscribe + load history for one stream. Raises on failure so the
         caller (_run_stream) can count it toward the error cooldown."""
@@ -4301,6 +4498,17 @@ class QuotexFeed:
         asset, period = stream.asset, stream.period
         print(f"[feed] starting stream {asset}@{period}s"
               + (f" (ALWAYS-ON — 85%+ payout)" if stream.always_on else ""))
+
+        # NEXT-CANDLE (CSE): kick off the deep history seed in the
+        # background — the engine's local model adapts from minute one
+        # without delaying the stream start (see _nc_deep_seed).
+        if _nc_enabled:
+            try:
+                asyncio.get_running_loop().create_task(
+                    self._nc_deep_seed(asset, period))
+            except Exception as _nc_seed_kick_exc:
+                print(f"[feed] next-candle deep-seed kick failed for "
+                      f"{asset}: {_nc_seed_kick_exc}")
 
         await self._client.start_candles_stream(asset, period)
         stream.sub_started = True
@@ -4445,6 +4653,19 @@ class QuotexFeed:
             # Reset micro cache + recompute prediction (cheap, no DB I/O
             # for the prediction engine itself; _run_eoc does the to_thread).
             self._reset_micro_cache(stream)
+            # NEXT-CANDLE (CSE): replay the (merged) history through the
+            # engine — idempotent by candle time, so preserved candles the
+            # engine already saw are skipped.  Builds the online model +
+            # rolling accuracy AND produces the current 0-second prediction
+            # for the candle that is running now.
+            if _nc_enabled and stream.candles:
+                try:
+                    _eng = _nc_get_engine(asset, period)
+                    await asyncio.to_thread(
+                        _eng.ingest_many, [dict(c) for c in stream.candles])
+                except Exception as _nc_seed_exc:
+                    print(f"[feed] next-candle seed failed for "
+                          f"{asset}: {_nc_seed_exc}")
             # FIX (B6, audit 2026-09-29): this watchdog-restart path used to
             # OVERWRITE stream.prediction unconditionally — a mid-candle
             # restart could flip an already-broadcast CALL↔PUT (the exact
@@ -4481,6 +4702,18 @@ class QuotexFeed:
         # micro compute instead of serving a stale cache from a previous
         # (now-dead) stream that reused this _AssetStream instance.
         self._reset_micro_cache(stream)
+        # NEXT-CANDLE (CSE): bulk-replay the broker history seed — the
+        # engine gets its training window, honest replay-graded accuracy,
+        # and the 0-second prediction for the running candle, all before
+        # the first live close.
+        if _nc_enabled and history:
+            try:
+                _eng = _nc_get_engine(asset, period)
+                await asyncio.to_thread(
+                    _eng.ingest_many, [dict(c) for c in history])
+            except Exception as _nc_seed_exc:
+                print(f"[feed] next-candle seed failed for "
+                      f"{asset}: {_nc_seed_exc}")
         # Generate initial prediction from history so the ghost candle
         # appears immediately without waiting for the first EOC.
         stream.prediction = await self._run_eoc(stream, actual_open=last["close"])
@@ -5421,8 +5654,13 @@ class QuotexFeed:
                                     # FIRST LAST10 snapshot of the candle —
                                     # the actionable moment the panel reports
                                     # accuracy for.
+                                    # FIX (2026-09-29): fresh streams hit
+                                    # this before any close/grade created
+                                    # the attribute — AttributeError killed
+                                    # the live-pred compute for the whole
+                                    # candle.  getattr with a default.
                                     if (_lp.get("phase") == "LAST10"
-                                            and stream._live_pred_last10 is None):
+                                            and getattr(stream, "_live_pred_last10", None) is None):
                                         stream._live_pred_last10 = _lp
                                     # FIRST entry hint of the candle (one
                                     # simulated trade per candle — strike =

@@ -1,0 +1,377 @@
+{
+  "engine": "core/next_candle.py (CSE v1)",
+  "protocol": "walk-forward \u2014 the shipped engine ingests every candle in order (online refit every 50, global-prior blend), predictions graded at close; first 2400 candles are warmup",
+  "real": {
+    "BTCUSDT": {
+      "n": 6171,
+      "accuracy": 0.5349,
+      "p_value_vs_coinflip": 0.0,
+      "max_wrong_streak": 11,
+      "conf_bands": {
+        "55+": {
+          "n": 689,
+          "accuracy": 0.5675
+        },
+        "58+": {
+          "n": 51,
+          "accuracy": 0.6078
+        }
+      },
+      "n_train": 5000,
+      "sec": 8.1
+    },
+    "ETHUSDT": {
+      "n": 6415,
+      "accuracy": 0.5082,
+      "p_value_vs_coinflip": 0.18987,
+      "max_wrong_streak": 11,
+      "conf_bands": {
+        "55+": {
+          "n": 217,
+          "accuracy": 0.5161
+        }
+      },
+      "n_train": 5000,
+      "sec": 8.4
+    },
+    "XRPUSDT": {
+      "n": 6310,
+      "accuracy": 0.5082,
+      "p_value_vs_coinflip": 0.190454,
+      "max_wrong_streak": 11,
+      "conf_bands": {
+        "55+": {
+          "n": 120,
+          "accuracy": 0.55
+        }
+      },
+      "n_train": 5000,
+      "sec": 8.4
+    },
+    "BNBUSDT": {
+      "n": 6301,
+      "accuracy": 0.5294,
+      "p_value_vs_coinflip": 3e-06,
+      "max_wrong_streak": 13,
+      "conf_bands": {
+        "55+": {
+          "n": 358,
+          "accuracy": 0.5419
+        },
+        "58+": {
+          "n": 36,
+          "accuracy": 0.5278
+        }
+      },
+      "n_train": 5000,
+      "sec": 8.5
+    }
+  },
+  "real_baselines": {
+    "BTCUSDT": {
+      "n": 5813,
+      "continuation": 0.5477,
+      "reversal": 0.4523
+    },
+    "ETHUSDT": {
+      "n": 6255,
+      "continuation": 0.5157,
+      "reversal": 0.4843
+    },
+    "XRPUSDT": {
+      "n": 6044,
+      "continuation": 0.5217,
+      "reversal": 0.4783
+    },
+    "BNBUSDT": {
+      "n": 6032,
+      "continuation": 0.5322,
+      "reversal": 0.4678
+    }
+  },
+  "otc_sim": {
+    "otc-sim:random-walk(GBM)": {
+      "mean_accuracy": 0.5012,
+      "detail": {
+        "11": {
+          "n": 6599,
+          "accuracy": 0.5042,
+          "p_value_vs_coinflip": 0.498371,
+          "max_wrong_streak": 12,
+          "conf_bands": {},
+          "n_train": 5000,
+          "sec": 8.6
+        },
+        "22": {
+          "n": 6599,
+          "accuracy": 0.5014,
+          "p_value_vs_coinflip": 0.815069,
+          "max_wrong_streak": 11,
+          "conf_bands": {
+            "55+": {
+              "n": 60,
+              "accuracy": 0.4167
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.5
+        },
+        "33": {
+          "n": 6599,
+          "accuracy": 0.4981,
+          "p_value_vs_coinflip": 0.758271,
+          "max_wrong_streak": 12,
+          "conf_bands": {},
+          "n_train": 5000,
+          "sec": 8.4
+        }
+      }
+    },
+    "otc-sim:mean-revert(OU k=0.10)": {
+      "mean_accuracy": 0.7083,
+      "detail": {
+        "11": {
+          "n": 6599,
+          "accuracy": 0.7093,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 6,
+          "conf_bands": {
+            "55+": {
+              "n": 4584,
+              "accuracy": 0.7784
+            },
+            "58+": {
+              "n": 3457,
+              "accuracy": 0.8189
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.5
+        },
+        "22": {
+          "n": 6599,
+          "accuracy": 0.7063,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 6,
+          "conf_bands": {
+            "55+": {
+              "n": 4591,
+              "accuracy": 0.7783
+            },
+            "58+": {
+              "n": 3367,
+              "accuracy": 0.8242
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.4
+        },
+        "33": {
+          "n": 6599,
+          "accuracy": 0.7092,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 7,
+          "conf_bands": {
+            "55+": {
+              "n": 4650,
+              "accuracy": 0.7802
+            },
+            "58+": {
+              "n": 3465,
+              "accuracy": 0.8185
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.6
+        }
+      }
+    },
+    "otc-sim:mean-revert(OU k=0.30)": {
+      "mean_accuracy": 0.6627,
+      "detail": {
+        "11": {
+          "n": 6599,
+          "accuracy": 0.6683,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 8,
+          "conf_bands": {
+            "55+": {
+              "n": 3907,
+              "accuracy": 0.7302
+            },
+            "58+": {
+              "n": 2444,
+              "accuracy": 0.7758
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.6
+        },
+        "22": {
+          "n": 6599,
+          "accuracy": 0.6575,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 8,
+          "conf_bands": {
+            "55+": {
+              "n": 3743,
+              "accuracy": 0.7328
+            },
+            "58+": {
+              "n": 2298,
+              "accuracy": 0.7759
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.4
+        },
+        "33": {
+          "n": 6599,
+          "accuracy": 0.6624,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 8,
+          "conf_bands": {
+            "55+": {
+              "n": 3978,
+              "accuracy": 0.7325
+            },
+            "58+": {
+              "n": 2501,
+              "accuracy": 0.7889
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.5
+        }
+      }
+    },
+    "otc-sim:regime-trend": {
+      "mean_accuracy": 0.6922,
+      "detail": {
+        "11": {
+          "n": 6599,
+          "accuracy": 0.6769,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 10,
+          "conf_bands": {
+            "55+": {
+              "n": 4517,
+              "accuracy": 0.7288
+            },
+            "58+": {
+              "n": 2949,
+              "accuracy": 0.7525
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.3
+        },
+        "22": {
+          "n": 6599,
+          "accuracy": 0.7147,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 10,
+          "conf_bands": {
+            "55+": {
+              "n": 5169,
+              "accuracy": 0.7495
+            },
+            "58+": {
+              "n": 4060,
+              "accuracy": 0.7648
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.4
+        },
+        "33": {
+          "n": 6599,
+          "accuracy": 0.685,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 8,
+          "conf_bands": {
+            "55+": {
+              "n": 4708,
+              "accuracy": 0.7271
+            },
+            "58+": {
+              "n": 3170,
+              "accuracy": 0.764
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.3
+        }
+      }
+    },
+    "otc-sim:broker-composite": {
+      "mean_accuracy": 0.5336,
+      "detail": {
+        "11": {
+          "n": 6599,
+          "accuracy": 0.5225,
+          "p_value_vs_coinflip": 0.000256,
+          "max_wrong_streak": 12,
+          "conf_bands": {
+            "55+": {
+              "n": 467,
+              "accuracy": 0.591
+            },
+            "58+": {
+              "n": 60,
+              "accuracy": 0.7167
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.4
+        },
+        "22": {
+          "n": 6599,
+          "accuracy": 0.5411,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 11,
+          "conf_bands": {
+            "55+": {
+              "n": 793,
+              "accuracy": 0.6267
+            },
+            "58+": {
+              "n": 121,
+              "accuracy": 0.6694
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.3
+        },
+        "33": {
+          "n": 6599,
+          "accuracy": 0.5372,
+          "p_value_vs_coinflip": 0.0,
+          "max_wrong_streak": 10,
+          "conf_bands": {
+            "55+": {
+              "n": 685,
+              "accuracy": 0.6219
+            },
+            "58+": {
+              "n": 130,
+              "accuracy": 0.7077
+            }
+          },
+          "n_train": 5000,
+          "sec": 8.4
+        }
+      }
+    }
+  },
+  "seeds": [
+    11,
+    22,
+    33
+  ],
+  "real_pooled": {
+    "n": 25197,
+    "accuracy": 0.5201,
+    "p_value_vs_coinflip": 0.0
+  }
+}

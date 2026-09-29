@@ -1255,6 +1255,112 @@ let currentTickEye = null;
    XSS-safe: textContent / className only, never innerHTML with data.
    ═══════════════════════════════════════════════════════════════════ */
 let lpAccTimer = 0;
+// NEXT-CANDLE ENGINE (CSE v1, 2026-09-29) — the user's #1 requirement:
+// the 0-second prediction for the RUNNING candle (its color, locked at
+// open). Rendered from msg.prediction.next_candle (fresh every tick after
+// the signal-delay gate opens) + /api/next-candle for the graded accuracy.
+let ncAccTimer = 0;
+function renderNextCandle(nc){
+  if(!nc) return;
+  const set = (id, txt) => { const el = $(id); if(el) el.textContent = txt; };
+
+  // state chip (PRIOR / BLENDED / LOCAL — how much this pair's own data
+  // is driving the prediction)
+  const stateEl = $('nc-state');
+  if(stateEl){
+    const s = nc.state || '—';
+    stateEl.textContent = s === 'LOCAL' ? 'অ্যাডাপ্টেড (LOCAL)'
+      : s === 'BLENDED' ? 'মিশ্রণ (BLENDED)'
+      : s === 'PRIOR' ? 'গ্লোবাল প্রায়র (PRIOR)' : s;
+    stateEl.className = 'nc-state-chip ' + (s === 'LOCAL' ? 'local'
+      : s === 'BLENDED' ? 'blended' : 'prior');
+  }
+
+  // direction + confidence + calibrated probability
+  const dirEl = $('nc-direction');
+  if(dirEl){
+    const d = nc.direction;
+    dirEl.textContent = d === 'CALL' ? '🟢 GREEN — CALL' : '🔴 RED — PUT';
+    dirEl.className = 'nc-direction ' + (d === 'CALL' ? 'call' : 'put');
+  }
+  set('nc-conf', (nc.confidence || 50) + '%');
+  const p = nc.p_green;
+  set('nc-prob', (p != null ? Math.round(p * 1000) / 10 : '—') + '% গ্রিন (calibrated)');
+
+  // pattern row: last-3-candles emoji → predicted next
+  set('nc-pattern', nc.pattern_emoji || nc.pattern || '—');
+  const nextEl = $('nc-pattern-next');
+  if(nextEl){
+    nextEl.textContent = nc.direction === 'CALL' ? '🟢' : '🔴';
+    nextEl.className = 'nc-pattern-next ' +
+      (nc.direction === 'CALL' ? 'call' : 'put');
+  }
+  const ps = nc.pattern_stats || {};
+  set('nc-pattern-stat', (ps.p3_n ?
+    ('এই প্যাটার্নের পরে ' + Math.round((ps.p3_green_rate || 0) * 100) +
+      '% সবুজ (' + ps.p3_n + 'বার)') : 'পরিসংখ্যান জমছে…'));
+
+  // factor chips (top 4, signed toward green)
+  const fWrap = $('nc-factors');
+  if(fWrap){
+    fWrap.textContent = '';
+    const facts = (nc.factors || []).slice(0, 4);
+    if(!facts.length){
+      const sp = document.createElement('span');
+      sp.className = 'lp-factor';
+      sp.textContent = 'ইঞ্জিন ওয়ার্ম-আপ চলছে…';
+      fWrap.appendChild(sp);
+    } else {
+      for(const f of facts){
+        const sp = document.createElement('span');
+        const c = f.contribution || 0;
+        sp.className = 'lp-factor ' + (c > 0 ? 'call' : 'put');
+        sp.textContent = (f.label || f.name) + ' ' +
+          (c > 0 ? '↑' : '↓') + Math.abs(Math.round(c * 1000) / 1000);
+        sp.title = (f.name || '') + ' = ' + (f.value != null ? f.value : '') +
+          ' · কন্ট্রিবিউশন ' + (Math.round(c * 1000) / 1000) +
+          ' (' + (c > 0 ? 'সবুজ' : 'লাল') + ' দিকে)';
+        fWrap.appendChild(sp);
+      }
+    }
+  }
+
+  // meta: training size + blend weight
+  set('nc-train', 'লোকাল ট্রেইন: ' + (nc.n_train || 0) + ' ক্যান্ডেল');
+  set('nc-blend', nc.blend_w != null ?
+    ('লোকাল ওজ়ন: ' + Math.round(nc.blend_w * 100) + '%') : '—');
+
+  // graded accuracy — refresh from the API at most every 20s (moves once
+  // per candle close; every-candle fetch would be waste)
+  const nowMs = Date.now();
+  if(nowMs - ncAccTimer > 20000){
+    ncAccTimer = nowMs;
+    fetch('/api/next-candle/' + encodeURIComponent(currentAsset || ''))
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        const row = $('nc-accuracy-row');
+        const val = $('nc-accuracy');
+        const st = j && j.stats;
+        if(!st || !st.total){
+          if(row) row.style.display = 'none';
+          return;
+        }
+        if(row) row.style.display = '';
+        if(val){
+          let txt = Math.round((st.accuracy || 0) * 100) + '% (' + st.total + ' ক্যান্ডেল)';
+          if(st.last20_accuracy != null){
+            txt += ' · শেষ ২০: ' + Math.round(st.last20_accuracy * 100) + '%';
+          }
+          if(st.max_wrong_streak){
+            txt += ' · সর্বোচ্চ ভুল-স্ট্রিক: ' + st.max_wrong_streak;
+          }
+          val.textContent = txt;
+        }
+      })
+      .catch(() => {});
+  }
+}
+
 function renderLivePred(lp){
   if(!lp) return;
   const set = (id, txt) => { const el = $(id); if(el) el.textContent = txt; };
@@ -3772,6 +3878,8 @@ function onSnapshot(msg){
   if(msg.prediction){
     lastPrediction = msg.prediction;
     renderSignal(msg.prediction);
+    // NEXT-CANDLE (CSE): restore the engine panel on subscribe/reconnect.
+    if(msg.prediction.next_candle) renderNextCandle(msg.prediction.next_candle);
   }
   // OTC-PREDICT-ENGINE: fresh subscribe → pull the frozen prediction card
   // for this pair (WS 'otc_pred' frames keep it live afterwards).
@@ -3866,6 +3974,9 @@ function onTick(msg){
   if(msg.prediction){
     lastPrediction = msg.prediction;
     renderSignal(msg.prediction);
+    // NEXT-CANDLE (CSE): the engine payload riding on the prediction —
+    // direction (locked at 0s), pattern, factors, live accuracy.
+    if(msg.prediction.next_candle) renderNextCandle(msg.prediction.next_candle);
   }
 }
 

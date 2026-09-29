@@ -48,7 +48,18 @@ def _is_jpy_like(price: float) -> bool:
 
 
 class _DemoAssetState:
-    """Per-asset price state (regime drift + AR(1) momentum)."""
+    """Per-asset price state — OTC-like composite dynamics.
+
+    Regimes (documented design, mirrors the backtest families in
+    scripts/backtest_next_candle.py — NOT a prediction of any market):
+      * MR    — mean-reversion pull toward a slowly wandering anchor
+                (OU-like; the property broker OTC feeds are known for)
+      * TREND — multi-candle directional drift (2–8 minutes)
+      * CHOP  — balanced noise
+    plus AR(1) tick momentum, occasional spike prints and stop-hunt wicks.
+    The same _step() drives BOTH live ticks and synthetic history, so the
+    NEXT-CANDLE engine's replay-graded accuracy reflects the real dynamics.
+    """
 
     def __init__(self, asset: str, price: float):
         self.asset = asset
@@ -59,29 +70,71 @@ class _DemoAssetState:
         self.innov = 0.0
         self.drift = 0.0
         self.drift_left = 0
+        self.mode = "CHOP"
+        self.anchor = price
+        self.anchor_left = 3600
 
-    def next_price(self) -> float:
-        # regime switching
+    def _regime(self):
         if self.drift_left <= 0:
             r = self.rng.random()
-            if r < 0.30:
-                self.drift = self.rng.choice((-1, 1)) * self.rng.uniform(0.12, 0.4)
-                self.drift_left = self.rng.randint(60, 220)
-            elif r < 0.60:
-                self.drift = self.rng.choice((-1, 1)) * self.rng.uniform(0.03, 0.12)
-                self.drift_left = self.rng.randint(40, 120)
-            else:
+            if r < 0.45:      # mean-reversion regime (~45% of the time)
+                self.mode = "MR"
                 self.drift = 0.0
-                self.drift_left = self.rng.randint(30, 90)
+                self.drift_left = self.rng.randint(240, 960)    # ~2–7 min
+            elif r < 0.75:    # multi-candle trend regime (~30%)
+                self.mode = "TREND"
+                self.drift = self.rng.choice((-1, 1)) * self.rng.uniform(0.25, 0.6)
+                self.drift_left = self.rng.randint(300, 1200)  # ~2–8 min
+            else:             # chop (~25%)
+                self.mode = "CHOP"
+                self.drift = 0.0
+                self.drift_left = self.rng.randint(60, 240)
         self.drift_left -= 1
+        # slow anchor wander (keeps MR non-stationary)
+        self.anchor_left -= 1
+        if self.anchor_left <= 0:
+            self.anchor_left = self.rng.randint(1800, 5400)
+            self.anchor += self.rng.gauss(0.0, 1.0) * self.sigma * 30.0
+
+    def _step(self) -> float:
+        """One tick of the composite dynamics (returns the new price)."""
+        self._regime()
         # AR(1) tick momentum
         self.innov = 0.30 * self.innov + self.rng.gauss(0.0, 1.0) * self.sigma
         step = self.drift * self.sigma + self.innov
+        # mean-reversion pull toward the anchor (MR regime only)
+        if self.mode == "MR":
+            step += 0.0012 * (self.anchor - self.price)
         # occasional spike print
         if self.rng.random() < 0.002:
             step += self.rng.choice((-1, 1)) * self.sigma * self.rng.uniform(5, 10)
         self.price += step
+        # stop-hunt wick: sharp pull-back after an excursion
+        if self.rng.random() < 0.0015:
+            self.price -= step * self.rng.uniform(3.0, 6.0)
         return self.price
+
+    def next_price(self) -> float:
+        return self._step()
+
+    def simulate_history(self, n_candles: int, period_s: int = 60):
+        """Generate n_candles of 1m OHLC with the SAME dynamics (used by
+        get_historical_candles so history and live ticks match)."""
+        ticks_per_candle = max(1, int(period_s * _TICKS_PER_SEC))
+        candles = []
+        now = int(time.time())
+        now -= now % period_s
+        for i in range(n_candles, 0, -1):
+            t = now - i * period_s
+            o = self.price
+            hi = lo = c = o
+            for _ in range(ticks_per_candle):
+                c = self._step()
+                hi = max(hi, c)
+                lo = min(lo, c)
+            candles.append({"time": t, "open": o, "high": hi,
+                            "low": lo, "close": c})
+        return candles
 
 
 class DemoClient:
@@ -91,6 +144,7 @@ class DemoClient:
         self._states = {a: _DemoAssetState(a, p) for a, p in DEMO_ASSETS.items()}
         self._callbacks: dict[str, list] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._hist_cache: dict[tuple, list] = {}   # master series per (asset, period)
         self._running = False
         self._loop = None
         # feed._srv_now reads this — demo clock is the local clock.
@@ -160,33 +214,29 @@ class DemoClient:
             return []
         return [{"time": time.time(), "price": st.price}]
 
-    # ── history (synthetic, generated once per call) ─────────────────────
+    # ── history (synthetic — SAME dynamics as live, see _DemoAssetState) ──
+    # One MASTER series per (asset, period), simulated on first request;
+    # every history call returns its tail — so the base seed (200), the
+    # engine's deep seed (3000) and the live ticks all describe ONE
+    # continuous price path (no chart discontinuity, no overlapping
+    # conflicting windows).
     async def get_historical_candles(self, asset, amount_of_seconds=7200,
                                      period=60, max_workers=1):
         st = self._states.get(asset)
         if st is None:
             return []
-        n = max(10, min(400, int(amount_of_seconds // max(period, 1))))
-        now = int(time.time())
-        now -= now % period
-        candles = []
-        price = st.price
-        rng = random.Random((hash(asset) ^ now) & 0xFFFFFFFF)
-        for i in range(n, 0, -1):
-            t = now - i * period
-            o = price
-            hi = lo = c = o
-            for _ in range(int(period * 1.5)):
-                step = rng.gauss(0.0, 1.0) * st.sigma * 1.2
-                c += step
-                hi = max(hi, c)
-                lo = min(lo, c)
-            candles.append({"time": t, "open": o, "high": hi,
-                            "low": lo, "close": c})
-            price = c
-        # move the live state to the generated close for continuity
-        st.price = price
-        return candles
+        key = (asset, period)
+        cache = self._hist_cache.get(key)
+        if cache is None:
+            # deep master series: the NEXT-CANDLE engine (CSE) seeds its
+            # online model from history — a deep window (QX_NC_SEED_CANDLES,
+            # default 3000) means the local model is adapted from minute one
+            cache = st.simulate_history(5000, period)
+            self._hist_cache[key] = cache
+        n = max(10, min(5000, int(amount_of_seconds // max(period, 1))))
+        if n < len(cache):
+            return list(cache[-n:])
+        return list(cache)
 
     async def get_candles(self, asset, end_from_time=None, offset=7200,
                           period=60):

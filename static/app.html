@@ -282,6 +282,48 @@
                              current), unified buyer/seller pressure. Updated
                              on every tick frame (msg.live_pred); common.js
                              renderLivePred() writes here. -->
+                        <!-- NEXT-CANDLE ENGINE (CSE v1, 2026-09-29):
+                             USER: "যখন একটি ক্যান্ডেল শুরু হবে 0 সেকেন্ড এ ওই
+                             শুরু হওয়া ক্যান্ডেল টি red হবে নাকি গ্রিন হবে
+                             এটার প্রেডিকশন।" — THE single-strategy engine
+                             (core/next_candle.py): at every candle's 0-second
+                             open it predicts THAT candle's color from the
+                             previous closed candles' anatomy + sequence
+                             ("কোন ক্যান্ডেলের পরে কোন ক্যান্ডেল আসে").
+                             Direction LOCKED at 0s; graded at every close.
+                             common.js renderNextCandle() writes here
+                             (msg.prediction.next_candle + /api/next-candle). -->
+                        <div class="next-candle-panel" id="next-candle-panel">
+                            <div class="lp-header">
+                                <h4 class="lp-title">পরের ক্যান্ডেল প্রেডিকশন — ০ সেকেন্ড</h4>
+                                <span class="nc-state-chip" id="nc-state" title="PRIOR=গ্লোবাল মডেল, BLENDED=গ্লোবাল+লোকাল মিশ্রণ, LOCAL=এই পেয়ারের নিজের ডেটায় অ্যাডাপ্টেড">—</span>
+                            </div>
+                            <div class="nc-direction-row">
+                                <span class="nc-direction" id="nc-direction">—</span>
+                                <span class="nc-conf" id="nc-conf">—</span>
+                                <span class="nc-prob" id="nc-prob" title="Calibrated P(গ্রিন) — স্ক্রিনে ৬০% মানে সত্যিকারের ~৬০%">—</span>
+                            </div>
+                            <div class="nc-pattern-row">
+                                <span class="nc-pattern-label">শেষ ৩ ক্যান্ডেল</span>
+                                <span class="nc-pattern" id="nc-pattern">—</span>
+                                <span class="nc-pattern-arrow">→</span>
+                                <span class="nc-pattern-next" id="nc-pattern-next">—</span>
+                                <span class="nc-pattern-stat" id="nc-pattern-stat" title="এই প্যাটার্নের পরে ঐতিহাসিকভাবে কত % সবুজ এসেছে (এই পেয়ারের নিজের ডেটা থেকে)">—</span>
+                            </div>
+                            <div class="nc-factors" id="nc-factors">
+                                <span class="lp-factor">ক্যান্ডেল শুরুর অপেক্ষায়…</span>
+                            </div>
+                            <div class="nc-meta-row">
+                                <span class="nc-meta" id="nc-train" title="লোকাল মডেল কতটা ক্যান্ডেলে ট্রেইন করা">—</span>
+                                <span class="nc-meta" id="nc-blend" title="গ্লোবাল vs লোকাল মডেলের ওজন">—</span>
+                                <span class="nc-meta" title="প্রেডিকশন ক্যান্ডেল শুরুর ০ সেকেন্ডে লক হয় — মাঝপথে বদলায় না">🔒 ০ সেকেন্ডে লকড</span>
+                            </div>
+                            <div class="lp-accuracy-row" id="nc-accuracy-row" style="display:none">
+                                <span class="lp-acc-label">লাইভ নির্ভুলতা (প্রতি ক্যান্ডেল গ্রেডেড)</span>
+                                <span class="lp-acc-val" id="nc-accuracy">—</span>
+                            </div>
+                        </div>
+
                         <div class="live-pred-panel" id="live-pred-panel">
                             <div class="lp-header">
                                 <h4 class="lp-title">রানিং ক্যান্ডেল প্রেডিকশন</h4>
