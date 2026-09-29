@@ -372,11 +372,14 @@ class AssetFingerprint:
             m["grid_adherence"] = round(on_grid / tot, 4) if tot else None
 
         # 4) increment shape (tick returns in grid units)
+        # NOTE: needs >= 2000 nonzero returns — validated low-sample kurt is
+        # noise (a handful of spikes at 2.5k ticks pushed kurt to 7+ and
+        # flipped the verdict — NZDCAD demo case 2026-09-29).
         if len(ticks) >= 500 and m.get("price_grid"):
             g = m["price_grid"]
             rets = [(b[1] - a[1]) / g for a, b in zip(ticks, ticks[1:])][:4000]
             rets = [r for r in rets if r != 0]
-            if len(rets) >= 200:
+            if len(rets) >= 2000:
                 m["ret_kurtosis"] = round(_kurtosis(rets), 2)
                 m["ret_std"] = round(_std(rets), 3)
                 m["ret_ac1"] = round(_autocorr(rets, 1), 4)
@@ -513,13 +516,32 @@ class AssetFingerprint:
 
         # increment shape
         k = m.get("ret_kurtosis")
+        gap_cv = m.get("tick_gap_cv")
+        tps_cv = m.get("ticks_per_sec_cv")
+        # metronome check FIRST: a fixed-cadence feed with fat tails is a
+        # generator doing DESIGNED spike/wick mimicry (stop-hunt flavor —
+        # common in OTC-style generators, ours does it too), NOT real order
+        # flow.  Real trade-driven ticks are irregular AND fat-tailed.
+        metronome = (gap_cv is not None and gap_cv < 0.40) or \
+                    (tps_cv is not None and tps_cv < 0.40)
         if k is not None:
-            if k < 1.0:
-                synthetic_evidence += 1.5
-                notes.append(f"tick returns near-Gaussian (kurt={k}) — RNG output")
-            elif k > 5.0:
-                real_evidence += 2.0
-                notes.append(f"tick returns fat-tailed (kurt={k}) — real order flow")
+            if metronome:
+                if k < 1.0:
+                    synthetic_evidence += 1.5
+                    notes.append(f"tick returns near-Gaussian (kurt={k}) on a metronome cadence — RNG output")
+                elif k > 5.0:
+                    synthetic_evidence += 0.5
+                    notes.append(f"fat tails (kurt={k}) ON a metronome cadence — designed spike/wick mimicry, not order flow")
+                else:
+                    synthetic_evidence += 1.0
+                    notes.append(f"tick return shape kurt={k} on a metronome cadence — synthetic feed")
+            else:
+                if k < 1.0:
+                    synthetic_evidence += 1.5
+                    notes.append(f"tick returns near-Gaussian (kurt={k}) — RNG output")
+                elif k > 5.0:
+                    real_evidence += 2.0
+                    notes.append(f"tick returns fat-tailed (kurt={k}) with irregular arrivals — real order flow")
 
         # variance ratio / hurst → process type
         vr = m.get("vr_q5")
