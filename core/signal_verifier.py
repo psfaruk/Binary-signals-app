@@ -316,9 +316,22 @@ def _layer1_price_action(signal: str, candles: List[Dict], atr: float) -> Dict:
         else:
             disagree += 1
 
+    # FIX (A4, audit 2026-09-29): counter-trend is the DEFINITION of a
+    # reversal entry — vetoing it killed every reversal signal (×0.55 via
+    # the joint gate) while momentum-chasers sailed through, backwards for
+    # mean-reverting OTC. Counter-trend now WEAKENS; VETO only when the
+    # move is extreme (every candle hard against, ≥2.5 ATR total).
     if disagree >= TREND_DISAGREE_MIN_CANDLES and agree == 0:
-        return {"verdict": "VETO",
-                "reason": f"last 3 candles strongly counter-trend ({disagree} against, 0 agree)"}
+        _against_atr = sum(abs(_body(c)) for c in last3 if _body(c) * sig_dir < 0)
+        if atr > 0 and _against_atr >= 2.5 * atr:
+            return {"verdict": "VETO",
+                    "reason": (f"extreme counter-trend run "
+                               f"({_against_atr / atr:.1f} ATR against) — "
+                               f"fighting a freight train")}
+        return {"verdict": "WEAKEN",
+                "reason": (f"reversal context: {disagree} counter-trend "
+                           f"candle(s), 0 agree — reversal entries carry "
+                           f"lower base odds, not a veto (A4 fix)")}
     if agree >= TREND_AGREE_MIN_CANDLES:
         return {"verdict": "CONFIRM",
                 "reason": f"last 3 candles trend-aligned ({agree} agree)"}
@@ -350,14 +363,24 @@ def _layer3_tick_momentum(signal: str, ticks: List[float]) -> Dict:
     if vel is None:
         return {"verdict": "PASS", "reason": "insufficient ticks"}
 
-    # CALL needs positive tick velocity
+    # FIX (A4, audit 2026-09-29): a reversal CALL lands while ticks are
+    # still falling (that's WHY it's a reversal) — the old hard VETO here
+    # executed every reversal signal. Misaligned momentum now WEAKENS;
+    # VETO only on extreme adverse velocity (a falling knife / vertical
+    # spike against the entry).
     if signal == "CALL" and vel < TICK_VELOCITY_VETO_THRESHOLD:
-        return {"verdict": "VETO",
-                "reason": f"ticks decelerating down (vel={vel:.2f})"}
+        if vel < 2.5 * TICK_VELOCITY_VETO_THRESHOLD:
+            return {"verdict": "VETO",
+                    "reason": f"ticks in free-fall (vel={vel:.2f})"}
+        return {"verdict": "WEAKEN",
+                "reason": f"ticks still falling into a CALL (vel={vel:.2f}) — reversal context (A4 fix)"}
     # PUT needs negative tick velocity
     if signal == "PUT" and vel > -TICK_VELOCITY_VETO_THRESHOLD:
-        return {"verdict": "VETO",
-                "reason": f"ticks accelerating up (vel={vel:.2f})"}
+        if vel > -2.5 * TICK_VELOCITY_VETO_THRESHOLD:
+            return {"verdict": "VETO",
+                    "reason": f"ticks vertical against PUT (vel={vel:.2f})"}
+        return {"verdict": "WEAKEN",
+                "reason": f"ticks still rising into a PUT (vel={vel:.2f}) — reversal context (A4 fix)"}
 
     if (signal == "CALL" and vel > 0.2) or (signal == "PUT" and vel < -0.2):
         return {"verdict": "CONFIRM",

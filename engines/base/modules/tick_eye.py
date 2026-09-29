@@ -32,18 +32,20 @@ MIN_EYE_STRENGTH = 45      # ≥ 2 aligned eye-signals (e.g. flip+flow)
 STRONG_EYE_STRENGTH = 60   # ≥ 3 aligned eye-signals → higher confidence
 
 
-def analyze(candles, ticks, ctx: MarketContext) -> list:
+def analyze(candles, ticks, ctx: MarketContext, period: int = 60) -> list:
     """Run the human-eye anatomy on the just-closed candle's ticks.
 
     `ticks` is the closed candle's raw tick sequence (base_ticks at EOC —
     the same input tickrun receives). `candles` is unused for the anatomy
     itself but kept for signature symmetry + ATR context.
+    `period` — the stream's real candle period (FIX B2, audit 2026-09-29:
+    was hardcoded 60, corrupting the final-segment math on non-1m charts).
     """
     if not ticks or len(ticks) < _eye.MIN_TICKS or not candles:
         return []
 
     last = candles[-1]
-    anatomy = _eye.analyze_candle_ticks(ticks, last.get("open"), period=60)
+    anatomy = _eye.analyze_candle_ticks(ticks, last.get("open"), period=period)
     if anatomy is None:
         return []
 

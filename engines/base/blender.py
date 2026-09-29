@@ -132,7 +132,9 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
     # TICK-EYE (2026-09-16): human-eye tick anatomy of the just-closed
     # candle (ending velocity, late flip, close position, wick reject,
     # tick burst) — runs on the same base_ticks tickrun receives.
-    all_results += mod_tick_eye.analyze(candles, ticks, ctx)
+    # FIX (B2, audit 2026-09-29): forward the stream's REAL period —
+    # the module's eye anatomy was hardcoded to 60s candles.
+    all_results += mod_tick_eye.analyze(candles, ticks, ctx, period=period)
     # SIGNAL-ROADMAP (2026-09-17): the user's six factors (buyer/seller,
     # hold, rejection/reaction, round number, overtake, winner) from the
     # just-closed candle's microstructure — the micro dict feed.py has
@@ -285,7 +287,11 @@ def predict(candles, ticks=None, micro=None, asset="", htf_trend="SIDEWAYS",
         _eye_anatomy = None
         if ticks and len(ticks) >= 12 and candles:
             from core.tick_eye import analyze_candle_ticks as _act
-            _eye_anatomy = _act(list(ticks), candles[-1].get("open"), 60)
+            # FIX (B2, audit 2026-09-29): was hardcoded 60 — on a 5m stream
+            # the "final segment" read ~50s instead of ~10s (and ~2.5s on a
+            # 15s stream), silently corrupting the eye anatomy + roadmap on
+            # every non-1m timeframe.
+            _eye_anatomy = _act(list(ticks), candles[-1].get("open"), period)
         result["roadmap"] = _roadmap.build_roadmap(
             micro, candles, eye_anatomy=_eye_anatomy,
             final_signal=result.get("signal"))

@@ -1239,6 +1239,150 @@ function renderModuleBreakdown(pred){
    close position, late flip, tick burst, late wick, and the eye's net
    verdict with human-readable Bengali reasons. */
 let currentTickEye = null;
+/* ═══════════════════════════════════════════════════════════════════════
+   LIVE-CANDLE PREDICTION (2026-09-29)
+   USER: "আমি চাই আমার প্রেডিকশন ক্যান্ডেল টি কোন দিকে যাবে... একটি ক্যান্ডেল
+   কি ঘটছে, মিলি সেকেন্ড এ আপডেট হবে।"
+
+   Renders msg.live_pred (feed.py attaches it to EVERY tick broadcast):
+     • direction + confidence — where the RUNNING candle is heading
+     • P(close>open) — the candle's closing-color probability
+     • P(close>current) — the tradeable probability from THIS moment
+     • unified buyer/seller pressure (one definition, count+volume blend)
+     • factors (velocity / close-pos / flip / wick / burst / locked)
+     • entry hint chip when the engine sees a tradeable moment
+     • rolling live accuracy from /api/live-prediction/<asset>
+   XSS-safe: textContent / className only, never innerHTML with data.
+   ═══════════════════════════════════════════════════════════════════ */
+let lpAccTimer = 0;
+function renderLivePred(lp){
+  if(!lp) return;
+  const set = (id, txt) => { const el = $(id); if(el) el.textContent = txt; };
+
+  if(!lp.ready){
+    set('lp-direction', '…');
+    const dEl = $('lp-direction');
+    if(dEl) dEl.className = 'lp-direction neutral';
+    set('lp-conf', '0%');
+    set('lp-clock', (lp.seconds_left != null ? lp.seconds_left + 's' : '--'));
+    set('lp-phase', lp.phase || '—');
+    return;
+  }
+
+  // Phase chip + countdown clock
+  const phaseEl = $('lp-phase');
+  if(phaseEl){
+    phaseEl.textContent = lp.phase === 'LAST10' ? 'শেষ ১০ সেকেন্ড'
+      : lp.phase === 'LATE' ? 'লেট'
+      : lp.phase === 'MID' ? 'মিড'
+      : lp.phase === 'EARLY' ? 'আর্লি' : (lp.phase || '—');
+    phaseEl.className = 'lp-phase-chip' + (lp.phase === 'LAST10' ? ' last10' : '');
+  }
+  const clockEl = $('lp-clock');
+  if(clockEl){
+    clockEl.textContent = (lp.seconds_left != null ? lp.seconds_left : '--') + 's';
+    clockEl.className = 'lp-clock' + (lp.phase === 'LAST10' ? ' last10' : '');
+  }
+
+  // Direction + confidence
+  const dirEl = $('lp-direction');
+  if(dirEl){
+    dirEl.textContent = lp.direction === 'CALL' ? '▲ CALL'
+      : lp.direction === 'PUT' ? '▼ PUT' : '—';
+    dirEl.className = 'lp-direction ' +
+      (lp.direction === 'CALL' ? 'call' : lp.direction === 'PUT' ? 'put' : 'neutral');
+  }
+  set('lp-conf', (lp.confidence || 0) + '%');
+
+  // Probability bars
+  const pc = Math.max(0, Math.min(100, Math.round((lp.p_close_green || 0.5) * 100)));
+  const pcEl = $('lp-p-close');
+  if(pcEl) pcEl.style.width = pc + '%';
+  set('lp-p-close-val', pc + '% গ্রিন');
+  const ph = Math.max(0, Math.min(100, Math.round((lp.p_up_from_here || 0.5) * 100)));
+  const phEl = $('lp-p-here');
+  if(phEl) phEl.style.width = ph + '%';
+  set('lp-p-here-val', ph + '% আপ');
+
+  // Unified pressure bar
+  const bp = lp.buyer_pct != null ? lp.buyer_pct : 50;
+  set('lp-buyer-pct', bp + '%');
+  set('lp-seller-pct', (lp.seller_pct != null ? lp.seller_pct : 100 - bp) + '%');
+  const bEl = $('lp-pressure-buyers');
+  if(bEl) bEl.style.width = bp + '%';
+  const stEl = $('lp-pressure-state');
+  if(stEl){
+    stEl.textContent = lp.pressure_bn || '—';
+    stEl.className = 'lp-state-badge ' +
+      (String(lp.pressure_state || '').indexOf('BUYER') >= 0 ? 'buyers'
+      : String(lp.pressure_state || '').indexOf('SELLER') >= 0 ? 'sellers' : '');
+  }
+  const lockEl = $('lp-lock');
+  if(lockEl && lp.lock_fraction != null){
+    lockEl.textContent = '🔒 ' + Math.round(lp.lock_fraction * 100) + '% নিশ্চিত';
+  }
+
+  // Factors (top 4, direction-tinted chips)
+  const fWrap = $('lp-factors');
+  if(fWrap){
+    fWrap.textContent = '';
+    const facts = (lp.factors || []).slice(0, 4);
+    if(!facts.length){
+      const sp = document.createElement('span');
+      sp.className = 'lp-factor';
+      sp.textContent = 'চোখে স্পষ্ট কিছু নেই — ব্যালান্সড টিক';
+      fWrap.appendChild(sp);
+    } else {
+      for(const f of facts){
+        const sp = document.createElement('span');
+        sp.className = 'lp-factor' + (f.dir === 'CALL' ? ' call' : f.dir === 'PUT' ? ' put' : '');
+        sp.textContent = f.note_bn || f.name || '';
+        sp.title = f.name || '';
+        fWrap.appendChild(sp);
+      }
+    }
+  }
+
+  // Entry hint — the trader's actionable moment
+  const hintEl = $('lp-entry-hint');
+  if(hintEl){
+    if(lp.entry_hint === 'CALL' || lp.entry_hint === 'PUT'){
+      hintEl.style.display = '';
+      hintEl.className = 'lp-entry-hint ' +
+        (lp.entry_hint === 'CALL' ? 'call' : 'put');
+      hintEl.textContent = (lp.entry_hint === 'CALL' ? '⬆ এন্ট্রির মুহূর্ত' : '⬇ এন্ট্রির মুহূর্ত');
+    } else {
+      hintEl.style.display = 'none';
+    }
+  }
+
+  // Rolling accuracy — refresh from the API at most every 20s (the panel
+  // itself updates every tick; the accuracy counter moves once per candle).
+  const nowMs = Date.now();
+  if(nowMs - lpAccTimer > 20000){
+    lpAccTimer = nowMs;
+    fetch('/api/live-prediction/' + encodeURIComponent(currentAsset || ''))
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        const row = $('lp-accuracy-row');
+        const val = $('lp-accuracy');
+        if(!j || !j.rolling || !j.rolling.entries || !j.rolling.entries.n){
+          if(row) row.style.display = 'none';
+          return;
+        }
+        const e = j.rolling.entries;
+        const f = j.rolling.final || {};
+        if(row) row.style.display = '';
+        if(val){
+          val.textContent =
+            'ক্লোজ-কল ' + Math.round((f.accuracy || 0) * 100) + '% (' + (f.n || 0) + ')' +
+            ' · এন্ট্রি ' + Math.round((e.win_rate || 0) * 100) + '% (' + e.n + ')';
+        }
+      })
+      .catch(() => {});
+  }
+}
+
 function renderTickEye(te){
   if(!te) return;
   currentTickEye = te;
@@ -3704,6 +3848,10 @@ function onTick(msg){
   }
   // FIX (DEEP-AUDIT-2026-07-26 / F-17-15, HIGH): removed addTapeTick(c.close) call — dead code (#tick-tape-inner doesn't exist).
   if(msg.micro) renderMicro(msg.micro);
+  // LIVE-CANDLE (2026-09-29): the running candle's own prediction —
+  // direction, P(close>open), P(close>current), unified buyer/seller
+  // pressure. Fresh on EVERY tick (ms-latency server compute).
+  if(msg.live_pred) renderLivePred(msg.live_pred);
   // TICK-EYE (2026-09-16): live human-eye anatomy of the running candle.
   if(msg.tick_eye) renderTickEye(msg.tick_eye);
   // COORDINATION-MS (2026-09-16): the merged four-voice coordination —

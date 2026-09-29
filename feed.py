@@ -72,6 +72,17 @@ try:                                               # noqa: E402
 except Exception as _coord_imp_exc:               # noqa: E402
     _compute_coordination = None
     print(f"[feed] coordination unavailable ({_coord_imp_exc}) — coordination off")
+# LIVE-CANDLE (2026-09-29): the running-candle prediction engine —
+# p_close_green / p_up_from_here / unified buyer-seller pressure, computed
+# on EVERY tick (µs-fast, same budget contract as tick_eye). Backtest:
+# scripts/backtest_live_candle_report.json (fair-walk entry control 49.3%,
+# no fake edge; OTC-like streams read profitably by phase).
+try:                                               # noqa: E402
+    from core.live_candle import predict_running_candle as _predict_live
+except Exception as _live_candle_imp_exc:         # noqa: E402
+    _predict_live = None
+    print(f"[feed] live_candle unavailable ({_live_candle_imp_exc}) — "
+          f"live prediction off")
 import os      # noqa: E402
 import re      # noqa: E402
 import time    # noqa: E402
@@ -1482,9 +1493,12 @@ class QuotexFeed:
 
         # LIVE-DATA-ONLY (2026-07-25): if no credentials configured, fail
         # loud with an actionable error. Do NOT silently fall back to sim.
+        # DEMO FEED (2026-09-29): QX_DEMO_FEED=1 bypasses the credential
+        # gate — the local DemoClient supplies ticks (preview deployments).
+        _demo_mode = os.environ.get("QX_DEMO_FEED", "0") == "1"
         _qx_token = os.environ.get("QX_TOKEN", "").strip()
         _qx_email = os.environ.get("QX_EMAIL", "").strip()
-        if not _qx_token and not _qx_email:
+        if not _demo_mode and not _qx_token and not _qx_email:
             err = ("no Quotex credentials — sim mode is disabled. "
                    "Set QX_TOKEN via Railway Variables or visit "
                    "/api/set-token?token=YOUR_TOKEN to provision at runtime.")
@@ -2142,6 +2156,19 @@ class QuotexFeed:
             # again — operator must push a fresh token via /api/set-token
             # or Railway Variables.
             env_token = os.environ.get("QX_TOKEN", "").strip()
+            # ── DEMO FEED (2026-09-29) ────────────────────────────────────
+            # QX_DEMO_FEED=1 → local synthetic ticks through the ENTIRE
+            # production pipeline (preview deployments; no Quotex account
+            # touched). Clearly labeled everywhere — never a live market.
+            if os.environ.get("QX_DEMO_FEED", "0") == "1":
+                from core.demo_feed import DemoClient
+                self._client = DemoClient()
+                ok, reason = await self._client.connect()
+                if ok:
+                    self._connected = True
+                    print("[feed] DEMO MODE ACTIVE — synthetic ticks, "
+                          "signals/predictions are NOT real market data")
+                return bool(ok)
             if not env_token:
                 # AUTO-SESSION (2026-08-13): before giving up, try to mint one
                 # from the stored browser cookies. This is what makes a cold
@@ -3179,6 +3206,18 @@ class QuotexFeed:
                     tags.append("WITH_REGIME")
             if micro_snap and micro_snap.get("last_react") == "EXHAUST":
                 tags.append("LATE_FLIP")         # candle flipped at the close
+            # FIX (A5, audit 2026-09-29): strike-based accuracy — the way the
+            # broker actually settles. A signal can be "correct" open→close
+            # but LOSE strike→expiry (entry after a fast opening move) and
+            # vice versa. Both gradings now land in the postmortem so the
+            # gap is visible and the history-gate / calibration analyses can
+            # use the honest one.
+            _entry_px = prediction.get("_entry_price")
+            _entry_ok = None
+            if isinstance(_entry_px, (int, float)) and _entry_px:
+                _entry_ok = ((closed["close"] > _entry_px) if sig == "CALL"
+                             else (closed["close"] < _entry_px))
+                tags.append("ENTRY_OK" if _entry_ok else "ENTRY_MISS")
 
             _atr_note = (f" ({abs(move) / atr * 100:.0f}% of ATR)"
                          if atr > 0 else "")
@@ -3194,6 +3233,9 @@ class QuotexFeed:
                 f" | regime {regime}/{zone}"
                 f"{' | ' + ','.join(tags) if tags else ''}"
             )
+            if _entry_ok is not None:
+                pm += (f" | entry {_entry_px:.5f} "
+                       f"{'✓' if _entry_ok else '✗'} (strike→close)")
 
             # Log ANY CALL/PUT signal so the history DB actually populates.
             # FIX (DEEP-AUDIT-2026-07-26 / F-01-09): use .get() with defaults
@@ -3322,12 +3364,23 @@ class QuotexFeed:
         cur = ticks[-1]
         rng = hi - lo
 
-        # ── 1. Buyer vs Seller tick count ─────────────────────────────────────
-        up_t = sum(1 for i in range(1, len(ticks)) if ticks[i] > ticks[i - 1])
-        dn_t = sum(1 for i in range(1, len(ticks)) if ticks[i] < ticks[i - 1])
-        moves = up_t + dn_t
-        buy_pct  = round(up_t / moves * 100) if moves else 50
-        sell_pct = 100 - buy_pct
+        # ── 1. Buyer vs Seller pressure — UNIFIED definition (C4 fix,
+        # audit 2026-09-29) ─────────────────────────────────────────────
+        # The app previously had THREE conflicting definitions (feed count
+        # @62%, core/microstructure volume @55%, tick_eye count bands
+        # @70/80) that contradicted each other on the same candle. ONE
+        # definition everywhere now: 50% tick-count flow + 50% volume-
+        # delta flow (core/live_candle.pressure_from_anatomy) — what the
+        # eye counts AND who actually moves price.
+        try:
+            from core.live_candle import pressure_from_anatomy as _pfa
+            buy_pct, sell_pct, _pstate = _pfa(ticks)
+        except Exception:
+            up_t = sum(1 for i in range(1, len(ticks)) if ticks[i] > ticks[i - 1])
+            dn_t = sum(1 for i in range(1, len(ticks)) if ticks[i] < ticks[i - 1])
+            moves = up_t + dn_t
+            buy_pct  = round(up_t / moves * 100) if moves else 50
+            sell_pct = 100 - buy_pct
 
         # ── 2. Dominant pressure ──────────────────────────────────────────────
         # FIX (DEEP-AUDIT-2026-07-26 / F-01-81): use module-level
@@ -3505,6 +3558,77 @@ class QuotexFeed:
             "round":      round_info,
             "ending_direction": ending_direction,
         }
+
+    def _srv_now(self) -> float:
+        """Server-aligned wall clock (FIX B1, audit 2026-09-29).
+
+        quotex_ws computes `_server_time_offset = server_ts - time.time()`
+        from the broker's timesync frames but NOTHING ever consumed it —
+        every candle-boundary / seconds-left computation ran on the local
+        clock, so any host↔broker skew shifted the timer-close vs the
+        tick boundary (late ticks dropped, wrong LAST10 phase weighting).
+        All candle-time consumers now go through this helper.
+        """
+        try:
+            off = getattr(self._client, "_server_time_offset", 0)
+            if isinstance(off, (int, float)) and abs(off) < 300:
+                return time.time() + float(off)
+        except Exception:
+            pass
+        return time.time()
+
+    def _grade_live_pred(self, stream: _AssetStream, closed: dict) -> None:
+        """LIVE-CANDLE (2026-09-29): grade the running-candle prediction.
+
+        At candle close, compare the engine's final live prediction (and
+        its LAST10 snapshot — the actionable moment) against the REAL
+        close. In-memory rolling accuracy per stream; exposed via
+        /api/live-prediction/<asset> and the UI panel so the user sees
+        the engine's honest, self-measured hit-rate (real market, real
+        ticks — the number the synthetic backtest can never give).
+        """
+        try:
+            stats = getattr(stream, "_live_pred_stats", None)
+            if stats is None:
+                stats = {"total": 0, "correct": 0,
+                         "last10_total": 0, "last10_correct": 0,
+                         "entries": 0, "entries_win": 0}
+                stream._live_pred_stats = stats
+            o, c = closed.get("open"), closed.get("close")
+            if o is None or c is None:
+                return
+            for snap_key, total_key, corr_key in (
+                    ("_live_pred_final", "total", "correct"),
+                    ("_live_pred_last10", "last10_total", "last10_correct")):
+                snap = getattr(stream, snap_key, None)
+                if not snap or not snap.get("ready"):
+                    continue
+                p = snap.get("p_close_green")
+                if p is None or c == o:
+                    continue
+                actual_green = c > o
+                pred_green = p > 0.5
+                stats[total_key] += 1
+                if pred_green == actual_green:
+                    stats[corr_key] += 1
+            # entry hints settle strike(current at hint)→close (audit A5
+            # semantics — the trade the user would actually place)
+            hints = getattr(stream, "_live_pred_entry_snaps", None) or []
+            for h in hints:
+                entry_px, direction = h
+                if c == entry_px:
+                    continue
+                stats["entries"] += 1
+                if (c > entry_px) == (direction == "CALL"):
+                    stats["entries_win"] += 1
+        except Exception as _lp_exc:
+            print(f"[feed] live-pred grade failed for "
+                  f"{getattr(stream, 'asset', '?')}: "
+                  f"{type(_lp_exc).__name__}: {_lp_exc}")
+        finally:
+            stream._live_pred_final = None
+            stream._live_pred_last10 = None
+            stream._live_pred_entry_snaps = []
 
     def _running_confirmation(self, stream: _AssetStream) -> str | None:
         """
@@ -3696,6 +3820,43 @@ class QuotexFeed:
             "close": cur_close,
         }
 
+    def _reanchor_open(self, stream: _AssetStream, real_open: float) -> None:
+        """FIX (B5, audit 2026-09-29): re-anchor a placeholder-open candle
+        to its first REAL tick WITHOUT wiping the tick history.
+
+        The old code did `stream.ticks.clear(); stream.ticks.append(open)`
+        — deleting every REAL tick buffered since the timer-close. The
+        running candle's high/low/eye/micro/live-pred then only reflected
+        post-restart data (an audit "wrong prediction" cause: the engine
+        was blind to the candle's real history mid-candle).
+
+        Now: drop ONLY the leading placeholder price (the stale price the
+        timer-close seeded — not a market tick), keep every REAL tick,
+        re-anchor tracked high/low, and redraw the prediction candle from
+        the true open.
+        """
+        placeholder = stream.candle_open_price
+        stream.candle_open_price = float(real_open)
+        stream.candle_open_is_real = True
+        try:
+            if stream.ticks and abs(stream.ticks[0] - placeholder) < 1e-12:
+                stream.ticks.popleft()
+        except Exception:
+            pass
+        if not stream.ticks:
+            stream.ticks.append(float(real_open))
+        tl = list(stream.ticks)
+        stream._tracked_high = max(tl)
+        stream._tracked_low = min(tl)
+        self._reset_micro_cache(stream)
+        if stream.prediction:
+            try:
+                stream.prediction["candle"] = _pred_candle(
+                    stream.candles, stream.prediction["signal"],
+                    stream.period, float(real_open))
+            except Exception:
+                pass
+
     @staticmethod
     def _track_tick(stream: '_AssetStream', price: float) -> None:
         """Update tracked high/low for ONE appended tick. Called by the
@@ -3724,6 +3885,11 @@ class QuotexFeed:
             return None
 
         closed = self._running_candle(stream)
+
+        # LIVE-CANDLE (2026-09-29): grade the running-candle prediction
+        # against the real close BEFORE the buffers reset — feeds the
+        # rolling accuracy the panel + /api/live-prediction expose.
+        self._grade_live_pred(stream, closed)
 
         # Replace or append the closed candle in the history list
         if stream.candles and stream.candles[-1]["time"] == closed["time"]:
@@ -3762,6 +3928,13 @@ class QuotexFeed:
         # is None during the grade (broadcast shows PENDING) and is set to
         # the new prediction atomically after the grade completes.
         old_prediction = stream.prediction
+        # FIX (A5, audit 2026-09-29): carry the recorded entry price (strike
+        # proxy from the prediction's first broadcast) into the grader.
+        _entry_px = getattr(stream, "_pred_entry_price", None)
+        if (old_prediction and _entry_px
+                and "_entry_price" not in old_prediction):
+            old_prediction = dict(old_prediction)
+            old_prediction["_entry_price"] = _entry_px
         # COORDINATION-MS (2026-09-16): capture the just-closed candle's FINAL
         # live coordination (what the merged voices said at its last tick) —
         # BEFORE the new-candle reset clears it — so the graded record can
@@ -3944,6 +4117,30 @@ class QuotexFeed:
         _otc_pred_payload = None
         try:
             from core.otc_predict.predictor import on_candle_closed
+            # FIX (ML-A, audit 2026-09-29): the DEEP feature block
+            # (micro_tick_z50 / micro_buy_z50 / micro_fight_rate_20 /
+            # micro_fight_streak) reads per-candle micro fields from the
+            # WINDOW candle dicts. Training rows (candle_micro) carry them,
+            # but live stream candles were OHLC-only → those 4/121 features
+            # were ALWAYS neutral at inference (train/live distribution
+            # skew — any weight the model put on them misfired live).
+            # Enrich the closed candle (and its copy inside
+            # stream.candles[-1], the same dict object appended above) with
+            # the micro snapshot BEFORE the window is built.
+            if _micro_snap:
+                try:
+                    for _cd in (closed, stream.candles[-1]
+                                if stream.candles
+                                and stream.candles[-1].get("time")
+                                == closed.get("time") else None):
+                        if _cd is not None:
+                            _cd.setdefault("tick_count",
+                                           _micro_snap.get("tick_count") or 0)
+                            _cd.setdefault("buy_pct", _micro_snap.get("buy_pct"))
+                            _cd.setdefault("is_fight",
+                                           bool(_micro_snap.get("is_fight")))
+                except Exception:
+                    pass
             _otc_pred_payload = await asyncio.to_thread(
                 on_candle_closed, stream.asset, stream.period,
                 list(stream.candles), dict(closed), _micro_snap)
@@ -4248,7 +4445,16 @@ class QuotexFeed:
             # Reset micro cache + recompute prediction (cheap, no DB I/O
             # for the prediction engine itself; _run_eoc does the to_thread).
             self._reset_micro_cache(stream)
-            stream.prediction = await self._run_eoc(stream, actual_open=new_last["close"])
+            # FIX (B6, audit 2026-09-29): this watchdog-restart path used to
+            # OVERWRITE stream.prediction unconditionally — a mid-candle
+            # restart could flip an already-broadcast CALL↔PUT (the exact
+            # "signal flipped" the user reported). The direction lock
+            # contract (CONFLUENCE-V1: published signal is final for the
+            # candle) is honored now: only a candle with NO live prediction
+            # gets a fresh EOC compute.
+            if stream.prediction is None or not stream.candle_open_is_real:
+                stream.prediction = await self._run_eoc(
+                    stream, actual_open=new_last["close"])
             stream.signal_delay_until = 0.0
             await self._broadcast({
                 "type":       "snapshot",
@@ -4606,32 +4812,52 @@ class QuotexFeed:
                             float(b_tick["time"]), stream.period)
 
                         if tick_new_open <= stream.candle_open_time:
-                            # Timer already fired for this boundary — drop late ticks
-                            # belonging to the closed candle, keep only current-window.
+                            # Timer already fired for this boundary — late ticks
+                            # belonging to the closed candle arrive AFTER it was
+                            # closed+graded.
+                            # FIX (A6, audit 2026-09-29): the old code DROPPED
+                            # these ticks, so the recorded close/high/low could
+                            # differ from the broker's settlement (a last-second
+                            # flip tick was lost → wrong grade, wrong ATR
+                            # context for later candles). Now the closed
+                            # candle's OHLC is PATCHED with the late prints
+                            # (bounded to a short window after close so a
+                            # long-stalled feed can't rewrite ancient history).
                             cur = [
                                 t for t in remaining
                                 if _floor_to_period(float(t["time"]), stream.period)
                                 == stream.candle_open_time
                             ]
-                            n_drop = len(remaining) - len(cur)
-                            if n_drop:
-                                print(f"[feed] dropped {n_drop} late tick(s) from "
-                                      f"closed candle ({stream.asset}@{stream.period}s)")
+                            late = [t for t in remaining if t not in cur]
+                            if late:
+                                print(f"[feed] {len(late)} late tick(s) after "
+                                      f"timer-close ({stream.asset}@"
+                                      f"{stream.period}s) — patching closed "
+                                      f"candle OHLC (was: dropped)")
+                                try:
+                                    lc = stream.candles[-1] if stream.candles else None
+                                    if (lc is not None and lc.get("time")
+                                            and stream.candle_open_time
+                                            and lc["time"]
+                                            < stream.candle_open_time):
+                                        for t in late:
+                                            px = float(t["price"])
+                                            if px > lc.get("high", px):
+                                                lc["high"] = px
+                                            if px < lc.get("low", px):
+                                                lc["low"] = px
+                                            lc["close"] = px
+                                except Exception as _late_exc:
+                                    print(f"[feed] late-tick patch failed: "
+                                          f"{type(_late_exc).__name__}: {_late_exc}")
                             # First CURRENT-window tick after timer-close is the true open
+                            # FIX (B5, audit 2026-09-29): re-anchor WITHOUT
+                            # wiping real ticks (see _reanchor_open). The
+                            # first real tick stays in `cur` and is appended
+                            # below like every other real observation.
                             reanchored = False
                             if cur and not stream.candle_open_is_real:
-                                real_open = float(cur[0]["price"])
-                                stream.candle_open_price   = real_open
-                                stream.candle_open_is_real = True
-                                stream.ticks.clear()
-                                stream.ticks.append(real_open)
-                                self._track_tick(stream, real_open)
-                                cur = cur[1:]
-                                self._reset_micro_cache(stream)
-                                if stream.prediction:
-                                    stream.prediction["candle"] = _pred_candle(
-                                        stream.candles, stream.prediction["signal"],
-                                        stream.period, real_open)
+                                self._reanchor_open(stream, float(cur[0]["price"]))
                                 reanchored = True
                             for t in cur:
                                 stream.ticks.append(float(t["price"]))
@@ -4718,20 +4944,13 @@ class QuotexFeed:
                     # prediction candle was drawn from the wrong price. The first
                     # real tick fixes the open AND redraws the prediction candle
                     # so it starts exactly where the new market candle starts.
+                    # FIX (B5, audit 2026-09-29): re-anchor WITHOUT wiping the
+                    # real ticks buffered since the timer-close (see
+                    # _reanchor_open). The first real tick stays in new_ticks
+                    # and is appended below like every other real observation.
                     reanchored = False
                     if (not stream.candle_open_is_real) and new_ticks:
-                        real_open = float(new_ticks[0]["price"])
-                        stream.candle_open_price   = real_open
-                        stream.candle_open_is_real = True
-                        stream.ticks.clear()
-                        stream.ticks.append(real_open)
-                        self._track_tick(stream, real_open)
-                        new_ticks = new_ticks[1:]   # first tick became the open
-                        self._reset_micro_cache(stream)
-                        if stream.prediction:
-                            stream.prediction["candle"] = _pred_candle(
-                                stream.candles, stream.prediction["signal"],
-                                stream.period, real_open)
+                        self._reanchor_open(stream, float(new_ticks[0]["price"]))
                         reanchored = True
 
                     for t in new_ticks:
@@ -5179,6 +5398,46 @@ class QuotexFeed:
                                 pred_changed = True  # force prediction in this msg
                                 gate_opened_this_tick = True
 
+                        # ── LIVE-CANDLE PREDICTION (2026-09-29) ─────────────
+                        # USER: "আমি চাই আমার প্রেডিকশন ক্যান্ডেল টি কোন দিকে
+                        # যাবে... একটি ক্যান্ডেল কি ঘটছে, মিলি সেকেন্ড এ
+                        # আপডেট হবে।" — the running candle's own direction
+                        # prediction + unified buyer/seller pressure, on
+                        # EVERY broadcast tick. Pure O(400) ≈ 200µs; backtest:
+                        # scripts/backtest_live_candle_report.json.
+                        _lp = None
+                        try:
+                            if _predict_live is not None:
+                                _lp = _predict_live(
+                                    list(stream.ticks)[-400:],
+                                    stream.candle_open_price,
+                                    stream.period,
+                                    stream.candle_open_time,
+                                    now=self._srv_now(),
+                                    recent_candles=stream.candles[-20:])
+                                stream._live_pred = _lp
+                                if _lp and _lp.get("ready"):
+                                    stream._live_pred_final = _lp
+                                    # FIRST LAST10 snapshot of the candle —
+                                    # the actionable moment the panel reports
+                                    # accuracy for.
+                                    if (_lp.get("phase") == "LAST10"
+                                            and stream._live_pred_last10 is None):
+                                        stream._live_pred_last10 = _lp
+                                    # FIRST entry hint of the candle (one
+                                    # simulated trade per candle — strike =
+                                    # price at hint, settled at close).
+                                    hint = _lp.get("entry_hint")
+                                    if (hint in ("CALL", "PUT")
+                                            and not getattr(
+                                                stream, "_live_pred_entry_snaps", None)):
+                                        stream._live_pred_entry_snaps = [
+                                            (running["close"], hint)]
+                        except Exception as _lp_exc:
+                            # Never let the live prediction break the pipeline.
+                            print(f"[feed] live-pred compute failed for "
+                                  f"{stream.asset}: "
+                                  f"{type(_lp_exc).__name__}: {_lp_exc}")
                         # ── Skip-redundant-broadcast (2026-07-11) ───────────
                         # If the running candle's high/low/close are unchanged
                         # since the last broadcast AND no prediction change
@@ -5193,9 +5452,20 @@ class QuotexFeed:
                                 and not gate_opened_this_tick
                                 and cur_high  == stream._last_bcast_high
                                 and cur_low   == stream._last_bcast_low
-                                and cur_close == stream._last_bcast_close):
+                                and cur_close == stream._last_bcast_close
+                                # LIVE-CANDLE (2026-09-29): a new tick that
+                                # didn't move H/L/C still updates the live
+                                # prediction (tick_count / pressure / p) —
+                                # don't starve the panel.
+                                and (_lp is None or not _lp.get("ready")
+                                     or _lp.get("tick_count")
+                                     == getattr(stream, "_last_bcast_lp_ticks", None))):
                             # No change at all — skip
+                            if _lp is not None and _lp.get("ready"):
+                                stream._last_bcast_lp_ticks = _lp.get("tick_count")
                             continue
+                        if _lp is not None and _lp.get("ready"):
+                            stream._last_bcast_lp_ticks = _lp.get("tick_count")
 
                         # COORDINATION-MS (2026-09-16): compute the running
                         # confirmation ONCE per broadcast — the msg field and
@@ -5208,6 +5478,7 @@ class QuotexFeed:
                             "candle":        running,
                             "running_conf":  _runconf,
                             "micro":         micro_snap,
+                            "live_pred":     _lp,
                         }
                         # ── TICK-EYE LIVE (2026-09-16, ms-fresh) ─────────────
                         # The "human eye" view of the RUNNING candle (user:
@@ -5272,6 +5543,17 @@ class QuotexFeed:
                                 stream.signal_delay_until = 0.0
                             if stream.prediction:
                                 msg["prediction"] = stream.prediction
+                                # FIX (A5, audit 2026-09-29): the broker
+                                # settles strike→expiry, not open→close.
+                                # Record the price at the prediction's FIRST
+                                # broadcast (≈ the user's entry/strike) so
+                                # the postmortem can grade BOTH ways and the
+                                # gap becomes visible instead of silently
+                                # mis-grading every signal.
+                                if (getattr(stream, "_pred_entry_candle", None)
+                                        != stream.candle_open_time):
+                                    stream._pred_entry_candle = stream.candle_open_time
+                                    stream._pred_entry_price = running["close"]
 
                         # Update the last-broadcast snapshot for the next
                         # skip-redundant-broadcast check.

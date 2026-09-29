@@ -274,6 +274,58 @@
                             </div>
                         </div>
 
+                        <!-- ── LIVE-CANDLE PREDICTION (2026-09-29) ──────────────
+                             USER: "আমি চাই আমার প্রেডিকশন ক্যান্ডেল টি কোন
+                             দিকে যাবে... একটি ক্যান্ডেল কি ঘটছে, মিলি সেকেন্ড
+                             এ আপডেট হবে।" — the RUNNING candle's own live
+                             prediction: direction, P(close>open), P(close>
+                             current), unified buyer/seller pressure. Updated
+                             on every tick frame (msg.live_pred); common.js
+                             renderLivePred() writes here. -->
+                        <div class="live-pred-panel" id="live-pred-panel">
+                            <div class="lp-header">
+                                <h4 class="lp-title">রানিং ক্যান্ডেল প্রেডিকশন</h4>
+                                <span class="lp-phase-chip" id="lp-phase">—</span>
+                                <span class="lp-clock" id="lp-clock">--s</span>
+                            </div>
+                            <div class="lp-direction-row">
+                                <span class="lp-direction call" id="lp-direction">—</span>
+                                <span class="lp-conf" id="lp-conf">0%</span>
+                                <span class="lp-entry-hint" id="lp-entry-hint" style="display:none"></span>
+                            </div>
+                            <div class="lp-prob-row">
+                                <div class="lp-prob-item">
+                                    <span class="lp-prob-label">ক্যান্ডেল ক্লোজ হবে <span class="lp-up" title="P(close > open) — ক্যান্ডেলটি কোন রঙে বন্ধ হবে">ⓘ</span></span>
+                                    <div class="lp-prob-bar"><div class="lp-prob-fill green" id="lp-p-close"></div></div>
+                                    <span class="lp-prob-val" id="lp-p-close-val">—</span>
+                                </div>
+                                <div class="lp-prob-item">
+                                    <span class="lp-prob-label">এখন ঢুকলে জেতার সম্ভাবনা <span class="lp-up" title="P(close > বর্তমান প্রাইস) — এই মুহূর্তে ট্রেড করলে জেতার হিসাব">ⓘ</span></span>
+                                    <div class="lp-prob-bar"><div class="lp-prob-fill teal" id="lp-p-here"></div></div>
+                                    <span class="lp-prob-val" id="lp-p-here-val">—</span>
+                                </div>
+                            </div>
+                            <div class="lp-pressure-row">
+                                <span class="lp-pressure-label">বায়ার <b id="lp-buyer-pct">50%</b></span>
+                                <div class="lp-pressure-bar" title="একটাই সংজ্ঞা: টিক-কাউন্ট ফ্লো + ভলিউম-ডেল্টা ফ্লো">
+                                    <div class="lp-pressure-buyers" id="lp-pressure-buyers"></div>
+                                    <div class="lp-pressure-sellers" id="lp-pressure-sellers"></div>
+                                </div>
+                                <span class="lp-pressure-label"><b id="lp-seller-pct">50%</b> সেলার</span>
+                            </div>
+                            <div class="lp-state-row">
+                                <span class="lp-state-badge" id="lp-pressure-state">—</span>
+                                <span class="lp-lock" id="lp-lock" title="ক্যান্ডেল কতটা 'লকড' — বাকি সময়ের ভোলাটিলিটি অনুযায়ী">🔒 0%</span>
+                            </div>
+                            <div class="lp-factors" id="lp-factors">
+                                <span class="lp-factor">টিকের অপেক্ষায়…</span>
+                            </div>
+                            <div class="lp-accuracy-row" id="lp-accuracy-row" style="display:none">
+                                <span class="lp-acc-label">লাইভ নির্ভুলতা</span>
+                                <span class="lp-acc-val" id="lp-accuracy">—</span>
+                            </div>
+                        </div>
+
                         <!-- OTC-PREDICT-ENGINE (2026-09-11, PART 30):
                              NEXT CANDLE / 2ND CANDLE probability card.
                              common.js renderPredictionCard() writes here;

@@ -882,23 +882,125 @@ async def auth_verify(request: Request):
                             content={"ok": False, "error": reason})
     return {"ok": True, "via": reason}
 
+# ── GATEWAY-PREVIEW + DEMO-BANNER (2026-09-29) ─────────────────────────────
+_DEMO_FEED_ON = os.environ.get("QX_DEMO_FEED", "0") == "1"
+
+_PREVIEW_PATCH_JS = r"""
+<script>
+/* PREVIEW-GATEWAY PATCH (2026-09-29): this page was requested through a
+   port-routing gateway (XTransformPort query param). Every same-origin
+   fetch() and WebSocket the app makes must carry the same param or it
+   lands on the wrong backend. Patch once, before the app scripts run. */
+(function(){
+  var m = (location.search || '').match(/[?&]XTransformPort=(\d+)/);
+  if(!m) return;
+  var PORT = m[1];
+  function withPort(url){
+    try{
+      var u = new URL(url, location.href);
+      if(u.host !== location.host) return url;
+      if(u.searchParams.has('XTransformPort')) return url;
+      u.searchParams.set('XTransformPort', PORT);
+      return u.pathname + u.search + u.hash;
+    }catch(e){ return url; }
+  }
+  var _fetch = window.fetch;
+  window.fetch = function(input, init){
+    if(typeof input === 'string') return _fetch(withPort(input), init);
+    if(input && input.url) return _fetch(new Request(withPort(input.url), input), init);
+    return _fetch(input, init);
+  };
+  /* NOTE (origin-comparison bug, 2026-09-29): this browser serializes a
+     ws:// URL's origin as "ws://host", so an origin===origin check NEVER
+     matched and WS URLs went to the gateway's default backend (hang).
+     Compare HOST + scheme instead. */
+  var _WS = window.WebSocket;
+  window.WebSocket = function(url, protocols){
+    if(typeof url === 'string'){
+      try{
+        var u = new URL(url, location.href);
+        var isWs = (u.protocol === 'ws:' || u.protocol === 'wss:');
+        if(isWs && u.host === location.host
+           && !u.searchParams.has('XTransformPort')){
+          u.searchParams.set('XTransformPort', PORT);
+          url = u.protocol + '//' + u.host + u.pathname + u.search;
+        }
+      }catch(e){}
+    }
+    return protocols !== undefined ? new _WS(url, protocols) : new _WS(url);
+  };
+  window.WebSocket.prototype = _WS.prototype;
+  window.WebSocket.OPEN = _WS.OPEN;
+  window.WebSocket.CONNECTING = _WS.CONNECTING;
+  window.WebSocket.CLOSING = _WS.CLOSING;
+  window.WebSocket.CLOSED = _WS.CLOSED;
+})();
+</script>
+"""
+
+_DEMO_BANNER_JS = """
+<div id="demo-mode-banner" style="position:sticky;top:0;z-index:9999;
+  background:#7c2d12;color:#fed7aa;font-weight:800;font-size:.82rem;
+  text-align:center;padding:7px 12px;font-family:system-ui,sans-serif;">
+  ⚠ ডেমো মোড — সিন্থেটিক টিক ডেটা (QX_DEMO_FEED=1)। এগুলো কোনো রিয়েল মার্কেট
+  সিগন্যাল নয়; প্রেডিকশন ইঞ্জিন প্রিভিউ করার জন্য।
+</div>
+"""
+
+def _serve_app_html(request: Request):
+    """app.html + preview-gateway patch + demo banner (both optional)."""
+    html = (static_dir / "app.html").read_text(encoding="utf-8")
+    inject = ""
+    _q = request.url.query or ""
+    if "XTransformPort" in _q:
+        import re as _re
+        m = _re.search(r"XTransformPort=(\d+)", _q)
+        _port = m.group(1) if m else None
+        if _port:
+            inject += _PREVIEW_PATCH_JS
+            # CRITICAL: the iframe's root-absolute subresources
+            # (/static/...) resolve WITHOUT the query string — they'd hit
+            # the gateway's DEFAULT backend (404) and the app would load
+            # as a dead shell. Rewrite every root-absolute asset URL in
+            # the served HTML to carry XTransformPort so CSS/JS also route
+            # to this app through the gateway.
+            html = _re.sub(
+                r'((?:src|href)="/(?:static|favicon)[^"?]*)(")',
+                r'\1?XTransformPort=' + _port + r'\2', html)
+    if _DEMO_FEED_ON:
+        inject += ("<script>(function(){function _show(){var b=document."
+                   "createElement('div');b.innerHTML="
+                   + json.dumps(_DEMO_BANNER_JS) + ";"
+                   "var el=b.firstElementChild||b.firstChild;"
+                   "if(el&&document.body)document.body.prepend(el);}"
+                   "if(document.readyState==='loading'){"
+                   "document.addEventListener('DOMContentLoaded',_show);}"
+                   "else{_show();}})();</script>")
+    if inject:
+        html = html.replace("<head>", "<head>" + inject, 1)
+    return Response(html, media_type="text/html",
+                    headers={"Cache-Control": "no-store, no-cache, max-age=0, "
+                                              "must-revalidate"})
+
+
 @app.get("/")
-async def index():
+async def index(request: Request):
     """Root — serve the consolidated app.html (PHASE-4-FIX, 2026-08-13).
 
     Replaces the old router (index.html → otc.html/real.html/alltime_otc.html).
     The app.html file is a single-page app that reads ?market= from the URL
     or `marketCategory` from localStorage to decide which market to show.
+    GATEWAY-PREVIEW (2026-09-29): if the request came through the sandbox
+    port-router (XTransformPort query), a tiny script is injected so every
+    fetch/WebSocket the app makes routes to the same backend port.
     """
-    return FileResponse(static_dir / "app.html",
-                        headers={"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate"})
+    return _serve_app_html(request)
 
 
 @app.get("/app")
-async def app_alias():
+async def app_alias(request: Request):
     """Alias for / — same consolidated app.html."""
-    return FileResponse(static_dir / "app.html",
-                        headers={"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate"})
+    return _serve_app_html(request)
 
 
 # Legacy routes — redirect to the consolidated app so old bookmarks keep working.
@@ -2775,6 +2877,61 @@ async def get_signals_all(
 # signal for every pair in a flat list — designed for curl / external
 # integrations. Always CALL/PUT (or "PENDING" if no prediction yet).
 # No auth required when QX_PUBLIC_READ=1 (railway default).
+@app.get("/api/live-prediction/{asset}")
+async def get_live_prediction(asset: str, period: int = 60):
+    """LIVE-CANDLE (2026-09-29): the running candle's live prediction.
+
+    The user's core request — "আমি চাই আমার প্রেডিকশন ক্যান্ডেল টি কোন দিকে
+    যাবে... মিলি সেকেন্ড এ আপডেট হবে":
+
+      live_pred   — the freshest running-candle prediction (direction vs
+                    open, p_close_green, p_up_from_here, unified buyer/
+                    seller pressure, factors, seconds_left, phase).
+                    Updated on EVERY tick by feed.py; also attached to
+                    every "tick" websocket frame as msg.live_pred.
+      rolling     — the engine's honest self-measured accuracy on THIS
+                    feed: final-snapshot accuracy, LAST10-snapshot
+                    accuracy, and entry-hint simulation (strike→close
+                    semantics, one simulated trade per candle).
+    """
+    asset = asset.strip()
+    stream = getattr(feed, '_streams', {}).get((asset, period))
+    if not stream:
+        return {"asset": asset, "period": period, "live_pred": None,
+                "rolling": None, "error": "stream not running"}
+    stats = getattr(stream, "_live_pred_stats", None) or {}
+    rolling = None
+    if stats.get("total"):
+        rolling = {
+            "final": {
+                "n": stats.get("total", 0),
+                "correct": stats.get("correct", 0),
+                "accuracy": round(stats.get("correct", 0)
+                                  / max(1, stats.get("total", 1)), 4),
+            },
+            "last10": {
+                "n": stats.get("last10_total", 0),
+                "correct": stats.get("last10_correct", 0),
+                "accuracy": (round(stats.get("last10_correct", 0)
+                                   / max(1, stats.get("last10_total", 1)), 4)
+                             if stats.get("last10_total") else None),
+            },
+            "entries": {
+                "n": stats.get("entries", 0),
+                "win": stats.get("entries_win", 0),
+                "win_rate": (round(stats.get("entries_win", 0)
+                                   / max(1, stats.get("entries", 1)), 4)
+                             if stats.get("entries") else None),
+            },
+        }
+    return {
+        "asset": asset,
+        "period": period,
+        "live_pred": getattr(stream, "_live_pred", None),
+        "rolling": rolling,
+    }
+
+
 @app.get("/api/signals/latest")
 async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
     """Latest signal snapshot for all pairs — open public endpoint.
