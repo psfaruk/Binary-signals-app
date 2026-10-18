@@ -288,6 +288,31 @@ IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "300"))
 ERROR_WINDOW    = int(os.environ.get("ERROR_WINDOW",    "60"))
 ERROR_THRESHOLD = int(os.environ.get("ERROR_THRESHOLD", "10"))
 ERROR_COOLDOWN  = int(os.environ.get("ERROR_COOLDOWN",  "30"))
+
+
+# ── PHASE-D AUDIT FIX (2026-10, finding C5) ──────────────────────────────
+# Research-only truth metadata for DIAGNOSTIC payloads broadcast outside
+# the signal-contract emission boundary: the otc_pred ML frames and the
+# live_pred running-candle frames. These carry engine directions
+# (CALL/PUT + entry hints) that are NOT contract-gated; under the current
+# blockers (unauthorized source, no validated model, unverified timing)
+# they can never be actionable. The fields are additive — clients that
+# ignore them keep working; honest clients can label them.
+def _research_truth_fields() -> dict:
+    return {
+        "research_only": True,
+        "actionable": False,
+        "reason_code": "DATA_SOURCE_UNAUTHORIZED",
+    }
+
+
+def _label_research(payload: dict) -> dict:
+    """Attach the research-only truth fields to a payload dict (copy)."""
+    if not isinstance(payload, dict):
+        return payload
+    out = dict(payload)
+    out.update(_research_truth_fields())
+    return out
 # Candle history bounding. When a stream's candle list exceeds MAX_CANDLES,
 # truncate to the most recent TRUNCATE_TO. Keeps memory bounded on long-lived
 # always-on pairs without throwing away recent chart context.
@@ -4684,8 +4709,12 @@ class QuotexFeed:
                   f"{type(_pred_exc).__name__}: {_pred_exc}")
         if _otc_pred_payload and self._broadcast:
             try:
+                # PHASE-D FIX (C5): ML T+1/T+2 diagnostic frames carry the
+                # research-only truth label — they are NOT contract-gated
+                # emissions and can never be actionable today.
                 await self._broadcast(
-                    {"type": "otc_pred", **_otc_pred_payload})
+                    {"type": "otc_pred",
+                     **_label_research(_otc_pred_payload)})
             except Exception as _pred_exc:
                 print(f"[silent-except] feed.py otc_pred broadcast "
                       f"{type(_pred_exc).__name__}: {_pred_exc}")
@@ -5654,9 +5683,24 @@ class QuotexFeed:
                     # only 43.3% win rate. Disabling lets signals keep their
                     # original MEDIUM/STRONG confidence from candle close.
                     pred_changed = False
+                    # PHASE-D FIX (C7, 2026-10): resurrection guard — a
+                    # prediction gated by the Truth Layer (truth_status not
+                    # in (None, "eligible")) can NEVER be upgraded to
+                    # CALL/PUT by LIVE re-eval, no matter which flags flip
+                    # in the future. The gate's verdict is final for the
+                    # candle. (Today this block is doubly dead —
+                    # DISABLE_LIVE_REEVAL=True and ENABLE_LIVE_THEORY=False —
+                    # this guard removes the latent bypass permanently.)
+                    _re_pred = (stream.prediction
+                                if isinstance(stream.prediction, dict)
+                                else None)
+                    _reeval_truth_ok = (
+                        _re_pred is None
+                        or _re_pred.get("truth_status") in (None, "eligible"))
                     if (not DISABLE_LIVE_REEVAL
                             and ENABLE_LIVE_THEORY and stream.base_candles
-                            and len(stream.ticks) >= LIVE_REEVAL_MIN_TICKS):
+                            and len(stream.ticks) >= LIVE_REEVAL_MIN_TICKS
+                            and _reeval_truth_ok):
                         time_to_close = -1
                         if stream.candle_open_time > 0:
                             time_to_close = (stream.candle_open_time
@@ -6144,7 +6188,10 @@ class QuotexFeed:
                             "candle":        running,
                             "running_conf":  _runconf,
                             "micro":         micro_snap,
-                            "live_pred":     _lp,
+                            # PHASE-D FIX (C5): live_pred carries direction
+                            # + entry hints that are NOT contract-gated —
+                            # broadcast it with the research-only label.
+                            "live_pred":     _label_research(_lp),
                         }
                         # ── TICK-EYE LIVE (2026-09-16, ms-fresh) ─────────────
                         # The "human eye" view of the RUNNING candle (user:

@@ -817,7 +817,11 @@ def status() -> dict:
         "password_login_allowed": password_login_allowed(),
         "login_blocked": is_login_blocked(),
         "login_block_detail": _login_block_detail(),
-        "account_email": _state["account_email"],
+        # PHASE-D AUDIT FIX (2026-10): the raw account email was exposed to
+        # UNAUTHENTICATED callers of the public /api/session/status route.
+        # Redact to a 2-char domain hint — enough to tell "configured",
+        # never enough to identify the account.
+        "account_email": _redact_email(_state["account_email"]),
         "last_success": _state["last_success"] or None,
         "last_attempt": _state["last_attempt"] or None,
         "last_error": _state["last_error"],
@@ -826,3 +830,16 @@ def status() -> dict:
         "consecutive_failures": _state["consecutive_failures"],
         "last_token_preview": _state["last_token_preview"],
     }
+
+
+def _redact_email(email: str) -> str:
+    """PHASE-D FIX: 'user@host.tld' -> '***@ho…' (identity-safe hint)."""
+    if not email:
+        return ""
+    try:
+        local, _, domain = email.partition("@")
+        if not domain:
+            return "***"
+        return f"***@{domain[:2]}…"
+    except Exception:
+        return "***"

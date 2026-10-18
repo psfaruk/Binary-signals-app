@@ -136,7 +136,11 @@ if not _QX_TOKEN and not _QX_EMAIL:
     print("[server]      3. OR send POST /api/set-token with JSON body")
     print("[server]    See RAILWAY_TOKEN_SETUP.md for full instructions.")
 elif _QX_TOKEN:
-    print(f"[server] ✅ QX_TOKEN found ({_QX_TOKEN[:8]}...{_QX_TOKEN[-4:]})")
+    # PHASE-D FIX (2026-10): last-4-only mask (was 12 chars in logs)
+    try:
+        print(f"[server] ✅ QX_TOKEN found ({_token_store.mask(_QX_TOKEN)})")
+    except Exception:
+        print("[server] ✅ QX_TOKEN found (set)")
 else:
     print("[server] ⚠️  QX_TOKEN not set — app will wait for a token.")
     print("[server]    Email/password login is DISABLED (Cloudflare blocks Railway IPs).")
@@ -209,6 +213,37 @@ def _check_admin_key(provided: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="forbidden")
     if not hmac.compare_digest(provided.strip(), expected):
         raise HTTPException(status_code=403, detail="forbidden")
+
+def _research_truth_label() -> dict:
+    """PHASE-D AUDIT FIX (2026-10, finding C5): standard research-only
+    truth metadata for DIAGNOSTIC prediction payloads that do not pass
+    through the signal-contract emission boundary (CSE current(), frozen
+    ML T+1/T+2 rows, otc_pred/live_pred WS frames). Under the current
+    blockers (unauthorized source, no validated model, unverified timing)
+    none of them can be actionable; the label says so explicitly so a UI
+    consumer cannot mistake a diagnostic CALL/PUT for a tradeable signal.
+    Fail-closed: if the contract module is unavailable the label still
+    marks the payload research-only with INTERNAL_ERROR."""
+    try:
+        from core import signal_contract as _sc
+        _tl = _sc.truth_layer_state()
+        return {
+            "research_only": True,
+            "actionable": False,
+            "reason_code": "DATA_SOURCE_UNAUTHORIZED",
+            "actionable_signals_possible": _tl.get(
+                "actionable_signals_possible", False),
+            "policy_version": _tl.get("policy_version"),
+        }
+    except Exception:
+        return {
+            "research_only": True,
+            "actionable": False,
+            "reason_code": "INTERNAL_ERROR",
+            "actionable_signals_possible": False,
+            "policy_version": None,
+        }
+
 
 async def broadcast(msg: dict):
     """Push a message to connected clients — PARALLEL sends."""
@@ -487,8 +522,14 @@ def _require_admin_for_api_keys(request: Request) -> None:
 def _verify_operator_pin(pin: str) -> tuple[bool, str]:
     """Verify the operator PIN via the existing auth system.
 
-    Reuses the same logic as /api/set-token. If no PIN has been claimed yet,
-    the first PIN becomes the operator PIN (same as token-import flow).
+    PHASE-D AUDIT FIX (2026-10): previously FAIL-OPEN — when no PIN had
+    been claimed it returned (True, "no-pin-claimed-yet") for ANY value,
+    so /api/keys* was effectively unauthenticated whenever ADMIN_KEY was
+    unset (the _meta.operator_pin_hash row this function reads is never
+    written by the claim flow, which uses token_store's AUTH_FILE — a
+    dead lookup). Now FAIL-CLOSED: no claimed PIN -> deny, with the
+    operator directed to claim via POST /api/auth/claim or use
+    X-Admin-Key.
     """
     import hashlib as _hashlib
     import sqlite3 as _sqlite3
@@ -497,9 +538,20 @@ def _verify_operator_pin(pin: str) -> tuple[bool, str]:
             cur.execute("SELECT value FROM _meta WHERE key='operator_pin_hash'")
             row = cur.fetchone()
         if not row:
-            # No PIN claimed — first call claims it. Allow through; the
-            # subsequent POST will set the PIN via the existing claim flow.
-            return True, "no-pin-claimed-yet"
+            # PHASE-D FIX: fail-closed. The legacy row is never written by
+            # the claim flow (token_store keeps its own hash file), so an
+            # absent row must NOT open the admin gate.
+            claimed = False
+            try:
+                claimed = _token_store.is_claimed()
+            except Exception:
+                claimed = False
+            if claimed:
+                # A PIN exists in token_store — verify against it.
+                ok = _token_store.verify_pin(pin or "")
+                return (ok, "ok" if ok else "PIN does not match")
+            return False, ("no operator PIN claimed — claim one via POST "
+                           "/api/auth/claim or use X-Admin-Key")
         # sqlite3.Row supports both index and key access.
         stored_hash = row["value"] if isinstance(row, _sqlite3.Row) else row[0]
         candidate = _hashlib.sha256(pin.encode("utf-8")).hexdigest()
@@ -853,7 +905,10 @@ async def token_status():
         pass
 
     if has_token:
-        preview = f"{qx_token[:8]}...{qx_token[-4:]}" if len(qx_token) > 12 else "(short)"
+        # PHASE-D AUDIT FIX (2026-10): the preview used to expose 12 chars
+        # of the live session token to UNAUTHENTICATED callers. Use the
+        # standard mask (≤10 chars, last-4 anchored) instead.
+        preview = _token_store.mask(qx_token)
         if connection_status == "live_authorized":
             status = "live_token"
             message = f"QX_TOKEN is set ({preview}) — connected + authorized. Live data flowing."
@@ -975,7 +1030,21 @@ async def auth_state():
 
 @app.post("/api/auth/claim")
 async def auth_claim(request: Request):
-    """First-run claim of the access PIN from the UI."""
+    """First-run claim of the access PIN from the UI.
+
+    PHASE-D AUDIT FIX (2026-10): the first-claim flow was a race — on a
+    fresh public deployment ANY caller could claim the operator PIN
+    before the real owner. When ADMIN_KEY is set, the FIRST claim now
+    requires it (fail-closed); subsequent claims/changes use the existing
+    PIN flows. Without ADMIN_KEY the first-claim race remains an accepted
+    deployment risk (documented in the Phase D audit).
+    """
+    try:
+        _already = _token_store.is_claimed()
+    except Exception:
+        _already = False
+    if not _already and os.environ.get("ADMIN_KEY", "").strip():
+        _check_admin_key(request.headers.get("X-Admin-Key"))
     body = await _json_body(request)
     pin = (body.get("pin") or "").strip()
     result = _token_store.claim_pin(pin)
@@ -1268,7 +1337,9 @@ async def _apply_token(token: str, source: str = "api"):
     try:
         from quotex_ws import QuotexWSClient
         QuotexWSClient.save_token_only(token)
-        print(f"[server] token saved to session.json ({token[:8]}...)")
+        # PHASE-D FIX (2026-10): 8-char prefix removed from logs
+        print(f"[server] token saved to session.json ("
+              f"{_token_store.mask(token)})")
     except Exception as e:
         print(f"[server] session.json save error: {e}")
 
@@ -1540,12 +1611,23 @@ async def download_db(request: Request):
     return Response(
         content=data,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Content-Length": str(len(data)), "X-DB-Path": found_path, "X-DB-Size": str(len(data))},
+        # PHASE-D FIX (2026-10): X-DB-Path leaked the absolute server
+        # filesystem path to (admin-gated) callers — basename only now.
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Content-Length": str(len(data)), "X-DB-Path": os.path.basename(found_path) if found_path else "", "X-DB-Size": str(len(data))},
     )
 
 @app.get("/api/db-export")
-async def export_db_json():
-    """Export all DB tables as a single JSON document."""
+async def export_db_json(request: Request):
+    """Export all DB tables as a single JSON document.
+
+    PHASE-D AUDIT FIX (2026-10): previously UNAUTHENTICATED (the route
+    classifier treated it as "unknown" -> public under the default
+    QX_PUBLIC_READ=1). An unauthenticated caller could dump the entire
+    database (API-key hashes/prefixes, model paths, all research data)
+    and exhaust memory. Now admin-key gated, fail-closed like
+    /api/db-download.
+    """
+    _check_admin_key(request.headers.get("X-Admin-Key"))
     import sqlite3
     import json as _json
     import time as _time
@@ -1616,8 +1698,14 @@ async def export_db_json():
         )
 
 @app.get("/api/db-info")
-async def db_info():
-    """Return DB file size, table list, and row counts (no row data)."""
+async def db_info(request: Request):
+    """Return DB file size, table list, and row counts (no row data).
+
+    PHASE-D AUDIT FIX (2026-10): previously unauthenticated — exposed the
+    resolved DB path, cwd and a directory listing. Now admin-key gated
+    (fail-closed when ADMIN_KEY is unset).
+    """
+    _check_admin_key(request.headers.get("X-Admin-Key"))
     import sqlite3
     import time as _time_mod
     import traceback
@@ -3118,6 +3206,9 @@ async def get_next_candle(asset: str, period: int = 60):
         "version": "next_candle_v1",
         "prediction": payload,
         "stats": stats,
+        # PHASE-D FIX (C5): diagnostic engine output is research-only —
+        # same labeling as /api/live-prediction.
+        "truth": _research_truth_label(),
     }
 
 
@@ -3541,6 +3632,11 @@ async def get_prediction_overview():
                 "candles": counts, "analytics": analytics,
                 "predictor": predictor, "pred_table": pred_table,
                 "live": live, "model_performance": mperf,
+                # PHASE-D FIX (C5): frozen ML T+1/T+2 rows are
+                # research-only diagnostics (no validated model, no
+                # authorized source) — labeled so the UI cannot mistake
+                # them for actionable signals.
+                "truth": _research_truth_label(),
                 "generated_at": time.time()}
 
     return await asyncio.to_thread(_build)
@@ -3685,6 +3781,9 @@ async def get_prediction_card(asset: str):
         "locked": True,
         "current": [_row_out(r) for r in sorted(group, key=lambda x: x["horizon"])],
         "history": [_row_out(r) for r in rows],
+        # PHASE-D FIX (C5): frozen ML predictions are research-only
+        # diagnostics — labeled like the other prediction endpoints.
+        "truth": _research_truth_label(),
     }
 
 
@@ -3698,11 +3797,20 @@ async def delete_signal_endpoint(asset: str, period: int, ctime: int):
 
 @app.post("/api/signals/clear")
 async def clear_signals_endpoint(
+    request: Request,
     asset: Optional[str] = None,
     period: Optional[int] = None,
     before_ctime: Optional[int] = None,
 ):
-    """Clear signals, optionally filtered by asset/period/before_ctime."""
+    """Clear signals, optionally filtered by asset/period/before_ctime.
+
+    PHASE-D AUDIT FIX (2026-10): previously the middleware only required
+    *some* header value — any unauthenticated caller with a dummy header
+    could wipe the signal history (destructive). Now admin-key gated,
+    fail-closed. (token_store.authorize's own docstring already claimed
+    this endpoint was admin-gated — the claim was false until now.)
+    """
+    _check_admin_key(request.headers.get("X-Admin-Key"))
     count = await asyncio.to_thread(
         _db.clear_signals, asset, period, before_ctime)
     return {"deleted_count": count, "filter": {"asset": asset, "period": period, "before_ctime": before_ctime}}
@@ -4127,7 +4235,13 @@ async def share_signals_save(request: Request):
 
 @app.get("/api/share-signals/history")
 async def share_signals_history(limit: int = 50):
-    """Get saved Share Signal snapshots from history."""
+    """Get saved Share Signal snapshots from history.
+
+    PHASE-D AUDIT FIX (2026-10): limit was unclamped — a negative value
+    produced an unbounded SELECT (resource exhaustion). Now clamped to
+    [1, 500].
+    """
+    limit = max(1, min(int(limit or 50), 500))
     try:
         with _db._read_cursor() as cur:
             cur.execute("""
