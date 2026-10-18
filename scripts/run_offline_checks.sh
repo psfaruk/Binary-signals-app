@@ -81,12 +81,16 @@ run "PHASE F — research checks (28)" python3 scripts/test_phase_f_research.py
 # 7. Phase G (API battery)
 run "PHASE G — API battery (39)" python3 scripts/test_phase_g_api.py
 
+# 8. Phase H (shadow/paper via replay)
+run "PHASE H — shadow replay runner (2 assets)" python3 scripts/shadow_replay.py --assets BTCUSDT,ETHUSDT
+run "PHASE H — shadow ledger checks (28)" python3 scripts/test_phase_h_shadow.py
+
 echo ""
 echo "=================================================================="
 if [ $FAIL -eq 0 ]; then
   echo "  ALL OFFLINE CHECKS PASSED"
   echo "  (Phase A 154 + Phase B 94 + Phase C 93 + Phase D 38 +"
-  echo "   Phase E 43 + Phase F 28 + Phase G 39 = 589 checks)"
+  echo "   Phase E 43 + Phase F 28 + Phase G 39 + Phase H 28 = 617 checks)"
 else
   echo "  OFFLINE CHECKS FAILED — see the FAILED step above"
 fi

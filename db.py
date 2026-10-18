@@ -550,6 +550,48 @@ def init():
         c.execute("""CREATE INDEX IF NOT EXISTS ix_pred_emit
             ON otc_predictions(emit, tier, signal_time)""")
 
+        # ── PHASE-H SHADOW LEDGER (2026-10) ─────────────────────────────
+        # Paper/shadow testing ledger: records EVERY prediction (including
+        # NO_SIGNAL abstentions) with its full evidence context and settles
+        # the outcome once observable — WITHOUT ever submitting a broker
+        # order. mode distinguishes honest replay evaluation ('replay')
+        # from genuine live shadow recording ('live_shadow'); only an
+        # AUTHORIZED data source may produce the latter. ADDITIVE-ONLY,
+        # idempotent (CREATE TABLE IF NOT EXISTS); INSERT OR IGNORE on the
+        # deterministic prediction_id makes recording idempotent; the
+        # correction_history column is APPEND-ONLY JSON (never rewritten).
+        c.execute("""CREATE TABLE IF NOT EXISTS shadow_predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prediction_id TEXT NOT NULL,
+            mode TEXT NOT NULL,               -- 'replay' | 'live_shadow'
+            asset TEXT NOT NULL,
+            period INT NOT NULL,
+            candle_identity TEXT,             -- asset:period:period_start
+            target_candle_open_epoch REAL NOT NULL,
+            prediction_cutoff_epoch REAL,
+            data_provenance TEXT,             -- JSON: dataset id/sha256/classification
+            input_quality_status TEXT,        -- JSON: data_quality.assess verdict
+            signal TEXT,                      -- gated signal (NO_SIGNAL today)
+            research_direction TEXT,          -- engine diagnostic preference
+            strategy TEXT,
+            model_version TEXT,
+            feature_version TEXT,
+            confidence_score REAL,            -- internal score (see confidence_kind)
+            confidence_kind TEXT,             -- 'internal_score' | 'calibrated_probability'
+            settlement_status TEXT NOT NULL DEFAULT 'pending',
+            outcome TEXT,                     -- GREEN / RED / FLAT once observable
+            outcome_correct INT,
+            correction_history TEXT,          -- JSON array, append-only
+            error_reason TEXT,                -- exclusion reason (evaluator)
+            created_at_utc TEXT,
+            created_at_epoch REAL,
+            settled_at_utc TEXT,
+            UNIQUE (prediction_id))""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_shadow_mode
+            ON shadow_predictions(mode, settlement_status)""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_shadow_asset
+            ON shadow_predictions(asset, period, target_candle_open_epoch)""")
+
         # PART 25/28: model registry — which bundle is allowed to predict.
         # A redeploy never serves an unregistered file; training scripts
         # insert a row and flip `active`.
@@ -1542,6 +1584,163 @@ def corrections_for(asset: str, period: int,
             return [dict(r) for r in rows]
     except sqlite3.Error:
         return []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHASE-H SHADOW LEDGER row operations (2026-10)
+#
+# Paper/shadow testing WITHOUT broker orders. Idempotent record
+# (INSERT OR IGNORE on the deterministic prediction_id); settlement is
+# a conditional single-transaction UPDATE that can only move
+# pending -> settled (outcome columns are never rewritten);
+# correction_history is APPEND-ONLY (a JSON array merged under
+# verification, never truncated).
+# ══════════════════════════════════════════════════════════════════════
+
+_SHADOW_COLUMNS = (
+    "prediction_id", "mode", "asset", "period", "candle_identity",
+    "target_candle_open_epoch", "prediction_cutoff_epoch",
+    "data_provenance", "input_quality_status", "signal",
+    "research_direction", "strategy", "model_version", "feature_version",
+    "confidence_score", "confidence_kind", "settlement_status",
+    "outcome", "outcome_correct", "correction_history", "error_reason",
+    "created_at_utc", "created_at_epoch",
+)
+
+
+def shadow_record(pred: dict) -> bool:
+    """Record ONE shadow/paper prediction (idempotent on prediction_id).
+
+    Required keys: prediction_id, mode ('replay'|'live_shadow'), asset,
+    period, target_candle_open_epoch. Everything else is optional and
+    stored as provided (JSON dicts are stringified by the caller).
+    Returns True when a NEW row was inserted.
+    """
+    if not isinstance(pred, dict) or not pred.get("prediction_id"):
+        return False
+    if pred.get("mode") not in ("replay", "live_shadow"):
+        return False
+    try:
+        now = time.time()
+        cols, vals = [], []
+        for col in _SHADOW_COLUMNS:
+            cols.append(col)
+            if col == "settlement_status":
+                vals.append(str(pred.get("settlement_status") or "pending"))
+            elif col == "created_at_utc":
+                vals.append(_cs_utc_iso(now))
+            elif col == "created_at_epoch":
+                vals.append(now)
+            else:
+                vals.append(pred.get(col))
+        with _cursor() as c:
+            cur = c.execute(
+                f"INSERT OR IGNORE INTO shadow_predictions "
+                f"({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                vals)
+            return bool(cur.rowcount)
+    except (sqlite3.Error, TypeError, ValueError):
+        return False
+
+
+def shadow_get(prediction_id: str) -> Optional[dict]:
+    try:
+        with _read_cursor() as c:
+            row = c.execute(
+                "SELECT * FROM shadow_predictions WHERE prediction_id=?",
+                (str(prediction_id),)).fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error:
+        return None
+
+
+def shadow_settle(prediction_id: str, outcome: str,
+                  correct: Optional[bool] = None) -> bool:
+    """Settle ONE shadow prediction (pending -> settled; one-way).
+
+    Outcome values: GREEN / RED / FLAT (the documented convention).
+    The outcome columns are written ONCE (conditional UPDATE guards
+    settlement_status='pending'); retries return False without
+    rewriting anything. correction_history is never touched here.
+    """
+    if outcome not in ("GREEN", "RED", "FLAT"):
+        return False
+    try:
+        now = time.time()
+        with _cursor() as c:
+            cur = c.execute(
+                "UPDATE shadow_predictions SET settlement_status='settled', "
+                "outcome=?, outcome_correct=?, settled_at_utc=? "
+                "WHERE prediction_id=? AND settlement_status='pending'",
+                (str(outcome),
+                 (None if correct is None else (1 if correct else 0)),
+                 _cs_utc_iso(now), str(prediction_id)))
+            return bool(cur.rowcount)
+    except sqlite3.Error:
+        return False
+
+
+def shadow_append_correction(prediction_id: str, entry: dict) -> bool:
+    """APPEND one entry to a shadow prediction's correction history.
+
+    The history is a JSON array; the existing entries are preserved
+    verbatim and the new entry is appended under a single conditional
+    transaction. Never truncates, never rewrites existing entries.
+    """
+    try:
+        with _cursor() as c:
+            row = c.execute(
+                "SELECT correction_history FROM shadow_predictions "
+                "WHERE prediction_id=?", (str(prediction_id),)).fetchone()
+            hist = []
+            if row and row["correction_history"]:
+                try:
+                    parsed = json.loads(row["correction_history"])
+                    if isinstance(parsed, list):
+                        hist = parsed
+                except (ValueError, TypeError):
+                    hist = []
+            hist.append(entry if isinstance(entry, dict)
+                        else {"detail": str(entry)})
+            cur = c.execute(
+                "UPDATE shadow_predictions SET correction_history=? "
+                "WHERE prediction_id=?",
+                (json.dumps(hist), str(prediction_id)))
+            return bool(cur.rowcount)
+    except (sqlite3.Error, TypeError, ValueError):
+        return False
+
+
+def shadow_counts() -> dict:
+    """Aggregates for diagnostics: totals by mode/status/signal."""
+    try:
+        with _read_cursor() as c:
+            total = c.execute(
+                "SELECT COUNT(*) FROM shadow_predictions").fetchone()[0]
+            by_mode = {r["mode"]: r["n"] for r in c.execute(
+                "SELECT mode, COUNT(*) AS n FROM shadow_predictions "
+                "GROUP BY mode")}
+            by_status = {r["settlement_status"]: r["n"] for r in c.execute(
+                "SELECT settlement_status, COUNT(*) AS n FROM "
+                "shadow_predictions GROUP BY settlement_status")}
+            by_signal = {r["signal"]: r["n"] for r in c.execute(
+                "SELECT signal, COUNT(*) AS n FROM shadow_predictions "
+                "GROUP BY signal")}
+            settled = c.execute(
+                "SELECT COUNT(*) FROM shadow_predictions WHERE "
+                "settlement_status='settled' AND outcome IN "
+                "('GREEN','RED')").fetchone()[0]
+            correct = c.execute(
+                "SELECT COUNT(*) FROM shadow_predictions WHERE "
+                "settlement_status='settled' AND outcome_correct=1"
+            ).fetchone()[0]
+            return {"total": total, "by_mode": by_mode,
+                    "by_settlement_status": by_status,
+                    "by_signal": by_signal,
+                    "directional_settled": settled,
+                    "directional_correct": correct}
+    except sqlite3.Error:
+        return {"total": 0}
 
 
 def settlement_counts() -> dict:

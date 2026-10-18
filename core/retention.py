@@ -443,6 +443,19 @@ def apply_retention(ohlc_secs: int | None = None,
                       f"failed (non-fatal): {exc}")
                 stats["candle_settlement"] = f"error: {exc}"
                 stats["candle_corrections"] = f"error: {exc}"
+            # ── PHASE-H: shadow_predictions — the paper/shadow ledger.
+            # SAME count-based policy (newest per (asset, period), order
+            # target_candle_open_epoch DESC). NEVER added to _POLICY —
+            # the 60-min time purge would destroy the shadow audit trail
+            # mid-evaluation.
+            try:
+                stats["shadow_predictions"] = _prune_by_count_keyed(
+                    cur, "shadow_predictions", SIGNAL_ROWS,
+                    order_key="target_candle_open_epoch")
+            except sqlite3.Error as exc:
+                print(f"[retention] shadow_predictions count-prune "
+                      f"failed (non-fatal): {exc}")
+                stats["shadow_predictions"] = f"error: {exc}"
             for table, col, bucket in _POLICY:
                 window = ohlc if bucket == "ohlc" else data
                 cutoff = now - window
