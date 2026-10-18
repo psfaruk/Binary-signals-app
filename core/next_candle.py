@@ -304,6 +304,16 @@ class NextCandleEngine:
             return None  # duplicate / out-of-order — already processed
 
         with self.lock:
+            # PHASE-E FIX (2026-10, found by test A13 in
+            # scripts/test_phase_e_data_quality.py): ``last_time`` was
+            # READ here and in ingest_many() but NEVER WRITTEN anywhere —
+            # it stayed at its -1 initializer forever, so the dedup above
+            # was dead code and duplicate/out-of-order candles were
+            # PROCESSED: pattern stats, streaks and training rows
+            # double-counted whenever history was re-seeded (watchdog
+            # restart replay). This assignment makes the documented
+            # "idempotent by candle time" contract actually hold.
+            self.last_time = t
             # 1) grade the prediction made for THIS candle (it was built at
             #    the previous ingest; target_time must match exactly)
             self._grade(t, o, c)

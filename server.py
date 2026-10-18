@@ -864,6 +864,151 @@ async def time_sync():
         "implies permission to trade — see /api/truth-layer.")
     return state
 
+@app.get("/api/data-quality")
+async def data_quality():
+    """PHASE-E DATA-QUALITY DIAGNOSTICS (2026-10): public, read-only,
+    secret-free snapshot of the data layer's health.
+
+    Per active stream: source identity + authorization (constant
+    "unauthorized" today — never fabricated), last observation time,
+    last receipt wall-time, candle/open state, tick counts, market-closed
+    latch, latest settled candle, missing-interval count, and a
+    quality-policy assessment (staleness, sufficiency, OHLC shape, clock
+    uncertainty).  Global sections: the documented quality policy, the
+    timing-verification state, and the count of signals suppressed by
+    each gate (from the Phase-A provenance ledger reason codes).
+
+    NOTHING here can enable a signal; gates only reject/downgrade.
+    """
+    import time as _t
+    from core import data_quality as _dq
+
+    now = _t.time()
+    backend = ("quotex_raw_ws" if os.environ.get("QX_USE_RAW_WS", "0")
+               == "1" else "pyquotex")
+    out = {
+        "generated_utc": _dq.utc_now_iso(),
+        "policy": _dq.describe_policy(),
+        "source": _dq.classify_live_quotex_channels(backend).as_dict(),
+        "timing": {},
+        "streams": [],
+        "last_processing_error": None,
+        "signals_suppressed_by_gate": {},
+        "notes": [
+            "authorization is constant 'unauthorized' until an authorized "
+            "provider is integrated (docs/DATA_SOURCE_BLOCKER.md path)",
+            "suppression counts come from the signal_provenance ledger "
+            "(reason codes DATA_STALE / DATA_UNAVAILABLE / ... ), i.e. the "
+            "Truth Layer's own record of gated emissions",
+        ],
+    }
+
+    # timing state (from the provider, honestly)
+    try:
+        from core.time_provider import get_time_provider as _gtp
+        tp = _gtp().describe()
+        out["timing"] = {
+            "sync_status": tp.get("sync_status"),
+            "offset_secs": tp.get("offset_secs"),
+            "uncertainty_secs": tp.get("uncertainty_secs"),
+            "seconds_since_last_sample": tp.get(
+                "seconds_since_last_sample"),
+            "last_sync_utc": tp.get("last_sync_utc"),
+        }
+        _unc = tp.get("uncertainty_secs")
+    except Exception:
+        out["timing"] = {"sync_status": "UNVERIFIED",
+                         "note": "time provider unavailable (fail-closed)"}
+        _unc = None
+
+    # per-stream diagnostics + assessment
+    try:
+        streams = getattr(feed, "_streams", {}) or {}
+        for (asset, period), stream in sorted(streams.items()):
+            candles = list(getattr(stream, "candles", []) or [])
+            latest_settled = None
+            try:
+                latest_settled = await asyncio.to_thread(
+                    _db.settlement_get, asset, period,
+                    candles[-1]["time"] if candles else 0)
+            except Exception:
+                latest_settled = None
+            gaps = _dq.count_series_gaps(
+                [c["time"] for c in candles[-64:]], int(period))
+            assessment = _dq.assess(
+                source_id=f"quotex_{backend}:{asset}",
+                source_authorized=False,
+                last_observation_wall=getattr(stream, "last_tick_ts", 0)
+                or None,
+                now=now,
+                closed_candles=[
+                    {"open": c.get("open"), "high": c.get("high"),
+                     "low": c.get("low"), "close": c.get("close")}
+                    for c in candles[-2:]],
+                clock_sync_status=out["timing"].get("sync_status",
+                                                    "UNVERIFIED"),
+                clock_uncertainty_secs=_unc,
+                missing_intervals=gaps,
+                latest_conflict_count=(
+                    (latest_settled or {}).get("conflict_count") or 0
+                    if latest_settled else 0),
+            )
+            out["streams"].append({
+                "asset": asset,
+                "period": period,
+                "last_observation_utc": (
+                    _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(
+                        getattr(stream, "last_tick_ts", 0)))
+                    if getattr(stream, "last_tick_ts", 0) else None),
+                "last_receipt_age_secs": round(
+                    now - (getattr(stream, "last_real_tick_wall", 0) or 0),
+                    1) if getattr(stream, "last_real_tick_wall", 0) else None,
+                "candle_open_time_utc": (
+                    _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(
+                        stream.candle_open_time))
+                    if getattr(stream, "candle_open_time", 0) else None),
+                "candle_tick_count": getattr(stream, "candle_tick_count", 0),
+                "closed_candles": len(candles),
+                "market_closed": bool(getattr(stream, "market_closed", False)),
+                "latest_settled_candle": (
+                    {"period_start": latest_settled.get("period_start"),
+                     "state": latest_settled.get("state"),
+                     "outcome": latest_settled.get("outcome"),
+                     "conflict_count": latest_settled.get("conflict_count")}
+                    if latest_settled else None),
+                "missing_intervals_last64": gaps,
+                "quality": assessment,
+            })
+    except Exception as _dq_exc:
+        out["streams_error"] = (f"{type(_dq_exc).__name__}: {_dq_exc}")
+
+    # last processing error (feed-level, redacted to a shape, never data)
+    try:
+        err = getattr(feed, "_last_error", None)
+        if err:
+            out["last_processing_error"] = {
+                "summary": str(err)[:200],
+                "wall_age_secs": round(now - (
+                    getattr(feed, "_last_error_time", 0) or 0), 1),
+            }
+    except Exception:
+        pass
+
+    # signals suppressed by the gates (provenance reason codes)
+    try:
+        counts = await asyncio.to_thread(_db.provenance_counts)
+        by_reason = counts.get("by_reason_code", {}) or {}
+        out["signals_suppressed_by_gate"] = {
+            k: v for k, v in by_reason.items()
+            if k in ("DATA_STALE", "DATA_UNAVAILABLE", "DATA_INVALID",
+                     "DATA_SOURCE_UNAUTHORIZED", "TIMING_UNVERIFIED",
+                     "INTERNAL_ERROR")}
+        out["provenance_total"] = counts.get("total", 0)
+    except Exception:
+        out["signals_suppressed_by_gate"] = {}
+
+    return out
+
 @app.get("/api/token-status")
 async def token_status():
     """Returns whether the app has live Quotex credentials."""
