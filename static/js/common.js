@@ -1367,7 +1367,15 @@ function renderNextCandle(nc){
   set('nc-conf', (nc.confidence != null && isFinite(nc.confidence)
     ? Math.round(nc.confidence) + '%' : '—'));
   const p = nc.p_green;
-  set('nc-prob', (p != null ? Math.round(p * 1000) / 10 : '—') + '% গ্রিন (calibrated)');
+  // PHASE-F CONFIDENCE HONESTY (2026-10): the engine's p_green is an
+  // INTERNAL score (logistic + fixed slope shrink). Calibration was
+  // EVALUATED in Phase C (clean_eval calibration table: only the
+  // [0.4,0.6) buckets populate, weakly informative) and is NOT
+  // established — so the old "(calibrated)" label was an unverified
+  // claim. It now renders as an engine score, never as a probability
+  // of being correct.
+  set('nc-prob', (p != null ? Math.round(p * 1000) / 10 : '—') +
+      '% গ্রিন (ইঞ্জিন স্কোর)');
 
   // pattern row: last-3-candles emoji → predicted next
   set('nc-pattern', nc.pattern_emoji || nc.pattern || '—');
