@@ -79,28 +79,33 @@ tree and must not be treated as executable/test evidence without re-verification
 
 | Snapshot | Lines | Bytes | SHA-256 | Classification |
 |---|---|---|---|---|
-| `tool-results/read_1792299280497_5cdacf9479d9.txt` = **Phase 1 `core/signal_contract.py`** | 715 | 38,545 | `5cdacf9479d9d0b89be7af18cfdfd846b4172f23e983e20f80bc1b44fce6840e` | SOURCE, appears complete (docstring → final function, no truncation markers); captured 2026-10-18 04:54 UTC |
+| `tool-results/read_1792299280497_5cdacf9479d9.txt` = **Phase 1 `core/signal_contract.py`** | 715 | 38,545 | `5cdacf9479d9d0b89be7af18cfdfd846b4172f23e983e20f80bc1b44fce6840e` (raw, with Read-tool prefixes) / `aa20ed7705dbe2b7cc96bd5e74b9db5464fc25d5c16ae2d42aac2035116666b3` (stripped source) | SOURCE — **AST-parse verified complete** this phase: every line prefix-strippable, `ast.parse` OK, 11 top-level defs ending cleanly with `truth_layer_state` (L691); captured 2026-10-18 04:54 UTC |
 
-This is the ONLY Phase 1/2 source file that survives anywhere. Verified copy
-preserved at `/home/z/my-project/recovery-artifacts/phase1_signal_contract_snapshot.py`
-(same sha256). It must NOT be restored into application code until an approved
-implementation phase verifies it.
+This is the ONLY Phase 1/2 source file that survives anywhere. Verified copies
+preserved at `/home/z/my-project/recovery-artifacts/` (raw + stripped
+variants, both hashed). It must NOT be restored into application code until
+an approved implementation phase verifies it.
 
 ### 4.2 Source-code snapshots (Phase 0 read-only audit captures)
 
-| Snapshot (original repo path) | Lines | SHA-256 (first 16) | Notes |
+| Snapshot (verified baseline file) | Lines | SHA-256 (first 16) | Notes |
 |---|---|---|---|
-| websocket client module (`read_1792259886863`) | 1,232 | `d5307aca0d889f839` | captured without line-number prefixes |
-| same module (`read_1792259889829`) | 1,232 | `b179eae4594301ac` | captured WITH line-number prefixes |
-| `static/app.html` (`read_1792259887113`) | 1,140 | `a2837b27b647aea0` | |
-| OTC HTML page (`read_1792259889415`) | 401 | `5787a2fedc434d4e` | |
-| `engines/base/confluence.py` (`read_1792259888037`) | 659 | `6595301e5d21358e` | |
-| `core/otc_predict/fast_train.py` (`read_1792259900271`) | 1,017 | `08cc006cdbab8369` | |
-| `core/otc_predict/tracker.py` (`read_1792259928355`) | 703 | `2119a8abcc6a510a` | |
-| `core/roadmap.py` (`read_1792259935037`) | 596 | `506fc3cc518f63a7` | |
-| `core/next_candle.py` (`read_1792260698461`) | 714 | `cfe6d0e96162c8a1` | |
-| `core/next_candle.py` (`read_1792260701903`) | 714 | `d8e5ff4bae2e5eb8` | with line-number prefixes |
-| Binance 1m data JSON (`read_1792260016071`) | 1 (748,820 B) | `82c06e1bb037ad71` | single-line JSON |
+| `pyquotex/api.py` (`read_1792259886863`) | 1,232 | `d5307aca0d889f839` | **byte-identical to baseline after prefix strip** (earlier narratives mislabeled this capture "quotex_ws.py"; root `quotex_ws.py` is 1,161 lines and is a different file) |
+| same (`read_1792259889829`) | 1,232 | `b179eae4594301ac` | double-prefixed capture; identical after double strip |
+| `static/app.html` (`read_1792259887113`) | 1,140 | `a2837b27b647aea0` | byte-identical to baseline |
+| `static/app.html` partial (`read_1792259889415`) | 401 | `5787a2fedc434d4e` | partial capture from char offset 1940; redundant (full file in clone) |
+| `engines/base/confluence.py` (`read_1792259888037`) | 659 | `6595301e5d21358e` | byte-identical to baseline |
+| `core/otc_predict/fast_train.py` (`read_1792259900271`) | 1,017 | `08cc006cdbab8369` | byte-identical to baseline |
+| `core/otc_predict/tracker.py` (`read_1792259928355`) | 703 | `2119a8abcc6a510a` | byte-identical to baseline |
+| `core/roadmap.py` (`read_1792259935037`) | 596 | `506fc3cc518f63a7` | byte-identical to baseline |
+| `core/next_candle.py` (`read_1792260698461`) | 714 | `cfe6d0e96162c8a1` | byte-identical to baseline |
+| `core/next_candle.py` (`read_1792260701903`) | 714 | `d8e5ff4bae2e5eb8` | double-prefixed; identical after double strip |
+| `scripts/data/binance/BTCUSDT_1m.json` (`read_1792260016071`) | 1 (748,820 B raw) | `82c06e1bb037ad71` | single-line JSON; byte-identical to baseline |
+
+All ten full captures were re-verified this phase against the fresh clone:
+**byte-identical after prefix stripping** — simultaneously proving the
+snapshots authentic AND the fresh clone an untampered copy of the audited
+baseline.
 
 Full hashes are recorded in
 `/home/z/my-project/recovery-artifacts/EVIDENCE_MANIFEST.txt`.
