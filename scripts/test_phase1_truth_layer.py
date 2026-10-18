@@ -386,7 +386,20 @@ check(_r.get("research_direction") == "CALL"
       and _r.get("research_strategy") == "next_candle_v1",
       "D1b CSE preference preserved as research")
 
-# D2 — acceptance criterion: synced raw-WS timing + unauthorized source
+# D2 — acceptance criterion: synced raw-WS timing + unauthorized source.
+# PHASE-2A (2026-10, rebuild): the timing gate now consults the TIME
+# PROVIDER (core/time_provider.py) — a boolean previously set is no
+# longer accepted as evidence.  The fixture therefore notes REAL
+# measured samples into the provider exactly the way quotex_ws.py's
+# timesync handler does (>= 3 fresh consistent samples => SYNCED).
+# The ASSERTION below is UNCHANGED from Phase A: synced timing +
+# unauthorized source must still yield NO_SIGNAL with
+# DATA_SOURCE_UNAUTHORIZED and preserved research fields.
+from core.time_provider import get_time_provider as _gtp  # noqa: E402
+_tp = _gtp()
+_tp.reset_for_tests()
+for _off in (0.4, 0.5, 0.6, 0.5):
+    _tp.note_sample(time.time() + _off)
 _f = fresh_feed(synced=True)
 _st = make_stream()
 _feed._nc_enabled = True
@@ -398,6 +411,7 @@ try:
     _r = asyncio.run(_run(_f, _st))
 finally:
     _feed._nc_enabled, _feed._nc_get_engine = _nc_save, _eng_save
+    _tp.reset_for_tests()   # isolate the provider for later tests
 check(_r["signal"] == "NO_SIGNAL"
       and _r["reason_code"] == "DATA_SOURCE_UNAUTHORIZED",
       "D2 unauthorized source → NO_SIGNAL/DATA_SOURCE_UNAUTHORIZED")

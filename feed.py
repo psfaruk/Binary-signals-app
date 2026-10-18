@@ -142,6 +142,32 @@ def utc_now_iso():  # thin alias used by the gate fallbacks
     return _truth_utc_now_iso()
 
 
+# ── PHASE-2A TIME PROVIDER + CANDLE LIFECYCLE (2026-10, rebuild) ──────
+# core/time_provider.py: honest time evidence.  The provider is SYNCED
+# only while there are >= 3 FRESH, consistent source-time samples (raw-WS
+# timesync frames); reconnects clear the evidence; staleness expires it.
+# There is NO env override and NO boolean shortcut — a connection or a
+# previously-set flag is never treated as synchronization.
+try:                                               # noqa: E402
+    from core.time_provider import get_time_provider as _get_time_provider
+    _tp = _get_time_provider()
+except Exception as _tp_imp_exc:                  # noqa: E402
+    _tp = None
+    print(f"[feed] time_provider unavailable ({_tp_imp_exc}) — "
+          f"timing stays UNVERIFIED (fail-closed)")
+# core/candle_lifecycle.py: the settlement state machine.  Pure
+# bookkeeping side-branch of the close path — zero effect on prediction
+# numerics; its failures are logged and non-fatal (audit degradation,
+# never feed degradation).
+try:                                               # noqa: E402
+    from core.candle_lifecycle import get_lifecycle as _get_lifecycle
+    _lc = _get_lifecycle()
+except Exception as _lc_imp_exc:                  # noqa: E402
+    _lc = None
+    print(f"[feed] candle_lifecycle unavailable ({_lc_imp_exc}) — "
+          f"settlement audit degraded (non-fatal)")
+
+
 # OTC-FINGERPRINT (Task 12-b, 2026-09-29): generator-fingerprint engine —
 # "এই ফিডটা কোন সিস্টেমে তৈরি?" (core/otc_fingerprint.py, validated 4/4
 # against known ground-truth feeds in Task 12-a).  CSE keeps its engine
@@ -2944,20 +2970,24 @@ class QuotexFeed:
     # is a non-emission (guards: dead market, zero-tick candle, cooldown)
     # and stays None — there is nothing actionable to suppress.
     def _timing_verified(self) -> bool:
-        """PHASE-1: is broker server-time sync ESTABLISHED on this backend?
+        """PHASE-2A: is broker server-time sync ESTABLISHED — with EVIDENCE?
 
-        Honest evidence only: the raw-WS backend (quotex_ws) receives the
-        broker's timesync frames and latches `_server_time_synced`.  The
-        default pyquotex backend has NO timesync mechanism at all → False
-        (TIMING_UNVERIFIED).  A fuller TimeProvider (sync staleness,
-        reconnect invalidation, offset uncertainty) is Phase B — this
-        boolean is the minimal honest Phase-A evidence.
+        The answer comes from core/time_provider.py: True ONLY while the
+        provider's sync status is SYNCED, which requires >= 3 fresh,
+        consistent source-time samples (raw-WS timesync frames), none
+        expired by the staleness window, none invalidated by a reconnect
+        or an unresolved offset jump.  The default pyquotex backend has
+        NO timesync mechanism at all → False (TIMING_UNVERIFIED).
+
+        Explicitly NOT accepted as evidence (Phase 2A directive):
+          * a connection existing,
+          * a boolean that was previously set (the Phase-A latch is
+            superseded — quotex_ws now feeds the provider instead).
         """
         try:
-            client = self._client
-            if client is None:
+            if _tp is None:
                 return False
-            return bool(getattr(client, "_server_time_synced", False))
+            return bool(_tp.timing_verified())
         except Exception:
             return False
 
@@ -3956,19 +3986,19 @@ class QuotexFeed:
         }
 
     def _srv_now(self) -> float:
-        """Server-aligned wall clock (FIX B1, audit 2026-09-29).
+        """Server-aligned wall clock (FIX B1 + PHASE-2A).
 
-        quotex_ws computes `_server_time_offset = server_ts - time.time()`
-        from the broker's timesync frames but NOTHING ever consumed it —
-        every candle-boundary / seconds-left computation ran on the local
-        clock, so any host↔broker skew shifted the timer-close vs the
-        tick boundary (late ticks dropped, wrong LAST10 phase weighting).
-        All candle-time consumers now go through this helper.
+        PHASE-2A: routed through core/time_provider.py — the offset is
+        applied ONLY while the provider is SYNCED (>= 3 fresh, consistent
+        timesync samples, no unresolved jump).  The old Phase-A behavior
+        (trust a single `_server_time_offset` reading if |off| < 300) is
+        superseded: one sample is an anecdote, not evidence.  With no
+        evidence the LOCAL clock is used — honestly, unlabeled as broker
+        time anywhere.
         """
         try:
-            off = getattr(self._client, "_server_time_offset", 0)
-            if isinstance(off, (int, float)) and abs(off) < 300:
-                return time.time() + float(off)
+            if _tp is not None:
+                return float(_tp.now())
         except Exception:
             pass
         return time.time()
@@ -4216,6 +4246,35 @@ class QuotexFeed:
             "close": cur_close,
         }
 
+    def _note_late_ticks(self, stream: _AssetStream, late: list) -> None:
+        """PHASE-2A CANDLE LIFECYCLE: record late ticks for an
+        already-closed candle in the CORRECTION LEDGER.
+
+        Each tick is bucketed to its own candle identity (asset, period,
+        period_start) — exactly the `_floor_to_period` bucketing the
+        stream loop uses, so a tick at a period edge lands on the right
+        candle.  The lifecycle decides per-candle: finalized/settled ->
+        correction row (original frozen OHLC verbatim + implied corrected
+        values + outcome-flip flag); not finalized -> the tick is not
+        late for the lifecycle (the live path owns it).  The finalized
+        OHLC in `stream.candles`, the production ledger (signal_log) and
+        the research settlement are NEVER modified here.  Never raises.
+        """
+        if _lc is None or not late:
+            return
+        for t in late:
+            try:
+                ts = float(t.get("time") if isinstance(t, dict) else t[1])
+                px = float(t.get("price") if isinstance(t, dict) else t[2])
+            except (TypeError, ValueError, IndexError, KeyError):
+                continue
+            try:
+                _lc.note_late_tick(stream.asset, stream.period, ts, px)
+            except Exception as _lt_exc:
+                print(f"[feed] late-tick correction recording failed "
+                      f"({stream.asset}): {type(_lt_exc).__name__}: "
+                      f"{_lt_exc}")
+
     def _reanchor_open(self, stream: _AssetStream, real_open: float) -> None:
         """FIX (B5, audit 2026-09-29): re-anchor a placeholder-open candle
         to its first REAL tick WITHOUT wiping the tick history.
@@ -4281,6 +4340,22 @@ class QuotexFeed:
             return None
 
         closed = self._running_candle(stream)
+
+        # ── PHASE-2A CANDLE LIFECYCLE (2026-10, rebuild) ───────────────
+        # Mark finalization BEGUN (idempotent pending row).  Pure
+        # bookkeeping — zero effect on the close/grade numerics below; a
+        # crash between here and the freeze leaves a recoverable
+        # pending_finalization row (see core/candle_lifecycle.py).
+        if _lc is not None and closed and closed.get("time"):
+            try:
+                _lc.begin_finalization(
+                    stream.asset, stream.period, closed,
+                    source=("tick_close" if open_is_real
+                            else "timer_close"))
+            except Exception as _lc_beg_exc:
+                print(f"[feed] lifecycle begin_finalization failed for "
+                      f"{stream.asset} (non-fatal): "
+                      f"{type(_lc_beg_exc).__name__}: {_lc_beg_exc}")
 
         # LIVE-CANDLE (2026-09-29): grade the running-candle prediction
         # against the real close BEFORE the buffers reset — feeds the
@@ -4388,6 +4463,26 @@ class QuotexFeed:
         accuracy = await asyncio.to_thread(
             self._grade_and_log, stream.asset, stream.period, closed,
             old_prediction, _micro_snap, stream.candles)
+
+        # ── PHASE-2A CANDLE LIFECYCLE: freeze + settle (idempotent) ────
+        # Freezes the finalized OHLC (immutable from here on — late ticks
+        # become correction-ledger rows ONLY) and records the research
+        # settlement from the FROZEN values + the signal_provenance
+        # emission row.  Also sweeps older unsettled rows for this asset
+        # (crash recovery).  Audit bookkeeping only — non-fatal.
+        if _lc is not None and closed and closed.get("time"):
+            try:
+                await asyncio.to_thread(
+                    _lc.finalize_and_settle,
+                    stream.asset, stream.period, closed,
+                    production_accuracy=accuracy,
+                    source=("tick_close" if open_is_real
+                            else "timer_close"),
+                    tick_count=stream.candle_tick_count)
+            except Exception as _lc_fin_exc:
+                print(f"[feed] lifecycle finalize_and_settle failed for "
+                      f"{stream.asset} (non-fatal): "
+                      f"{type(_lc_fin_exc).__name__}: {_lc_fin_exc}")
 
         # TARGET-75 controller feed (2026-09-09): every GRADED outcome moves
         # the per-pair per-direction rolling win rate, which raises/lowers
@@ -5389,14 +5484,20 @@ class QuotexFeed:
                             # Timer already fired for this boundary — late ticks
                             # belonging to the closed candle arrive AFTER it was
                             # closed+graded.
-                            # FIX (A6, audit 2026-09-29): the old code DROPPED
-                            # these ticks, so the recorded close/high/low could
-                            # differ from the broker's settlement (a last-second
-                            # flip tick was lost → wrong grade, wrong ATR
-                            # context for later candles). Now the closed
-                            # candle's OHLC is PATCHED with the late prints
-                            # (bounded to a short window after close so a
-                            # long-stalled feed can't rewrite ancient history).
+                            # PHASE-2A CANDLE LIFECYCLE (2026-10, rebuild):
+                            # the A6 post-scoring OHLC PATCH is REPLACED.
+                            # The old patch mutated the closed candle's
+                            # high/low/close AFTER it had been graded and
+                            # logged — desyncing the chart, the engine
+                            # context and BOTH ledgers (Phase 0 RC-06:
+                            # "late ticks silently mutate finalized OHLC").
+                            # Under the lifecycle, finalized OHLC is
+                            # IMMUTABLE: each late tick is recorded in the
+                            # CORRECTION LEDGER (db.candle_corrections) with
+                            # the original values preserved verbatim and the
+                            # implied correction + outcome-flip flag — the
+                            # audit trail downstream evaluation needs,
+                            # without silently rewriting history.
                             cur = [
                                 t for t in remaining
                                 if _floor_to_period(float(t["time"]), stream.period)
@@ -5406,24 +5507,10 @@ class QuotexFeed:
                             if late:
                                 print(f"[feed] {len(late)} late tick(s) after "
                                       f"timer-close ({stream.asset}@"
-                                      f"{stream.period}s) — patching closed "
-                                      f"candle OHLC (was: dropped)")
-                                try:
-                                    lc = stream.candles[-1] if stream.candles else None
-                                    if (lc is not None and lc.get("time")
-                                            and stream.candle_open_time
-                                            and lc["time"]
-                                            < stream.candle_open_time):
-                                        for t in late:
-                                            px = float(t["price"])
-                                            if px > lc.get("high", px):
-                                                lc["high"] = px
-                                            if px < lc.get("low", px):
-                                                lc["low"] = px
-                                            lc["close"] = px
-                                except Exception as _late_exc:
-                                    print(f"[feed] late-tick patch failed: "
-                                          f"{type(_late_exc).__name__}: {_late_exc}")
+                                      f"{stream.period}s) — recorded in the "
+                                      f"correction ledger (finalized OHLC "
+                                      f"immutable; was: in-place patch)")
+                                self._note_late_ticks(stream, late)
                             # First CURRENT-window tick after timer-close is the true open
                             # FIX (B5, audit 2026-09-29): re-anchor WITHOUT
                             # wiping real ticks (see _reanchor_open). The

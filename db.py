@@ -11,6 +11,7 @@ import time
 from datetime import timedelta
 import threading
 from contextlib import contextmanager
+from typing import Optional
 
 def _resolve_db_path() -> str:
     """PERSISTENCE-FIX (2026-09-09): choose the DB location.
@@ -247,6 +248,31 @@ _SP_COLUMNS = (
     "target_candle_open_time_utc", "target_candle_open_epoch",
     "target_candle_close_time_utc", "eligibility_checks", "ts",
 )
+
+# ── PHASE-2A CANDLE LIFECYCLE (2026-10, rebuild) ────────────────────
+# Structural column parity for the settlement/correction INSERTs and
+# UPDATEs — same discipline as _SP_COLUMNS (the lost Phase-2 work found
+# a dropped-column bug in a hand-written INSERT; column lists are
+# derived from ONE constant each so schema and SQL cannot drift).
+_CS_COLUMNS = (
+    "asset", "period", "period_start", "lifecycle_version", "state",
+    "open", "high", "low", "close", "tick_count",
+    "finalize_source", "finalized_at_utc", "finalized_at_epoch",
+    "signal_id", "research_direction", "research_strategy",
+    "outcome", "research_correct", "production_accuracy",
+    "settled_at_utc", "settled_at_epoch",
+    "settle_attempts", "conflict_count", "correction_count",
+)
+_CS_STATE_PENDING = "pending_finalization"
+_CS_STATE_FINALIZED = "finalized"
+_CS_STATE_SETTLED = "settled"
+_CC_COLUMNS = (
+    "asset", "period", "period_start", "reason",
+    "original_ohlc", "corrected_ohlc",
+    "late_tick_epoch", "late_tick_price",
+    "original_outcome", "corrected_outcome", "outcome_flipped",
+    "stale_replay", "ledger", "created_at_utc", "created_at_epoch",
+)
 _SECONDS_PER_DAY = 86400
 
 
@@ -423,6 +449,70 @@ def init():
             ON signal_provenance(asset, period, target_candle_open_epoch DESC)""")
         c.execute("""CREATE INDEX IF NOT EXISTS ix_sp_reason
             ON signal_provenance(reason_code, research_only)""")
+
+        # ── PHASE-2A CANDLE LIFECYCLE (2026-10, rebuild) ──────────────────
+        # candle_settlement: the explicit settlement lifecycle, one row per
+        # (asset, period, period_start) candle identity.  ADDITIVE-ONLY
+        # migration (CREATE TABLE IF NOT EXISTS) — no existing table is
+        # altered, no existing row is rewritten.  State machine:
+        #   pending_finalization -> finalized (OHLC FROZEN) -> settled
+        #   (research outcome from FROZEN values + signal_provenance join).
+        # The frozen OHLC is IMMUTABLE once written: re-finalization with
+        # different values is a CONFLICT (rejected + audited into
+        # candle_corrections), never an UPDATE.  Settlement is idempotent:
+        # retries bump settle_attempts; outcome columns never rewrite.
+        # RESEARCH ledger: joins signal_provenance (research emissions).
+        # The PRODUCTION ledger (signal_log) is never written here.
+        c.execute("""CREATE TABLE IF NOT EXISTS candle_settlement (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset TEXT NOT NULL,
+            period INT NOT NULL,
+            period_start REAL NOT NULL,
+            lifecycle_version TEXT,
+            state TEXT NOT NULL,
+            open REAL, high REAL, low REAL, close REAL,
+            tick_count INT,
+            finalize_source TEXT,
+            finalized_at_utc TEXT, finalized_at_epoch REAL,
+            signal_id TEXT,              -- provenance join (research ledger)
+            research_direction TEXT,
+            research_strategy TEXT,
+            outcome TEXT,                -- up/down/flat from FROZEN close
+            research_correct INT,        -- 1/0/NULL vs research_direction
+            production_accuracy TEXT,    -- audit COPY of signal_log grade
+            settled_at_utc TEXT, settled_at_epoch REAL,
+            settle_attempts INT NOT NULL DEFAULT 0,
+            conflict_count INT NOT NULL DEFAULT 0,
+            correction_count INT NOT NULL DEFAULT 0,
+            UNIQUE (asset, period, period_start))""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_cs_state
+            ON candle_settlement(state)""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_cs_recent
+            ON candle_settlement(asset, period, period_start DESC)""")
+        # candle_corrections: the additive correction ledger.  Late ticks
+        # and conflicting finalizations append rows here; finalized
+        # OHLC/outcomes are NEVER edited.  original_* snapshots preserved
+        # verbatim; corrected_* carries what the late evidence implies.
+        c.execute("""CREATE TABLE IF NOT EXISTS candle_corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset TEXT NOT NULL,
+            period INT NOT NULL,
+            period_start REAL NOT NULL,
+            reason TEXT NOT NULL,        -- late_tick | conflicting_finalization
+            original_ohlc TEXT,          -- JSON (frozen values, verbatim)
+            corrected_ohlc TEXT,         -- JSON (implied by late evidence)
+            late_tick_epoch REAL,
+            late_tick_price REAL,
+            original_outcome TEXT,
+            corrected_outcome TEXT,
+            outcome_flipped INT,
+            stale_replay INT,            -- late tick > window after close
+            ledger TEXT NOT NULL DEFAULT 'research',
+            created_at_utc TEXT, created_at_epoch REAL,
+            UNIQUE (asset, period, period_start, reason,
+                    late_tick_epoch, late_tick_price))""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_cc_asset
+            ON candle_corrections(asset, period, period_start DESC)""")
 
         # ── OTC-PREDICT-ENGINE (2026-09-11, PART 17 + PART 16 freeze) ────
         # Frozen T+1/T+2 predictions. PART 16 "Prediction Freeze":
@@ -1139,6 +1229,348 @@ def provenance_counts() -> dict:
                     "by_reason_code": by_reason}
     except sqlite3.Error:
         return {"total": 0, "actionable": 0, "by_reason_code": {}}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PHASE-2A CANDLE LIFECYCLE row operations (2026-10, rebuild)
+#
+# Transaction discipline: every operation below is ONE _write_cursor
+# transaction (commit on success, rollback on exception).  State
+# transitions are CONDITIONAL UPDATEs (`WHERE state=...`) so a stale
+# writer can never move a state backwards; conflicting/duplicate
+# finalizations are audited into candle_corrections, never applied.
+# Writers: the single server process (event loop + to_thread helpers +
+# retention daemon).  Cross-process writers are NOT supported — see
+# docs/PHASE2A_SETTLEMENT.md for the honest single-process assumption.
+# ══════════════════════════════════════════════════════════════════════
+def _cs_utc_iso(ts: float) -> str:
+    try:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
+def settlement_begin(asset: str, period: int, period_start: float,
+                     source: str = "unknown") -> dict:
+    """Transition (none) -> pending_finalization (idempotent INSERT OR
+    IGNORE).  Returns the CURRENT row state (whatever it is)."""
+    now = time.time()
+    try:
+        with _cursor() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO candle_settlement "
+                f"({','.join(_CS_COLUMNS)}) "
+                f"VALUES ({','.join('?' for _ in _CS_COLUMNS)})",
+                (str(asset), int(period), float(period_start),
+                 "1.0.0", _CS_STATE_PENDING,
+                 None, None, None, None, 0,
+                 str(source), None, None,
+                 None, None, None,
+                 None, None, None,
+                 None, None,
+                 0, 0, 0))
+            row = c.execute(
+                "SELECT * FROM candle_settlement WHERE asset=? AND "
+                "period=? AND period_start=?",
+                (str(asset), int(period), float(period_start))).fetchone()
+            return dict(row) if row else {"error": "row missing after "
+                                             "insert"}
+    except sqlite3.Error as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def settlement_get(asset: str, period: int,
+                   period_start: float) -> Optional[dict]:
+    """Read one candle_settlement row (or None)."""
+    try:
+        with _read_cursor() as c:
+            row = c.execute(
+                "SELECT * FROM candle_settlement WHERE asset=? AND "
+                "period=? AND period_start=?",
+                (str(asset), int(period), float(period_start))).fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error:
+        return None
+
+
+def _cs_ohlc_equal(row: dict, o, h, l, cl) -> bool:
+    """Frozen-vs-attempted OHLC comparison (tiny float epsilon)."""
+    try:
+        return (abs((row["open"] or 0.0) - float(o)) < 1e-9
+                and abs((row["high"] or 0.0) - float(h)) < 1e-9
+                and abs((row["low"] or 0.0) - float(l)) < 1e-9
+                and abs((row["close"] or 0.0) - float(cl)) < 1e-9)
+    except (TypeError, ValueError, KeyError):
+        return False
+
+
+def settlement_finalize(asset: str, period: int, period_start: float,
+                        o, h, l, cl, tick_count: int,
+                        source: str = "unknown") -> dict:
+    """Transition pending_finalization -> finalized (freeze OHLC).
+
+    * row absent            -> insert pending then freeze (recovery).
+    * state pending         -> freeze (the only write to OHLC columns,
+                              happens exactly once per candle).
+    * state finalized/settled + SAME OHLC    -> {'action': 'duplicate'}
+      (idempotent re-close; nothing written).
+    * state finalized/settled + DIFFERENT OHLC -> CONFLICT: rejected +
+      audited into candle_corrections (reason='conflicting_finalization');
+      the frozen row is NEVER modified.  conflict_count incremented.
+    """
+    now = time.time()
+    try:
+        with _cursor() as c:
+            row = c.execute(
+                "SELECT * FROM candle_settlement WHERE asset=? AND "
+                "period=? AND period_start=?",
+                (str(asset), int(period), float(period_start))).fetchone()
+            if row is None:
+                c.execute(
+                    "INSERT OR IGNORE INTO candle_settlement "
+                    f"({','.join(_CS_COLUMNS)}) "
+                    f"VALUES ({','.join('?' for _ in _CS_COLUMNS)})",
+                    (str(asset), int(period), float(period_start),
+                     "1.0.0", _CS_STATE_PENDING,
+                     None, None, None, None, 0,
+                     str(source), None, None,
+                     None, None, None,
+                     None, None, None,
+                     None, None,
+                     0, 0, 0))
+                row = c.execute(
+                    "SELECT * FROM candle_settlement WHERE asset=? AND "
+                    "period=? AND period_start=?",
+                    (str(asset), int(period),
+                     float(period_start))).fetchone()
+            state = row["state"]
+            if state == _CS_STATE_PENDING:
+                cur = c.execute(
+                    "UPDATE candle_settlement SET state=?, open=?, high=?,"
+                    " low=?, close=?, tick_count=?, finalize_source=?,"
+                    " finalized_at_utc=?, finalized_at_epoch=?"
+                    " WHERE asset=? AND period=? AND period_start=?"
+                    "   AND state=?",
+                    (_CS_STATE_FINALIZED, float(o), float(h), float(l),
+                     float(cl), int(tick_count or 0), str(source),
+                     _cs_utc_iso(now), now,
+                     str(asset), int(period), float(period_start),
+                     _CS_STATE_PENDING))
+                if cur.rowcount == 1:
+                    return {"action": "finalized", "state":
+                            _CS_STATE_FINALIZED}
+                # Lost a race to a concurrent writer — re-read the FULL
+                # row and fall through to duplicate/conflict handling.
+                row = c.execute(
+                    "SELECT * FROM candle_settlement WHERE asset=? "
+                    "AND period=? AND period_start=?",
+                    (str(asset), int(period),
+                     float(period_start))).fetchone()
+                if row is None:
+                    return {"action": "unexpected_state",
+                            "state": "missing"}
+                state = row["state"]
+            if state in (_CS_STATE_FINALIZED, _CS_STATE_SETTLED):
+                if _cs_ohlc_equal(dict(row), o, h, l, cl):
+                    return {"action": "duplicate", "state": state}
+                # CONFLICT — auditable rejection, frozen row untouched.
+                original = {"open": row["open"], "high": row["high"],
+                            "low": row["low"], "close": row["close"]}
+                attempted = {"open": float(o), "high": float(h),
+                             "low": float(l), "close": float(cl)}
+                c.execute(
+                    "INSERT OR IGNORE INTO candle_corrections "
+                    f"({','.join(_CC_COLUMNS)}) "
+                    f"VALUES ({','.join('?' for _ in _CC_COLUMNS)})",
+                    (str(asset), int(period), float(period_start),
+                     "conflicting_finalization",
+                     json.dumps(original, separators=(",", ":")),
+                     json.dumps(attempted, separators=(",", ":")),
+                     None, None, None, None, None, 0, "research",
+                     _cs_utc_iso(now), now))
+                c.execute(
+                    "UPDATE candle_settlement SET conflict_count="
+                    "conflict_count+1 WHERE asset=? AND period=? AND "
+                    "period_start=?",
+                    (str(asset), int(period), float(period_start)))
+                return {"action": "conflict_rejected", "state": state,
+                        "frozen": original, "attempted": attempted}
+            return {"action": "unexpected_state", "state": state}
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def settlement_settle(asset: str, period: int, period_start: float,
+                      signal_id=None, research_direction=None,
+                      research_strategy=None, outcome=None,
+                      research_correct=None,
+                      production_accuracy=None) -> dict:
+    """Transition finalized -> settled (research outcome from FROZEN
+    values; provenance join happens in candle_lifecycle.settle).
+
+    Idempotent: on a settled row the outcome columns are NEVER
+    rewritten — only settle_attempts increments (audit of retries).
+    """
+    now = time.time()
+    try:
+        with _cursor() as c:
+            cur = c.execute(
+                "UPDATE candle_settlement SET state=?, signal_id=?,"
+                " research_direction=?, research_strategy=?, outcome=?,"
+                " research_correct=?, production_accuracy=?,"
+                " settled_at_utc=?, settled_at_epoch=?"
+                " WHERE asset=? AND period=? AND period_start=?"
+                "   AND state=?",
+                (_CS_STATE_SETTLED, signal_id, research_direction,
+                 research_strategy, outcome, research_correct,
+                 production_accuracy, _cs_utc_iso(now), now,
+                 str(asset), int(period), float(period_start),
+                 _CS_STATE_FINALIZED))
+            if cur.rowcount == 1:
+                return {"action": "settled", "state": _CS_STATE_SETTLED}
+            row = c.execute(
+                "SELECT state FROM candle_settlement WHERE asset=? AND "
+                "period=? AND period_start=?",
+                (str(asset), int(period),
+                 float(period_start))).fetchone()
+            if row is None:
+                return {"action": "no_row"}
+            if row["state"] == _CS_STATE_SETTLED:
+                # retry on an already-settled row: attempts only — the
+                # frozen outcome columns are immutable history.
+                c.execute(
+                    "UPDATE candle_settlement SET settle_attempts="
+                    "settle_attempts+1 WHERE asset=? AND period=? AND "
+                    "period_start=?",
+                    (str(asset), int(period), float(period_start)))
+                return {"action": "already_settled",
+                        "state": _CS_STATE_SETTLED}
+            return {"action": "not_finalized", "state": row["state"]}
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def settlement_unsettled(asset=None, period=None,
+                         limit: int = 100) -> list:
+    """Rows needing recovery: finalized-not-settled (+ pending rows are
+    reported so callers can count them; they cannot be settled)."""
+    try:
+        with _read_cursor() as c:
+            if asset:
+                rows = c.execute(
+                    "SELECT * FROM candle_settlement WHERE asset=? AND "
+                    "state IN ('finalized','pending_finalization') "
+                    "ORDER BY period_start DESC LIMIT ?",
+                    (str(asset), int(max(1, limit)))).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM candle_settlement WHERE state IN "
+                    "('finalized','pending_finalization') "
+                    "ORDER BY period_start DESC LIMIT ?",
+                    (int(max(1, limit)),)).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []
+
+
+def provenance_for_target(asset: str, period: int,
+                          target_epoch: float) -> Optional[dict]:
+    """PHASE-2A: the frozen research emission targeting one candle
+    (signal_provenance unique key join for research settlement)."""
+    try:
+        with _read_cursor() as c:
+            row = c.execute(
+                "SELECT signal_id, research_direction, "
+                "research_strategy, research_confidence, reason_code, "
+                "signal, truth_status FROM signal_provenance "
+                "WHERE asset=? AND period=? AND target_candle_open_epoch=?",
+                (str(asset), int(period),
+                 float(target_epoch))).fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error:
+        return None
+
+
+def correction_insert(asset: str, period: int, period_start: float,
+                      reason: str, original_ohlc: str,
+                      corrected_ohlc: str, late_tick_epoch=None,
+                      late_tick_price=None, original_outcome=None,
+                      corrected_outcome=None, outcome_flipped=None,
+                      ledger: str = "research",
+                      stale: bool = False) -> bool:
+    """Append ONE correction-ledger row (INSERT OR IGNORE on the natural
+    key — duplicate late ticks are idempotent).  Also bumps the
+    settlement row's correction_count.  Never edits frozen values."""
+    now = time.time()
+    try:
+        with _cursor() as c:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO candle_corrections "
+                f"({','.join(_CC_COLUMNS)}) "
+                f"VALUES ({','.join('?' for _ in _CC_COLUMNS)})",
+                (str(asset), int(period), float(period_start), str(reason),
+                 str(original_ohlc), str(corrected_ohlc),
+                 (float(late_tick_epoch)
+                  if late_tick_epoch is not None else None),
+                 (float(late_tick_price)
+                  if late_tick_price is not None else None),
+                 original_outcome, corrected_outcome, outcome_flipped,
+                 1 if stale else 0, str(ledger),
+                 _cs_utc_iso(now), now))
+            if cur.rowcount == 1:
+                c.execute(
+                    "UPDATE candle_settlement SET correction_count="
+                    "correction_count+1 WHERE asset=? AND period=? AND "
+                    "period_start=?",
+                    (str(asset), int(period), float(period_start)))
+            return bool(cur.rowcount)
+    except (sqlite3.Error, TypeError, ValueError):
+        return False
+
+
+def corrections_for(asset: str, period: int,
+                    period_start: float) -> list:
+    """Read-only: correction rows for one candle."""
+    try:
+        with _read_cursor() as c:
+            rows = c.execute(
+                "SELECT * FROM candle_corrections WHERE asset=? AND "
+                "period=? AND period_start=? ORDER BY id",
+                (str(asset), int(period),
+                 float(period_start))).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []
+
+
+def settlement_counts() -> dict:
+    """PHASE-2A aggregates for /api/settlement-integrity + tests."""
+    try:
+        with _read_cursor() as c:
+            state_counts = {
+                r["state"]: r["n"] for r in c.execute(
+                    "SELECT state, COUNT(*) AS n FROM candle_settlement "
+                    "GROUP BY state")}
+            total = c.execute(
+                "SELECT COUNT(*) FROM candle_settlement").fetchone()[0]
+            corr_total = c.execute(
+                "SELECT COUNT(*) FROM candle_corrections").fetchone()[0]
+            corr_flips = c.execute(
+                "SELECT COUNT(*) FROM candle_corrections WHERE "
+                "outcome_flipped=1").fetchone()[0]
+            corr_by_reason = {
+                r["reason"]: r["n"] for r in c.execute(
+                    "SELECT reason, COUNT(*) AS n FROM candle_corrections "
+                    "GROUP BY reason")}
+            return {"total": total, "state_counts": state_counts,
+                    "corrections": {"total": corr_total,
+                                    "outcome_flips": corr_flips,
+                                    "by_reason": corr_by_reason}}
+    except sqlite3.Error:
+        return {"total": 0, "state_counts": {},
+                "corrections": {"total": 0, "outcome_flips": 0,
+                                "by_reason": {}}}
 
 
 def log_signal(asset, period, ctime, signal, score, confidence,

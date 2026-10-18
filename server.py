@@ -726,6 +726,92 @@ async def truth_layer():
     state["emission_provenance"] = counts
     return state
 
+@app.get("/api/settlement-integrity")
+async def settlement_integrity():
+    """PHASE-2A CANDLE LIFECYCLE (2026-10, rebuild): public, secret-free
+    settlement-integrity snapshot.
+
+    Reports the lifecycle version, per-state row counts (pending_
+    finalization / finalized / settled), correction-ledger aggregates
+    (late ticks, outcome flips, conflicting finalizations) and the
+    binding policies (immutable finalized OHLC, correction-ledger-only
+    late ticks, idempotent settlement, research/production ledger
+    separation).  Bookkeeping transparency only — nothing here makes
+    any signal actionable.
+    """
+    try:
+        from core.candle_lifecycle import get_lifecycle as _gl
+        state = _gl().describe()
+    except Exception as _si_exc:
+        return {
+            "error": f"settlement lifecycle unavailable: "
+                     f"{type(_si_exc).__name__}: {_si_exc}",
+            "lifecycle_version": None,
+            "note": "fail-closed reporting: unavailability is stated, "
+                    "never hidden",
+        }
+    try:
+        state["db_counts"] = await asyncio.to_thread(_db.settlement_counts)
+    except Exception:
+        state["db_counts"] = {"total": 0, "state_counts": {},
+                              "corrections": {"total": 0,
+                                              "outcome_flips": 0,
+                                              "by_reason": {}}}
+    return state
+
+@app.get("/api/time-sync")
+async def time_sync():
+    """PHASE-2A TIME PROVIDER (2026-10, rebuild): public, secret-free
+    time-evidence snapshot.
+
+    Honest answer to 'is broker time synchronized?': backend identity,
+    local_only flag, sync status (UNVERIFIED / SYNCED / STALE), offset
+    estimate + uncertainty, staleness window + current sample age,
+    sample/rejection/jump/reconnect counters, last sync UTC.
+
+    EXPLICIT CAVEAT (Phase 2A directive): timing sync != source
+    authorization.  A SYNCED provider only means the broker clock is
+    measurable on the raw-WS backend — an UNAUTHORIZED data source.
+    Actionable signals remain impossible regardless of this endpoint's
+    contents (see /api/truth-layer).
+    """
+    # Which backend is ACTIVE (feed's own config — labeled honestly).
+    backend = ("quotex_raw_ws" if os.environ.get("QX_USE_RAW_WS", "0")
+               == "1" else "pyquotex")
+    try:
+        from core.time_provider import get_time_provider as _gtp
+        state = _gtp().describe()
+    except Exception as _ts_exc:
+        return {
+            "error": f"time provider unavailable: "
+                     f"{type(_ts_exc).__name__}: {_ts_exc}",
+            "active_backend": backend,
+            "sync_status": "UNVERIFIED",
+            "timing_verified": False,
+            "note": "fail-closed: provider unavailability means timing "
+                    "stays UNVERIFIED, never the opposite",
+        }
+    state["active_backend"] = backend
+    # The pyquotex backend has NO timesync mechanism: even a provider
+    # with leftover evidence from a raw-WS session is not evidence for
+    # the ACTIVE backend.  Label it honestly.
+    if backend != "quotex_raw_ws":
+        state["backend_note"] = (
+            "Active backend (pyquotex) has no source-time mechanism — "
+            "device UTC only.  Any provider samples shown are leftover "
+            "evidence from a raw-WS session and do NOT verify timing "
+            "for the active backend.")
+        state["timing_verified_for_active_backend"] = False
+    else:
+        state["timing_verified_for_active_backend"] = bool(
+            state.get("sync_status") == "SYNCED")
+    state["timing_verified"] = bool(state.get("sync_status") == "SYNCED")
+    state["authorization_caveat"] = (
+        "Timing sync != source authorization: the raw-WS backend is an "
+        "unauthorized data source (Phase 0 RC-03).  SYNCED here never "
+        "implies permission to trade — see /api/truth-layer.")
+    return state
+
 @app.get("/api/token-status")
 async def token_status():
     """Returns whether the app has live Quotex credentials."""

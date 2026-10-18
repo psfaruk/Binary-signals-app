@@ -340,6 +340,53 @@ def _prune_signal_provenance_by_count(cur: sqlite3.Connection.cursor,
     return deleted
 
 
+def _prune_by_count_keyed(cur: sqlite3.Connection.cursor,
+                           table: str, keep_rows: int,
+                           order_key: str) -> int:
+    """PHASE-2A CANDLE LIFECYCLE: generic count-based prune for the
+    settlement/correction tables — keep only the newest `keep_rows` rows
+    PER (asset, period), ordered by `order_key` (period_start for
+    settlements — the deterministic candle order; created_at_epoch for
+    corrections).  Same policy family as signal_log/signal_provenance;
+    NEVER the 60-min time purge (the audit trail must outlive a
+    candle-close by hours).  Table/column names are internal constants,
+    never user input."""
+    try:
+        cur.execute(
+            f"SELECT asset, period, COUNT(*) AS n FROM {table} "
+            f"GROUP BY asset, period")
+        groups = cur.fetchall()
+    except sqlite3.Error:
+        return 0
+    deleted = 0
+    for asset, period, n in groups:
+        if n <= keep_rows:
+            continue
+        try:
+            cur.execute(
+                f"DELETE FROM {table} WHERE id IN ("
+                f"  SELECT id FROM {table} s"
+                f"  WHERE s.asset = ? AND s.period = ?"
+                f"    AND s.id NOT IN ("
+                f"      SELECT id FROM {table} s2"
+                f"      WHERE s2.asset = s.asset AND s2.period = s.period"
+                f"      ORDER BY s2.{order_key} DESC, s2.id DESC"
+                f"      LIMIT ?"
+                f"    )"
+                f")",
+                (asset, period, keep_rows))
+            deleted += cur.rowcount
+        except sqlite3.Error as exc:
+            print(f"[retention] {table} count-prune failed for "
+                  f"{asset}@{period}s (non-fatal): {exc}")
+            try:
+                conn = cur.connection
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+    return deleted
+
+
 # ── core pass ───────────────────────────────────────────────────────────────
 def apply_retention(ohlc_secs: int | None = None,
                     data_secs: int | None = None) -> dict:
@@ -378,6 +425,24 @@ def apply_retention(ohlc_secs: int | None = None,
                 print(f"[retention] signal_provenance count-prune failed "
                       f"(non-fatal): {exc}")
                 stats["signal_provenance"] = f"error: {exc}"
+            # ── PHASE-2A: candle_settlement + candle_corrections — the
+            # SAME count-based policy as signal_log (newest per pair).
+            # Never added to _POLICY (the 60-min time purge would destroy
+            # the settlement/correction audit trail).  Bounded to the same
+            # audit window as the signal_log / signal_provenance ledgers
+            # it joins — older rows have no join partners left anyway.
+            try:
+                stats["candle_settlement"] = _prune_by_count_keyed(
+                    cur, "candle_settlement", SIGNAL_ROWS,
+                    order_key="period_start")
+                stats["candle_corrections"] = _prune_by_count_keyed(
+                    cur, "candle_corrections", SIGNAL_ROWS,
+                    order_key="created_at_epoch")
+            except sqlite3.Error as exc:
+                print(f"[retention] settlement/correction count-prune "
+                      f"failed (non-fatal): {exc}")
+                stats["candle_settlement"] = f"error: {exc}"
+                stats["candle_corrections"] = f"error: {exc}"
             for table, col, bucket in _POLICY:
                 window = ohlc if bucket == "ohlc" else data
                 cutoff = now - window

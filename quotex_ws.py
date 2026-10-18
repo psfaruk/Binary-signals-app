@@ -255,14 +255,22 @@ class QuotexWSClient:
         # Server time offset (server ts - local ts)
         self._server_time_offset: float = 0.0
         # PHASE-1 TRUTH LAYER (2026-10, rebuild): latched True on the FIRST
-        # valid broker timesync frame — the honest evidence that server-time
-        # sync is established on THIS backend.  feed._timing_verified()
-        # reads it for the TIMING_UNVERIFIED eligibility check (Phase 0
-        # RC-05).  The default pyquotex backend has no such evidence, so
-        # timing stays unverified there.  Sync-staleness / reconnect
-        # invalidation belong to the Phase-B TimeProvider — Phase A keeps
-        # only this minimal, truthful latch.
+        # valid broker timesync frame.
+        # PHASE-2A (2026-10, rebuild): the gate no longer reads this latch
+        # — a previously-set boolean is NOT synchronization evidence.  It
+        # is kept only for backward compatibility of the attribute; the
+        # TIMING_UNVERIFIED eligibility check now consults
+        # core/time_provider.py (SYNCED requires >= 3 fresh consistent
+        # samples; reconnects clear the evidence; staleness expires it).
+        # Sample wiring happens in the timesync frame handler below.
         self._server_time_synced: bool = False
+        # PHASE-2A: the honest time-evidence provider (module singleton —
+        # import failures leave it None and timing stays UNVERIFIED).
+        try:
+            from core.time_provider import get_time_provider as _gtp
+            self._time_provider = _gtp()
+        except Exception:
+            self._time_provider = None
 
         # Per-asset open/closed state from chart_notification
         self._asset_open_state: dict[str, bool] = {}
@@ -450,6 +458,20 @@ class QuotexWSClient:
             )
         except Exception as exc:
             return False, f"ws connect failed: {exc}"
+
+        # PHASE-2A TIME PROVIDER: a (re)connection INVALIDATES all sync
+        # evidence — the new connection's clock relationship must be
+        # re-established by fresh measured timesync samples before the
+        # provider can be SYNCED again (Phase 2A directive: never claim
+        # synchronization merely because a connection exists or evidence
+        # existed before).  Harmless on a first-ever connect (evidence is
+        # empty anyway).
+        if self._time_provider is not None:
+            try:
+                self._time_provider.on_reconnect()
+            except Exception:
+                pass
+        self._server_time_synced = False
 
         # Start the reader loop (handles incoming frames + pings)
         self._reader_task = asyncio.create_task(self._reader_loop())
@@ -665,6 +687,16 @@ class QuotexWSClient:
                         # PHASE-1: evidence latch — a valid broker timesync
                         # frame arrived on this connection.
                         self._server_time_synced = True
+                        # PHASE-2A: feed the MEASURED sample to the time
+                        # provider — the only thing the Truth-Layer timing
+                        # gate trusts.  Malformed/out-of-order/jumping
+                        # samples are rejected inside the provider
+                        # (fail-closed); SYNCED needs >= 3 fresh samples.
+                        if self._time_provider is not None:
+                            try:
+                                self._time_provider.note_sample(server_ts)
+                            except Exception:
+                                pass
             except (TypeError, ValueError) as _e:
                 print(f"[silent-except] quotex_ws.py:1053 {type(_e).__name__}: {_e}")
                 pass

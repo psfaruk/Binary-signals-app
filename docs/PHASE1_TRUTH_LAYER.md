@@ -66,10 +66,14 @@ source → registry) and the FIRST failure's reason code is reported.
 * No validation registry file exists → nothing is validated (measured
   real-OTC accuracy 49.92–50.11%, `production_ready=false` in the
   repo's own committed reports).
-* Timing verification only exists on the raw-WS backend
-  (`quotex_ws._server_time_synced`, latched on the first valid broker
-  timesync frame — added in Phase A); the production default (pyquotex,
-  `QX_USE_RAW_WS=0`) has no timesync → `TIMING_UNVERIFIED`.
+* Timing verification only exists on the raw-WS backend; the production
+  default (pyquotex, `QX_USE_RAW_WS=0`) has no timesync → `TIMING_UNVERIFIED`.
+  **Phase 2A update**: the gate now consults `core/time_provider.py`
+  (SYNCED requires ≥ 3 fresh, consistent measured timesync samples;
+  reconnects clear the evidence; staleness expires it; offset jumps
+  re-verify). The Phase-A boolean latch (`quotex_ws._server_time_synced`)
+  is superseded and no longer read by the gate — see
+  `docs/PHASE2A_SETTLEMENT.md`.
 
 ## Integration points (Phase A)
 
@@ -78,7 +82,7 @@ source → registry) and the FIRST failure's reason code is reported.
 | `feed._run_eoc` wrapper | ALL dict-producing return paths of the engine chain are gated — including the CSE early-exit (`return _nc_result`), the NEUTRAL return, and the legacy/`fade_default` CALL/PUT return. `None` returns (dead market, zero-tick candle, cooldown) are non-emissions and stay `None`. |
 | Engine exception | `NO_SIGNAL` / `INTERNAL_ERROR` — a crash can never emit CALL/PUT. |
 | Gate-module exception/unavailability | `NO_SIGNAL` / `INTERNAL_ERROR` fallback dict — the boundary can never fail OPEN. |
-| `quotex_ws.py` | `_server_time_synced` latch (honest timing evidence source). |
+| `quotex_ws.py` | timesync frames feed `core/time_provider.py` samples (Phase 2A); reconnect invalidation via `on_reconnect()`. |
 | `db.py` | `signal_provenance` table (additive, idempotent; frozen-first-write on `(asset, period, target_candle_open_epoch)`). One row per emitted prediction. `signal_log` schema and INSERTs unchanged. |
 | `core/retention.py` | `signal_provenance` gets the SAME count-based 200-rows-per-pair policy as `signal_log` — never the 60-minute time purge (audit trail must survive for settlement/correction audits). |
 | `server.py` | `GET /api/truth-layer` (public, secret-free policy snapshot); REST rows carry the same truth fields as WS payloads; `/api/live-prediction` labels the running-candle diagnostic research-only. |
