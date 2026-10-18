@@ -686,6 +686,46 @@ async def healthz(request: Request):
         return JSONResponse(status_code=503, content=payload)
     return payload
 
+@app.get("/api/truth-layer")
+async def truth_layer():
+    """PHASE-1 TRUTH LAYER (2026-10, rebuild): public, secret-free policy
+    snapshot.
+
+    Answers honestly: are actionable CALL/PUT signals possible AT ALL
+    right now? Today the answer is NO for three independent reasons
+    (Phase 0 root causes, fail-closed):
+      * data_source_authorization = "unauthorized" (RC-03 — the repo's
+        own docs describe TLS-spoofing / cookie-replay access);
+      * no validation registry → no model is validated (measured real-OTC
+        accuracy 49.92–50.11%, production_ready=false in the repo's own
+        committed reports);
+      * timing unverified on the default backend (RC-05).
+    There is NO environment variable that flips any of these — the only
+    path to actionable signals is an authorized data source plus a
+    signed validation registry entry (core/model_validation.json),
+    neither of which exists today.
+    """
+    try:
+        from core import signal_contract as _sc
+        state = _sc.truth_layer_state()
+    except Exception as _tl_exc:
+        return {
+            "error": f"truth layer unavailable: "
+                     f"{type(_tl_exc).__name__}: {_tl_exc}",
+            "actionable_signals_possible": False,
+            "note": "fail-closed: contract unavailability means no "
+                    "actionable signals, never the opposite",
+        }
+    # REST/WS parity: the same reason codes the WebSocket prediction
+    # payloads carry (stream.prediction dicts) are listed here so API
+    # consumers can map states identically.
+    try:
+        counts = await asyncio.to_thread(_db.provenance_counts)
+    except Exception:
+        counts = {"total": 0, "actionable": 0, "by_reason_code": {}}
+    state["emission_provenance"] = counts
+    return state
+
 @app.get("/api/token-status")
 async def token_status():
     """Returns whether the app has live Quotex credentials."""
@@ -2924,10 +2964,34 @@ async def get_live_prediction(asset: str, period: int = 60):
                              if stats.get("entries") else None),
             },
         }
+    # PHASE-1 TRUTH LAYER: live_pred is the running-candle ENGINE'S
+    # DIAGNOSTIC (direction-vs-open probability, per tick) — under the
+    # current blockers it can never be an actionable signal. Label it
+    # research-only with the same reason codes the contract uses, so the
+    # UI/API consumer cannot mistake it for a tradeable CALL/PUT.
+    try:
+        from core import signal_contract as _sc
+        _tl = _sc.truth_layer_state()
+        truth_block = {
+            "research_only": True,
+            "actionable": False,
+            "reason_code": "DATA_SOURCE_UNAUTHORIZED",
+            "actionable_signals_possible": _tl.get(
+                "actionable_signals_possible", False),
+            "policy_version": _tl.get("policy_version"),
+        }
+    except Exception:
+        truth_block = {
+            "research_only": True,
+            "actionable": False,
+            "reason_code": "INTERNAL_ERROR",
+            "actionable_signals_possible": False,
+        }
     return {
         "asset": asset,
         "period": period,
         "live_pred": getattr(stream, "_live_pred", None),
+        "truth": truth_block,
         "rolling": rolling,
     }
 
@@ -3112,9 +3176,26 @@ async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
                 "pair": asset,
                 "type": pair_type,
                 "signal": "PENDING",
-                "confidence": 0,
+                # PHASE-1 TRUTH LAYER: no stream → no prediction exists →
+                # no measured confidence.  None renders "—" in the UI;
+                # the old fabricated 0 implied a measurement that never
+                # happened.  Truth fields below keep REST/WS parity for
+                # the fallback row too (reason: no data available).
+                "confidence": None,
                 "strength": "—",
                 "strategy": "—",
+                "truth_status": None,
+                "reason_code": "DATA_UNAVAILABLE",
+                "research_only": True,
+                "research_direction": None,
+                "research_confidence": None,
+                "research_strategy": None,
+                "eligibility_policy_version": None,
+                "contract_schema_version": None,
+                "created_at_utc": None,
+                "target_candle_open_time_utc": None,
+                "data_source_authorization": "unauthorized",
+                "signal_id": None,
                 "candle_time": None,
                 "candle_time_str": "—",
                 "buyer_pct": None,
@@ -3137,12 +3218,34 @@ async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
         # Prediction
         pred = getattr(stream, 'prediction', None) or {}
         signal = pred.get("signal", "PENDING")
-        confidence = pred.get("confidence", 0)
+        confidence = pred.get("confidence")
         strength = pred.get("strength", "—")
         strategy = pred.get("strategy", "—")
         reasons = pred.get("reasons", [])
         # Top 3 reasons only (for compactness)
         top_reasons = reasons[-3:] if reasons else []
+        # PHASE-1 TRUTH LAYER: REST/WS payload parity — the same truth
+        # fields the WebSocket prediction payload carries (the gated
+        # stream.prediction dict) flow into this REST row so both
+        # transports tell the identical story. A NO_SIGNAL row keeps
+        # confidence=None (rendered as "—", never a fabricated 0/50).
+        truth_fields = {
+            "truth_status": pred.get("truth_status"),
+            "reason_code": pred.get("reason_code"),
+            "research_only": bool(pred.get("research_only")),
+            "research_direction": pred.get("research_direction"),
+            "research_confidence": pred.get("research_confidence"),
+            "research_strategy": pred.get("research_strategy"),
+            "eligibility_policy_version": pred.get(
+                "eligibility_policy_version"),
+            "contract_schema_version": pred.get("contract_schema_version"),
+            "created_at_utc": pred.get("created_at_utc"),
+            "target_candle_open_time_utc": pred.get(
+                "target_candle_open_time_utc"),
+            "data_source_authorization": pred.get(
+                "data_source_authorization"),
+            "signal_id": pred.get("signal_id"),
+        }
 
         # Buyer/seller from microstructure
         micro = getattr(stream, '_last_micro', None) or {}
@@ -3175,9 +3278,15 @@ async def get_latest_signals_all(limit: int = 50, pair: Optional[str] = None):
             "pair": asset,
             "type": pair_type,
             "signal": signal,
-            "confidence": round(confidence, 1) if confidence else 0,
+            # PHASE-1: honest confidence — None (no measured confidence on
+            # a NO_SIGNAL) stays None; callers must render "—", not 0/50.
+            "confidence": (round(confidence, 1)
+                           if isinstance(confidence, (int, float))
+                           and confidence is not None else None),
             "strength": strength,
             "strategy": strategy,
+            # PHASE-1 truth fields (REST/WS parity — see extraction above)
+            **truth_fields,
             "candle_time": candle_time,
             "candle_time_str": candle_time_str,
             "buyer_pct": round(buyer_pct, 1) if buyer_pct is not None else None,

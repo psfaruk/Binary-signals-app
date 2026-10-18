@@ -102,6 +102,46 @@ except Exception as _nc_imp_exc:                  # noqa: E402
     _nc_get_engine = None
     print(f"[feed] next_candle unavailable ({_nc_imp_exc}) — "
           f"legacy signal chain active")
+# ── PHASE-1 TRUTH LAYER (2026-10, rebuild) ─────────────────────────────
+# Canonical signal contract: EVERY prediction leaving the emission
+# boundary (QuotexFeed._run_eoc wrapper below) passes through
+# core.signal_contract.apply_truth_layer.  Governing rule (fail-closed):
+#   NO AUTHORIZED DATA SOURCE + NO VALIDATED MODEL + NO VERIFIED TIMING
+#   = NO ACTIONABLE DIRECTIONAL SIGNAL.
+# The contract module is dependency-free (stdlib only) — if even THIS
+# import fails the wrapper stays fail-closed (NO_SIGNAL/INTERNAL_ERROR),
+# it can never fail OPEN.  Nothing here is env-overridable: there is no
+# environment variable that flips data_source_authorization, the
+# validation registry, or the timing gate (Phase 0 RC-03 + the Phase-1
+# directive "policy not overridable by environment").
+try:                                               # noqa: E402
+    from core import signal_contract as _sc
+except Exception as _sc_imp_exc:                  # noqa: E402
+    _sc = None
+    print(f"[feed] signal_contract unavailable ({_sc_imp_exc}) — "
+          f"TRUTH LAYER FAIL-CLOSED: predictions suppressed")
+
+
+# PHASE-1 helper: UTC ISO stamp + id for the fail-closed NO_SIGNAL
+# fallback dicts (auditability even when the contract module itself is
+# unavailable — an emission event is still a recorded event).
+def _truth_utc_now_iso() -> str:
+    try:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+    except Exception:
+        return str(int(time.time()))
+
+
+def _truth_new_signal_id() -> str:
+    import uuid as _uuid
+    return _uuid.uuid4().hex
+
+
+def utc_now_iso():  # thin alias used by the gate fallbacks
+    return _truth_utc_now_iso()
+
+
 # OTC-FINGERPRINT (Task 12-b, 2026-09-29): generator-fingerprint engine —
 # "এই ফিডটা কোন সিস্টেমে তৈরি?" (core/otc_fingerprint.py, validated 4/4
 # against known ground-truth feeds in Task 12-a).  CSE keeps its engine
@@ -2887,7 +2927,154 @@ class QuotexFeed:
                                        actual_open),
                 "payout": stream.payout}
 
+    # ── PHASE-1 TRUTH LAYER: the emission boundary (2026-10, rebuild) ──
+    # Every caller of the old _run_eoc (candle-close EOC, watchdog restart,
+    # history-seed bootstrap) now lands on THIS wrapper.  The ungated engine
+    # chain below keeps its exact baseline numerics — the ONLY thing added
+    # at this boundary is the canonical eligibility contract:
+    #   eligible  → CALL/PUT stands with provenance attached;
+    #   rejected  → NO_SIGNAL + stable reason code, engine preference kept
+    #               as research_* fields (never rendered actionable, never
+    #               graded into the win-rate ledger);
+    #   exception → NO_SIGNAL/INTERNAL_ERROR (a crash can never emit
+    #               CALL/PUT — fail closed, Phase 0 RC-01/RC-02).
+    # This covers ALL dict-producing return paths of the engine chain,
+    # including the CSE early-exit (`return _nc_result`), the NEUTRAL
+    # return and the legacy/fade_default CALL/PUT return.  A `None` return
+    # is a non-emission (guards: dead market, zero-tick candle, cooldown)
+    # and stays None — there is nothing actionable to suppress.
+    def _timing_verified(self) -> bool:
+        """PHASE-1: is broker server-time sync ESTABLISHED on this backend?
+
+        Honest evidence only: the raw-WS backend (quotex_ws) receives the
+        broker's timesync frames and latches `_server_time_synced`.  The
+        default pyquotex backend has NO timesync mechanism at all → False
+        (TIMING_UNVERIFIED).  A fuller TimeProvider (sync staleness,
+        reconnect invalidation, offset uncertainty) is Phase B — this
+        boolean is the minimal honest Phase-A evidence.
+        """
+        try:
+            client = self._client
+            if client is None:
+                return False
+            return bool(getattr(client, "_server_time_synced", False))
+        except Exception:
+            return False
+
+    def _apply_truth_gate(self, raw, stream, closed, internal_error=False):
+        """PHASE-1: gate ONE emission-boundary result.  Never raises,
+        never fails open.  Returns the contract dict, or None when there
+        was no emission at all (raw is None and no internal error)."""
+        if raw is None and not internal_error:
+            return None
+        asset = getattr(stream, "asset", "UNKNOWN")
+        period = int(getattr(stream, "period", 60) or 60)
+        if _sc is None:
+            # Contract module itself unavailable — fail CLOSED with a
+            # minimal, honestly-shaped NO_SIGNAL (no fake provenance —
+            # but a real signal_id + UTC stamp so the emission event is
+            # still auditable in signal_provenance).
+            print(f"[feed] TRUTH-LAYER: contract unavailable for {asset} — "
+                  f"NO_SIGNAL/INTERNAL_ERROR (fail-closed)")
+            return {
+                "signal": "NO_SIGNAL",
+                "confidence": None,
+                "strength": "NO_SIGNAL",
+                "reason_code": "INTERNAL_ERROR",
+                "truth_status": "error",
+                "research_only": True,
+                "research_direction": None,
+                "research_confidence": None,
+                "research_strategy": (raw or {}).get("strategy")
+                if isinstance(raw, dict) else None,
+                "symbol": asset,
+                "signal_id": _truth_new_signal_id(),
+                "created_at_utc": _truth_utc_now_iso(),
+                "reasons": ["TRUTH-LAYER: signal_contract unavailable — "
+                            "prediction suppressed (fail-closed)"],
+            }
+        try:
+            return _sc.apply_truth_layer(
+                raw,
+                asset=asset,
+                period=period,
+                candles=closed,
+                last_tick_wall=getattr(stream, "last_real_tick_wall", 0.0),
+                timing_verified=self._timing_verified(),
+                live_domain=("otc" if str(asset).endswith("_otc")
+                             else "real"),
+                now=time.time(),
+                internal_error=internal_error,
+            )
+        except Exception as _gate_exc:
+            # The gate itself crashed — still never an actionable signal.
+            print(f"[feed] TRUTH-LAYER gate failed for {asset} "
+                  f"({type(_gate_exc).__name__}: {_gate_exc}) — "
+                  f"NO_SIGNAL/INTERNAL_ERROR (fail-closed)")
+            return {
+                "signal": "NO_SIGNAL",
+                "confidence": None,
+                "strength": "NO_SIGNAL",
+                "reason_code": "INTERNAL_ERROR",
+                "truth_status": "error",
+                "research_only": True,
+                "research_direction": (raw or {}).get("signal")
+                if isinstance(raw, dict) else None,
+                "research_confidence": (raw or {}).get("confidence")
+                if isinstance(raw, dict) else None,
+                "research_strategy": (raw or {}).get("strategy")
+                if isinstance(raw, dict) else None,
+                "symbol": asset,
+                "signal_id": _truth_new_signal_id(),
+                "created_at_utc": _truth_utc_now_iso(),
+                "reasons": [f"TRUTH-LAYER gate exception: "
+                            f"{type(_gate_exc).__name__}: {_gate_exc}"],
+            }
+
     async def _run_eoc(self, stream: _AssetStream,
+                actual_open: float | None = None,
+                ml_payload: dict | None = None) -> dict | None:
+        """PHASE-1 emission boundary wrapper (see _apply_truth_gate).
+
+        Runs the ungated engine chain, then applies the truth layer and
+        persists one signal_provenance row per emitted prediction (the
+        audit trail for later clean-eval; INSERT OR IGNORE on the frozen
+        (asset, period, target) key — re-evaluations never rewrite the
+        first recorded emission).  Provenance write failures are logged
+        and non-fatal: the gated prediction itself is already honest.
+        """
+        # Same snapshot discipline as the ungated chain (F-01-04): copy
+        # BEFORE the engine runs so the gate grades the candles the
+        # engine actually consumed.
+        closed = list(stream.candles)
+        internal_error = False
+        raw = None
+        try:
+            raw = await self._run_eoc_ungated(
+                stream, actual_open=actual_open, ml_payload=ml_payload)
+        except Exception as _eoc_exc:
+            internal_error = True
+            print(f"[feed] EOC chain failed for {stream.asset}: "
+                  f"{type(_eoc_exc).__name__}: {_eoc_exc} — "
+                  f"NO_SIGNAL/INTERNAL_ERROR (fail-closed)")
+        gated = self._apply_truth_gate(raw, stream, closed,
+                                        internal_error=internal_error)
+        if gated is None:
+            return None
+        try:
+            await asyncio.to_thread(
+                _db.log_signal_provenance, gated, stream.period)
+        except Exception as _prov_exc:
+            print(f"[feed] signal_provenance write failed for "
+                  f"{stream.asset} (non-fatal): "
+                  f"{type(_prov_exc).__name__}: {_prov_exc}")
+        if gated.get("research_only"):
+            print(f"[feed] TRUTH-LAYER: {stream.asset}@{stream.period}s "
+                  f"→ NO_SIGNAL/{gated.get('reason_code')} "
+                  f"(research_direction={gated.get('research_direction')})")
+        return gated
+
+    async def _run_eoc_ungated(self, stream: _AssetStream,
                 actual_open: float | None = None,
                 ml_payload: dict | None = None) -> dict | None:
         # FIX (DEEP-AUDIT-2026-07-26 / F-01-04): copy the candles list so the

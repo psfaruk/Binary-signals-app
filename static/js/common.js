@@ -797,6 +797,58 @@ function renderPending(){
 //   src-any       স্ট্রাটেজি × থিওরি (ANY ONE theory/module voted)
 //   src-ml        ML মডেল (module engine silent → ML T+1 prediction)
 // The badge lives in the signal-box header next to the strength badge.
+// ── PHASE-1 TRUTH LAYER helpers (2026-10, rebuild) ───────────────────
+// Reason badge for NO_SIGNAL states: shows the contract's stable reason
+// code as a visible, honest chip in the signal header. Created lazily in
+// the same dynamic style as renderSourceBadge's badge.
+function _renderTruthReasonBadge(ss){
+  const hdr = document.querySelector('.signal-header');
+  if(!hdr) return;
+  let el = hdr.querySelector('#signal-reason-badge');
+  const show = !!(ss && ss.rawSignal === 'NO_SIGNAL' && ss.reasonCode);
+  if(!show){
+    if(el) el.style.display = 'none';
+    return;
+  }
+  if(!el){
+    el = document.createElement('span');
+    el.id = 'signal-reason-badge';
+    el.className = 'src-badge';
+    hdr.appendChild(el);
+  }
+  el.style.display = '';
+  el.className = 'src-badge';
+  el.style.background = 'var(--text-dim)';
+  el.style.color = '#fff';
+  el.style.opacity = '0.9';
+  el.textContent = ss.reasonCode;
+  el.title = ss.reasonText +
+    ' — Phase-1 truth layer: এই কারণে এই ক্যান্ডেলে কোনো অ্যাকশনেবল সিগন্যাল নেই';
+}
+
+// Research-only tag for the LIVE-CANDLE prediction panel: the running
+// candle's direction estimate is an engine DIAGNOSTIC — under the truth
+// layer it can never be presented as a tradeable CALL/PUT.
+function _renderLivePredResearchTag(){
+  const SS = (typeof window !== 'undefined') && window.SignalStates;
+  if(!SS) return;
+  const hdr = document.querySelector('.next-candle-panel .lp-header')
+    || document.querySelector('.lp-header');
+  if(!hdr) return;
+  let el = hdr.querySelector('#lp-research-tag');
+  if(!el){
+    el = document.createElement('span');
+    el.id = 'lp-research-tag';
+    el.className = 'lp-phase-chip';
+    el.style.background = 'var(--text-dim)';
+    el.style.color = '#fff';
+    hdr.insertBefore(el, hdr.firstChild);
+  }
+  el.style.display = '';
+  el.textContent = SS.mapLivePred({ready: true}).researchTag;
+  el.title = SS.mapLivePred({ready: true}).note;
+}
+
 function renderSourceBadge(pred){
   let host = null;
   const hdr = document.querySelector('.signal-header');
@@ -861,6 +913,10 @@ function renderSignal(pred){
     const isNewCandle = candleKey !== alertedCandleOpenTime;
     const isDirectionChange = alertedSignalDirection !== s;
     shouldAlert = isNewCandle || isDirectionChange;
+    // PHASE-1 TRUTH LAYER: never BEEP for a non-directional state — an
+    // audible alert on NO_SIGNAL/NEUTRAL sounds like a tradeable signal
+    // and is exactly the kind of dishonest urgency Phase 0 flagged.
+    if(s !== 'CALL' && s !== 'PUT') shouldAlert = false;
     if(shouldAlert){
       alertedCandleOpenTime = candleKey;
       alertedSignalDirection = s;
@@ -869,12 +925,29 @@ function renderSignal(pred){
 
   // FIX (UI-P0-3, 2026-07-21): null-safe setters throughout. Previously
   // any missing element crashed the entire tick handler.
-  const cls = s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral';
+  // PHASE-1 TRUTH LAYER (2026-10, rebuild): the label / css class /
+  // confidence all come from the PURE mapping module
+  // (static/js/signal_states.js) so the browser tells exactly the same
+  // story as the backend contract: NO_SIGNAL renders as "⛔ NO SIGNAL"
+  // with its machine-readable reason; an unmeasured confidence renders
+  // "—" (never a fabricated 0/50). Falls back to the legacy neutral
+  // rendering only if the mapping module itself failed to load.
+  const SS = (typeof window !== 'undefined') && window.SignalStates;
+  const ss = SS ? SS.mapSignalState(pred) : null;
+  const cls = ss ? ss.cssClass
+    : (s === 'CALL' ? 'call' : s === 'PUT' ? 'put' : 'neutral');
   _setClass('signal-box', cls + (shouldAlert ? ' signal-pop' : ''));
   // TARGET-75 (2026-09-09): a gate-blocked candle is a deliberate WAIT — the
   // pair's conviction bar was not met. Showing 'WAIT' (not 'NEUTRAL') makes
   // the no-trade decision legible; the WHY is in the strength badge/reasons.
-  _setText('signal-label', s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT' : (pred.target_gate ? '⏸ WAIT' : '➖ NEUTRAL'));
+  _setText('signal-label', ss ? ss.label
+    : (s === 'CALL' ? '🟢 CALL' : s === 'PUT' ? '🔴 PUT'
+      : (pred.target_gate ? '⏸ WAIT' : '➖ NEUTRAL')));
+
+  // PHASE-1: reason badge for NO_SIGNAL — the user must SEE why there is
+  // no signal (unauthorized source / unvalidated model / unverified
+  // timing …), not wonder why the panel went quiet.
+  _renderTruthReasonBadge(ss);
 
   const score = pred.score || 0;
   // FIX (LIVE-FIX-BATCH-2026-07-25 / AUDIT-5-18): when score===0 (NEUTRAL
@@ -910,9 +983,15 @@ function renderSignal(pred){
   // source visible at a glance; heuristic fallbacks no longer exist.
   renderSourceBadge(pred);
 
-  const conf = pred.confidence || 0;
-  _setText('sig-conf-val', Math.round(conf) + '%');
-  _setStyle('sig-conf-bar', 'width', conf + '%');
+  const conf = pred.confidence;
+  // PHASE-1 TRUTH LAYER: honest confidence — a NO_SIGNAL carries NO
+  // measured confidence (null) and must render "—" with an empty bar.
+  // The old `pred.confidence || 0` fabricated a 0% reading; a faded
+  // fallback fabricated 50. Neither ever happened.
+  _setText('sig-conf-val', ss ? ss.confidenceText
+    : (conf != null ? Math.round(conf) + '%' : '—'));
+  _setStyle('sig-conf-bar', 'width', ss ? ss.confidenceWidth
+    : (conf != null ? Math.max(0, Math.min(100, conf)) + '%' : '0%'));
   _setStyle('sig-conf-bar', 'background',
             s === 'CALL' ? 'var(--green)' : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)');
 
@@ -1283,7 +1362,10 @@ function renderNextCandle(nc){
     dirEl.textContent = d === 'CALL' ? '🟢 GREEN — CALL' : '🔴 RED — PUT';
     dirEl.className = 'nc-direction ' + (d === 'CALL' ? 'call' : 'put');
   }
-  set('nc-conf', (nc.confidence || 50) + '%');
+  // PHASE-1 TRUTH LAYER: honest confidence — null/unmeasured renders
+  // "—", NEVER a fabricated 50 (Phase 0 fake-confidence finding).
+  set('nc-conf', (nc.confidence != null && isFinite(nc.confidence)
+    ? Math.round(nc.confidence) + '%' : '—'));
   const p = nc.p_green;
   set('nc-prob', (p != null ? Math.round(p * 1000) / 10 : '—') + '% গ্রিন (calibrated)');
 
@@ -1615,11 +1697,18 @@ function renderLivePred(lp){
   if(!lp) return;
   const set = (id, txt) => { const el = $(id); if(el) el.textContent = txt; };
 
+  // PHASE-1 TRUTH LAYER: this panel is an engine DIAGNOSTIC — tag it
+  // research-only so the running direction estimate is never mistaken
+  // for a tradeable CALL/PUT (blockers: unauthorized source, no
+  // validation registry, unverified timing).
+  _renderLivePredResearchTag();
+
   if(!lp.ready){
     set('lp-direction', '…');
     const dEl = $('lp-direction');
     if(dEl) dEl.className = 'lp-direction neutral';
-    set('lp-conf', '0%');
+    // PHASE-1: no live estimate yet → honest "—", not a fake 0%.
+    set('lp-conf', '—');
     set('lp-clock', (lp.seconds_left != null ? lp.seconds_left + 's' : '--'));
     set('lp-phase', lp.phase || '—');
     return;
@@ -1648,7 +1737,8 @@ function renderLivePred(lp){
     dirEl.className = 'lp-direction ' +
       (lp.direction === 'CALL' ? 'call' : lp.direction === 'PUT' ? 'put' : 'neutral');
   }
-  set('lp-conf', (lp.confidence || 0) + '%');
+  // PHASE-1: honest confidence — null (unmeasured) renders "—", never 0%.
+  set('lp-conf', (lp.confidence != null ? Math.round(lp.confidence) + '%' : '—'));
 
   // Probability bars
   const pc = Math.max(0, Math.min(100, Math.round((lp.p_close_green || 0.5) * 100)));
@@ -3043,11 +3133,16 @@ function _updatePairLiveCard(pred){
     scoreEl.style.color = score > 0 ? 'var(--green)'
                         : score < 0 ? 'var(--red)' : 'var(--text-dim)';
   }
-  const conf = pred.confidence || 0;
-  _setText('wr-live-conf', Math.round(conf) + '%');
+  // PHASE-1 TRUTH LAYER: honest confidence — null (a gated NO_SIGNAL
+  // carries no measured confidence) renders "—" and an empty bar;
+  // the old `pred.confidence || 0` fabricated a 0% reading.
+  const conf = pred.confidence;
+  _setText('wr-live-conf', (conf != null && isFinite(conf)
+    ? Math.round(conf) + '%' : '—'));
   const bar = $('wr-live-conf-bar');
   if(bar){
-    bar.style.width = conf + '%';
+    bar.style.width = (conf != null && isFinite(conf)
+      ? Math.max(0, Math.min(100, conf)) : 0) + '%';
     bar.style.background = s === 'CALL' ? 'var(--green)'
                          : s === 'PUT' ? 'var(--red)' : 'var(--text-dim)';
   }
@@ -3888,15 +3983,31 @@ function _predAgoBn(secs){
 function _predCountdownTick(){
   const el = $('pred-countdown');
   if(!el) return;
-  const nowSec = Math.floor(Date.now() / 1000);
-  const toClose = 60 - (nowSec % 60);   // OTC 1m candles: freeze fires at :00
-  let txt = '⏱ চলমান ক্যান্ডেল বন্ধ হবে ~' + toClose +
-            ' সেকেন্ডে — তখনই নতুন T+1/T+2 ফ্রিজ হবে';
+  const SS = (typeof window !== 'undefined') && window.SignalStates;
+  // PHASE-1 TRUTH LAYER (Phase 0 fake-countdown fix): the old line
+  // `60 - (nowSec % 60)` claimed an exact candle close from the LOCAL
+  // wall clock alone — a fabricated precision (local↔broker offset is
+  // unverified until Phase B). Now the estimate is anchored to the
+  // BROKER-provided candle open time (runningCandleOpenTime, from feed
+  // data) and honestly labeled "≈" with the device-clock caveat.
+  let toClose = null;
+  if(SS && runningCandleOpenTime && currentPeriod){
+    toClose = SS.candleSecondsLeft(runningCandleOpenTime, currentPeriod,
+                                   Date.now());
+  }
+  if(toClose == null){
+    toClose = 60 - (Math.floor(Date.now() / 1000) % 60);
+  }
+  let txt = (SS ? SS.HONEST_LABELS.countdownPrefix : '⏱ ≈') + ' ' +
+            toClose + ' সেকেন্ডে চলমান ক্যান্ডেল বন্ধ' +
+            (SS ? SS.HONEST_LABELS.countdownSuffix : '');
   if(_predCardSignalTime){
-    const age = nowSec - _predCardSignalTime;
+    const age = Math.floor(Date.now() / 1000) - _predCardSignalTime;
     if(age > 90) txt = 'ফ্রিজ হয়েছে ' + _predAgoBn(age) + ' আগে · ' + txt;
   }
   el.textContent = txt;
+  el.title = 'অনুমান — ব্রোকার-ক্যান্ডেল-টাইম থেকে গণনা, ডিভাইস ঘড়ির সাথে ' +
+             'অফসেট যাচাই হয়নি (Phase-1: টাইমিং গেট বন্ধ)';
 }
 function _ensurePredCountdown(){
   if(_predCdStarted) return;
@@ -4323,6 +4434,12 @@ function updateCandleCountdown(){
   }
   const closeAt = (runningCandleOpenTime + currentPeriod) * 1000;
   const remainingMs = closeAt - Date.now();
+  // PHASE-1 TRUTH LAYER: this mixes broker candle time (open time from
+  // feed data) with the local clock — an ESTIMATE, not broker time.
+  // Labeled honestly (≈ + tooltip); never presented as exact broker
+  // timing while the Phase-B time-sync gate is closed.
+  countdownEl.title = '≈ আনুমানিক — ব্রোকার-ক্যান্ডেল-টাইম + ডিভাইস ঘড়ি; ' +
+                      'ব্রোকার টাইম-সিঙ্ক যাচাই হয়নি (Phase-1)';
   if(remainingMs <= 0){
     countdownEl.textContent = '⏱ 00:00';
     countdownEl.className = 'critical';
@@ -4332,7 +4449,7 @@ function updateCandleCountdown(){
   const totalSec = Math.ceil(remainingMs / 1000);
   const mm = Math.floor(totalSec / 60);
   const ss = totalSec % 60;
-  countdownEl.textContent = '⏱ ' + String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
+  countdownEl.textContent = '⏱ ≈ ' + String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0');
   if(totalSec <= 5)       countdownEl.className = 'critical';
   else if(totalSec <= 10) countdownEl.className = 'warn';
   else                    countdownEl.className = '';
@@ -4885,11 +5002,12 @@ function initApp(category){
   // (for future use) but no interval polls it.
   _countdownInterval = setInterval(updateCandleCountdown, 500);
 
-  // FIX (BROKER-TIME 2026-07-30): broker time clock — updates every 1 second.
-  // Shows UTC HH:MM:SS so user can verify candles update at exact broker
-  // time boundaries. User requirement: "প্রত্যেকটি পেয়ার এর সাথে টাইম সেকেন্ড
-  // যোগ করতে হবে, এবং ব্রোকার টাইম অনুযায়ী ক্যান্ডেল গুলো আপডেট হবে।
-  // মিলি সেকেন্ড ও কম বেশি থাকবে না।"
+  // FIX (BROKER-TIME 2026-07-30) + PHASE-1 TRUTH LAYER (2026-10):
+  // This is the DEVICE's UTC clock — honest label, honest tooltip.  It
+  // is NOT broker time: broker time-sync is unverified (Phase 0
+  // RC-05), so displaying this as "Broker UTC" was a fabricated
+  // attribution. Users can still verify candle updates against it as
+  // an approximation; the title states the limitation.
   _brokerTimeInterval = setInterval(() => {
     const el = $('broker-time');
     if(!el) return;
@@ -4897,7 +5015,9 @@ function initApp(category){
     const h = String(now.getUTCHours()).padStart(2, '0');
     const m = String(now.getUTCMinutes()).padStart(2, '0');
     const s = String(now.getUTCSeconds()).padStart(2, '0');
-    el.textContent = `🕐 ${h}:${m}:${s}`;
+    el.textContent = `🖥 ${h}:${m}:${s} UTC`;
+    el.title = 'ডিভাইসের UTC ঘড়ি — ব্রোকার টাইম-সিঙ্ক যাচাই হয়নি ' +
+               '(Phase-1: ব্রোকার সময় দাবি করা হয় না)';
   }, 1000);
 
   // GENERATOR-FINGERPRINT (Task 12-d): poll the selected pair's

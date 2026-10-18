@@ -254,6 +254,15 @@ class QuotexWSClient:
 
         # Server time offset (server ts - local ts)
         self._server_time_offset: float = 0.0
+        # PHASE-1 TRUTH LAYER (2026-10, rebuild): latched True on the FIRST
+        # valid broker timesync frame — the honest evidence that server-time
+        # sync is established on THIS backend.  feed._timing_verified()
+        # reads it for the TIMING_UNVERIFIED eligibility check (Phase 0
+        # RC-05).  The default pyquotex backend has no such evidence, so
+        # timing stays unverified there.  Sync-staleness / reconnect
+        # invalidation belong to the Phase-B TimeProvider — Phase A keeps
+        # only this minimal, truthful latch.
+        self._server_time_synced: bool = False
 
         # Per-asset open/closed state from chart_notification
         self._asset_open_state: dict[str, bool] = {}
@@ -653,6 +662,9 @@ class QuotexWSClient:
                     server_ts = float(args[0].get("time", 0))
                     if server_ts > 0:
                         self._server_time_offset = server_ts - time.time()
+                        # PHASE-1: evidence latch — a valid broker timesync
+                        # frame arrived on this connection.
+                        self._server_time_synced = True
             except (TypeError, ValueError) as _e:
                 print(f"[silent-except] quotex_ws.py:1053 {type(_e).__name__}: {_e}")
                 pass

@@ -136,7 +136,7 @@
                     <span class="countdown-label">Next</span>
                     <span class="countdown-value" id="candle-countdown">--:--</span>
                 </div>
-                <div class="broker-time" title="Broker UTC time">
+                <div class="broker-time" title="ডিভাইসের UTC ঘড়ি — ব্রোকার টাইম-সিঙ্ক যাচাই হয়নি (Phase-1)">
                     <span id="broker-time">--:--:--</span>
                 </div>
                 <button class="icon-btn" id="sound-btn" type="button" aria-label="Toggle sound">🔔</button>
@@ -1095,6 +1095,9 @@
 
 <!-- ============ SCRIPTS ============ -->
 <script src="/static/lightweight-charts.js"></script>
+<!-- PHASE-1 TRUTH LAYER: pure contract-state → UI-state mapping. MUST load
+     before common.js (label/confidence/reason rendering consumes it). -->
+<script src="/static/js/signal_states.js"></script>
 <script src="/static/js/common.js"></script>
 <script src="/static/js/winrate.js"></script>
 <script src="/static/js/models-panel.js"></script>

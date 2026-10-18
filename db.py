@@ -227,6 +227,26 @@ _migration_lock = threading.Lock()
 
 _VALID_SIGNALS = ("CALL", "PUT", "DRAW", "PENDING")
 _VALID_ACCURACY = ("correct", "wrong", "draw", "pending", None)
+
+# ── PHASE-1 TRUTH LAYER (2026-10, rebuild) ────────────────────────────
+# signal_provenance column list.  The INSERT below is BUILT FROM THIS
+# CONSTANT (columns and placeholders are derived from the same tuple),
+# so the INSERT statement and the table schema can never drift apart —
+# the lost Phase-2 work found a dropped-column bug in a hand-written
+# _SP_COLUMNS INSERT; this rebuild makes column parity structural.
+_SP_COLUMNS = (
+    "signal_id", "asset", "period", "signal", "truth_status",
+    "reason_code", "research_direction", "research_confidence",
+    "research_strategy", "research_only",
+    "eligibility_policy_version", "contract_schema_version",
+    "model_id", "model_version", "model_artifact_hash",
+    "feature_schema_version", "data_source_id",
+    "data_source_authorization", "data_freshness_status",
+    "validation_status", "created_at_utc", "created_at_epoch",
+    "source_candle_close_time_utc", "source_candle_close_epoch",
+    "target_candle_open_time_utc", "target_candle_open_epoch",
+    "target_candle_close_time_utc", "eligibility_checks", "ts",
+)
 _SECONDS_PER_DAY = 86400
 
 
@@ -357,6 +377,52 @@ def init():
             c.execute("CREATE INDEX IF NOT EXISTS ix_sl_quality ON signal_log(signal_quality, accuracy)")
         except Exception as _e:
             print(f"[db] ix_sl_quality index creation skipped: {_e}")
+
+        # ── PHASE-1 TRUTH LAYER (2026-10, rebuild) ─────────────────────
+        # signal_provenance: one row per prediction AT THE EMISSION
+        # BOUNDARY (feed._run_eoc wrapper → db.log_signal_provenance).
+        # ADDITIVE-ONLY migration: CREATE TABLE IF NOT EXISTS — no existing
+        # table is altered, no existing row is rewritten, signal_log keeps
+        # its exact baseline schema and INSERT parity.  Rows record the
+        # gated truth (NO_SIGNAL + reason_code for everything today:
+        # unauthorized source / no validated model / unverified timing)
+        # PLUS the engine's diagnostic preference as research_* fields —
+        # the audit trail for later out-of-sample clean-eval (Phase C).
+        # Frozen-first-write: UNIQUE(asset, period, target_candle_open_epoch)
+        # + INSERT OR IGNORE — the FIRST recorded emission for a target
+        # candle wins forever; watchdog/LIVE re-evaluations of the same
+        # candle can never rewrite research history (mirrors the
+        # otc_predictions freeze contract).
+        c.execute("""CREATE TABLE IF NOT EXISTS signal_provenance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT NOT NULL,
+            asset TEXT, period INT,
+            signal TEXT,               -- gated output: CALL/PUT/NO_SIGNAL
+            truth_status TEXT,         -- eligible/rejected/stale/error
+            reason_code TEXT,          -- stable contract reason code
+            research_direction TEXT,   -- engine's diagnostic preference
+            research_confidence REAL,
+            research_strategy TEXT,
+            research_only INT,         -- 1 = not actionable (all rows today)
+            eligibility_policy_version TEXT,
+            contract_schema_version TEXT,
+            model_id TEXT, model_version TEXT, model_artifact_hash TEXT,
+            feature_schema_version TEXT,
+            data_source_id TEXT, data_source_authorization TEXT,
+            data_freshness_status TEXT, validation_status TEXT,
+            created_at_utc TEXT, created_at_epoch REAL,
+            source_candle_close_time_utc TEXT,
+            source_candle_close_epoch REAL,
+            target_candle_open_time_utc TEXT,
+            target_candle_open_epoch REAL,
+            target_candle_close_time_utc TEXT,
+            eligibility_checks TEXT,   -- JSON check-dict from the gate
+            ts REAL,
+            UNIQUE (asset, period, target_candle_open_epoch))""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_sp_asset
+            ON signal_provenance(asset, period, target_candle_open_epoch DESC)""")
+        c.execute("""CREATE INDEX IF NOT EXISTS ix_sp_reason
+            ON signal_provenance(reason_code, research_only)""")
 
         # ── OTC-PREDICT-ENGINE (2026-09-11, PART 17 + PART 16 freeze) ────
         # Frozen T+1/T+2 predictions. PART 16 "Prediction Freeze":
@@ -965,6 +1031,114 @@ def _extract_theory_votes(reasons_list, asset, period, ctime, actual, category, 
         ))
 
     return rows
+
+
+def log_signal_provenance(pred: dict, period: int = 60) -> bool:
+    """PHASE-1 TRUTH LAYER: persist ONE gated emission-boundary prediction.
+
+    Called from feed._run_eoc (via asyncio.to_thread) with the contract
+    dict returned by core.signal_contract.apply_truth_layer (or the
+    fail-closed NO_SIGNAL/INTERNAL_ERROR fallback).  Frozen-first-write:
+    INSERT OR IGNORE on UNIQUE(asset, period, target_candle_open_epoch)
+    — the first recorded emission for a target candle stands; later
+    re-evaluations of the same candle are ignored (research history is
+    never rewritten).  Returns True when a row was inserted.
+
+    Column parity is STRUCTURAL: the SQL is generated from _SP_COLUMNS,
+    and every value is pulled from the same whitelisted contract dict —
+    a missing key stores NULL, never a crash, and unknown extra keys in
+    the prediction are ignored (whitelist-only writes).
+    """
+    if not isinstance(pred, dict) or not pred.get("signal_id"):
+        print("[db] log_signal_provenance: invalid prediction payload "
+              f"(type={type(pred).__name__}, signal_id missing)")
+        return False
+    asset = str(pred.get("symbol") or "UNKNOWN")
+    values = {
+        "signal_id": str(pred["signal_id"]),
+        "asset": asset,
+        "period": int(period or 60),
+        "signal": pred.get("signal"),
+        "truth_status": pred.get("truth_status"),
+        "reason_code": pred.get("reason_code"),
+        "research_direction": pred.get("research_direction"),
+        "research_confidence": pred.get("research_confidence"),
+        "research_strategy": pred.get("research_strategy"),
+        "research_only": 1 if pred.get("research_only") else 0,
+        "eligibility_policy_version": pred.get("eligibility_policy_version"),
+        "contract_schema_version": pred.get("contract_schema_version"),
+        "model_id": pred.get("model_id"),
+        "model_version": pred.get("model_version"),
+        "model_artifact_hash": pred.get("model_artifact_hash"),
+        "feature_schema_version": pred.get("feature_schema_version"),
+        "data_source_id": pred.get("data_source_id"),
+        "data_source_authorization": pred.get("data_source_authorization"),
+        "data_freshness_status": pred.get("data_freshness_status"),
+        "validation_status": pred.get("validation_status"),
+        "created_at_utc": pred.get("created_at_utc"),
+        "created_at_epoch": pred.get("created_at_epoch"),
+        "source_candle_close_time_utc": pred.get(
+            "source_candle_close_time_utc"),
+        "source_candle_close_epoch": pred.get(
+            "source_candle_close_epoch"),
+        "target_candle_open_time_utc": pred.get(
+            "target_candle_open_time_utc"),
+        "target_candle_open_epoch": pred.get(
+            "target_candle_open_epoch"),
+        "target_candle_close_time_utc": pred.get(
+            "target_candle_close_time_utc"),
+        "eligibility_checks": _as_text(pred.get("eligibility_checks")),
+        "ts": time.time(),
+    }
+    cols_sql = ",".join(_SP_COLUMNS)
+    placeholders = ",".join("?" for _ in _SP_COLUMNS)
+    try:
+        with _cursor() as c:
+            cur = c.execute(
+                f"INSERT OR IGNORE INTO signal_provenance ({cols_sql}) "
+                f"VALUES ({placeholders})",
+                tuple(values[k] for k in _SP_COLUMNS))
+            return bool(cur.rowcount)
+    except sqlite3.Error as _sp_exc:
+        print(f"[db] log_signal_provenance failed: "
+              f"{type(_sp_exc).__name__}: {_sp_exc}")
+        return False
+
+
+def provenance_recent(asset: str, period: int = 60,
+                      limit: int = 50) -> list:
+    """PHASE-1: newest signal_provenance rows for one (asset, period).
+    Read-only helper used by tests and later clean-eval (Phase C)."""
+    try:
+        with _read_cursor() as c:
+            rows = c.execute(
+                "SELECT * FROM signal_provenance "
+                "WHERE asset=? AND period=? "
+                "ORDER BY target_candle_open_epoch DESC, id DESC LIMIT ?",
+                (asset, int(period), int(max(1, limit)))).fetchall()
+            return [dict(r) for r in rows]
+    except sqlite3.Error:
+        return []
+
+
+def provenance_counts() -> dict:
+    """PHASE-1: aggregate counts for tests / /api/truth-layer parity."""
+    try:
+        with _read_cursor() as c:
+            total = c.execute(
+                "SELECT COUNT(*) FROM signal_provenance").fetchone()[0]
+            actionable = c.execute(
+                "SELECT COUNT(*) FROM signal_provenance "
+                "WHERE research_only=0 AND signal IN ('CALL','PUT')"
+            ).fetchone()[0]
+            by_reason = {
+                r["reason_code"]: r["n"] for r in c.execute(
+                    "SELECT reason_code, COUNT(*) AS n FROM "
+                    "signal_provenance GROUP BY reason_code")}
+            return {"total": total, "actionable": actionable,
+                    "by_reason_code": by_reason}
+    except sqlite3.Error:
+        return {"total": 0, "actionable": 0, "by_reason_code": {}}
 
 
 def log_signal(asset, period, ctime, signal, score, confidence,

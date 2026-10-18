@@ -111,6 +111,12 @@ _BATCH = 2000   # delete batch size — keeps lock windows tiny
 # (table, time column, bucket) — bucket: "ohlc" (12 h) or "data" (60 min).
 # signal_log is NOT here: it is count-pruned per (asset, period) by
 # _prune_signal_log_by_count() — see USER-2026-09-18 requirement above.
+# PHASE-1 TRUTH LAYER (2026-10, rebuild): signal_provenance is ALSO NOT
+# here — the emission-boundary audit trail must NEVER be 60-min-purged:
+# forward settlement / correction audits (Phase B/C clean-eval) read it
+# long after emission. It gets the SAME count-based policy as signal_log
+# (newest rows per (asset, period)) so storage stays bounded while the
+# newest provenance always survives alongside its signal history.
 # Time columns are all epoch seconds. INTEGER columns are preferred where
 # an index exists (ctime on the hot tables) so the DELETEs stay index-driven.
 _POLICY: tuple[tuple[str, str, str], ...] = (
@@ -289,6 +295,51 @@ def _prune_signal_log_by_count(cur: sqlite3.Connection.cursor,
     return deleted
 
 
+def _prune_signal_provenance_by_count(cur: sqlite3.Connection.cursor,
+                                      keep_rows: int) -> int:
+    """PHASE-1 TRUTH LAYER: keep only the newest `keep_rows`
+    signal_provenance rows PER (asset, period) — the audit trail gets the
+    SAME count-based policy as signal_log (never the 60-min time purge:
+    settlement / correction audits must be able to read provenance that
+    was recorded hours earlier). Ordering key is
+    (target_candle_open_epoch, id) — the deterministic freeze order.
+    """
+    try:
+        cur.execute(
+            "SELECT asset, period, COUNT(*) AS n FROM signal_provenance "
+            "GROUP BY asset, period")
+        groups = cur.fetchall()
+    except sqlite3.Error:
+        return 0
+    deleted = 0
+    for asset, period, n in groups:
+        if n <= keep_rows:
+            continue
+        try:
+            cur.execute(
+                "DELETE FROM signal_provenance WHERE id IN ("
+                "  SELECT id FROM signal_provenance s"
+                "  WHERE s.asset = ? AND s.period = ?"
+                "    AND s.id NOT IN ("
+                "      SELECT id FROM signal_provenance s2"
+                "      WHERE s2.asset = s.asset AND s2.period = s.period"
+                "      ORDER BY s2.target_candle_open_epoch DESC, s2.id DESC"
+                "      LIMIT ?"
+                "    )"
+                ")",
+                (asset, period, keep_rows))
+            deleted += cur.rowcount
+        except sqlite3.Error as exc:
+            print(f"[retention] signal_provenance count-prune failed for "
+                  f"{asset}@{period}s (non-fatal): {exc}")
+            try:
+                conn = cur.connection
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+    return deleted
+
+
 # ── core pass ───────────────────────────────────────────────────────────────
 def apply_retention(ohlc_secs: int | None = None,
                     data_secs: int | None = None) -> dict:
@@ -316,6 +367,17 @@ def apply_retention(ohlc_secs: int | None = None,
             except sqlite3.Error as exc:
                 print(f"[retention] signal_log count-prune failed (non-fatal): {exc}")
                 stats["signal_log"] = f"error: {exc}"
+            # ── PHASE-1: signal_provenance — same count-based policy as
+            # signal_log (audit trail survives; storage stays bounded).
+            # Never added to _POLICY (60-min time purge would destroy the
+            # settlement/correction audit trail).
+            try:
+                stats["signal_provenance"] = _prune_signal_provenance_by_count(
+                    cur, SIGNAL_ROWS)
+            except sqlite3.Error as exc:
+                print(f"[retention] signal_provenance count-prune failed "
+                      f"(non-fatal): {exc}")
+                stats["signal_provenance"] = f"error: {exc}"
             for table, col, bucket in _POLICY:
                 window = ohlc if bucket == "ohlc" else data
                 cutoff = now - window
