@@ -34,6 +34,16 @@ sys.path.insert(0, REPO)
 
 
 def main():
+    # INTEGRITY LABEL (Phase C, 2026-10, per REBUILD_PLAN Phase C):
+    # the Phase-0 deep audit found this harness CONTAMINATED — the
+    # walk-forward replay at its tail is IN-SAMPLE (calibration/selection
+    # sees the same candles that are graded). Its accuracy numbers are
+    # smoke-test evidence ONLY and must never be cited as out-of-sample
+    # performance. Clean evaluation: scripts/backtest_clean_eval.py.
+    print("=" * 72)
+    print("INTEGRITY LABEL: IN-SAMPLE SMOKE TEST — numbers below are NOT")
+    print("out-of-sample evidence (Phase-0 audit verdict; labeled 2026-10).")
+    print("=" * 72)
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=3,
                     help="candle_micro depth per pair (production shape)")

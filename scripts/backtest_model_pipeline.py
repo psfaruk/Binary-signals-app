@@ -217,7 +217,14 @@ check("S3", "সব পেয়ারে বান্ডেল", reg_n == len(p
 
 # ═══════════════════════ S4 — LIVE PATH REPLAY ═══════════════════════════
 
+# INTEGRITY LABEL (Phase C, 2026-10): the Phase-0 deep audit found S4
+# IN-SAMPLE — the replay grades candles the models were trained/calibrated
+# on within this same harness. S4 numbers are pipeline smoke-test evidence
+# ONLY, never out-of-sample performance. Clean evaluation:
+# scripts/backtest_clean_eval.py.
 section("S4 · LIVE PREDICTOR REPLAY (settle→predict→freeze)")
+print("INTEGRITY LABEL: S4 is IN-SAMPLE (trained-on-then-graded) — "
+      "smoke evidence only, never OOS performance. Labeled 2026-10.")
 from core.otc_predict import predictor as pred        # noqa: E402
 
 replay_stats = {}

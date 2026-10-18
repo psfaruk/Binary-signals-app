@@ -107,7 +107,17 @@ def train_and_gate(rows, cand_names=None, seed=13):
         return {"n": len(p), "acc": round(acc, 4),
                 "logloss": round(-ll / len(p), 4)}
 
-    report = {"rows": n, "folds": len(cuts), "candidates": {}, "gate": {}}
+    # INTEGRITY NOTE (Phase C label, 2026-10): best_overall below is
+    # selected by min logloss computed on the SAME pooled evaluation rows
+    # that are then reported — selection-on-test. The per-candidate
+    # statistics are honest; the "best" pick and any downstream claim of
+    # its accuracy are optimistically biased. Clean evaluation:
+    # scripts/backtest_clean_eval.py (core/eval_clean).
+    report = {"rows": n, "folds": len(cuts), "candidates": {}, "gate": {},
+              "integrity_note": (
+                  "selection-on-test: the 'best' candidate is chosen by "
+                  "logloss on the reported evaluation rows — its accuracy "
+                  "is optimistically biased (Phase C label, 2026-10)")}
     best_overall = None
     for h in ("y1_up", "y2_up"):
         stats = {c: _stats(v["p"], v["y"]) for c, v in pooled[h].items()}

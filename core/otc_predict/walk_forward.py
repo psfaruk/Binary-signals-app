@@ -116,6 +116,16 @@ def walk_forward_report(rows_by_asset, feature_names, horizons=("y1_up", "y2_up"
                         shuffle_probe=True, seed=13):
     """Full walk-forward evaluation. Returns a report dict (JSON-safe).
 
+    INTEGRITY NOTE (Phase C label, 2026-10): the ``report["selected"]``
+    block produced below picks its winner from TEST-fold statistics —
+    selection-on-test. Per-candidate fold numbers are honest walk-forward
+    measurements, but the "selected" convenience block must NOT be read
+    as an unbiased OOS estimate of the chosen candidate (its own test
+    folds voted for it). Live replicas of this pattern were flagged by
+    the Phase-0 audit; fixing selection would change LIVE training
+    behavior and is out of scope without explicit authorization. Clean
+    evaluation lives in core/eval_clean + scripts/backtest_clean_eval.py.
+
     rows_by_asset: {asset: [row dicts from build_dataset, time-ordered]}
     """
     if not SKLEARN_OK:
@@ -126,7 +136,11 @@ def walk_forward_report(rows_by_asset, feature_names, horizons=("y1_up", "y2_up"
 
     report = {"folds_per_asset": {}, "candidates": {}, "shuffle_probe": {},
               "n_rows_total": sum(len(v) for v in rows_by_asset.values()),
-              "embargo": EMBARGO, "n_folds": n_folds}
+              "embargo": EMBARGO, "n_folds": n_folds,
+              "integrity_note": (
+                  "selection-on-test: report['selected'] is chosen from "
+                  "test-fold statistics — not an unbiased OOS estimate "
+                  "(Phase C label, 2026-10)")}
 
     # accumulate per-candidate predictions across ALL assets/folds
     cand_pred = {h: {c: ([], []) for c in cand_names} for h in horizons}

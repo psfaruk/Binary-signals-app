@@ -69,7 +69,27 @@ if __name__ == "__main__":
     ap.add_argument("--json", help="path to signals_full.json dump")
     ap.add_argument("--url", default="https://binary-signals-app-production-321a.up.railway.app",
                     help="live app base URL (used when --json is absent)")
+    ap.add_argument("--acknowledge-contaminated", action="store_true",
+                    help="INTEGRITY LABEL (Phase C, 2026-10): this harness "
+                         "is DEPRECATED — the Phase-0 deep audit found it "
+                         "CONTAMINATED (in-sample replay inside the Platt "
+                         "calibration tail) and broken at HEAD "
+                         "(engines.base.confluence._fallback_direction was "
+                         "removed). Its numbers must never be cited as "
+                         "out-of-sample evidence. Pass this flag only if "
+                         "you explicitly accept that.")
     args = ap.parse_args()
+
+    if not args.acknowledge_contaminated:
+        raise SystemExit(
+            "DEPRECATED / CONTAMINATED (Phase-0 audit verdict, labeled "
+            "2026-10 per REBUILD_PLAN Phase C). This harness replays "
+            "in-sample data inside its calibration path and references a "
+            "function that no longer exists at HEAD. It cannot produce "
+            "out-of-sample evidence. Re-run with "
+            "--acknowledge-contaminated if (and only if) you understand "
+            "this and want the legacy behavior preserved for archaeology. "
+            "For clean evaluation use scripts/backtest_clean_eval.py.")
 
     if args.json:
         with open(args.json) as f:
