@@ -1,0 +1,28 @@
+name: offline-checks
+# Mirrors scripts/run_offline_checks.sh exactly.
+# HONESTY NOTE: GitHub Actions execution is NOT claimable as passing
+# until a real run is observed (no push has occurred from this rebuild;
+# local verification is the only evidence that exists).
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  offline-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install python deps (runtime + test imports)
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn httpx
+      - name: Run every offline check (temp DBs, no network, no creds)
+        run: bash scripts/run_offline_checks.sh
