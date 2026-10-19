@@ -161,3 +161,10 @@
   #token-btn .tk-text{display:none}
   #token-btn.state-dead .tk-text{display:inline}
 }
+
+/* ── PHASE-J (2026-10): operator PIN + first-run claim section ── */
+.tk-claim{border:1px dashed var(--border,#2a3550);border-radius:8px;padding:10px;
+  display:flex;flex-direction:column;gap:8px;background:rgba(255,193,7,.04)}
+.tk-claim[hidden]{display:none}
+.tk-claim .tk-input{width:100%}
+.tk-claim-note{color:var(--muted,#93a4c3)}

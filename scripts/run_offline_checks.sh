@@ -47,6 +47,9 @@ files = [
     "scripts/test_phase_c_eval.py", "scripts/test_phase_d_audit.py",
     "scripts/test_phase_e_data_quality.py",
     "scripts/test_phase_f_research.py", "scripts/test_phase_g_api.py",
+    "scripts/test_phase_j_security.py",
+    "scripts/phase_j_race_worker.py",
+    "core/rate_limit.py",
 ]
 for f in files:
     ast.parse(open(f).read(), filename=f)
@@ -54,6 +57,7 @@ print(f"ast.parse OK over {len(files)} files")
 PYEOF
 run "SYNTAX GATE — changed JS" node --check static/js/common.js
 run "SYNTAX GATE — signal_states.js" node --check static/js/signal_states.js
+run "SYNTAX GATE — token panel JS" node --check static/js/token-panel.js
 
 # 1. Phase A (Truth Layer)
 run "PHASE 1 — truth layer (70)" python3 scripts/test_phase1_truth_layer.py
@@ -84,13 +88,15 @@ run "PHASE G — API battery (39)" python3 scripts/test_phase_g_api.py
 # 8. Phase H (shadow/paper via replay)
 run "PHASE H — shadow replay runner (2 assets)" python3 scripts/shadow_replay.py --assets BTCUSDT,ETHUSDT
 run "PHASE H — shadow ledger checks (28)" python3 scripts/test_phase_h_shadow.py
+run "PHASE J — security hardening (42)" python3 scripts/test_phase_j_security.py
 
 echo ""
 echo "=================================================================="
 if [ $FAIL -eq 0 ]; then
   echo "  ALL OFFLINE CHECKS PASSED"
   echo "  (Phase A 154 + Phase B 94 + Phase C 93 + Phase D 38 +"
-  echo "   Phase E 43 + Phase F 28 + Phase G 39 + Phase H 28 = 617 checks)"
+  echo "   Phase E 43 + Phase F 28 + Phase G 39 + Phase H 28 +"
+  echo "   Phase J 42 = 659 checks)"
 else
   echo "  OFFLINE CHECKS FAILED — see the FAILED step above"
 fi

@@ -44,7 +44,10 @@ def send(text: str, *, key: str = "default", force: bool = False) -> bool:
 
 
 def token_dead(consecutive_rejects: int) -> None:
-    send(f"🔴 PLYBIT — Quotex token DEAD\n{consecutive_rejects}x পরপর authorization rejected হয়েছে।\nনতুন টোকেন পুশ করুন: /api/set-token?token=NEW_TOKEN\n(browser DevTools থেকে সংগ্রহ করুন)", key="token_dead", force=True)
+    # PHASE-J (2026-10): guidance updated — the ?token=NEW_TOKEN URL form
+    # is REMOVED (it put the full secret token into access logs). The
+    # operator now uses the PIN-authenticated POST form.
+    send(f"🔴 PLYBIT — Quotex token DEAD\n{consecutive_rejects}x পরপর authorization rejected হয়েছে।\nনতুন টোকেন পুশ করুন: POST /api/set-token (JSON body + X-App-Pin header)\n(browser DevTools থেকে টোকেন সংগ্রহ করুন; 🔑 Token panel-ও ব্যবহার করা যাবে)", key="token_dead", force=True)
 
 
 def feed_recovered() -> None:

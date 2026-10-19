@@ -275,25 +275,18 @@ _PUBLIC_READ_PREFIXES = (
     # ভলিউম কি আর ফুল হবে না" (same sensitivity as /api/status).
     "/api/latency",
     "/healthz",
-    "/api/token-status",  # token import status (read-only)
-    "/api/auth/state",  # first-run check
-    # ── Token-push endpoints — USER REQ 2026-08-17 ──
-    # "টোকেন দিলেই ডেটা আসবে" — paste a token, get data. No PIN, no admin
-    # key on the frontend. These accept POST {token: "..."} from anyone
-    # with the URL.
-    "/api/set-token",
-    "/api/session/cookies",
-    "/api/session/refresh",
-    "/api/session/status",
-    "/api/reconnect",
+    "/api/token-status",  # token import status (read-only, masked)
+    "/api/auth/state",  # first-run check (no secrets)
+    "/api/session/status",  # read-only session state (redacted)
+    # NOTE (PHASE-J 2026-10): the token-PUSH routes moved OUT of this
+    # public list into _OPERATOR_GATE_PREFIXES — they now require
+    # ADMIN_KEY or a claimed+verified operator PIN. See the PHASE-J
+    # comment at _OPERATOR_GATE_PREFIXES for the history.
 )
 
 _ADMIN_ONLY_PREFIXES = (
-    # USER REQ 2026-08-17: token-push endpoints (/api/set-token,
-    # /api/session/cookies, /api/session/refresh, /api/reconnect) are
-    # NO LONGER admin-gated. The frontend pushes tokens with NO PIN and
-    # NO admin key. They fall through to the "unknown" branch below,
-    # which defaults to public_read when QX_PUBLIC_READ=1 (the default).
+    # (PHASE-J 2026-10) Token-push routes are NOT here either — they live
+    # in _OPERATOR_GATE_PREFIXES with their own middleware branch.
     "/api/signals/clear",
     "/api/admin/",
     "/api/auth/claim",
@@ -304,15 +297,25 @@ _ADMIN_ONLY_PREFIXES = (
     "/api/pair-health/reset",
 )
 
-# Token-push endpoints that USED to be admin-only and are now PUBLIC.
-# Listed explicitly so the test script (and any future audit) can verify
-# the policy is correct.
+# ── Token-push endpoints — PHASE-J OPERATOR GATE (2026-10) ─────────────────
+# HISTORY: USER REQ 2026-08-17 made these routes PUBLIC (paste a token,
+# get data — no PIN, no admin key on the frontend). The Phase D
+# independent audit flagged that as release blocker B3 for public
+# deployments (anyone with the URL could swap the broker token or push
+# session cookies). The owner has now authorized closing it (2026-10).
+# These routes require ADMIN_KEY or a claimed+verified operator PIN,
+# enforced by the server middleware (operator_gate branch).
 TOKEN_PUSH_PREFIXES = (
     "/api/set-token",
     "/api/session/cookies",
     "/api/session/refresh",
     "/api/reconnect",
 )
+
+# Classification bucket for the middleware (distinct from "admin":
+# operator-gated routes get their own guidance UX and rate-limit bucket,
+# while admin routes keep their PIN/admin-key presence check).
+_OPERATOR_GATE_PREFIXES = TOKEN_PUSH_PREFIXES
 
 _API_KEY_WRITE_PREFIXES = (
     "/api/share-signals/save",
@@ -327,10 +330,14 @@ _PUBLIC_API_KEY_SUBROUTES = (
 
 
 def classify_request(path: str) -> str:
-    """Classify an HTTP path as 'public_read', 'admin', 'api_key_write', or 'unknown'.
+    """Classify an HTTP path as 'public_read', 'admin', 'operator_gate',
+    'api_key_write', or 'unknown'.
 
     'unknown' routes default to requiring auth (fail-closed) when
     QX_PUBLIC_READ=0, and to public read when QX_PUBLIC_READ=1 (default).
+    'operator_gate' (PHASE-J 2026-10): token-push routes require
+    ADMIN_KEY or a claimed+verified operator PIN — enforced by the
+    server middleware, fail-closed when no credential is present.
     """
     if not path:
         return "unknown"
@@ -338,6 +345,9 @@ def classify_request(path: str) -> str:
     for prefix in _PUBLIC_API_KEY_SUBROUTES:
         if path == prefix or path.startswith(prefix):
             return "public_read"
+    for prefix in _OPERATOR_GATE_PREFIXES:
+        if path == prefix or path.startswith(prefix):
+            return "operator_gate"
     for prefix in _ADMIN_ONLY_PREFIXES:
         if path == prefix or path.startswith(prefix):
             return "admin"

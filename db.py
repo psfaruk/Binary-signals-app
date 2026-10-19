@@ -317,6 +317,48 @@ def _write_cursor():
         conn.close()
 
 
+@contextmanager
+def _immediate_cursor():
+    """SERIALIZED write cursor — BEGIN IMMEDIATE (PHASE-J, 2026-10).
+
+    Grabs the SQLite write lock at transaction START (instead of at the
+    first DML, which is the deferred default). This gives the
+    read-then-write settlement sequences a cross-process guarantee:
+    two processes racing to finalize/settle the same row serialize
+    cleanly (busy_timeout waits), the conditional UPDATE guards decide
+    the winner, and no lost-update interleaving is possible.
+
+    Used by: settlement_begin / settlement_finalize / settlement_settle,
+    shadow_record / shadow_settle / shadow_append_correction.
+    (log_signal intentionally NOT converted: it performs a single atomic
+    UPSERT per commit — no read-then-write window — so the deferred
+    default is already safe there.)
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+    except sqlite3.Error as e:
+        print(f"[db] PRAGMA setup failed (falling back to defaults): {e}")
+    cur = conn.cursor()
+    try:
+        conn.isolation_level = None          # autocommit off — explicit tx
+        cur.execute("BEGIN IMMEDIATE")
+        yield cur
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception as _e:
+            print(f"[silent-except] db.py:_immediate_cursor "
+                  f"{type(_e).__name__}: {_e}")
+        raise
+    finally:
+        conn.close()
+
+
 _cursor = _write_cursor
 
 
@@ -1296,10 +1338,13 @@ def _cs_utc_iso(ts: float) -> str:
 def settlement_begin(asset: str, period: int, period_start: float,
                      source: str = "unknown") -> dict:
     """Transition (none) -> pending_finalization (idempotent INSERT OR
-    IGNORE).  Returns the CURRENT row state (whatever it is)."""
+    IGNORE).  Returns the CURRENT row state (whatever it is).
+
+    PHASE-J: runs inside BEGIN IMMEDIATE — cross-process safe.
+    """
     now = time.time()
     try:
-        with _cursor() as c:
+        with _immediate_cursor() as c:
             c.execute(
                 "INSERT OR IGNORE INTO candle_settlement "
                 f"({','.join(_CS_COLUMNS)}) "
@@ -1360,10 +1405,14 @@ def settlement_finalize(asset: str, period: int, period_start: float,
     * state finalized/settled + DIFFERENT OHLC -> CONFLICT: rejected +
       audited into candle_corrections (reason='conflicting_finalization');
       the frozen row is NEVER modified.  conflict_count incremented.
+
+    PHASE-J: the whole SELECT+UPDATE sequence runs inside BEGIN
+    IMMEDIATE, so concurrent multi-process finalizations serialize and
+    the conditional-UPDATE guards decide the winner deterministically.
     """
     now = time.time()
     try:
-        with _cursor() as c:
+        with _immediate_cursor() as c:
             row = c.execute(
                 "SELECT * FROM candle_settlement WHERE asset=? AND "
                 "period=? AND period_start=?",
@@ -1453,10 +1502,11 @@ def settlement_settle(asset: str, period: int, period_start: float,
 
     Idempotent: on a settled row the outcome columns are NEVER
     rewritten — only settle_attempts increments (audit of retries).
+    PHASE-J: BEGIN IMMEDIATE — cross-process safe (exactly one winner).
     """
     now = time.time()
     try:
-        with _cursor() as c:
+        with _immediate_cursor() as c:
             cur = c.execute(
                 "UPDATE candle_settlement SET state=?, signal_id=?,"
                 " research_direction=?, research_strategy=?, outcome=?,"
@@ -1615,6 +1665,7 @@ def shadow_record(pred: dict) -> bool:
     period, target_candle_open_epoch. Everything else is optional and
     stored as provided (JSON dicts are stringified by the caller).
     Returns True when a NEW row was inserted.
+    PHASE-J: BEGIN IMMEDIATE — cross-process safe.
     """
     if not isinstance(pred, dict) or not pred.get("prediction_id"):
         return False
@@ -1633,7 +1684,7 @@ def shadow_record(pred: dict) -> bool:
                 vals.append(now)
             else:
                 vals.append(pred.get(col))
-        with _cursor() as c:
+        with _immediate_cursor() as c:
             cur = c.execute(
                 f"INSERT OR IGNORE INTO shadow_predictions "
                 f"({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
@@ -1662,12 +1713,13 @@ def shadow_settle(prediction_id: str, outcome: str,
     The outcome columns are written ONCE (conditional UPDATE guards
     settlement_status='pending'); retries return False without
     rewriting anything. correction_history is never touched here.
+    PHASE-J: BEGIN IMMEDIATE — cross-process safe (exactly one winner).
     """
     if outcome not in ("GREEN", "RED", "FLAT"):
         return False
     try:
         now = time.time()
-        with _cursor() as c:
+        with _immediate_cursor() as c:
             cur = c.execute(
                 "UPDATE shadow_predictions SET settlement_status='settled', "
                 "outcome=?, outcome_correct=?, settled_at_utc=? "
@@ -1686,9 +1738,13 @@ def shadow_append_correction(prediction_id: str, entry: dict) -> bool:
     The history is a JSON array; the existing entries are preserved
     verbatim and the new entry is appended under a single conditional
     transaction. Never truncates, never rewrites existing entries.
+    PHASE-J: the read-modify-write now runs inside BEGIN IMMEDIATE —
+    concurrent appends from multiple processes SERIALIZE instead of
+    losing one another's entries (the old deferred-tx version had a
+    genuine cross-process lost-update window here).
     """
     try:
-        with _cursor() as c:
+        with _immediate_cursor() as c:
             row = c.execute(
                 "SELECT correction_history FROM shadow_predictions "
                 "WHERE prediction_id=?", (str(prediction_id),)).fetchone()

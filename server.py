@@ -132,8 +132,9 @@ if not _QX_TOKEN and not _QX_EMAIL:
     print("[server]    but ALL stream subscriptions will return errors until")
     print("[server]    a token is provisioned. To fix:")
     print("[server]      1. Set QX_TOKEN in Railway Variables (one-time)")
-    print("[server]      2. OR visit /api/set-token?token=YOUR_TOKEN in browser")
-    print("[server]      3. OR send POST /api/set-token with JSON body")
+    print("[server]      2. OR POST /api/set-token with JSON body + operator PIN")
+    print("[server]         (PHASE-J: the token-in-URL GET form is REMOVED —")
+    print("[server]         it leaked the full token into access logs)")
     print("[server]    See RAILWAY_TOKEN_SETUP.md for full instructions.")
 elif _QX_TOKEN:
     # PHASE-D FIX (2026-10): last-4-only mask (was 12 chars in logs)
@@ -146,8 +147,9 @@ else:
     print("[server]    Email/password login is DISABLED (Cloudflare blocks Railway IPs).")
     print("[server]    To get live data, push a token via ONE of:")
     print("[server]      1. Set QX_TOKEN in Railway Variables (persists across redeploys)")
-    print("[server]      2. POST /api/set-token {\"token\":\"YOUR_TOKEN\"} (runtime, no redeploy)")
-    print("[server]      3. GET  /api/set-token?token=YOUR_TOKEN (browser-friendly)")
+    print("[server]      2. POST /api/set-token {\"token\":\"YOUR_TOKEN\"} + X-App-Pin header")
+    print("[server]         (PHASE-J: the ?token=... GET form is REMOVED — it")
+    print("[server]         leaked the full token into access logs)")
     print("[server]    See RAILWAY_TOKEN_SETUP.md for token extraction instructions.")
 
 feed = _Feed()
@@ -300,6 +302,27 @@ async def lifespan(app: FastAPI):
     global _PATTERNS_INITIALIZED
     print("[server] lifespan: startup beginning")
 
+    # PHASE-J (2026-10): one-time setup code for the FIRST PIN claim.
+    # Generated only while unclaimed AND no ADMIN_KEY is configured; the
+    # plaintext is printed HERE (operator console) exactly once and only
+    # its SHA-256 is stored. Regenerated on every boot while unclaimed,
+    # erased forever on successful claim. Closes the first-claim race.
+    try:
+        _setup_code = _token_store.ensure_setup_code()
+        if _setup_code:
+            print("\n[server] ═════════════════════════════════════════════════════")
+            print("[server]  FIRST-RUN ACCESS SETUP (PHASE-J)")
+            print("[server]  No operator PIN is claimed yet and no ADMIN_KEY is set.")
+            print("[server]  To claim your PIN, use this ONE-TIME SETUP CODE:")
+            print(f"[server]        {_setup_code}")
+            print("[server]  POST /api/auth/claim {\"pin\":\"...\",\"setup_code\":\"" + _setup_code + "\"}")
+            print("[server]  (also available in the 🔑 Token panel). The code dies")
+            print("[server]  on restart-while-unclaimed and after a successful claim.")
+            print("[server] ═════════════════════════════════════════════════════\n")
+    except Exception as _sc_exc:
+        print(f"[server] setup-code generation failed (non-fatal): {_sc_exc}")
+
+
     def _sync_init():
         _db.init()
         # PERSISTENCE-FIX (2026-09-09): periodic online backup of signals.db
@@ -413,21 +436,37 @@ from core import api_keys as _api_keys  # noqa: E402
 
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
-    """Classify every request and enforce auth policy.
+    """Classify every request and enforce auth + rate-limit policy.
 
-    • public_read  → no auth required (default behavior, anyone with URL)
+    • public_read   → no auth required (default behavior, anyone with URL)
     • api_key_write → require valid API key (Bearer token or ?api_key=)
-    • admin        → require admin PIN (X-App-Pin) or ADMIN_KEY
-    • unknown      → behave as public_read when QX_PUBLIC_READ=1 (default),
+                      — rate-limited by the key's OWN per-minute cap
+                      (PHASE-J: the advertised rate_limit_per_min is now
+                      actually enforced)
+    • admin         → require admin PIN (X-App-Pin) or ADMIN_KEY
+    • operator_gate → (PHASE-J) token-push routes require ADMIN_KEY or a
+                      claimed+verified operator PIN. Fail-closed: with no
+                      credential, no PIN claimed and no ADMIN_KEY set, the
+                      response guides the operator to the setup-code claim
+                      flow (one-time code printed on the server console).
+    • unknown       → behave as public_read when QX_PUBLIC_READ=1 (default),
                       otherwise require API key (fail-closed)
 
-    The middleware is intentionally lightweight — it never touches the DB for
-    public reads, so anonymous traffic stays fast.
+    RATE LIMITING (PHASE-J): in-process fixed-window counters per client
+    (core/rate_limit.py): auth endpoints 10/min, token-push 30/min, every
+    other /api/* route 600/min per IP; api-key writes use the key's own
+    cap. 429 + Retry-After + truthful X-RateLimit-* headers. Kill switch
+    QX_RATE_LIMIT=0.
+
+    The middleware is intentionally lightweight — it never touches the DB
+    for public reads, so anonymous traffic stays fast.
 
     FIX: middleware must return JSONResponse (not raise HTTPException) because
     FastAPI's BaseHTTPMiddleware doesn't translate exceptions into proper
     status codes — they bubble up as 500.
     """
+    from core import rate_limit as _rl
+
     path = request.url.path
     # Skip auth for static assets, root, and WebSocket (WS auth handled in /ws).
     if (path.startswith("/static/") or path == "/" or path == "/favicon.ico"
@@ -437,9 +476,48 @@ async def api_key_middleware(request: Request, call_next):
 
     category = _api_keys.classify_request(path)
 
+    # ── RATE LIMIT (PHASE-J) — enforced for /api/* paths ──────────────
+    _rl_key = None
+    _rl_limit = None
+    if _rl.is_enabled() and path.startswith("/api/"):
+        bucket = _rl.bucket_for_path(path)
+        client = _rl.client_key(request)
+        if bucket == "auth":
+            _rl_limit = _rl._limit_for("auth")
+            _rl_key = f"auth:{client}"
+        elif bucket == "token_push":
+            _rl_limit = _rl._limit_for("token_push")
+            _rl_key = f"token_push:{client}"
+        elif bucket == "global":
+            # auth'd categories get the per-key/per-credential limits below;
+            # anonymous global traffic uses the generous per-IP default.
+            if category not in ("api_key_write",):
+                _rl_limit = _rl._limit_for("global")
+                _rl_key = f"global:{client}"
+        if _rl_key is not None:
+            allowed, retry_after = _rl.hit(_rl_key, _rl_limit)
+            if not allowed:
+                return JSONResponse(
+                    status_code=429,
+                    headers={
+                        "Retry-After": str(int(retry_after) + 1),
+                        "X-RateLimit-Limit": str(_rl_limit),
+                        "X-RateLimit-Remaining": "0",
+                    },
+                    content={
+                        "detail": "rate limit exceeded — retry after "
+                                  f"{int(retry_after) + 1}s",
+                        "limit": _rl_limit,
+                    },
+                )
+
     if category == "public_read":
         # Anyone can read — no auth check.
-        return await call_next(request)
+        response = await call_next(request)
+        if _rl_key is not None:
+            for k, v in _rl.headers_for(_rl_key, _rl_limit).items():
+                response.headers[k] = v
+        return response
 
     if category == "api_key_write":
         key = _api_keys.extract_key_from_request(request)
@@ -457,30 +535,139 @@ async def api_key_middleware(request: Request, call_next):
                 status_code=403,
                 content={"detail": "invalid or revoked API key"},
             )
+        # PHASE-J: enforce the key's OWN advertised per-minute cap.
+        if _rl.is_enabled():
+            k_limit = int(info.rate_limit_per_min or _api_keys.DEFAULT_RATE_LIMIT)
+            k_key = f"apikey:{info.id}"
+            allowed, retry_after = _rl.hit(k_key, k_limit)
+            if not allowed:
+                return JSONResponse(
+                    status_code=429,
+                    headers={
+                        "Retry-After": str(int(retry_after) + 1),
+                        "X-RateLimit-Limit": str(k_limit),
+                        "X-RateLimit-Remaining": "0",
+                    },
+                    content={
+                        "detail": "API key rate limit exceeded — retry after "
+                                  f"{int(retry_after) + 1}s",
+                        "limit": k_limit,
+                    },
+                )
+            _rl_key, _rl_limit = k_key, k_limit
         # Attach key info for downstream handlers.
         request.state.api_key = info
-        return await call_next(request)
+        response = await call_next(request)
+        if _rl_key is not None:
+            for k, v in _rl.headers_for(_rl_key, _rl_limit).items():
+                response.headers[k] = v
+        return response
+
+    if category == "operator_gate":
+        # PHASE-J: token-in-URL deprecation takes priority over auth —
+        # we are rejecting the REQUEST FORM itself (the full token must
+        # never appear in a URL). No secret is processed or logged.
+        if (path == "/api/set-token"
+                and request.query_params.get("token")):
+            return JSONResponse(
+                status_code=410,
+                content={
+                    "ok": False,
+                    "error": "token-in-URL is no longer accepted (it leaked "
+                             "the full token into access logs, browser "
+                             "history and proxies). Use POST /api/set-token "
+                             "with JSON body, or GET with the token in the "
+                             "X-Qx-Token header.",
+                },
+            )
+        # PHASE-J: token-push routes — ADMIN_KEY or claimed+valid PIN.
+        pin = (request.headers.get("X-App-Pin") or "").strip()
+        admin_key = (request.headers.get("X-Admin-Key") or "").strip()
+        if _token_store.verify_admin_key(admin_key):
+            response = await call_next(request)
+            if _rl_key is not None:
+                for k, v in _rl.headers_for(_rl_key, _rl_limit).items():
+                    response.headers[k] = v
+            return response
+        if pin:
+            if not _token_store.is_claimed():
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "no access PIN claimed on this deployment yet. "
+                                  "Claim one first: POST /api/auth/claim "
+                                  "{\"pin\":\"…\",\"setup_code\":\"…\"} — the one-time "
+                                  "setup code is printed on the SERVER CONSOLE "
+                                  "at boot. Then retry with X-App-Pin.",
+                        "setup_code_required": True,
+                    },
+                )
+            if _token_store.verify_pin(pin):
+                response = await call_next(request)
+                if _rl_key is not None:
+                    for k, v in _rl.headers_for(_rl_key, _rl_limit).items():
+                        response.headers[k] = v
+                return response
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "wrong operator PIN (X-App-Pin)."},
+            )
+        # No credential at all — fail-closed with honest guidance.
+        if _token_store.is_claimed():
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "operator credential required — send X-App-Pin "
+                              "(operator PIN) or X-Admin-Key header.",
+                },
+            )
+        return JSONResponse(
+            status_code=401,
+            content={
+                "detail": "operator credential required. This deployment has no "
+                          "PIN yet: claim one via POST /api/auth/claim "
+                          "{\"pin\":\"…\",\"setup_code\":\"…\"} using the one-time "
+                          "setup code printed on the SERVER CONSOLE at boot, "
+                          "then send X-App-Pin with every token push.",
+                "setup_code_required": True,
+            },
+        )
 
     if category == "admin":
         # Admin routes: require admin PIN (X-App-Pin) OR ADMIN_KEY (X-Admin-Key).
         # The actual PIN verification is done inside each handler via
         # _request_secrets() / _check_admin_key(). Here we just enforce that
         # SOME admin credential is present.
-        pin = request.headers.get("X-App-Pin", "")
-        admin_key = request.headers.get("X-Admin-Key", "")
-        if not pin and not admin_key:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "detail": "admin endpoint — provide X-App-Pin (operator PIN) or "
-                              "X-Admin-Key header.",
-                },
-            )
-        return await call_next(request)
+        # EXCEPTION (PHASE-J): /api/auth/* routes carry their credentials in
+        # the JSON BODY (pin / setup_code / old_pin), not headers — and
+        # their handlers enforce for real now (claim needs the setup code
+        # or ADMIN_KEY; verify actually verifies the PIN; change-pin needs
+        # the old PIN or ADMIN_KEY). The header presence check would only
+        # break the first-run claim flow, so these routes pass through.
+        if not path.startswith("/api/auth/"):
+            pin = request.headers.get("X-App-Pin", "")
+            admin_key = request.headers.get("X-Admin-Key", "")
+            if not pin and not admin_key:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "admin endpoint — provide X-App-Pin (operator PIN) or "
+                                  "X-Admin-Key header.",
+                    },
+                )
+        response = await call_next(request)
+        if _rl_key is not None:
+            for k, v in _rl.headers_for(_rl_key, _rl_limit).items():
+                response.headers[k] = v
+        return response
 
     # Unknown route — default to public read when QX_PUBLIC_READ=1 (default).
     if _api_keys.is_public_read_enabled():
-        return await call_next(request)
+        response = await call_next(request)
+        if _rl_key is not None:
+            for k, v in _rl.headers_for(_rl_key, _rl_limit).items():
+                response.headers[k] = v
+        return response
     # Fail-closed mode — require API key.
     key = _api_keys.extract_key_from_request(request)
     if not key or not _api_keys.verify_key(key):
@@ -1177,12 +1364,13 @@ async def auth_state():
 async def auth_claim(request: Request):
     """First-run claim of the access PIN from the UI.
 
-    PHASE-D AUDIT FIX (2026-10): the first-claim flow was a race — on a
-    fresh public deployment ANY caller could claim the operator PIN
-    before the real owner. When ADMIN_KEY is set, the FIRST claim now
-    requires it (fail-closed); subsequent claims/changes use the existing
-    PIN flows. Without ADMIN_KEY the first-claim race remains an accepted
-    deployment risk (documented in the Phase D audit).
+    PHASE-D (2026-10): when ADMIN_KEY is set, the FIRST claim requires it.
+    PHASE-J (2026-10): without ADMIN_KEY the first claim now requires the
+    ONE-TIME SETUP CODE generated at server boot and printed on the
+    operator console (core/token_store.ensure_setup_code). This closes
+    the first-claim race: a random internet caller can no longer claim
+    the PIN before the real owner — they would need the code from the
+    server's own console/log.
     """
     try:
         _already = _token_store.is_claimed()
@@ -1192,9 +1380,11 @@ async def auth_claim(request: Request):
         _check_admin_key(request.headers.get("X-Admin-Key"))
     body = await _json_body(request)
     pin = (body.get("pin") or "").strip()
-    result = _token_store.claim_pin(pin)
+    setup_code = (body.get("setup_code") or "").strip()
+    result = _token_store.claim_pin(pin, setup_code=setup_code)
     if not result.get("ok"):
-        return JSONResponse(status_code=400, content=result)
+        status = 403 if result.get("setup_code_required") else 400
+        return JSONResponse(status_code=status, content=result)
     return {"ok": True, "message": "PIN set — keep it, you need it to import "
                                    "tokens from now on.", **_token_store.auth_state()}
 
@@ -1213,14 +1403,25 @@ async def auth_change_pin(request: Request):
 
 @app.post("/api/auth/verify")
 async def auth_verify(request: Request):
-    """Check a PIN without doing anything — lets the UI unlock its form."""
+    """Check a PIN without doing anything — lets the UI unlock its form.
+
+    PHASE-J: authorize() is now a real check (no blanket "open"), so this
+    endpoint can genuinely fail:
+      • claimed + wrong PIN   -> 403 (wrong_pin)
+      • unclaimed + no ADMIN  -> 200 with via='unclaimed' + setup-code
+        guidance (the UI shows the first-run claim form)
+      • valid PIN / ADMIN_KEY -> 200 via='pin'/'admin_key'
+    """
     body = await _json_body(request)
     pin, admin_key = _request_secrets(body, request)
     allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
     if not allowed:
         return JSONResponse(status_code=403,
-                            content={"ok": False, "error": reason})
-    return {"ok": True, "via": reason}
+                            content={"ok": False, "error": _auth_error(reason),
+                                     "reason": reason})
+    return {"ok": True, "via": reason,
+            **({"setup_code_required": True}
+               if reason == "unclaimed" else {})}
 
 # ── GATEWAY-PREVIEW + DEMO-BANNER (2026-09-29) ─────────────────────────────
 _DEMO_FEED_ON = os.environ.get("QX_DEMO_FEED", "0") == "1"
@@ -1365,37 +1566,61 @@ async def legacy_alltime_otc():
     return RedirectResponse(url="/?market=alltime_otc", status_code=302)
 
 @app.get("/api/set-token")
-async def set_token_get(token: str, x_admin_key: Optional[str] = None,
-                        pin: Optional[str] = None):
-    """Set Quotex token at runtime — no restart needed (browser-friendly).
+async def set_token_get(request: Request):
+    """Set Quotex token at runtime via GET — HEADER-ONLY (PHASE-J, 2026-10).
 
-    USER REQ 2026-08-17: just `?token=...` is enough — no PIN, no admin key
-    needed on the frontend. Auth gate is open by design (see
-    core/token_store.authorize). Admin-key is still accepted for backwards
-    compatibility with scripts/token_agent.py and scripts/minter_service.py.
+    SECURITY HISTORY: this endpoint used to accept `?token=...` in the
+    URL query string (browser-friendly, USER REQ 2026-08-17). That put the
+    FULL SECRET TOKEN into uvicorn access logs, browser history and any
+    intermediate proxy logs — Phase D documented it as blocker C2/B3.
+    The owner has now authorized closing it.
+
+    New contract:
+      • token  → X-Qx-Token header (never in the URL)
+      • auth   → X-App-Pin or X-Admin-Key header (operator gate)
+      • a request that still puts a token in the query string gets 410
+        GONE with guidance — the token is NOT processed and NOT logged.
     """
-    allowed, reason = _token_store.authorize(pin=pin or "",
-                                             admin_key=x_admin_key or "")
+    if request.query_params.get("token"):
+        return JSONResponse(
+            status_code=410,
+            content={
+                "ok": False,
+                "error": "token-in-URL is no longer accepted (it leaked the "
+                         "full token into access logs, browser history and "
+                         "proxies). Use POST /api/set-token with JSON body, "
+                         "or GET with the token in the X-Qx-Token header.",
+            },
+        )
+    token = (request.headers.get("X-Qx-Token") or "").strip()
+    pin = (request.headers.get("X-App-Pin") or "").strip()
+    admin_key = (request.headers.get("X-Admin-Key") or "").strip()
+    allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
     if not allowed:
-        raise HTTPException(status_code=403, detail=_auth_error(reason))
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "error": _auth_error(reason),
+                     "reason": reason,
+                     "auth": _token_store.auth_state()})
     return await _apply_token(token, source="api-get")
 
 @app.post("/api/set-token")
 async def set_token_post(request: Request):
     """Set Quotex token via POST — used by the 🔑 Token panel in the UI.
 
-    USER REQ 2026-08-17: "টোকেন দিলেই ডেটা আসবে" — paste a token, get live
-    data. No PIN, no admin key required. The body only needs `{token: "..."}`.
+    PHASE-J (2026-10): the operator gate is now CLOSED — this route
+    requires ADMIN_KEY or a claimed+verified operator PIN (enforced by
+    the middleware; see core/token_store.authorize history). The token
+    itself goes in the JSON body `{"token": "..."}`, never in a URL.
     """
     body = await _json_body(request)
     if not body:
         return JSONResponse(status_code=400,
                             content={"ok": False, "error": "invalid JSON body"})
     pin, admin_key = _request_secrets(body, request)
-    # authorize() always returns (True, "open") now — kept for audit trail.
     allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
     if not allowed:
-        return JSONResponse(status_code=403,
+        return JSONResponse(status_code=401,
                             content={"ok": False, "error": _auth_error(reason),
                                      "reason": reason,
                                      "auth": _token_store.auth_state()})
@@ -2009,7 +2234,18 @@ async def module_stats():
     """
     def _compute_stats_with_adaptation():
         from core.stats import compute_module_stats
-        stats = compute_module_stats(_db.DB_PATH)
+        # PHASE-J ROBUSTNESS FIX (2026-10): compute_module_stats raises an
+        # UNCAUGHT sqlite3.OperationalError on a DB file that exists
+        # without the signal_log table (fresh deploy, first request after
+        # an unrelated endpoint touched the DB) -> raw 500. Pre-existing
+        # bug (reproduced on the pre-Phase-J tree too). Fail honestly
+        # instead: return the error INSIDE the JSON like every other
+        # sub-computation below already does.
+        try:
+            stats = compute_module_stats(_db.DB_PATH)
+        except Exception as _stats_exc:
+            stats = {"error": f"module stats unavailable: "
+                              f"{type(_stats_exc).__name__}: {_stats_exc}"}
         try:
             from engines.otc.config import weight_adapter as _otc_adapter
             from engines.real.config import weight_adapter as _real_adapter

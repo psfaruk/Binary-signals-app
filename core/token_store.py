@@ -309,7 +309,23 @@ def mask(token: str) -> str:
     return f"{token[:6]}…{token[-4:]}"
 
 
-# ── PIN (claim-on-first-use) ──────────────────────────────────────────────
+# ── PIN (claim-on-first-use) + PHASE-J SETUP CODE (2026-10) ────────────
+
+# PHASE-J SECURITY HARDENING (owner authorization 2026-10: "সব গুলো deeply
+# সমাধান করো" — closes the Phase-D documented blockers B3/B4):
+#   • claim-on-first-use had a RACE: on a fresh public deployment the first
+#     caller of /api/auth/claim won the PIN. Fix: when no PIN is claimed and
+#     no ADMIN_KEY is configured, the server generates a ONE-TIME SETUP CODE
+#     at boot, prints it to the operator console, and the first claim must
+#     present it. The code is stored hashed, is invalidated by any restart
+#     while unclaimed (regenerated), and is erased after a successful claim.
+#   • authorize() no longer returns a blanket "open": token-push operations
+#     now require ADMIN_KEY or a claimed+valid PIN. (The old open-by-design
+#     behavior was USER REQ 2026-08-17; the owner has now authorized closing
+#     it — documented in docs/phase_j_m/PHASE_J_SECURITY_HARDENING.md.)
+
+_SETUP_CODE_TTL = 24 * 3600  # seconds a generated setup code stays valid
+
 
 def _auth_record() -> dict:
     with _LOCK:
@@ -339,17 +355,77 @@ def auth_state() -> dict:
         "admin_key_env": bool(env_admin_key()),
         "persistent": is_persistent(),
         "state_dir": str(state_dir()),
+        # PHASE-J: tells the UI whether the first claim needs the one-time
+        # setup code printed on the server console (fresh deployment with
+        # no ADMIN_KEY). Purely informational — no secret material here.
+        "setup_code_required": (
+            not is_claimed() and not env_admin_key()
+            and bool(rec.get("setup_code_hash"))
+        ),
     }
 
 
-def claim_pin(pin: str) -> dict:
-    """First-run claim. Fails if already claimed (use change_pin instead)."""
+def ensure_setup_code() -> Optional[str]:
+    """Generate + persist a fresh one-time setup code for the FIRST claim.
+
+    Called once per server boot (server lifespan). Only acts when no PIN is
+    claimed and no ADMIN_KEY is configured. The plaintext code is returned
+    exactly ONCE (for the console banner); only its SHA-256 is stored.
+    Any subsequent boot while unclaimed REPLACES the code (old one dies).
+    """
+    if is_claimed() or env_admin_key():
+        return None
+    code = "-".join(secrets.token_hex(2).upper()
+                     for _ in range(3))            # e.g. "A1B2-C3D4-E5F6"
+    rec = _auth_record()
+    rec["setup_code_hash"] = hashlib.sha256(
+        code.encode("utf-8")).hexdigest()
+    rec["setup_code_created"] = time.time()
+    with _LOCK:
+        _write_json(state_dir() / AUTH_FILE, rec)
+    return code
+
+
+def _setup_code_ok(code: str) -> bool:
+    """Constant-time check of a presented setup code against the stored hash.
+
+    A code is valid only while: no PIN claimed, no ADMIN_KEY configured,
+    the stored hash exists, and it has not expired (_SETUP_CODE_TTL).
+    """
+    if is_claimed() or env_admin_key():
+        return False
+    rec = _auth_record()
+    stored = rec.get("setup_code_hash")
+    created = rec.get("setup_code_created")
+    if not stored or not created:
+        return False
+    if time.time() - float(created) > _SETUP_CODE_TTL:
+        return False
+    return hmac.compare_digest(
+        hashlib.sha256((code or "").strip().encode("utf-8")).hexdigest(),
+        str(stored))
+
+
+def claim_pin(pin: str, setup_code: str = "") -> dict:
+    """First-run claim. Fails if already claimed (use change_pin instead).
+
+    PHASE-J: when unclaimed AND no ADMIN_KEY is configured, the claim must
+    present the one-time setup code from the server console (or an ADMIN_KEY
+    — checked by the caller). This closes the first-claim race.
+    """
     pin = (pin or "").strip()
     if len(pin) < _MIN_PIN_LEN:
         return {"ok": False, "error": f"PIN must be at least {_MIN_PIN_LEN} characters"}
     if is_claimed():
         return {"ok": False, "error": "already claimed — enter the existing PIN, "
                                       "or reset it with the ADMIN_KEY"}
+    if not env_admin_key():
+        if not setup_code or not _setup_code_ok(setup_code):
+            return {"ok": False,
+                    "error": "setup code required — read the one-time code "
+                             "printed on the SERVER CONSOLE at boot "
+                             "(refreshes on restart while unclaimed)",
+                    "setup_code_required": True}
     salt = secrets.token_bytes(16)
     rec = {
         "pin_hash": _hash_pin(pin, salt),
@@ -358,7 +434,7 @@ def claim_pin(pin: str) -> dict:
         "claimed_at": time.time(),
     }
     with _LOCK:
-        _write_json(state_dir() / AUTH_FILE, rec)
+        _write_json(state_dir() / AUTH_FILE, rec)   # setup-code fields die here
     print("[token_store] 🔐 access PIN claimed — token import is now "
           "PIN-protected")
     return {"ok": True}
@@ -410,25 +486,25 @@ def change_pin(new_pin: str, old_pin: str = "", admin_key: str = "") -> dict:
 def authorize(pin: str = "", admin_key: str = "") -> tuple[bool, str]:
     """Gate for token import / reconnect.
 
-    USER REQUIREMENT (2026-08-17): "টোকেন মেনইয়ালি অ্যাপ ui তে শুধু মাত্র টোকেন
-    দিলেই যেনো অ্যাপ টি লাইভ ডেটা কানেক্ট হয়, কোনো এডমিন key, অন্যান্য key
-    এই গুলো fronted এ থাকবে না" — token push from the UI must work with
-    JUST a token. No PIN, no admin key required on the frontend.
+    HISTORY: USER REQ 2026-08-17 made token-push open-by-design ("টোকেন
+    দিলেই ডেটা আসবে") — no PIN, no admin key on the frontend. That open
+    behavior was audited in Phase D and documented as release blocker B3
+    for public deployments (anyone with the URL could swap broker
+    credentials). The owner has now authorized closing it (2026-10:
+    "সব গুলো deeply সমাধান করো").
 
-    Therefore this function now ALWAYS allows token-push operations. The
-    PIN/admin_key parameters are accepted for backwards compatibility with
-    existing callers (token_agent.py, minter_service.py) but are no longer
-    required.
-
-    The genuinely sensitive endpoints (/api/db-download, /api/debug,
-    /api/signals/clear) still use _check_admin_key() directly in server.py,
-    so a stolen token-push URL still cannot exfiltrate the DB.
+    PHASE-J SEMANTICS (fail-closed):
+      • valid ADMIN_KEY               -> (True,  "admin_key")
+      • claimed + valid PIN           -> (True,  "pin")
+      • claimed + wrong/no PIN        -> (False, "wrong_pin")
+      • unclaimed + no ADMIN_KEY env  -> (False, "unclaimed")
+        (the first-claim flow now needs the one-time setup code printed on
+        the server console — see ensure_setup_code/claim_pin)
     """
     if verify_admin_key(admin_key):
         return True, "admin_key"
-    if pin and is_claimed() and verify_pin(pin):
-        return True, "pin"
-    # Token-push is open by design (USER REQ 2026-08-17). Returning "open"
-    # here means /api/set-token, /api/session/cookies, /api/session/refresh
-    # work without any auth header from the frontend.
-    return True, "open"
+    if is_claimed():
+        if pin and verify_pin(pin):
+            return True, "pin"
+        return False, "wrong_pin"
+    return False, "unclaimed"

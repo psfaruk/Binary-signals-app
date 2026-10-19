@@ -52,10 +52,16 @@ Late-tick policy
         never edited; the production ledger is never touched.
 
 Concurrency: db operations run single-transaction with conditional
-UPDATE ... WHERE state=... guards.  The application is a SINGLE
-process (uvicorn event loop + helper threads); cross-process writers
-are not supported and the risk is documented in
-docs/PHASE2A_SETTLEMENT.md.  No env overrides; no secrets.
+UPDATE ... WHERE state=... guards.  PHASE-J (2026-10): the critical
+settlement sequences (settlement_begin / settlement_finalize /
+settlement_settle / shadow_record / shadow_settle /
+shadow_append_correction) now run inside BEGIN IMMEDIATE transactions
+(db._immediate_cursor), so concurrent MULTI-PROCESS writers SERIALIZE
+cleanly: exactly one winner per state transition, the loser sees
+already_settled/duplicate/conflict, and no lost-update interleaving is
+possible. Verified by a two-process race test
+(scripts/test_phase_j_security.py, section D).  No env overrides; no
+secrets.
 =====================================================================
 """
 from __future__ import annotations

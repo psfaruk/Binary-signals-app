@@ -186,12 +186,18 @@ r = client.get("/api/share-signals/history?limit=-5")
 check(r.status_code == 200, "S16 share-signals/history with negative limit "
       "-> 200 (clamped, was: unbounded SELECT)", f"got {r.status_code}")
 
-# documented-open endpoints stay open BY DESIGN (owner requirement) — the
-# test PINS the current behavior so any change is noticed and re-documented
+# S17 (UPDATED PHASE-J 2026-10): set-token used to be open-by-design
+# (owner USER REQ 2026-08-17) and this test pinned that behavior while
+# documenting it as a release blocker. The owner has now authorized
+# CLOSING the gate (2026-10: "সব গুলো deeply সমাধান করো") — the
+# operator_gate middleware requires ADMIN_KEY or a claimed+verified PIN.
+# The test now pins the CLOSED behavior; the full new-security battery
+# lives in scripts/test_phase_j_security.py.
 r = client.post("/api/set-token", json={"token": ""})
-check(r.status_code in (200, 400),
-      "S17 set-token POST open-by-design (owner USER REQ 2026-08-17; "
-      "documented as release blocker for public deployment)",
+check(r.status_code == 401,
+      "S17 set-token POST now operator-gated (PHASE-J owner authorization "
+      "2026-10; was open-by-design USER REQ 2026-08-17, documented as "
+      "release blocker B3)",
       f"got {r.status_code}")
 
 # ── N. NEGATIVE SAFETY SCENARIOS (directive D5 list) ────────────────────

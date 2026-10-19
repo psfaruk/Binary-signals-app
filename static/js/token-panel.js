@@ -1,27 +1,21 @@
 /* ============================================================================
-   token-panel.js — 🔑 Token import panel (TOKEN-ONLY EDITION, 2026-08-17).
+   token-panel.js — 🔑 Token import panel (PHASE-J SECURED EDITION, 2026-10).
 
-   USER REQUIREMENT (2026-08-17):
-     "টোকেন মেনইয়ালি অ্যাপ ui তে শুধু মাত্র টোকেন দিলেই যেনো অ্যাপ টি লাইভ
-      ডেটা কানেক্ট হয়, কোনো এডমিন key, অন্যান্য key এই গুলো fronted এ থাকবে
-      না। শুধু মাত্র টোকেন ইমপোর্ট করার ব্যবস্থা থাকবে। আর টোকেন দিলেই
-      ডেটা আসবে।"
+   HISTORY (USER REQ 2026-08-17): this panel used to be TOKEN-ONLY —
+   paste a token, get data, no PIN, no admin key. That open-by-design
+   behavior was audited in Phase D as release blocker B3: on a public
+   deployment ANYONE with the URL could swap the broker token or push
+   session cookies. The owner has now authorized closing it
+   (2026-10: "সব গুলো deeply সমাধান করো").
 
-   Translation: paste a token → app goes live. NO admin key, NO PIN, NO
-   other key in the frontend. Only a token import box.
-
-   What was removed vs the previous version:
-     • The "set an access PIN" first-run claim section.
-     • The "Access PIN" input + "Remember on this device" checkbox.
-     • All X-App-Pin / X-Admin-Key headers on outgoing requests.
-     • The api-keys.js companion file (removed from app.html).
-
-   What was kept:
-     • The token textarea + "Import & Go Live" button (the core flow).
-     • The live-status indicator + auto-refresh (cookies) section — useful
-       for the operator, but it's an opt-in <details>, not the primary UI.
-       Cookies here are imported without a PIN too (server-side gate is
-       open by design).
+   PHASE-J SECURITY MODEL (fail-closed):
+     • Token/cookie pushes now require the operator PIN (X-App-Pin header).
+     • First run: the server prints a ONE-TIME SETUP CODE on its console;
+       this panel turns it into your PIN (POST /api/auth/claim).
+     • The PIN is remembered on this device (localStorage) — day-to-day
+       usage stays one paste + one click.
+     • The GET /api/set-token?token=... URL form is REMOVED (it leaked
+       the full token into access logs); only POST with JSON body + PIN.
    ============================================================================ */
 (function () {
   'use strict';
@@ -55,7 +49,102 @@
   var el = {};
   var state = { status: null, watching: false, pollTimer: null,
                 autoOpened: false, notLiveSince: 0, lastDeadNag: 0,
-                lastNodataNag: 0 };
+                lastNodataNag: 0, authState: null };
+  var LS_PIN = 'bst_app_pin';
+
+  function storedPin() {
+    try { return localStorage.getItem(LS_PIN) || ''; } catch (_e) { return ''; }
+  }
+
+  function rememberPin(pin) {
+    try { localStorage.setItem(LS_PIN, pin); } catch (_e) {}
+  }
+
+  function currentPin() {
+    var typed = (el.pin && el.pin.value || '').trim();
+    return typed || storedPin();
+  }
+
+  /* PHASE-J: every token-push call carries the operator PIN. */
+  function authHeaders(extra) {
+    var h = extra || {};
+    var pin = currentPin();
+    if (pin) h['X-App-Pin'] = pin;
+    return h;
+  }
+
+  /* 401 handling: reveal the first-run claim section when the server says
+     no PIN exists yet (setup_code_required), else prompt for the PIN. */
+  function handleAuthFailure(r) {
+    var body = (r && r.body) || {};
+    var detail = body.detail || body.error || '';
+    if (body.setup_code_required || /setup code/i.test(detail)) {
+      showClaim('সার্ভারে এখনো PIN সেট হয়নি। সার্ভার কনসোলে প্রিন্ট হওয়া '
+              + 'এককালীন SETUP CODE দিয়ে নিচে PIN সেট করুন, তারপর আবার টোকেন '
+              + 'দিন।');
+      return 'PIN সেট করা দরকার — নিচের সেটআপ সেকশন দেখুন।';
+    }
+    if (/wrong operator PIN/i.test(detail)) {
+      if (el.pin) el.pin.value = '';
+      return 'ভুল PIN — আবার সঠিক PIN দিন।';
+    }
+    return detail || 'অথরাইজেশন প্রয়োজন — X-App-Pin হেডার দিন।';
+  }
+
+  function showClaim(msg) {
+    if (el.claim) el.claim.hidden = false;
+    if (msg && el.result) result('err', msg);
+  }
+
+  function claimPin() {
+    var pin = (el.claimPin && el.claimPin.value || '').trim();
+    var code = (el.setupCode && el.setupCode.value || '').trim();
+    if (!pin || !code) {
+      result('err', 'SETUP CODE এবং নতুন PIN — দুটোই দিন।');
+      return;
+    }
+    if (pin.length < 6) {
+      result('err', 'PIN অন্তত ৬ অক্ষরের হতে হবে।');
+      return;
+    }
+    el.claimBtn.disabled = true;
+    result('busy', 'PIN সেট করা হচ্ছে…');
+    fetchJSON('/api/auth/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: pin, setup_code: code })
+    }).then(function (r) {
+      el.claimBtn.disabled = false;
+      var body = r.body || {};
+      if (!r.ok || !body.ok) {
+        result('err', '❌ ' + (body.error || body.detail || ('HTTP ' + r.status)));
+        return;
+      }
+      rememberPin(pin);
+      if (el.pin) el.pin.value = pin;
+      if (el.claim) el.claim.hidden = true;
+      result('ok', '✅ PIN সেট হয়েছে এবং এই ডিভাইসে মনে রাখা হলো। '
+                  + 'এখন টোকেন পেস্ট করে Import চাপুন।');
+      refreshAuth();
+    }).catch(function (e) {
+      el.claimBtn.disabled = false;
+      result('err', 'Network error: ' + e);
+    });
+  }
+
+  function refreshAuth() {
+    return fetchJSON('/api/auth/state').then(function (r) {
+      if (!r.ok) return null;
+      state.authState = r.body || null;
+      if (state.authState && state.authState.setup_code_required) {
+        showClaim('এই ডিপ্লয়মেন্টে এখনো PIN নেই — সার্ভার কনসোলের '
+                + 'এককালীন SETUP CODE দিয়ে PIN সেট করুন।');
+      } else if (el.claim) {
+        el.claim.hidden = true;
+      }
+      return state.authState;
+    }).catch(function () { return null; });
+  }
 
   function dismissedRecently() {
     try {
@@ -227,8 +316,41 @@
           h('div', { class: 'tk-hint',
                      text: 'Both forms work: the bare session value, or the full ' +
                            'authorization frame copied from DevTools. The server ' +
-                           'extracts the session for you. No PIN, no admin key — ' +
-                           'just the token.' })
+                           'extracts the session for you.' })
+        ]),
+
+        /* ── PHASE-J: operator PIN (required for every push) ── */
+        h('div', { class: 'tk-field' }, [
+          h('label', { class: 'tk-label', for: 'tk-pin',
+                       html: 'Access PIN <span class="tk-req">*</span>' }),
+          h('input', {
+            class: 'tk-input', id: 'tk-pin', type: 'password',
+            autocomplete: 'current-password', spellcheck: 'false',
+            placeholder: storedPin() ? '•••••• (saved on this device)' : 'Operator PIN'
+          }),
+          h('div', { class: 'tk-hint',
+                     text: 'PHASE-J: টোকেন/কুকি পুশের জন্য PIN লাগবে। একবার দিলে ' +
+                           'এই ডিভাইসে মনে রাখা হয় — তারপর আগের মতোই শুধু ' +
+                           'পেস্ট + Import।' })
+        ]),
+
+        /* ── PHASE-J: first-run claim (server console setup code) ── */
+        h('div', { class: 'tk-field tk-claim', id: 'tk-claim', hidden: 'hidden' }, [
+          h('div', { class: 'tk-hint tk-claim-note',
+                     text: 'সার্ভারে এখনো PIN নেই। সার্ভার কনসোলে (লগ) প্রিন্ট হওয়া ' +
+                           'এককালীন SETUP CODE দিয়ে নিচে PIN সেট করুন।' }),
+          h('input', {
+            class: 'tk-input', id: 'tk-setup-code', type: 'text',
+            autocomplete: 'off', spellcheck: 'false',
+            placeholder: 'Setup code (e.g. A1B2-C3D4-E5F6)'
+          }),
+          h('input', {
+            class: 'tk-input', id: 'tk-claim-pin', type: 'password',
+            autocomplete: 'new-password',
+            placeholder: 'New PIN (min 6 chars)'
+          }),
+          h('button', { class: 'tk-btn tk-btn-primary', id: 'tk-claim-btn',
+                        type: 'button', text: 'PIN সেট করুন' })
         ]),
         h('div', { class: 'tk-result', id: 'tk-result', hidden: 'hidden' }),
         h('div', { class: 'tk-actions' }, [
@@ -403,19 +525,26 @@
     el.importBtn.disabled = true;
     result('busy', 'Sending token to the server…');
 
-    // NOTE: NO X-App-Pin / X-Admin-Key header. USER REQ 2026-08-17.
+    // NOTE (PHASE-J 2026-10): token pushes now carry X-App-Pin — the
+    // open-by-design USER REQ 2026-08-17 was closed by owner authorization
+    // (see file header). authHeaders() attaches the PIN.
     clearDismissMemory();               // a fresh token re-arms the nagging
     fetchJSON('/api/set-token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ token: token, source: 'ui' })
     }).then(function (r) {
       el.importBtn.disabled = false;
       var body = r.body || {};
-      if (!r.ok || !body.ok) {
+      if (!r.ok) {
+        result('err', '❌ ' + handleAuthFailure(r));
+        return;
+      }
+      if (!body.ok) {
         result('err', '❌ ' + (body.error || body.detail || ('HTTP ' + r.status)));
         return;
       }
+      if (currentPin()) rememberPin(currentPin());
       el.token.value = '';
       var note = body.persisted
         ? (body.persistent_storage
@@ -442,15 +571,19 @@
 
     el.cookiesSave.disabled = true;
     result('busy', 'Saving cookies and minting a test token…');
-    // NOTE: NO X-App-Pin / X-Admin-Key header. USER REQ 2026-08-17.
+    // NOTE (PHASE-J 2026-10): cookies import now carries X-App-Pin.
     fetchJSON('/api/session/cookies', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ cookies: cookies, source: 'ui' })
     }).then(function (r) {
       el.cookiesSave.disabled = false;
       var body = r.body || {};
-      if (!r.ok || !body.ok) {
+      if (!r.ok) {
+        result('err', '❌ ' + handleAuthFailure(r));
+        return;
+      }
+      if (!body.ok) {
         result('err', '❌ ' + (body.error || body.detail || ('HTTP ' + r.status)) +
                       (body.hint ? '\n' + body.hint : ''));
         return;
@@ -468,15 +601,19 @@
   function refreshNow() {
     el.refreshNow.disabled = true;
     result('busy', 'Minting a fresh token from the stored cookies…');
-    // NOTE: NO X-App-Pin / X-Admin-Key header. USER REQ 2026-08-17.
+    // NOTE (PHASE-J 2026-10): session refresh now carries X-App-Pin.
     fetchJSON('/api/session/refresh', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({})
     }).then(function (r) {
       el.refreshNow.disabled = false;
       var body = r.body || {};
-      if (!r.ok || !body.ok) {
+      if (!r.ok) {
+        result('err', '❌ ' + handleAuthFailure(r));
+        return;
+      }
+      if (!body.ok) {
         result('err', '❌ ' + (body.error || ('HTTP ' + r.status)));
         renderAuto(body.status);
         return;
@@ -539,6 +676,7 @@
     try { window.__tokenPanelOpen = open; } catch (_e) {}
     el.btn.setAttribute('aria-expanded', 'true');
     refresh();
+    refreshAuth();          // PHASE-J: show claim section on fresh deploys
     setTimeout(function () { el.token.focus(); }, 30);
   }
 
@@ -566,6 +704,16 @@
     el.token = document.getElementById('tk-token');
     el.result = document.getElementById('tk-result');
     el.importBtn = document.getElementById('tk-import');
+    /* PHASE-J: PIN + first-run claim wiring */
+    el.pin = document.getElementById('tk-pin');
+    el.claim = document.getElementById('tk-claim');
+    el.setupCode = document.getElementById('tk-setup-code');
+    el.claimPin = document.getElementById('tk-claim-pin');
+    el.claimBtn = document.getElementById('tk-claim-btn');
+    if (el.claimBtn) el.claimBtn.addEventListener('click', claimPin);
+    if (el.claimPin) el.claimPin.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') claimPin();
+    });
     el.auto = document.getElementById('tk-auto');
     el.autoSummary = document.getElementById('tk-auto-summary');
     el.autoDetail = document.getElementById('tk-auto-detail');

@@ -141,7 +141,10 @@ check(r.status_code == 200 and (r.json().get("prediction") is None
 r = client.post("/api/set-token",
                 content=b"{not json",
                 headers={"Content-Type": "application/json"})
-check(r.status_code in (400, 422, 200),
+# PHASE-J UPDATE (2026-10): the operator gate now rejects unauthenticated
+# set-token calls BEFORE JSON parsing — 401 is the new correct answer for
+# a no-credential malformed body (the "no 500" intent still holds).
+check(r.status_code in (400, 401, 422, 200),
       "G3-8 malformed JSON body handled without 500",
       f"got {r.status_code}")
 r = client.get("/api/history/BRLUSD_otc/notanumber")

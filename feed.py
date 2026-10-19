@@ -6830,8 +6830,10 @@ class QuotexFeed:
             sess_data = QuotexWSClient.load_session_json()
             if sess_data and sess_data.get("token"):
                 token = sess_data["token"]
+                # PHASE-J FIX (2026-10): 6+4 split mask (was an 8-char
+                # prefix — more of the secret than the mask() standard).
                 print(f"[feed] startup: found saved token in session.json "
-                      f"({token[:8]}...) — will try it first")
+                      f"({token[:6]}…{token[-4:]}) — will try it first")
                 os.environ["QX_TOKEN"] = token
                 return
         except Exception as _e:
