@@ -88,9 +88,15 @@ def hit(key: str, limit: int, window: float = 60.0) -> tuple[bool, float]:
     global _LAST_PRUNE
     now = time.time()
     with _LOCK:
-        # periodic prune of windows older than 2x the interval
+        # AUDIT FIX #5 (2026-10): the old prune did _COUNTERS.clear(),
+        # which ALSO wiped ACTIVE windows (inflating effective limits and
+        # briefly falsifying X-RateLimit-Remaining). Now removes only
+        # STALE entries (older than 2x the max window).
         if now - _LAST_PRUNE > _PRUNE_INTERVAL:
-            _COUNTERS.clear()          # fixed-window: old windows are dead
+            stale = [k for k, e in _COUNTERS.items()
+                     if (now - e[0]) >= 2 * window + _PRUNE_INTERVAL]
+            for k in stale:
+                del _COUNTERS[k]
             _LAST_PRUNE = now
         entry = _COUNTERS.get(key)
         if not entry or (now - entry[0]) >= window:
@@ -127,7 +133,24 @@ def reset() -> None:
 
 
 def client_key(request) -> str:
-    """Best-effort client identity for keying (falls back to 'local')."""
+    """Best-effort client identity for keying (falls back to 'local').
+
+    AUDIT NOTE #8 (2026-10): by default ONLY the TCP peer address is used
+    — X-Forwarded-For is deliberately NOT trusted (trivially spoofable
+    when the app is directly exposed; spoofing would hand an attacker a
+    fresh bucket per request). Behind a reverse proxy (Railway etc.) all
+    visitors share the peer's buckets — set QX_TRUST_PROXY=1 there so the
+    FIRST XFF hop (the address the PROXY saw) is used instead. Only do
+    this when you trust your proxy to overwrite inbound XFF.
+    """
+    if os.environ.get("QX_TRUST_PROXY", "0") == "1":
+        xff = ""
+        try:
+            xff = (request.headers.get("X-Forwarded-For") or "").strip()
+        except Exception:
+            xff = ""
+        if xff:
+            return xff.split(",")[0].strip() or "local"
     client = getattr(request, "client", None)
     host = getattr(client, "host", None) if client else None
     return host or "local"

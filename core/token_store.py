@@ -412,29 +412,42 @@ def claim_pin(pin: str, setup_code: str = "") -> dict:
     PHASE-J: when unclaimed AND no ADMIN_KEY is configured, the claim must
     present the one-time setup code from the server console (or an ADMIN_KEY
     — checked by the caller). This closes the first-claim race.
+    AUDIT FIX #2 (2026-10): the check-then-write sequence now runs ENTIRELY
+    under _LOCK — two concurrent claims presenting the same code can no
+    longer BOTH succeed (last-writer-wins PIN swap); exactly one wins.
     """
     pin = (pin or "").strip()
     if len(pin) < _MIN_PIN_LEN:
         return {"ok": False, "error": f"PIN must be at least {_MIN_PIN_LEN} characters"}
-    if is_claimed():
-        return {"ok": False, "error": "already claimed — enter the existing PIN, "
-                                      "or reset it with the ADMIN_KEY"}
-    if not env_admin_key():
-        if not setup_code or not _setup_code_ok(setup_code):
-            return {"ok": False,
-                    "error": "setup code required — read the one-time code "
-                             "printed on the SERVER CONSOLE at boot "
-                             "(refreshes on restart while unclaimed)",
-                    "setup_code_required": True}
-    salt = secrets.token_bytes(16)
-    rec = {
-        "pin_hash": _hash_pin(pin, salt),
-        "salt": salt.hex(),
-        "iterations": _PBKDF2_ROUNDS,
-        "claimed_at": time.time(),
-    }
     with _LOCK:
-        _write_json(state_dir() / AUTH_FILE, rec)   # setup-code fields die here
+        rec = _auth_record()
+        if rec.get("pin_hash") and rec.get("salt"):
+            return {"ok": False, "error": "already claimed — enter the existing PIN, "
+                                          "or reset it with the ADMIN_KEY"}
+        if not env_admin_key():
+            code_ok = False
+            if setup_code and rec.get("setup_code_hash") \
+                    and rec.get("setup_code_created"):
+                if (time.time() - float(rec["setup_code_created"])
+                        <= _SETUP_CODE_TTL):
+                    code_ok = hmac.compare_digest(
+                        hashlib.sha256(
+                            (setup_code or "").strip().encode("utf-8")
+                        ).hexdigest(), str(rec["setup_code_hash"]))
+            if not code_ok:
+                return {"ok": False,
+                        "error": "setup code required — read the one-time code "
+                                 "printed on the SERVER CONSOLE at boot "
+                                 "(refreshes on restart while unclaimed)",
+                        "setup_code_required": True}
+        salt = secrets.token_bytes(16)
+        new_rec = {
+            "pin_hash": _hash_pin(pin, salt),
+            "salt": salt.hex(),
+            "iterations": _PBKDF2_ROUNDS,
+            "claimed_at": time.time(),
+        }
+        _write_json(state_dir() / AUTH_FILE, new_rec)  # setup fields die here
     print("[token_store] 🔐 access PIN claimed — token import is now "
           "PIN-protected")
     return {"ok": True}

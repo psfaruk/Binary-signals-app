@@ -74,6 +74,15 @@ import server as _server  # noqa: E402
 from core import token_store as ts  # noqa: E402
 from core import rate_limit as rl  # noqa: E402
 
+# Real boots run db.init() in the lifespan (skipped here to avoid the
+# broker feed task) — initialize the schema directly so DB-backed checks
+# (F1b etc.) exercise the real tables, exactly like a deployed server.
+import db as _db_init  # noqa: E402
+try:
+    _db_init.init()
+except Exception as _init_exc:
+    print(f"[battery] db.init() failed (continuing): {_init_exc}")
+
 client = TestClient(_server.app, raise_server_exceptions=False)
 
 # ══ A. TOKEN-PUSH OPERATOR GATE ════════════════════════════════════════
@@ -404,6 +413,142 @@ panel_src = open(os.path.join(_REPO, "static", "js", "token-panel.js"),
 check("X-App-Pin" in panel_src and "tk-claim" in panel_src
       and "authHeaders" in panel_src,
       "E4 token panel sends X-App-Pin + has the first-run claim section")
+
+# ══ F. PHASE-J ROUND-2 — INDEPENDENT AUDIT FINDINGS ════════════════════
+print("\nF. AUDIT-FIX REGRESSIONS (independent auditor findings)")
+
+# F1 (audit #1, HIGH): anonymous destructive DELETE /api/signals/{...}
+r = client.delete("/api/signals/BRLUSD_otc/60/1700000000")
+check(r.status_code == 401,
+      "F1 DELETE /api/signals/{a}/{p}/{c} now admin-gated (was anonymous "
+      "destructive wipe)", f"got {r.status_code}")
+r = client.delete("/api/signals/BRLUSD_otc/60/1700000000",
+                  headers={"X-App-Pin": "123456"})
+check(r.status_code in (200, 404),
+      "F1b DELETE with valid PIN passes the gate (404: row absent)",
+      f"got {r.status_code}")
+
+# F2 (audit #3): /api/prediction/reload-models no longer NameError-500s
+r = client.post("/api/prediction/reload-models")
+check(r.status_code == 401,
+      "F2 reload-models without creds -> 401 (was 500 NameError: "
+      "_require_admin undefined)", f"got {r.status_code}")
+
+# F3 (audit #4): /api/prediction/bootstrap gated
+r = client.post("/api/prediction/bootstrap")
+check(r.status_code == 401,
+      "F3 bootstrap without creds -> 401 (was anonymous CPU/DB DoS trigger)",
+      f"got {r.status_code}")
+
+# F4 (audit #5): prune must NOT reset ACTIVE windows
+rl.reset()
+os.environ["QX_RL_AUTH"] = "3"
+for _ in range(4):
+    r = client.post("/api/auth/verify", json={"pin": "123456"})
+assert r.status_code == 429
+# backdate the prune clock far past the interval, then hit again —
+# the ACTIVE (blocked) window must STILL block
+rl._LAST_PRUNE = time.time() - 1000.0
+r = client.post("/api/auth/verify", json={"pin": "123456"})
+check(r.status_code == 429,
+      "F4 stale-prune does NOT wipe the active window (was: prune reset "
+      "blocked buckets)", f"got {r.status_code}")
+os.environ.pop("QX_RL_AUTH", None)
+rl.reset()
+
+# F5 (audit #2): concurrent claim race — exactly ONE winner
+import threading  # noqa: E402
+state6 = tempfile.mkdtemp(prefix="phase_j_state6_")
+os.environ["QX_STATE_DIR"] = state6
+code6 = ts.ensure_setup_code()
+results_race = []
+
+def _claimer():
+    results_race.append(ts.claim_pin("654321", setup_code=code6))
+
+threads = [threading.Thread(target=_claimer) for _ in range(8)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+oks = sum(1 for r in results_race if r.get("ok"))
+check(oks == 1,
+      "F5 8 concurrent claims with the same code -> exactly ONE ok "
+      f"(was: last-writer-wins race; got {oks} oks)", f"oks={oks}")
+os.environ["QX_STATE_DIR"] = os.path.join(_TMPDIR, "state")
+
+# F6 (audit #7): access-log secret redaction on a REAL uvicorn server
+_logf = os.path.join(_TMPDIR, "access_test.log")
+_env = dict(os.environ)
+_env["DB_PATH"] = os.path.join(_TMPDIR, "access_test.db")
+_env["QX_RATE_LIMIT"] = "0"
+_env["QX_STATE_DIR"] = os.path.join(_TMPDIR, "state")
+_proc = subprocess.Popen(
+    [sys.executable, "-m", "uvicorn", "server:app",
+     "--host", "127.0.0.1", "--port", "8033",
+     "--log-level", "info"],
+    env=_env, cwd=_REPO, stdout=open(_logf, "w"),
+    stderr=subprocess.STDOUT, text=True)
+_secret = "SUPERSECRETTOKEN123456789"
+try:
+    _up = False
+    for _ in range(40):
+        try:
+            import urllib.request  # noqa: E402
+            with urllib.request.urlopen(
+                    "http://127.0.0.1:8033/healthz", timeout=2) as _resp:
+                _up = _resp.status == 200
+            if _up:
+                break
+        except Exception:
+            time.sleep(0.5)
+    check(_up, "F6a real uvicorn boot for access-log redaction test")
+    if _up:
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:8033/api/set-token?token={_secret}",
+                timeout=5)
+        except Exception:
+            pass          # 410 raise is fine — the request line is logged
+        time.sleep(1.0)   # let the access logger flush
+        _log = open(_logf, encoding="utf-8", errors="replace").read()
+        check(_secret not in _log and "<REDACTED>" in _log,
+              "F6b access log redacts ?token=SECRET (410 flow still logged "
+              "with the secret masked)")
+finally:
+    _proc.terminate()
+    try:
+        _proc.wait(timeout=10)
+    except Exception:
+        _proc.kill()
+
+# F7 (audit #8): QX_TRUST_PROXY=1 uses the first XFF hop
+class _FakeReq:
+    headers = {"X-Forwarded-For": "203.0.113.9, 10.0.0.1"}
+    client = type("C", (), {"host": "10.0.0.1"})()
+os.environ["QX_TRUST_PROXY"] = "1"
+check(rl.client_key(_FakeReq()) == "203.0.113.9",
+      "F7a QX_TRUST_PROXY=1 -> first XFF hop used")
+os.environ["QX_TRUST_PROXY"] = "0"
+check(rl.client_key(_FakeReq()) == "10.0.0.1",
+      "F7b default -> TCP peer only (XFF NOT trusted; spoof-proof)")
+os.environ.pop("QX_TRUST_PROXY", None)
+
+# F8 (audit #9): /api/auth/verify unclaimed -> 200 + via=unclaimed
+state7 = tempfile.mkdtemp(prefix="phase_j_state7_")
+os.environ["QX_STATE_DIR"] = state7
+r = client.post("/api/auth/verify", json={})
+check(r.status_code == 200 and r.json().get("via") == "unclaimed"
+      and r.json().get("setup_code_required") is True,
+      "F8 auth/verify unclaimed -> 200 via='unclaimed' (docstring-aligned)",
+      r.text[:120])
+os.environ["QX_STATE_DIR"] = os.path.join(_TMPDIR, "state")
+
+# F9 (audit D-list): _update_hourly_pattern inside BEGIN IMMEDIATE
+db_src = open(os.path.join(_REPO, "db.py"), encoding="utf-8").read()
+check('cur.execute("BEGIN IMMEDIATE")' in db_src
+      and "_update_hourly_pattern" in db_src,
+      "F9 _update_hourly_pattern RMW now under BEGIN IMMEDIATE (source)")
 
 # ══ summary ═════════════════════════════════════════════════════════════
 print()

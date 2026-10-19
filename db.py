@@ -1324,8 +1324,12 @@ def provenance_counts() -> dict:
 # writer can never move a state backwards; conflicting/duplicate
 # finalizations are audited into candle_corrections, never applied.
 # Writers: the single server process (event loop + to_thread helpers +
-# retention daemon).  Cross-process writers are NOT supported — see
-# docs/PHASE2A_SETTLEMENT.md for the honest single-process assumption.
+# retention daemon).  PHASE-J (2026-10): the critical settlement/shadow
+# sequences now run under BEGIN IMMEDIATE (_immediate_cursor), so
+# MULTI-PROCESS writers SERIALIZE safely (verified by two-process race
+# tests in scripts/test_phase_j_security.py section D) — see
+# docs/PHASE2A_SETTLEMENT.md for the original single-process design and
+# docs/phase_j_m/PHASE_J_SECURITY_HARDENING.md for the upgrade.
 # ══════════════════════════════════════════════════════════════════════
 def _cs_utc_iso(ts: float) -> str:
     try:
@@ -2060,7 +2064,14 @@ def _update_hourly_pattern(asset: str, period: int, ctime: int, signal: str,
 
     conn = _conn()
     try:
+        # PHASE-J AUDIT FIX (D-list, 2026-10): the SELECT→compute→UPDATE
+        # sequence is a genuine cross-process/cross-thread lost-update
+        # window (two concurrent grades of the same hour could each read
+        # total=N and both write total=N+1). BEGIN IMMEDIATE serializes
+        # the whole read-modify-write.
+        conn.isolation_level = None
         cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
         cur.execute("""
             SELECT total_signals, correct, wrong, call_win_pct, put_win_pct,
                    last_ctime, avg_confidence, counted_keys, best_direction,
@@ -2088,6 +2099,7 @@ def _update_hourly_pattern(asset: str, period: int, ctime: int, signal: str,
                 _counted = {'60': int(existing['last_ctime'])}
         _ckey = str(period)
         if _counted.get(_ckey) and int(_counted[_ckey]) == int(ctime):
+            conn.rollback()          # AUDIT FIX: close the immediate tx cleanly
             conn.close()
             return
         _counted[_ckey] = int(ctime)
@@ -2182,6 +2194,10 @@ def _update_hourly_pattern(asset: str, period: int, ctime: int, signal: str,
         conn.commit()
     except Exception as e:
         print(f"[db] _update_hourly_pattern error: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     finally:
         conn.close()
 

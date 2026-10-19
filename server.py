@@ -157,6 +157,38 @@ clients: dict[str, WebSocket] = {}   # cid -> ws
 cid_counter = 0
 _MAX_WS_CLIENTS = int(os.environ.get("MAX_WS_CLIENTS", "200"))
 _logger = logging.getLogger("server")
+
+# ── PHASE-J AUDIT FIX #7 (2026-10): access-log secret redaction ──────────
+# uvicorn's access log records the FULL request line including the query
+# string. Even though GET /api/set-token?token=... is now REJECTED (410),
+# a legacy caller's secret would still land verbatim in the access log
+# (Railway logs, stdout captures). This filter rewrites secret-like query
+# params in every access-log record BEFORE it reaches any handler.
+# Attached to the LOGGER (not a handler) so it survives uvicorn's
+# dictConfig — works for `python server.py`, `uvicorn server:app`, and
+# run_service.sh alike.
+import re as _re_mod  # noqa: E402  (local alias — server.py has no top-level re import)
+
+_SECRET_QS_RE = _re_mod.compile(
+    r"([?&](?:token|api_key|pin|ssid|password|setup_code)=)[^&\s\"']+",
+    _re_mod.IGNORECASE)
+
+class _AccessLogSecretRedact(logging.Filter):
+    """Rewrite ?token=…&api_key=… style query secrets in access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if record.args and isinstance(record.args, tuple):
+                record.args = tuple(
+                    _SECRET_QS_RE.sub(r"\1<REDACTED>", a)
+                    if isinstance(a, str) else a
+                    for a in record.args)
+        except Exception:   # never break logging
+            pass
+        return True
+
+logging.getLogger("uvicorn.access").addFilter(_AccessLogSecretRedact())
+# ── end access-log redaction ──────────────────────────────────────────────
 _WS_IDLE_TIMEOUT = float(os.environ.get("WS_IDLE_TIMEOUT", "300.0"))
 _MAX_WS_MSG_BYTES = int(os.environ.get("MAX_WS_MSG_BYTES", str(1 << 20)))
 _ALLOWED_WS_ORIGINS = [
@@ -704,6 +736,27 @@ def _require_admin_for_api_keys(request: Request) -> None:
         raise HTTPException(status_code=500, detail=f"PIN verification failed: {exc}")
     if not ok:
         raise HTTPException(status_code=403, detail=f"invalid PIN: {_reason}")
+
+
+async def _require_admin(request: Request) -> None:
+    """PHASE-J AUDIT FIX #3 (2026-10): this function was REFERENCED at
+    /api/prediction/reload-models since 2026-09 but NEVER DEFINED — every
+    call raised NameError -> 500 (fail-closed by accident, and genuine
+    admins were locked out). Now defined for real: ADMIN_KEY or a
+    claimed+verified operator PIN, mirroring the token-push gate.
+    """
+    admin_key = (request.headers.get("X-Admin-Key") or "").strip()
+    pin = (request.headers.get("X-App-Pin") or "").strip()
+    if admin_key and _token_store.verify_admin_key(admin_key):
+        return
+    if pin and _token_store.is_claimed() and _token_store.verify_pin(pin):
+        return
+    if admin_key or pin:
+        raise HTTPException(status_code=403,
+                            detail="invalid admin credential")
+    raise HTTPException(
+        status_code=401,
+        detail="admin endpoint — provide X-Admin-Key or X-App-Pin header.")
 
 
 def _verify_operator_pin(pin: str) -> tuple[bool, str]:
@@ -1408,20 +1461,26 @@ async def auth_verify(request: Request):
     PHASE-J: authorize() is now a real check (no blanket "open"), so this
     endpoint can genuinely fail:
       • claimed + wrong PIN   -> 403 (wrong_pin)
-      • unclaimed + no ADMIN  -> 200 with via='unclaimed' + setup-code
-        guidance (the UI shows the first-run claim form)
       • valid PIN / ADMIN_KEY -> 200 via='pin'/'admin_key'
+      • unclaimed + no ADMIN  -> 200 with via='unclaimed' + setup-code
+        guidance (matches this docstring; AUDIT FIX #9 — the body used to
+        return 403 for the unclaimed case, contradicting the docs; the
+        state is public via /api/auth/state anyway, so 200 + guidance is
+        both honest and UI-friendly)
     """
     body = await _json_body(request)
     pin, admin_key = _request_secrets(body, request)
     allowed, reason = _token_store.authorize(pin=pin, admin_key=admin_key)
+    if reason == "unclaimed":
+        return {"ok": True, "via": "unclaimed",
+                "setup_code_required": True,
+                "hint": "claim a PIN first (POST /api/auth/claim with the "
+                        "one-time setup code from the server console)"}
     if not allowed:
         return JSONResponse(status_code=403,
                             content={"ok": False, "error": _auth_error(reason),
                                      "reason": reason})
-    return {"ok": True, "via": reason,
-            **({"setup_code_required": True}
-               if reason == "unclaimed" else {})}
+    return {"ok": True, "via": reason}
 
 # ── GATEWAY-PREVIEW + DEMO-BANNER (2026-09-29) ─────────────────────────────
 _DEMO_FEED_ON = os.environ.get("QX_DEMO_FEED", "0") == "1"
@@ -3914,8 +3973,14 @@ async def get_prediction_guard():
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 @app.post("/api/prediction/bootstrap")
-async def post_prediction_bootstrap():
-    """Force a fast-train run right now (non-blocking; one at a time)."""
+async def post_prediction_bootstrap(request: Request):
+    """Force a fast-train run right now (non-blocking; one at a time).
+
+    PHASE-J AUDIT FIX #4 (2026-10): was ANONYMOUS (unknown->public_read
+    default) — a trivial remote CPU/DB-write DoS trigger (force-starts
+    synthetic seeding + training across all pairs). Now admin-gated.
+    """
+    await _require_admin(request)
     st = await asyncio.to_thread(_fast_train.bootstrap_status)
     if st.get("running"):
         return {"started": False, "reason": "already_running", "status": st}
@@ -4169,9 +4234,26 @@ async def get_prediction_card(asset: str):
 
 
 @app.delete("/api/signals/{asset}/{period}/{ctime}")
-async def delete_signal_endpoint(asset: str, period: int, ctime: int):
-    """Delete a single signal by (asset, period, ctime)."""
-    deleted = await asyncio.to_thread(_db.delete_signal, asset, period, ctime)
+async def delete_signal_endpoint(asset: str, period: int, ctime: int,
+                                  request: Request):
+    """Delete a single signal by (asset, period, ctime).
+
+    PHASE-J AUDIT FIX #1 (HIGH, 2026-10): this DESTRUCTIVE endpoint was
+    reachable ANONYMOUSLY (classified public_read via the /api/signals
+    prefix; the Phase D audit gated /api/signals/clear but missed this
+    sibling). Any visitor could script a full history wipe one row at a
+    time using the (asset, period, ctime) triples published by
+    /api/signals/all. Now requires admin credentials.
+    """
+    await _require_admin(request)
+    try:
+        deleted = await asyncio.to_thread(_db.delete_signal, asset, period, ctime)
+    except Exception as exc:
+        # PHASE-J: honest in-JSON error (e.g. table-less fresh DB) —
+        # was a raw 500 on unhandled sqlite errors.
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"delete failed: {type(exc).__name__}: {exc}"})
     if not deleted:
         raise HTTPException(status_code=404, detail="signal not found")
     return {"deleted": True, "asset": asset, "period": period, "ctime": ctime}
