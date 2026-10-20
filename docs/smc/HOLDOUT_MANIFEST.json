@@ -1,0 +1,76 @@
+{
+  "purpose": "Phase L pre-committed holdout \u2014 frozen at L0 BEFORE any L6 evaluation run. Changing this after seeing results = protocol violation.",
+  "frozen_utc": "2026-10-20T00:00:00Z",
+  "dataset_class": "AUTHORIZED_HISTORICAL_EXCHANGE (Binance public API, fetched Phase J)",
+  "protocol": {
+    "warmup_candles": 600,
+    "holdout": "LAST 6 DAYS (8640 candles) of each asset series",
+    "embargo_candles": 1,
+    "split": "chronological only; train = everything before holdout start",
+    "assets": [
+      "ADAUSDT",
+      "BNBUSDT",
+      "BTCUSDT",
+      "DOGEUSDT",
+      "ETHUSDT",
+      "LTCUSDT",
+      "SOLUSDT",
+      "XRPUSDT"
+    ]
+  },
+  "acceptance_rule": {
+    "rule": "An arm is ACCEPTED only if Wilson-CI-lower of holdout accuracy > prev-candle baseline holdout accuracy AND coverage >= 0.5",
+    "committed_at": "L0 (before any ICT arm was run)",
+    "note": "Same rule as Phase F. Rejected arms remain research-only weight 0."
+  },
+  "files": {
+    "ADAUSDT_1m.json": {
+      "sha256": "1d6109017a8ef2196ce545098a909a734d3df85bd692ca6353d95cf4e398abfa",
+      "rows": 43200,
+      "first_t_ms": 1789798920000,
+      "last_t_ms": 1792438860000
+    },
+    "BNBUSDT_1m.json": {
+      "sha256": "8c7edb694428fdbab1d25de14ec5200061b3656fd98951f425d6e112bfbf0f37",
+      "rows": 43200,
+      "first_t_ms": 1789798860000,
+      "last_t_ms": 1792438800000
+    },
+    "BTCUSDT_1m.json": {
+      "sha256": "5814b7c9e8cdbf6b0945e8301c0e8c91d5f95c5dfc78ccb32d064132222894df",
+      "rows": 43200,
+      "first_t_ms": 1789798860000,
+      "last_t_ms": 1792438800000
+    },
+    "DOGEUSDT_1m.json": {
+      "sha256": "2c091b2d8aebaaae03b9895ab60d7f4bca780b1e45e041f8bb45e3a2521aefa3",
+      "rows": 43200,
+      "first_t_ms": 1789798920000,
+      "last_t_ms": 1792438860000
+    },
+    "ETHUSDT_1m.json": {
+      "sha256": "63193e83c307774dbeb0488b5c5465049fb98cd38d43144f40ddd1b8e32e16b0",
+      "rows": 43200,
+      "first_t_ms": 1789798860000,
+      "last_t_ms": 1792438800000
+    },
+    "LTCUSDT_1m.json": {
+      "sha256": "be2fc0bb27bf8729434115e605bb7a27460c0c17301310913baa2cfe3f73fefd",
+      "rows": 43200,
+      "first_t_ms": 1789798920000,
+      "last_t_ms": 1792438860000
+    },
+    "SOLUSDT_1m.json": {
+      "sha256": "9cab7c73edacc9bd1d6b3d940b702ec593bc0d59529fc6081a394c641cb60e8f",
+      "rows": 43200,
+      "first_t_ms": 1789798920000,
+      "last_t_ms": 1792438860000
+    },
+    "XRPUSDT_1m.json": {
+      "sha256": "d36c713862eefcd7806bd6f42c09bc37c179e964c9ed3b2f0aa8267c44028600",
+      "rows": 43200,
+      "first_t_ms": 1789798860000,
+      "last_t_ms": 1792438800000
+    }
+  }
+}
