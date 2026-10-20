@@ -348,6 +348,16 @@ def build_feature_matrix(candles: Sequence[Candle],
     ptr = 0            # zones added to tracker (confirm <= t-2)
     avail_hi = 0       # zones available (confirm <= t-1)
     nz = len(ctx.zones)
+    # PRIMING (correctness): fold the FULL history [1, lo) first, so zones
+    # confirmed before `start` carry their true touched/broken status.
+    # Without this, early zones would wrongly stay "untested".
+    for t in range(1, lo):
+        while ptr < nz and ctx.zones[ptr].confirm_index <= t - 2:
+            tracker.add(ptr, ctx.zones[ptr])
+            ptr += 1
+        tracker.advance(ctx.candles[t - 1])
+        while avail_hi < nz and ctx.zones[avail_hi].confirm_index <= t - 1:
+            avail_hi += 1
     for t in range(lo, hi + 1):
         while ptr < nz and ctx.zones[ptr].confirm_index <= t - 2:
             tracker.add(ptr, ctx.zones[ptr])

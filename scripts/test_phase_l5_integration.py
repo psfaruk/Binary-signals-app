@@ -109,6 +109,21 @@ m2 = build_feature_matrix(cs_big, start=1, end=399)
 same = all(m1[i]["features"] == m2[i]["features"] for i in range(len(m1)))
 check(same, "C1 extending the series does not change any earlier snapshot row")
 
+print("C2. LATE-START MATRIX EQUIVALENCE (primed history)")
+m_late = build_feature_matrix(cs_big, start=250, end=399)
+late_ok = True
+late_detail = ""
+for r in m_late[::17]:
+    t = r["t"]
+    ref = snapshot_at(cs_big, t)
+    if ref != r["features"]:
+        late_ok = False
+        late_detail = f"t={t} diff keys={[k for k in ref if ref[k] != r['features'].get(k)][:4]}"
+        break
+check(late_ok, "C2 matrix built with start=250 equals snapshot_at for sampled rows "
+      "(primed zone history — catches the unprimed-tracker bug)",
+      late_detail)
+
 print("D. ZONE STATUS == classify_zone_status EXACTLY")
 ok = True
 detail = ""
