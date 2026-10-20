@@ -90,13 +90,22 @@ run "PHASE H — shadow replay runner (2 assets)" python3 scripts/shadow_replay.
 run "PHASE H — shadow ledger checks (28)" python3 scripts/test_phase_h_shadow.py
 run "PHASE J — security hardening (54)" python3 scripts/test_phase_j_security.py
 
+# 9. Phase K (provenance-clean retraining integrity)
+run "PHASE K — cleanprior integrity (26)" python3 scripts/test_phase_k_cleanprior.py
+
+# 10. Phase L SMC/ICT research modules (L1-L4)
+run "PHASE L1 — market structure (62)" python3 scripts/test_phase_l1_market_structure.py
+run "PHASE L2 — POI zones (66)" python3 scripts/test_phase_l2_poi_zones.py
+run "PHASE L3 — patterns + momentum (70)" python3 scripts/test_phase_l3_patterns_momentum.py
+run "PHASE L4 — liquidity/sessions/news/flow (118)" python3 scripts/test_phase_l4_liquidity_sessions_news.py
+
 echo ""
 echo "=================================================================="
 if [ $FAIL -eq 0 ]; then
   echo "  ALL OFFLINE CHECKS PASSED"
   echo "  (Phase A 154 + Phase B 94 + Phase C 93 + Phase D 38 +"
   echo "   Phase E 43 + Phase F 28 + Phase G 39 + Phase H 28 +"
-  echo "   Phase J 54 = 671 checks)"
+  echo "   Phase J 54 + Phase K 26 + Phase L1-L4 316 = 1013 checks)"
 else
   echo "  OFFLINE CHECKS FAILED — see the FAILED step above"
 fi

@@ -66,7 +66,13 @@ except Exception:  # pragma: no cover
 
 _EPS = 1e-12
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_WEIGHTS_FILE = os.path.join(_HERE, "next_candle_weights.json")
+# PHASE-K (2026-10): research override for the global-prior weights file.
+# DEFAULT IS UNCHANGED (production core/next_candle_weights.json) — this
+# only lets an isolated research arm (backtest_clean_eval worker /
+# retrain_clean_prior) point the engine at a CANDIDATE weights file with
+# recorded provenance. Production deployments never set this variable.
+_WEIGHTS_FILE = os.environ.get("QX_NC_WEIGHTS_FILE") or os.path.join(
+    _HERE, "next_candle_weights.json")
 
 # ── tunables (env-overridable; research defaults) ────────────────
 BLEND_K = float(os.environ.get("QX_NC_BLEND_K", "3000"))     # local/global blend

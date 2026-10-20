@@ -99,6 +99,13 @@ SPLIT_SPEC = SplitSpec(warmup=600, train_frac=0.50, selection_frac=0.25,
 
 BINANCE_ASSETS = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "BNBUSDT")
 BINANCE_DIR = os.path.join(_REPO, "scripts", "data", "binance")
+# PHASE-K (2026-10): overridable data dir (default unchanged) so the
+# provenance-clean retraining campaign can run the SAME frozen protocol
+# over the larger authorized 30-day dataset (scripts/data/binance_30d)
+# without touching the original pre-committed-holdout files.
+_gbd = os.environ.get("QX_BINANCE_DIR", "").strip()
+if _gbd:
+    BINANCE_DIR = _gbd
 
 
 # ── DATA LOADERS ─────────────────────────────────────────────────────────
@@ -159,10 +166,25 @@ def run_worker(arm: str, asset: str, source: str, seed: int) -> list:
     environment (local model dominates the unverifiable global prior) — a
     RESEARCH variant, clearly labeled, never a production-numerics change:
     production code is untouched and the default arm runs with defaults.
+
+    PHASE-K (2026-10): the cse_v1_cleanprior arm points the child's
+    global prior at a CANDIDATE weights file (QX_NC_WEIGHTS_FILE) produced
+    by scripts/retrain_clean_prior.py with recorded provenance — same
+    engine, same features, different (provenance-complete) prior.
     """
     env = dict(os.environ)
     if arm == "cse_v1_research_localprior":
         env["QX_NC_BLEND_K"] = "1"
+    if arm == "cse_v1_cleanprior":
+        _wf = getattr(run_worker, "weights_file", None)
+        if not _wf:
+            raise RuntimeError(
+                "cse_v1_cleanprior arm requires --weights-file")
+        env["QX_NC_WEIGHTS_FILE"] = _wf
+    # PHASE-K: propagate the data-dir override to the child interpreter
+    # (module-level default is the original binance dir otherwise).
+    if BINANCE_DIR != os.path.join(_REPO, "scripts", "data", "binance"):
+        env["QX_BINANCE_DIR"] = BINANCE_DIR
     out_file = tempfile.mktemp(prefix=f"clean_eval_worker_{arm}_{asset}_",
                                suffix=".json")
     cmd = [sys.executable, os.path.abspath(__file__),
@@ -364,10 +386,17 @@ def evaluate(args: argparse.Namespace) -> dict:
         arms_rows[name] = recs
 
     for arm, per_asset in engine_predictions.items():
-        def _engine(a, candles, i, _per=per_asset) -> tuple:
-            preds = _per.get(a) or []
-            by_t = {p["target_t"]: p for p in preds}
-            p = by_t.get(candles[i].t)
+        # PERF-FIX (Phase-K, 2026-10): by_t maps were rebuilt per candle —
+        # O(n²) per arm/asset (tolerable at Phase-C's 9k candles, fatal at
+        # 43k). Hoisted to one build per (arm, asset). Semantics identical:
+        # same dict construction (last duplicate target_t wins), same
+        # lookups — outputs byte-identical, verified by the Phase-C
+        # battery re-run after this change.
+        _maps = {a: {p["target_t"]: p for p in (per_asset.get(a) or [])}
+                 for a in accepted_by_asset}
+
+        def _engine(a, candles, i, _maps=_maps) -> tuple:
+            p = _maps.get(a, {}).get(candles[i].t)
             if p is None or p["direction"] is None:
                 return None, None
             return p["direction"], p["prob"]
@@ -444,6 +473,13 @@ def evaluate(args: argparse.Namespace) -> dict:
         folds_metrics = []
         pooled = []
         for a, candles in accepted_by_asset.items():
+            # PERF-FIX (Phase-K, 2026-10): position index + per-asset record
+            # map built once per (arm, asset) instead of per fold/call —
+            # _index_of's reverse linear scan was O(n) per lookup. Same
+            # semantics (exact t match, None when absent).
+            pos_by_t = {c.t: i for i, c in enumerate(candles)}
+            rec_by_target = {r["target_t"]: r for r in recs
+                             if r["asset"] == a}
             post = candles[FROZEN["warmup_candles"]:]
             folds = walk_forward_folds(post, n_folds=4, embargo_periods=1,
                                        period=60)
@@ -451,7 +487,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                 if name == "baseline_research_logreg_pre_specified":
                     X, y = [], []
                     for c in f.train:
-                        i = _index_of(candles, c.t)
+                        i = pos_by_t.get(c.t)
                         if i is None or i < 2:
                             continue
                         lab = research_label(candles, i)
@@ -462,7 +498,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                     m = PrespecifiedLogreg().fit(X, y) if len(X) >= 50 else None
                     fold_rows = []
                     for c in f.test:
-                        i = _index_of(candles, c.t)
+                        i = pos_by_t.get(c.t)
                         if i is None or i < 2:
                             continue
                         if m is None:
@@ -484,9 +520,8 @@ def evaluate(args: argparse.Namespace) -> dict:
                     pooled.extend(fold_rows)
                     continue
                 # engine arms + fixed baselines: predictions already online
+                # (rec_by_target hoisted per arm/asset — PERF-FIX above)
                 by_region_rows = []
-                rec_by_target = {r["target_t"]: r for r in recs
-                                 if r["asset"] == a}
                 for c in f.test:
                     r = rec_by_target.get(c.t)
                     if r is None or r["direction"] is None:
@@ -813,7 +848,14 @@ def main() -> None:
                     help="comma-separated asset filter (default: all)")
     ap.add_argument("--arms", default="cse_v1",
                     help="engine arms, comma-separated: cse_v1, "
-                         "cse_v1_research_localprior")
+                         "cse_v1_research_localprior, cse_v1_cleanprior")
+    ap.add_argument("--binance-dir", default=None,
+                    help="override the binance data dir (PHASE-K: the 30-day "
+                         "dataset; default: the original pre-committed "
+                         "holdout files)")
+    ap.add_argument("--weights-file", default=None,
+                    help="candidate global-prior weights for the "
+                         "cse_v1_cleanprior arm (PHASE-K)")
     ap.add_argument("--payout", type=float, default=None,
                     help="net payout per unit for the break-even block "
                          "(explicitly supplied, never hardcoded)")
@@ -832,6 +874,15 @@ def main() -> None:
     if args.internal_worker:
         _worker_main(args)
         return
+
+    # PHASE-K wiring: data dir + candidate weights for the cleanprior arm.
+    if args.binance_dir:
+        global BINANCE_DIR
+        BINANCE_DIR = os.path.abspath(args.binance_dir)
+    if args.weights_file:
+        if not os.path.isfile(args.weights_file):
+            raise SystemExit(f"--weights-file not found: {args.weights_file}")
+        run_worker.weights_file = os.path.abspath(args.weights_file)
 
     os.makedirs(args.out_dir, exist_ok=True)
     report = evaluate(args)
