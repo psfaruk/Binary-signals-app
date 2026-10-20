@@ -1,0 +1,8 @@
+[
+  {"time": "2026-01-15T13:30:00Z", "currency": "USD", "impact": "high", "title": "SYNTHETIC-TEST: Nonfarm Payrolls (fabricated fixture event — not real calendar data)"},
+  {"ts": 1768489200, "currency": "USD", "impact": "medium", "title": "SYNTHETIC-TEST: Consumer Sentiment Prelim (fabricated fixture event)"},
+  {"time": "2026-01-16T09:00:00Z", "currency": "EUR", "impact": "high", "title": "SYNTHETIC-TEST: ECB Main Refinancing Rate (fabricated fixture event)"},
+  {"ts": 1768558500, "currency": "EUR", "impact": "low", "title": "SYNTHETIC-TEST: German 10-y Bond Auction (fabricated fixture event)"},
+  {"time": "2026-01-19T13:30:00Z", "currency": "USD", "impact": "high", "title": "SYNTHETIC-TEST: CPI y/y (fabricated fixture event)"},
+  {"ts": 1768836600, "currency": "USD", "impact": "medium", "title": "SYNTHETIC-TEST: FOMC Member Speaks (fabricated fixture event)"}
+]
