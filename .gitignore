@@ -63,4 +63,10 @@ data/
 # trained bundle files land next to the DB (models_dir()); backtest
 # outputs are regenerable — neither belongs in the repo.
 models/
-scripts/out/
+scripts/out/*
+# PHASE-K EVIDENCE (CP-CI1, 2026-10-21): these two frozen artifacts are
+# NOT cheaply regenerable (30-day, 8-asset retrain pipeline) and are the
+# exact files the Phase-K battery verifies (the B5 bounded-by-existence
+# record). Everything else under scripts/out/ stays ignored.
+!scripts/out/retrained_prior_20261020T214325.json
+!scripts/out/phase_k_retrain_20261020T214325.json

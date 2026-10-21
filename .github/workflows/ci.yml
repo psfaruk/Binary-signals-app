@@ -1,8 +1,12 @@
 name: offline-checks
 # Mirrors scripts/run_offline_checks.sh exactly.
-# HONESTY NOTE: GitHub Actions execution is NOT claimable as passing
-# until a real run is observed (no push has occurred from this rebuild;
-# local verification is the only evidence that exists).
+# HONESTY NOTE (updated CP-CI1, 2026-10-21): the FIRST observed GitHub
+# run (39587996894, on CP-L8) FAILED — this workflow's dependency list
+# was missing python-dotenv (imported by server.py) and numpy (guarded
+# import in core/next_candle.py), and the Phase-K battery needs the two
+# committed evidence artifacts (previously gitignored). Fixed here and
+# verified by a faithful fresh-clone repro (1071/1071, exit 0). A "CI
+# green" claim still requires observing a real post-fix GitHub run.
 on:
   push:
     branches: ["**"]
@@ -23,6 +27,6 @@ jobs:
       - name: Install python deps (runtime + test imports)
         run: |
           python -m pip install --upgrade pip
-          pip install fastapi uvicorn httpx
+          pip install fastapi uvicorn httpx python-dotenv numpy
       - name: Run every offline check (temp DBs, no network, no creds)
         run: bash scripts/run_offline_checks.sh
