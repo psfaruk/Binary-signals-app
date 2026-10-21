@@ -57,6 +57,7 @@ print(f"ast.parse OK over {len(files)} files")
 PYEOF
 run "SYNTAX GATE — changed JS" node --check static/js/common.js
 run "SYNTAX GATE — signal_states.js" node --check static/js/signal_states.js
+run "SYNTAX GATE — ict-overlay.js" node --check static/js/ict-overlay.js
 run "SYNTAX GATE — token panel JS" node --check static/js/token-panel.js
 
 # 1. Phase A (Truth Layer)
@@ -98,6 +99,8 @@ run "PHASE L1 — market structure (62)" python3 scripts/test_phase_l1_market_st
 run "PHASE L2 — POI zones (66)" python3 scripts/test_phase_l2_poi_zones.py
 run "PHASE L3 — patterns + momentum (70)" python3 scripts/test_phase_l3_patterns_momentum.py
 run "PHASE L4 — liquidity/sessions/news/flow (118)" python3 scripts/test_phase_l4_liquidity_sessions_news.py
+run "PHASE L5 — integration snapshot (31)" python3 scripts/test_phase_l5_integration.py
+run "PHASE L7 — ICT research overlay UI (27)" python3 scripts/test_phase_l7_ui.py
 
 echo ""
 echo "=================================================================="
@@ -105,7 +108,8 @@ if [ $FAIL -eq 0 ]; then
   echo "  ALL OFFLINE CHECKS PASSED"
   echo "  (Phase A 154 + Phase B 94 + Phase C 93 + Phase D 38 +"
   echo "   Phase E 43 + Phase F 28 + Phase G 39 + Phase H 28 +"
-  echo "   Phase J 54 + Phase K 26 + Phase L1-L4 316 = 1013 checks)"
+  echo "   Phase J 54 + Phase K 26 + Phase L1-L4 316 + L5 31 +"
+  echo "   L7 27 = 1071 checks)"
 else
   echo "  OFFLINE CHECKS FAILED — see the FAILED step above"
 fi

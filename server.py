@@ -1249,6 +1249,173 @@ async def data_quality():
 
     return out
 
+
+# ── PHASE-L7 ICT/SMC RESEARCH OVERLAY (2026-10) ──────────────────────────
+_ICT_REPLAY_ASSETS = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "BNBUSDT", "ADAUSDT",
+                      "SOLUSDT", "DOGEUSDT", "LTCUSDT")
+_ICT_HONESTY = {
+    "research_only": True,
+    "validated": False,
+    "actionable": False,
+    "weight": 0.0,
+    "labels": [
+        "রিসার্চ মডিউল — ভ্যালিডেটেড নয়",
+        "research overlay; NOT validated; NOT actionable",
+        "L6 evaluation: all ICT arms below 54.05% break-even at 0.85 "
+        "payout (negative expectancy); no module registered",
+    ],
+}
+_ict_cache: dict = {}
+_ICT_EVAL_MOD = None
+
+
+@app.get("/api/ict-research/{asset}")
+async def ict_research(asset: str, mode: str = "auto", at: int | None = None):
+    """PHASE-L7: read-only ICT/SMC research overlay for ONE asset.
+
+    Modes:
+      * auto (default): if the live feed has closed candles for the
+        asset, compute the snapshot from them; otherwise an honest
+        no-data state (never fabricated).
+      * replay: compute from the AUTHORIZED 30-day Binance 1m research
+        dataset (historical exchange data — NOT OTC, NOT live). `at`
+        selects the target candle index (default: near the dataset end).
+
+    Returns structure/trend, windowed zones with status, recent patterns,
+    momentum, session tag, liquidity/AMD state and the PRE-SPECIFIED L6
+    research rule votes — every vote explicitly research-only, weight 0,
+    NOT validated, NOT actionable. No secrets, no writes, no direction
+    emission through any signal path (the Truth Layer is untouched).
+    """
+    import json as _json
+    from core.ict.features import FeatureContext
+    from core.ict.types import candle_from_row, Candle
+
+    asset = (asset or "").upper().strip()
+
+    def _no_data(reason: str):
+        return {
+            "asset": asset, "data_mode": "no_data", "reason": reason,
+            "honesty": _ICT_HONESTY, "state": None,
+        }
+
+    candles: list | None = None
+    data_mode = None
+    provenance = None
+
+    if mode == "replay":
+        if asset not in _ICT_REPLAY_ASSETS:
+            return _no_data(
+                f"replay dataset has no asset '{asset}' "
+                f"(available: {', '.join(_ICT_REPLAY_ASSETS)})")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "scripts", "data", "binance_30d",
+                            f"{asset}_1m.json")
+        if not os.path.exists(path):
+            return _no_data("replay dataset file missing")
+        import hashlib as _hl
+        key = (asset, at)
+        cached = _ict_cache.get(key)
+        if cached:
+            return cached
+        with open(path) as fh:
+            raw = _json.load(fh)
+        raw = raw[:-1]  # drop the trailing fetch-time PARTIAL candle
+        target = at if at is not None else len(raw) - 8640 + 720
+        target = max(600, min(target, len(raw) - 1))
+        lo = max(0, target - 720)
+        candles = [candle_from_row(r) for r in raw[lo:target + 1]]
+        t = len(candles) - 1
+        data_mode = "research_replay_authorized_binance_30d"
+        import datetime as _dt
+        provenance = {
+            "classification": ("HISTORICAL_EXCHANGE_DATA (public Binance "
+                               "1m — authorized; NOT OTC; NOT live)"),
+            "file": f"scripts/data/binance_30d/{asset}_1m.json",
+            "sha256": _hl.sha256(open(path, "rb").read()).hexdigest(),
+            "target_index_in_file": target,
+            "target_ts_utc": _dt.datetime.fromtimestamp(
+                candles[t].ts, _dt.timezone.utc).isoformat(),
+        }
+        ctx = FeatureContext(candles)
+        snap = ctx.snapshot(t)
+        out = {
+            "asset": asset, "data_mode": data_mode,
+            "provenance": provenance, "honesty": _ICT_HONESTY,
+            "state": snap,
+            "research_votes": _ict_research_votes(snap, candles, t),
+        }
+        if len(_ict_cache) > 64:
+            _ict_cache.clear()
+        _ict_cache[key] = out
+        return out
+
+    # auto mode: use live closed candles if the feed has them
+    try:
+        stream = None
+        streams = getattr(feed, "_streams", {}) or {}
+        for (a, period), s in streams.items():
+            if (a or "").upper() == asset and period == 60:
+                stream = s
+                break
+        hist = [c for c in (getattr(stream, "candles", []) or [])
+                if c.get("open") is not None and c.get("close") is not None]
+        if len(hist) >= 30:
+            candles = [Candle(ts=int(c.get("time", 0) or 0),
+                              open=float(c["open"]), high=float(c["high"]),
+                              low=float(c["low"]), close=float(c["close"]))
+                       for c in hist]
+            data_mode = "live_feed"
+    except Exception:
+        candles = None
+    if candles is None:
+        return _no_data(
+            "no live closed candles for this asset (unauthorized source "
+            "— see docs/DATA_SOURCE_BLOCKER.md); use ?mode=replay for "
+            "the authorized research dataset")
+    ctx = FeatureContext(candles)
+    t = len(candles) - 1
+    snap = ctx.snapshot(t)
+    return {
+        "asset": asset, "data_mode": data_mode,
+        "provenance": {
+            "classification": ("live feed candles (source authorization: "
+                               "unauthorized — labeled, not actionable)"),
+        },
+        "honesty": _ICT_HONESTY, "state": snap,
+        "research_votes": _ict_research_votes(snap, candles, t),
+    }
+
+
+def _ict_research_votes(snap: dict, candles, t: int) -> dict:
+    """Pre-specified L6 rule outputs, labeled research-only/weight-0."""
+    global _ICT_EVAL_MOD
+    try:
+        if _ICT_EVAL_MOD is None:
+            import importlib.util as _il
+            _p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "scripts", "backtest_ict_eval.py")
+            spec = _il.spec_from_file_location("bce_ict", _p)
+            m = _il.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            _ICT_EVAL_MOD = m
+        m = _ICT_EVAL_MOD
+        votes = {}
+        for name, fn in m.ARMS.items():
+            if name == "baseline_prev_candle":
+                continue
+            d = fn(snap, candles, t)
+            votes[name] = {
+                "direction": d,
+                "label": "রিসার্চ ভোট — ভ্যালিডেটেড নয়, ওজন 0, "
+                          "প্রযোজ্য নয়",
+                "l6_holdout_accuracy": None,  # filled by caller if desired
+            }
+        return votes
+    except Exception as exc:  # honest degradation, never fabricated
+        return {"error": f"research vote computation failed: {exc}"}
+
+
 @app.get("/api/token-status")
 async def token_status():
     """Returns whether the app has live Quotex credentials."""

@@ -464,6 +464,20 @@
                             </div>
                         </div>
 
+                        <!-- PHASE-L7 (2026-10): ICT/SMC রিসার্চ ওভারলে — read-only,
+                             honest research state (zones/structure/patterns/momentum)
+                             + L6 research votes, everything labeled NOT validated.
+                             js/ict-overlay.js writes to #ict-* elements. -->
+                        <div class="module-panel collapsible-panel collapsed" id="ict-panel">
+                            <div class="panel-section-header">
+                                <h4>ICT/SMC রিসার্চ <span class="te-eye-icon" title="শুধুমাত্র রিসার্চ ওভারলে — ভ্যালিডেটেড নয়, প্রযোজ্য নয়">🔬</span></h4>
+                                <button class="icon-btn-sm panel-toggle" type="button" aria-expanded="false">▾</button>
+                            </div>
+                            <div class="module-list" id="ict-overlay-body">
+                                <div class="module-row">রিসার্চ ডেটার অপেক্ষায়…</div>
+                            </div>
+                        </div>
+
                         <!-- Market state — common.js writes to #ms-* elements.
                              RIGHT-RAIL-REORG (2026-09-19): collapsible, collapsed by default. -->
                         <div class="market-state-panel collapsible-panel collapsed">
@@ -1103,6 +1117,7 @@
 <script src="/static/js/models-panel.js"></script>
 <script src="/static/js/app-nav.js"></script>
 <script src="/static/js/token-panel.js"></script>
+<script src="/static/js/ict-overlay.js"></script>
 <script>
 (function() {
     var params = new URLSearchParams(window.location.search);
