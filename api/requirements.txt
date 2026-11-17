@@ -1,0 +1,23 @@
+# Slim dependency manifest for the VERCEL serverless functions
+# (VERCEL-DEPLOY 2026-11). The @vercel/python runtime installs from the
+# requirements.txt NEAREST the entry file (api/), so this list wins over
+# the root requirements.txt inside Vercel while local/persistent-host
+# installs keep using the full manifest at the repo root.
+#
+# Dropped vs the root manifest (bundle size + cold-start):
+#   numpy / scikit-learn / joblib — every consumer guards the import
+#   (SKLEARN_OK pattern, "Railway slim image fallback" in
+#   core/otc_predict/models.py). Consequence on Vercel: the ML trainer is
+#   offline there (models cannot persist across serverless instances
+#   anyway) while the confluence engine, history gate, pair-health gate
+#   and pattern learning all run — they are pure Python.
+#   uvicorn — the platform adapter invokes the ASGI app directly.
+#   orjson — pyquotex/utils/json_utils.py falls back to stdlib json.
+fastapi>=0.110.0,<0.115
+python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0
+certifi>=2024.0.0
+fake-useragent>=1.5.0
+httpx>=0.27.0
+typing_extensions>=4.0.0
+websockets>=12.0

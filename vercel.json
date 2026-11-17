@@ -1,0 +1,60 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": {
+        "includeFiles": [
+          "server.py",
+          "feed.py",
+          "db.py",
+          "quotex_ws.py",
+          "alerts.py",
+          "supabase_sync.py",
+          "sitecustomize.py",
+          "core/**",
+          "engines/**",
+          "pyquotex/**",
+          "static/**"
+        ]
+      }
+    },
+    {
+      "src": "api/cron/refresh.py",
+      "use": "@vercel/python",
+      "config": {
+        "includeFiles": [
+          "server.py",
+          "feed.py",
+          "db.py",
+          "quotex_ws.py",
+          "alerts.py",
+          "supabase_sync.py",
+          "sitecustomize.py",
+          "core/**",
+          "engines/**",
+          "pyquotex/**",
+          "static/**"
+        ]
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/cron/refresh",
+      "dest": "/api/cron/refresh"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/api/index"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/refresh",
+      "schedule": "0 6 * * *"
+    }
+  ]
+}

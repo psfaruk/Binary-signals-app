@@ -1,0 +1,15 @@
+# VERCEL-DEPLOY (2026-11): keep the serverless bundle lean — none of these
+# are imported at runtime (see vercel.json includeFiles for the full
+# runtime set). Local/persistent-host installs are unaffected.
+.git
+.github
+docs
+backtest_reports
+scripts
+DEPLOYMENT_V2.md
+DEPLOYMENT_VERCEL.md
+run.sh
+run_service.sh
+.env.example
+.dockerignore
+.persistence_marker.json

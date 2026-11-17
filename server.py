@@ -328,6 +328,83 @@ async def broadcast(msg: dict):
         if isinstance(result, BaseException):
             clients.pop(cid, None)
 
+# ── VERCEL-DEPLOY (2026-11): serverless-safe boot split ─────────────────────
+# QX_DISABLE_FEED=1 (set by api/index.py on Vercel) keeps the identical app
+# importable + servable on a serverless platform: no persistent feed task,
+# no backup-scheduler thread, no Supabase mirror thread. The live signal
+# engine instead runs in bounded bursts inside api/cron/refresh.py.
+_DISABLE_FEED = os.environ.get("QX_DISABLE_FEED", "0") == "1"
+
+
+def _boot_static_init() -> None:
+    """One-time synchronous init: DB schema, TARGET-75 gate, brain tables,
+    pair-hourly patterns, algorithm monitor.
+
+    VERCEL-DEPLOY (2026-11): extracted from the old nested lifespan closure
+    so the serverless wrapper (api/index.py) — which may never receive the
+    ASGI lifespan protocol — can run the exact same init on first request.
+    Idempotent and thread-safe via SQLite's own locking.
+    """
+    _db.init()
+    try:
+        from core.target_gate import _ensure_table as _tg_ensure
+        _conn = _db._conn()
+        try:
+            _tg_ensure(_conn)
+        finally:
+            _conn.close()
+        print("[server] TARGET-75 gate table ready")
+    except Exception as _tg_exc:
+        print(f"[server] target-gate table init failed (non-fatal): {_tg_exc}")
+    # Initialize brain tables
+    from core.brain import init_brain
+    init_brain()
+    try:
+        from core.time_patterns import init_patterns, recompute_from_signal_log
+        init_patterns()
+        summary = recompute_from_signal_log(min_samples=3)
+        total_patterns = sum(sum(dims.values()) for dims in summary.values()) if summary else 0
+        print(f"[server] patterns loaded: {total_patterns} entries across " f"{len(summary)} pairs")
+    except Exception as _e:
+        print(f"[server] pattern init failed (non-fatal): {_e}")
+    try:
+        from core.algorithm_monitor import init_algorithm_monitor
+        init_algorithm_monitor()
+        print("[server] algorithm monitor initialized")
+    except Exception as _e:
+        print(f"[server] algorithm monitor init failed (non-fatal): {_e}")
+
+
+def _start_background_threads() -> None:
+    """Threads that only make sense on a persistent host (VPS / fly.io / …).
+
+    VERCEL-DEPLOY (2026-11): split out of _sync_init. NOT started when
+    QX_DISABLE_FEED=1 — a serverless instance is frozen between requests,
+    so the backup scheduler and the Supabase mirror loop could never make
+    progress anyway.
+    """
+    # PERSISTENCE-FIX (2026-09-09): periodic online backup of signals.db
+    # (volume-backed or repo-local).
+    try:
+        _db.start_backup_scheduler()
+    except Exception as _bk_exc:
+        print(f"[server] backup scheduler init failed (non-fatal): {_bk_exc}")
+    # SUPABASE-SYNC-FIX (2026-09-18): sitecustomize.py's start() call
+    # only fires under Python's automatic sitecustomize import, which
+    # scans sys.path[0] = the directory of the script being *executed*.
+    # Starting it explicitly here removes that dependency on *how* the
+    # process happens to be launched.
+    try:
+        import supabase_sync
+        if supabase_sync.start():
+            print("[server] Supabase persistence bridge started")
+        else:
+            print("[server] Supabase bridge not started "
+                  "(SUPABASE_URL/KEY not set — local-only mode)")
+    except Exception as _e:
+        print(f"[server] Supabase bridge init failed (non-fatal): {_e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup + shutdown lifecycle (replaces @app.on_event)."""
@@ -356,62 +433,13 @@ async def lifespan(app: FastAPI):
 
 
     def _sync_init():
-        _db.init()
-        # PERSISTENCE-FIX (2026-09-09): periodic online backup of signals.db
-        # (volume-backed or repo-local) + TARGET-75 gate table init.
-        try:
-            _db.start_backup_scheduler()
-        except Exception as _bk_exc:
-            print(f"[server] backup scheduler init failed (non-fatal): {_bk_exc}")
-        try:
-            from core.target_gate import _ensure_table as _tg_ensure
-            _conn = _db._conn()
-            try:
-                _tg_ensure(_conn)
-            finally:
-                _conn.close()
-            print("[server] TARGET-75 gate table ready")
-        except Exception as _tg_exc:
-            print(f"[server] target-gate table init failed (non-fatal): {_tg_exc}")
-        # Initialize brain tables
-        from core.brain import init_brain
-        init_brain()
-        try:
-            from core.time_patterns import init_patterns, recompute_from_signal_log
-            init_patterns()
-            summary = recompute_from_signal_log(min_samples=3)
-            total_patterns = sum(sum(dims.values()) for dims in summary.values()) if summary else 0
-            print(f"[server] patterns loaded: {total_patterns} entries across " f"{len(summary)} pairs")
-        except Exception as _e:
-            print(f"[server] pattern init failed (non-fatal): {_e}")
-        try:
-            from core.algorithm_monitor import init_algorithm_monitor
-            init_algorithm_monitor()
-            print("[server] algorithm monitor initialized")
-        except Exception as _e:
-            print(f"[server] algorithm monitor init failed (non-fatal): {_e}")
-        # SUPABASE-SYNC-FIX (2026-09-18): sitecustomize.py's start() call
-        # only fires under Python's automatic sitecustomize import, which
-        # scans sys.path[0] = the directory of the script being *executed*.
-        # run_service.sh launches `exec uvicorn server:app ...` — the
-        # uvicorn console-script, not `python server.py` — so sys.path[0]
-        # is uvicorn's own install dir, never the repo root, and
-        # sitecustomize.py was silently never imported: the bridge never
-        # started under this deployment's actual launch command (confirmed
-        # live: SUPABASE_URL/KEY were correctly set and the app ran for
-        # hours with signal_log/candle_micro/otc_predictions/model_registry
-        # all still at 0 rows on Supabase). Starting it explicitly here
-        # removes that dependency on *how* the process happens to be
-        # launched.
-        try:
-            import supabase_sync
-            if supabase_sync.start():
-                print("[server] Supabase persistence bridge started")
-            else:
-                print("[server] Supabase bridge not started "
-                      "(SUPABASE_URL/KEY not set — local-only mode)")
-        except Exception as _e:
-            print(f"[server] Supabase bridge init failed (non-fatal): {_e}")
+        # VERCEL-DEPLOY (2026-11): thin dispatcher — the real body lives in
+        # module-level _boot_static_init() + _start_background_threads() so
+        # the serverless wrapper (api/index.py) can run the identical init
+        # without the ASGI lifespan protocol.
+        _boot_static_init()
+        if not _DISABLE_FEED:
+            _start_background_threads()
 
     await asyncio.to_thread(_sync_init)
     _PATTERNS_INITIALIZED = True
@@ -428,14 +456,23 @@ async def lifespan(app: FastAPI):
             print("[server] FATAL: feed task exited normally (unexpected) " "— feed is dead. Restart the container.")
             # Tag the task so /healthz can detect this state.
             app.state.feed_dead_normal_exit = True
-    feed_task = asyncio.create_task(feed.run(broadcast))
-    feed_task.add_done_callback(_on_feed_done)
-    # Expose the feed task so /healthz can check it (Problem 38).
-    app.state.feed_task = feed_task
-    print("[server] lifespan: feed task started")
+    if _DISABLE_FEED:
+        print("[server] lifespan: feed task SKIPPED (QX_DISABLE_FEED=1 — "
+              "serverless/static-API mode, Vercel deployment; the live "
+              "engine runs in bursts inside api/cron/refresh.py)")
+    else:
+        feed_task = asyncio.create_task(feed.run(broadcast))
+        feed_task.add_done_callback(_on_feed_done)
+        # Expose the feed task so /healthz can check it (Problem 38).
+        app.state.feed_task = feed_task
+        print("[server] lifespan: feed task started")
     # Auto-open browser (local dev only — disabled on Railway via env var)
     _auto_open_browser()
     print("[server] lifespan: startup complete")
+    # VERCEL-DEPLOY (2026-11): marker for the serverless boot middleware in
+    # api/index.py — if the platform adapter DID deliver the lifespan
+    # protocol, _ensure_boot() detects this and skips its own init.
+    app.state._lifespan_ran = True
     yield
     print("[server] lifespan: shutdown beginning")
     # Flush learned agent weights before the container goes away — otherwise
@@ -447,12 +484,19 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         print(f"[server] agent save on shutdown failed (non-fatal): {_e}")
     await feed.shutdown()
-    feed_task.cancel()
-    try:
-        await feed_task
-    except asyncio.CancelledError as _e:
-        print(f"[silent-except] server.py:368 {type(_e).__name__}: {_e}")
-        pass
+    # VERCEL-DEPLOY (2026-11): feed_task only exists when it was started —
+    # under QX_DISABLE_FEED=1 (serverless mode) app.state.feed_task is
+    # never set, so guard the cancel/await on shutdown.
+    _ft = getattr(app.state, "feed_task", None)
+    if _ft is not None:
+        _ft.cancel()
+        try:
+            await _ft
+        except asyncio.CancelledError as _e:
+            print(f"[silent-except] server.py:368 {type(_e).__name__}: {_e}")
+            pass
+    else:
+        print("[server] lifespan: shutdown — no feed task (serverless mode)")
     print("[server] lifespan: shutdown complete")
 
 app = FastAPI(lifespan=lifespan)

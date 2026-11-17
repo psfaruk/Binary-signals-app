@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Entry point for every Railway service built from this repo.
+# Entry point for persistent-host deploys (VPS / fly.io / Render / …).
+
+# VERCEL-DEPLOY (2026-11): Railway config removed (railway.json deleted —
+# the Vercel deployment lives in vercel.json + api/). This script remains
+# for any host with a long-running process, where the live Quotex feed can
+# stream continuously. Geo note preserved below for whoever runs the
+# minter role: Quotex geo-blocks the trade page by country, so mint the
+# SSID from a non-blocked region and hand the token to the app.
 #
-# Two services share this image and differ only by QX_SERVICE_ROLE:
+# Two services can share this image and differ only by QX_SERVICE_ROLE:
 #
-#   (unset)  the signals app  — us-west, owns the volume + signals.db
-#   minter   the token minter — southeast-asia, no volume
-#
-# The split exists because Quotex geo-blocks by country: from us-west the
-# trade page literally returns "Quotex is currently not available in your
-# region. (United States)", so the app cannot mint its own SSID there. The
-# WebSocket is not geo-blocked, so the app keeps streaming from us-west with
-# a token the minter hands it. See scripts/minter_service.py.
+#   (unset)  the signals app  — owns the volume + signals.db
+#   minter   the token minter — no volume
 set -euo pipefail
 
 if [ "${QX_SERVICE_ROLE:-}" = "minter" ]; then
