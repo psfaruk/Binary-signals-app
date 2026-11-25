@@ -49,7 +49,7 @@
   var el = {};
   var state = { status: null, watching: false, pollTimer: null,
                 autoOpened: false, notLiveSince: 0, lastDeadNag: 0,
-                lastNodataNag: 0, authState: null };
+                lastNodataNag: 0, authState: null, claimMode: 'code' };
   var LS_PIN = 'bst_app_pin';
 
   function storedPin() {
@@ -84,6 +84,15 @@
               + 'দিন।');
       return 'PIN সেট করা দরকার — নিচের সেটআপ সেকশন দেখুন।';
     }
+    /* UI-FIX (2026-11-26): /api/set-token 401 carries auth:{claimed:false}
+       when no PIN exists yet — reveal the claim section (refreshAuth picks
+       the correct admin-key / setup-code mode from the server). */
+    if (body.auth && body.auth.claimed === false) {
+      refreshAuth();
+      showClaim('সার্ভারে এখনো PIN সেট হয়নি — নিচের সেটআপ সেকশন দিয়ে আগে '
+              + 'PIN সেট করুন, তারপর টোকেন দিন।');
+      return 'PIN সেট করা দরকার — নিচের সেটআপ সেকশন দেখুন।';
+    }
     if (/wrong operator PIN/i.test(detail)) {
       if (el.pin) el.pin.value = '';
       return 'ভুল PIN — আবার সঠিক PIN দিন।';
@@ -96,28 +105,62 @@
     if (msg && el.result) result('err', msg);
   }
 
+  /* UI-FIX (2026-11-26): the claim form has TWO modes. When the server has
+     ADMIN_KEY set (auth_state.admin_key_env), the first claim must present
+     the X-Admin-Key header — claim_pin() IGNORES the console setup code in
+     that case, so the old setup-code-only form always died with 403
+     "forbidden". Without ADMIN_KEY the one-time console code is the way. */
+  function setClaimMode(mode) {
+    state.claimMode = mode;
+    var adminBox = document.getElementById('tk-claim-admin-key');
+    var codeBox = document.getElementById('tk-setup-code');
+    var note = document.getElementById('tk-claim-note');
+    if (adminBox) adminBox.hidden = (mode !== 'admin');
+    if (codeBox) codeBox.hidden = (mode !== 'code');
+    if (note) note.textContent = (mode === 'admin')
+      ? 'সার্ভারে এখনো PIN নেই — কিন্তু ADMIN_KEY সেট আছে, তাই সেটআপ কোড '
+        + 'লাগবে না। Railway → Variables এ থাকা ADMIN_KEY মান দিয়ে নিচে '
+        + 'PIN সেট করুন।'
+      : 'সার্ভারে এখনো PIN নেই। সার্ভার কনসোলে (লগ) প্রিন্ট হওয়া এককালীন '
+        + 'SETUP CODE দিয়ে নিচে PIN সেট করুন।';
+  }
+
   function claimPin() {
     var pin = (el.claimPin && el.claimPin.value || '').trim();
+    var mode = state.claimMode || 'code';
     var code = (el.setupCode && el.setupCode.value || '').trim();
-    if (!pin || !code) {
-      result('err', 'SETUP CODE এবং নতুন PIN — দুটোই দিন।');
+    var adminKey = (el.claimAdminKey && el.claimAdminKey.value || '').trim();
+    if (!pin || pin.length < 6) {
+      result('err', 'নতুন PIN দিন (অন্তত ৬ অক্ষর)।');
       return;
     }
-    if (pin.length < 6) {
-      result('err', 'PIN অন্তত ৬ অক্ষরের হতে হবে।');
+    if (mode === 'admin' && !adminKey) {
+      result('err', 'ADMIN KEY দিন — Railway → Variables এর ADMIN_KEY মান।');
+      return;
+    }
+    if (mode === 'code' && !code) {
+      result('err', 'SETUP CODE দিন — সার্ভার কনসোলের লগে প্রিন্ট হয়।');
       return;
     }
     el.claimBtn.disabled = true;
     result('busy', 'PIN সেট করা হচ্ছে…');
+    /* UI-FIX (2026-11-26): admin-key mode sends X-Admin-Key; setup-code
+       mode sends the console code in the body — exactly what the server's
+       /api/auth/claim expects in each configuration. */
+    var headers = { 'Content-Type': 'application/json' };
+    var body = { pin: pin };
+    if (mode === 'admin') headers['X-Admin-Key'] = adminKey;
+    else body.setup_code = code;
     fetchJSON('/api/auth/claim', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pin: pin, setup_code: code })
+      headers: headers,
+      body: JSON.stringify(body)
     }).then(function (r) {
       el.claimBtn.disabled = false;
       var body = r.body || {};
       if (!r.ok || !body.ok) {
         result('err', '❌ ' + (body.error || body.detail || ('HTTP ' + r.status)));
+        if (r.status === 403) refreshAuth();  /* stale claim mode — re-sync */
         return;
       }
       rememberPin(pin);
@@ -136,9 +179,16 @@
     return fetchJSON('/api/auth/state').then(function (r) {
       if (!r.ok) return null;
       state.authState = r.body || null;
-      if (state.authState && state.authState.setup_code_required) {
-        showClaim('এই ডিপ্লয়মেন্টে এখনো PIN নেই — সার্ভার কনসোলের '
-                + 'এককালীন SETUP CODE দিয়ে PIN সেট করুন।');
+      var st = state.authState || {};
+      if (!st.claimed && (st.admin_key_env || st.setup_code_required)) {
+        /* UI-FIX (2026-11-26): pick the claim mode the server can actually
+           accept — admin key when ADMIN_KEY is set, else the console code. */
+        setClaimMode(st.admin_key_env ? 'admin' : 'code');
+        showClaim(st.admin_key_env
+          ? 'এই ডিপ্লয়মেন্টে এখনো PIN নেই — Railway → Variables এর ADMIN_KEY '
+          + 'দিয়ে নিচে PIN সেট করুন (সেটআপ কোড লাগবে না)।'
+          : 'এই ডিপ্লয়মেন্টে এখনো PIN নেই — সার্ভার কনসোলের এককালীন '
+          + 'SETUP CODE দিয়ে PIN সেট করুন।');
       } else if (el.claim) {
         el.claim.hidden = true;
       }
@@ -334,11 +384,16 @@
                            'পেস্ট + Import।' })
         ]),
 
-        /* ── PHASE-J: first-run claim (server console setup code) ── */
+        /* ── PHASE-J: first-run claim (setup code OR admin key) ── */
         h('div', { class: 'tk-field tk-claim', id: 'tk-claim', hidden: 'hidden' }, [
-          h('div', { class: 'tk-hint tk-claim-note',
+          h('div', { class: 'tk-hint tk-claim-note', id: 'tk-claim-note',
                      text: 'সার্ভারে এখনো PIN নেই। সার্ভার কনসোলে (লগ) প্রিন্ট হওয়া ' +
                            'এককালীন SETUP CODE দিয়ে নিচে PIN সেট করুন।' }),
+          h('input', {
+            class: 'tk-input', id: 'tk-claim-admin-key', type: 'password',
+            autocomplete: 'off', spellcheck: 'false', hidden: 'hidden',
+            placeholder: 'ADMIN KEY (Railway Variables → ADMIN_KEY)'
+          }),
           h('input', {
             class: 'tk-input', id: 'tk-setup-code', type: 'text',
             autocomplete: 'off', spellcheck: 'false',
@@ -708,8 +763,13 @@
     el.pin = document.getElementById('tk-pin');
     el.claim = document.getElementById('tk-claim');
     el.setupCode = document.getElementById('tk-setup-code');
+    el.claimAdminKey = document.getElementById('tk-claim-admin-key');
+    el.claimNote = document.getElementById('tk-claim-note');
     el.claimPin = document.getElementById('tk-claim-pin');
     el.claimBtn = document.getElementById('tk-claim-btn');
+    if (el.claimAdminKey) el.claimAdminKey.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') claimPin();
+    });
     if (el.claimBtn) el.claimBtn.addEventListener('click', claimPin);
     if (el.claimPin) el.claimPin.addEventListener('keydown', function (ev) {
       if (ev.key === 'Enter') claimPin();
