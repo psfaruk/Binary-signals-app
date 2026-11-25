@@ -102,6 +102,10 @@ run "PHASE L4 — liquidity/sessions/news/flow (118)" python3 scripts/test_phase
 run "PHASE L5 — integration snapshot (31)" python3 scripts/test_phase_l5_integration.py
 run "PHASE L7 — ICT research overlay UI (27)" python3 scripts/test_phase_l7_ui.py
 
+# 11. ALL-THEORY ENSEMBLE (ENSEMBLE-2026-11-26)
+run "ENSEMBLE — all-theory blend battery (13)" python3 scripts/test_ensemble.py
+run "ENSEMBLE — accuracy verification (honesty rules R1-R3)" python3 scripts/verify_accuracy.py
+
 echo ""
 echo "=================================================================="
 if [ $FAIL -eq 0 ]; then
@@ -109,7 +113,8 @@ if [ $FAIL -eq 0 ]; then
   echo "  (Phase A 154 + Phase B 94 + Phase C 93 + Phase D 38 +"
   echo "   Phase E 43 + Phase F 28 + Phase G 39 + Phase H 28 +"
   echo "   Phase J 54 + Phase K 26 + Phase L1-L4 316 + L5 31 +"
-  echo "   L7 27 = 1071 checks)"
+  echo "   L7 27 = 1071 checks; ENSEMBLE 13 + verification R1-R3"
+  echo "   = 1087 checks)"
 else
   echo "  OFFLINE CHECKS FAILED — see the FAILED step above"
 fi

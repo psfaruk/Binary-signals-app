@@ -83,6 +83,17 @@ except Exception as _live_candle_imp_exc:         # noqa: E402
     _predict_live = None
     print(f"[feed] live_candle unavailable ({_live_candle_imp_exc}) — "
           f"live prediction off")
+# ALL-THEORY ENSEMBLE (ENSEMBLE-2026-11-26) — every measured theory voice
+# (σ-model, pressure, pattern, eye factors, EOC strategy, ML T+1) blended
+# into ONE probability with weights earned by rolling self-graded accuracy.
+# USER: "অনেক theory আছে সব গুলো সঠিক ভাবে ইউজ করো।" Battery:
+# scripts/test_ensemble.py; verification: scripts/verify_accuracy.py.
+try:                                               # noqa: E402
+    from core import ensemble as _ensemble_mod
+except Exception as _ensemble_imp_exc:            # noqa: E402
+    _ensemble_mod = None
+    print(f"[feed] ensemble unavailable ({_ensemble_imp_exc}) — "
+          f"all-theory blending off")
 # NEXT-CANDLE ENGINE — "Candle Sequence Engine" (CSE v1, 2026-09-29).
 # THE single-strategy signal source (USER: "একটা স্ট্রাটেজি সঠিক হলে একটাই
 # যথেষ্ট"): at the 0-second open of every NEW candle it predicts THAT
@@ -4077,6 +4088,14 @@ class QuotexFeed:
                   f"{getattr(stream, 'asset', '?')}: "
                   f"{type(_lp_exc).__name__}: {_lp_exc}")
         finally:
+            # ALL-THEORY ENSEMBLE (2026-11-26): grade the ensemble + every
+            # voice against the real close — the self-learning loop that
+            # earns each theory its weight on THIS feed (core/ensemble.py).
+            if _ensemble_mod is not None:
+                try:
+                    _ensemble_mod.grade_closed(stream, o, c)
+                except Exception:
+                    pass
             stream._live_pred_final = None
             stream._live_pred_last10 = None
             stream._live_pred_entry_snaps = []
@@ -6148,6 +6167,51 @@ class QuotexFeed:
                             print(f"[feed] live-pred compute failed for "
                                   f"{stream.asset}: "
                                   f"{type(_lp_exc).__name__}: {_lp_exc}")
+                        # ── ALL-THEORY ENSEMBLE (2026-11-26) ─────────────
+                        # USER: "অনেক theory আছে সব গুলো সঠিক ভাবে ইউজ
+                        # করো।" Every measured voice — σ-model, pressure,
+                        # pattern, eye factors, the published EOC signal
+                        # and the frozen ML T+1 prediction — blended into
+                        # ONE probability, weights earned by rolling
+                        # self-graded accuracy (core/ensemble.py). The ML
+                        # voice is cached ONCE per candle (DB lookup at
+                        # candle open, ~1 query/candle/stream). Graded at
+                        # candle close in _grade_live_pred → the weights
+                        # learn from the REAL feed, per pair.
+                        if _ensemble_mod is not None and _lp and _lp.get("ready"):
+                            try:
+                                _ml_p = None
+                                if (getattr(stream, "_ens_ml_candle_time", None)
+                                        != stream.candle_open_time):
+                                    stream._ens_ml_candle_time = \
+                                        stream.candle_open_time
+                                    stream._ens_ml_p = None
+                                    _t1c, _ = self._ml_t1_from_db(
+                                        stream.asset, stream.period,
+                                        stream.candles)
+                                    if isinstance(_t1c, dict) \
+                                            and _t1c.get("prediction") in ("CALL", "PUT"):
+                                        _prob = float(_t1c.get("probability") or 0.5)
+                                        stream._ens_ml_p = (
+                                            _prob if _t1c["prediction"] == "CALL"
+                                            else 1.0 - _prob)
+                                _ml_p = getattr(stream, "_ens_ml_p", None)
+                                _eoc_sig = None
+                                if isinstance(stream.prediction, dict):
+                                    _eoc_sig = stream.prediction.get("signal")
+                                _ens = _ensemble_mod.ensemble_running_candle(
+                                    lp=_lp,
+                                    closed_candles=stream.candles[-40:],
+                                    eoc_signal=_eoc_sig,
+                                    ml_t1=_ml_p,
+                                    state=_ensemble_mod.get_state(stream))
+                                if _ens:
+                                    _lp["ensemble"] = _ens
+                            except Exception as _ens_exc:
+                                # Never let the ensemble break the pipeline.
+                                print(f"[feed] ensemble compute failed for "
+                                      f"{stream.asset}: "
+                                      f"{type(_ens_exc).__name__}: {_ens_exc}")
                         # ── Skip-redundant-broadcast (2026-07-11) ───────────
                         # If the running candle's high/low/close are unchanged
                         # since the last broadcast AND no prediction change

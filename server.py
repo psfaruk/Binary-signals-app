@@ -3765,6 +3765,15 @@ async def get_live_prediction(asset: str, period: int = 60):
         return {"asset": asset, "period": period, "live_pred": None,
                 "rolling": None, "error": "stream not running"}
     stats = getattr(stream, "_live_pred_stats", None) or {}
+    # ALL-THEORY ENSEMBLE (2026-11-26): rolling self-graded accuracy of
+    # the ensemble + every theory voice on THIS feed (core/ensemble.py).
+    # Never a promise — only measured history, per pair.
+    ensemble_rolling = None
+    try:
+        from core import ensemble as _ens_mod
+        ensemble_rolling = _ens_mod.public_stats(stream)
+    except Exception:
+        ensemble_rolling = None
     rolling = None
     if stats.get("total"):
         rolling = {
@@ -3818,6 +3827,9 @@ async def get_live_prediction(asset: str, period: int = 60):
         "live_pred": getattr(stream, "_live_pred", None),
         "truth": truth_block,
         "rolling": rolling,
+        # ALL-THEORY ENSEMBLE (2026-11-26): the combined voice + per-voice
+        # measured accuracy (self-graded at every candle close).
+        "ensemble_rolling": ensemble_rolling,
     }
 
 
