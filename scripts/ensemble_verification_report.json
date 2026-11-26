@@ -1,5 +1,5 @@
 {
-  "generated_at": 1795625535.5682962,
+  "generated_at": 1795724423.2408788,
   "engine": "core/ensemble.py::ensemble_running_candle v1",
   "convention": "synthetic = MECHANICS proof only; fair-walk control must show NO entry edge; real-market numbers come from the live rolling grader per pair",
   "payout": 0.85,

@@ -162,8 +162,21 @@ check("mapSignalState" in r.text and "ALL_REASON_CODES" in r.text,
       "the pure mapping module is served to the browser")
 
 r = client.get("/")
+# REDESIGN-2026-11-27: "/" now serves the v2 React/TS/Vite SPA
+# (static/app-v2, embeds the same truth-layer state mapping compiled
+# from frontend/src/services/signals/states.ts). The legacy app.html
+# moved to /legacy + /app — the original invariant (signal_states.js
+# loads BEFORE common.js so the mapping is defined for common.js) is
+# preserved verbatim against the legacy route, and the new root is
+# asserted to be the v2 shell.
+check(r.status_code == 200 and ("app-v2/assets" in r.text or "id=\"root\"" in r.text),
+      "root serves the v2 SPA shell (redesign)", r.text[:80])
+r = client.get("/legacy")
 check(r.status_code == 200 and "signal_states.js" in r.text,
-      "app.html includes signal_states.js before common.js")
+      "legacy app.html (at /legacy) includes signal_states.js")
+r = client.get("/app")
+check(r.status_code == 200 and "signal_states.js" in r.text,
+      "legacy alias /app still serves app.html")
 
 # ── summary ─────────────────────────────────────────────────────────────
 print("\n" + "=" * 72)

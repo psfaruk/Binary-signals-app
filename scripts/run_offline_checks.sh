@@ -91,6 +91,10 @@ run "PHASE H — shadow replay runner (2 assets)" python3 scripts/shadow_replay.
 run "PHASE H — shadow ledger checks (28)" python3 scripts/test_phase_h_shadow.py
 run "PHASE J — security hardening (54)" python3 scripts/test_phase_j_security.py
 
+# 8.5 CRON-GATE (audit fix C-1, 2026-11-27): fail-closed CRON_SECRET,
+# no spoofable-header bypass, no query-string secrets.
+run "CRON-GATE — fail-closed secret (8)" python3 scripts/test_cron_gate.py
+
 # 9. Phase K (provenance-clean retraining integrity)
 run "PHASE K — cleanprior integrity (26)" python3 scripts/test_phase_k_cleanprior.py
 

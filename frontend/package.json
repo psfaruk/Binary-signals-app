@@ -1,0 +1,27 @@
+{
+  "name": "binary-signals-terminal",
+  "private": true,
+  "version": "2.0.0-redesign",
+  "type": "module",
+  "description": "Binary Signals App — new trading terminal frontend (React + TS + Vite). Served as static assets by the existing FastAPI backend; talks to the unchanged REST + WS API.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lightweight-charts": "4.1.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.4",
+    "typescript": "5.6.3",
+    "vite": "5.4.11",
+    "vitest": "2.1.8"
+  }
+}

@@ -1,0 +1,15 @@
+/* Analytics */
+
+.ana { display: flex; flex-direction: column; gap: var(--sp-4); }
+.ana-note { font-size: var(--fs-xs); }
+
+.ana-hero { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-3); }
+.ana-stat { display: flex; flex-direction: column; gap: var(--sp-1); padding: var(--sp-4); }
+.ana-stat-label { font-size: var(--fs-xs); color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.ana-stat-value { font-size: var(--fs-2xl); font-weight: 800; font-variant-numeric: tabular-nums; }
+.ana-stat-note { font-size: var(--fs-xs); color: var(--ink-3); }
+
+.small-sample { color: var(--warn); font-size: var(--fs-xs); margin-left: 4px; }
+
+@media (max-width: 900px) { .ana-hero { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 420px) { .ana-hero { grid-template-columns: 1fr 1fr; gap: var(--sp-2); } .ana-stat-value { font-size: 1.5rem; } }

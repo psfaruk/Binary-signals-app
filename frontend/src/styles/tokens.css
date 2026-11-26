@@ -1,0 +1,116 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   DESIGN TOKENS — Binary Signals Terminal (single source of truth)
+   Philosophy: professional fintech terminal. Deep navy/charcoal ground,
+   sky-blue primary accent, cyan secondary, green/red direction, amber
+   warning, gray neutral. No glowing borders, no gratuitous gradients.
+   Dark mode default; light mode via [data-theme="light"].
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── ground ─────────────────────────────────────────────────────── */
+  --bg-0: #0B1220;            /* app background — deep navy/charcoal */
+  --bg-1: #111A2C;            /* raised panels */
+  --bg-2: #18233A;            /* cards / inputs */
+  --bg-3: #202E4A;            /* hover / active fills */
+  --bg-inset: #0A101B;        /* wells, chart gutters, code */
+
+  /* ── ink ────────────────────────────────────────────────────────── */
+  --ink-1: #E8EEF8;           /* primary text */
+  --ink-2: #A7B4CC;           /* secondary text */
+  --ink-3: #6B7A94;           /* muted / captions */
+  --ink-disabled: #475269;
+
+  /* ── brand accents ──────────────────────────────────────────────── */
+  --accent: #38BDF8;          /* sky blue — primary accent */
+  --accent-strong: #0EA5E9;
+  --accent-2: #22D3EE;        /* cyan — secondary accent */
+  --accent-wash: rgba(56, 189, 248, 0.10);
+
+  /* ── semantic ───────────────────────────────────────────────────── */
+  --pos: #34D399;             /* green — CALL / positive / win */
+  --pos-wash: rgba(52, 211, 153, 0.12);
+  --neg: #F87171;             /* red — PUT / negative / loss */
+  --neg-wash: rgba(248, 113, 113, 0.12);
+  --warn: #FBBF24;            /* amber — STALE / warnings */
+  --warn-wash: rgba(251, 191, 36, 0.12);
+  --neutral: #94A3B8;         /* gray — NO_SIGNAL / unavailable */
+  --neutral-wash: rgba(148, 163, 184, 0.12);
+  --research: #A78BFA;        /* violet — RESEARCH_ONLY marking */
+  --research-wash: rgba(167, 139, 250, 0.14);
+
+  /* ── lines & focus ──────────────────────────────────────────────── */
+  --line-1: #24314F;          /* panel borders */
+  --line-2: #2E3F62;          /* dividers */
+  --focus-ring: rgba(56, 189, 248, 0.55);
+
+  /* ── type ────────────────────────────────────────────────────────── */
+  --font-ui: "Inter", "Noto Sans Bengali", "Hind Siliguri", system-ui,
+             -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo,
+               Consolas, "Noto Sans Bengali", monospace;
+  --fs-xs: 0.6875rem;   /* 11px — captions, chips */
+  --fs-sm: 0.78125rem;  /* 12.5px — dense data */
+  --fs-md: 0.875rem;    /* 14px — body */
+  --fs-lg: 1.0625rem;   /* 17px — panel titles */
+  --fs-xl: 1.75rem;     /* 28px — hero price */
+  --fs-2xl: 2.25rem;    /* 36px — page stat values */
+
+  /* ── rhythm ─────────────────────────────────────────────────────── */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* ── depth (restrained — no glow) ───────────────────────────────── */
+  --shadow-1: 0 1px 2px rgba(2, 6, 16, 0.5);
+  --shadow-2: 0 8px 24px rgba(2, 6, 16, 0.45);
+
+  /* ── motion ──────────────────────────────────────────────────────── */
+  --tr-fast: 120ms ease;
+  --tr-med: 240ms ease;
+
+  /* ── layout metrics ─────────────────────────────────────────────── */
+  --sidebar-w: 232px;
+  --topbar-h: 56px;
+  --bottomnav-h: 60px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ── light theme ─────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg-0: #F2F5FA;
+  --bg-1: #FFFFFF;
+  --bg-2: #EAEEF6;
+  --bg-3: #DDE5F2;
+  --bg-inset: #E4EAF4;
+  --ink-1: #0E1A2E;
+  --ink-2: #3D4A63;
+  --ink-3: #64708A;
+  --ink-disabled: #97A2B8;
+  --accent: #0284C7;
+  --accent-strong: #0369A1;
+  --accent-2: #0891B2;
+  --accent-wash: rgba(2, 132, 199, 0.08);
+  --pos: #059669;
+  --pos-wash: rgba(5, 150, 105, 0.10);
+  --neg: #DC2626;
+  --neg-wash: rgba(220, 38, 38, 0.08);
+  --warn: #B45309;
+  --warn-wash: rgba(180, 83, 9, 0.10);
+  --neutral: #64748B;
+  --neutral-wash: rgba(100, 116, 139, 0.10);
+  --research: #7C3AED;
+  --research-wash: rgba(124, 58, 237, 0.10);
+  --line-1: #D5DDEB;
+  --line-2: #C3CEDF;
+  --focus-ring: rgba(2, 132, 199, 0.5);
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.12);
+  --shadow-2: 0 8px 24px rgba(15, 23, 42, 0.12);
+}

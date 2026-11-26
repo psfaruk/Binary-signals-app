@@ -1,0 +1,166 @@
+/* base.css — reset + shared primitives. Everything else composes these. */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg-0);
+  color: var(--ink-1);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;                 /* no horizontal overflow ever */
+  overscroll-behavior-y: none;
+}
+
+#root { height: 100%; }
+
+h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+p  { margin: 0; }
+ul, ol { margin: 0; padding: 0; list-style: none; }
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+button { touch-action: manipulation; }  /* kills double-tap zoom without
+                                           disabling page zoom (audit H-3) */
+button:focus-visible, a:focus-visible, input:focus-visible,
+select:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, .mono { font-family: var(--font-mono); }
+
+:disabled { color: var(--ink-disabled); cursor: not-allowed; }
+
+/* ── shared primitives ───────────────────────────────────────────────── */
+
+.panel {
+  background: var(--bg-1);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line-1);
+}
+
+.panel-head h3 {
+  font-size: var(--fs-md);
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+
+.panel-body { padding: var(--sp-4); }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.chip.pos     { background: var(--pos-wash);     color: var(--pos); }
+.chip.neg     { background: var(--neg-wash);     color: var(--neg); }
+.chip.warn    { background: var(--warn-wash);    color: var(--warn); }
+.chip.neutral { background: var(--neutral-wash); color: var(--neutral); }
+.chip.research{ background: var(--research-wash);color: var(--research); }
+.chip.accent  { background: var(--accent-wash);  color: var(--accent); }
+
+.kv { display: flex; justify-content: space-between; gap: var(--sp-3);
+      padding: 6px 0; border-bottom: 1px dashed var(--line-1);
+      font-size: var(--fs-sm); }
+.kv:last-child { border-bottom: none; }
+.kv > .k { color: var(--ink-3); }
+.kv > .v { color: var(--ink-1); font-weight: 600; text-align: right; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: 40px;            /* touch target ≥40px */
+  padding: 0 var(--sp-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--ink-1);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  transition: background var(--tr-fast), border-color var(--tr-fast),
+              transform var(--tr-fast);
+}
+.btn:hover { background: var(--bg-3); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #06121F; }
+.btn.primary:hover { background: var(--accent); }
+.btn.danger { color: var(--neg); border-color: color-mix(in srgb, var(--neg) 40%, var(--line-2)); }
+.btn.small { min-height: 32px; padding: 0 var(--sp-3); font-size: var(--fs-xs); }
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--ink-3);
+}
+.field input, .field select {
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-md);
+  padding: 10px var(--sp-3);
+  color: var(--ink-1);
+  min-height: 40px;
+  cursor: text;
+}
+
+.table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+.table th {
+  text-align: left; font-weight: 600; color: var(--ink-3);
+  font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 8px 10px; border-bottom: 1px solid var(--line-2);
+  position: sticky; top: 0; background: var(--bg-1); z-index: 1;
+}
+.table td { padding: 8px 10px; border-bottom: 1px solid var(--line-1); }
+.table tr:hover td { background: var(--bg-2); }
+
+.muted  { color: var(--ink-3); }
+.center { text-align: center; }
+.nowrap { white-space: nowrap; }
+
+/* ── scrollbar (subtle, desktop) ─────────────────────────────────────── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ── skeleton shimmer for loading states ─────────────────────────────── */
+@keyframes shimmer { 0% { opacity: 0.55; } 50% { opacity: 0.9; } 100% { opacity: 0.55; } }
+.skeleton {
+  background: var(--bg-2);
+  border-radius: var(--radius-sm);
+  animation: shimmer 1.6s ease-in-out infinite;
+  min-height: 12px;
+}

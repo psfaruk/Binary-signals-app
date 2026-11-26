@@ -1,0 +1,9 @@
+# frontend/ — Vite + React + TypeScript source (redesign/v2-terminal)
+# Build-time artifacts; the PRODUCTION bundle is committed at ../static/app-v2/
+# so deploys never need a Node toolchain. node_modules is ~100 MB of deps.
+node_modules/
+*.local
+coverage/
+.vite/
+# vitest temp outputs
+.vitest/
