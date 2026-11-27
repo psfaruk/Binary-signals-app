@@ -19,14 +19,23 @@ Environment (Vercel → Settings → Environment Variables):
     QX_TOKEN            Quotex SSID token (required; expires ~daily)
     QX_CRON_BUDGET      seconds inside the burst (default 240, max 540 —
                         keep below the function's maxDuration minus ~30 s)
-    CRON_SECRET         shared secret (?secret=… or Bearer) — set it!
+    CRON_SECRET         shared secret — REQUIRED (Authorization: Bearer).
+                        SECURITY-FIX (2026-11-27, audit C-1): the endpoint is
+                        FAIL-CLOSED when CRON_SECRET is unset; the secret is
+                        accepted ONLY via the Authorization header (never a
+                        query string, which leaks into access logs); and a
+                        client-supplied x-vercel-cron header is NO LONGER
+                        sufficient by itself (any HTTP client can forge it).
+                        Vercel Cron requests must be configured to send the
+                        Bearer token (Vercel cron headers, or route the cron
+                        through the API with the env var set).
     SUPABASE_URL        https://<project>.supabase.co
     SUPABASE_ANON_KEY   anon/publishable key (tables per DEPLOYMENT_VERCEL.md)
 
-Vercel Cron invokes this path on schedule (vercel.json → crons; the
-x-vercel-cron: 1 header is accepted when CRON_SECRET is set). Manual run:
+Vercel Cron invokes this path on schedule (vercel.json → crons). Manual run:
 
-    curl "https://<app>.vercel.app/api/cron/refresh?secret=<CRON_SECRET>"
+    curl -H "Authorization: Bearer $CRON_SECRET" \
+         "https://<app>.vercel.app/api/cron/refresh"
 """
 import asyncio
 import os
@@ -57,19 +66,30 @@ app = FastAPI()
 
 
 def _authorized(request: Request) -> bool:
-    """CRON_SECRET gates the endpoint. With no secret configured the
-    endpoint is open (documented risk — anyone can trigger a burst);
-    always set CRON_SECRET in production."""
+    """CRON_SECRET gates the endpoint — FAIL-CLOSED (audit fix C-1, 2026-11-27).
+
+    Three defects fixed:
+      1. Unset CRON_SECRET previously meant "open" — now the endpoint
+         refuses (503) exactly like _check_admin_key on the main server.
+         Directive rule: cron endpoints must reject requests when
+         CRON_SECRET is missing.
+      2. The secret is accepted ONLY via `Authorization: Bearer <secret>` —
+         never via query string (secrets in URLs persist in Vercel access
+         logs, browser history, proxies).
+      3. A client-supplied `x-vercel-cron` header no longer bypasses the
+         secret — the header is client-forgeable. It is now accepted ONLY
+         in addition to the correct Bearer token (harmless signal from
+         the real scheduler, useless to an attacker).
+    Comparison is constant-time (hmac.compare_digest).
+    """
+    import hmac
     secret = os.environ.get("CRON_SECRET", "").strip()
     if not secret:
-        return True
-    if request.query_params.get("secret", "").strip() == secret:
-        return True
+        return False  # FAIL-CLOSED: no secret configured -> nobody authorized
     auth = request.headers.get("authorization", "").strip()
-    if auth == f"Bearer {secret}":
+    if auth and hmac.compare_digest(auth, f"Bearer {secret}"):
         return True
-    # Header sent by the Vercel Cron scheduler itself.
-    return request.headers.get("x-vercel-cron", "").strip() == "1"
+    return False
 
 
 def _sync_once() -> dict:
@@ -82,6 +102,15 @@ def _sync_once() -> dict:
 @app.get("/api/cron/refresh")
 async def refresh(request: Request):
     t0 = time.time()
+    secret_set = bool(os.environ.get("CRON_SECRET", "").strip())
+    if not secret_set:
+        # FAIL-CLOSED (audit C-1): refuse to serve anyone until the operator
+        # sets CRON_SECRET. 503 mirrors the main server's ADMIN_KEY policy.
+        return JSONResponse({
+            "error": "CRON_SECRET is not set",
+            "hint": ("Set CRON_SECRET in the deployment environment. The "
+                     "cron endpoint is disabled until then (fail-closed)."),
+        }, status_code=503)
     if not _authorized(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 

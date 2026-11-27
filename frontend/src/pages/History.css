@@ -1,0 +1,28 @@
+/* History */
+
+.hist { display: flex; flex-direction: column; gap: var(--sp-3); }
+
+.hist-filters {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2);
+  padding: var(--sp-3);
+  align-items: center;
+}
+.hist-filters select, .hist-filters input {
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  min-height: 36px;
+  padding: 6px var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--ink-1);
+}
+.hist-search { flex: 1 1 180px; min-width: 140px; }
+
+.hist-table-wrap { overflow-x: auto; max-height: 60vh; }
+.reason-cell { font-size: var(--fs-xs); color: var(--ink-3); }
+
+.hist-pager { display: flex; align-items: center; justify-content: center; gap: var(--sp-4); }
+
+@media (max-width: 640px) {
+  .hist-filters select, .hist-filters input { flex: 1 1 40%; }
+}

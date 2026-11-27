@@ -1,0 +1,50 @@
+/* SignalPanel — the intelligence side panel */
+
+.sig-panel { display: flex; flex-direction: column; min-width: 0; overflow-y: auto; }
+
+.sig-hero {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--sp-3);
+  border: 1px solid var(--line-1);
+  background: var(--bg-inset);
+}
+.sig-hero .sig-dir { font-size: var(--fs-lg); font-weight: 800; letter-spacing: 0.02em; }
+.sig-hero.call, .sig-hero.research_only { color: var(--ink-1); }
+.sig-hero.call { color: var(--pos); }
+.sig-hero.put { color: var(--neg); }
+.sig-hero.no_signal, .sig-hero.stale, .sig-hero.error { color: var(--neutral); }
+
+.sig-kvs { display: flex; flex-direction: column; }
+.sig-kvs .v.unavail { color: var(--ink-disabled); }
+
+.sig-reason {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--neutral-wash);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--neutral);
+}
+.sig-reason .reason-code { font-size: var(--fs-xs); color: var(--ink-3); display: block; }
+.sig-reason p { margin: 4px 0 0; font-size: var(--fs-sm); color: var(--ink-2); }
+
+.sig-evidence {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-sm);
+  border-top: 1px solid var(--line-1);
+  padding-top: var(--sp-3);
+}
+.sig-evidence summary { cursor: pointer; color: var(--ink-3); }
+.sig-evidence ul { margin-top: var(--sp-2); display: flex; flex-direction: column; gap: 4px; }
+.sig-evidence li { color: var(--ink-2); padding-left: var(--sp-3); position: relative; }
+.sig-evidence li::before { content: "·"; position: absolute; left: 2px; color: var(--accent); }
+
+.sig-target {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  border-top: 1px dashed var(--line-1);
+  padding-top: var(--sp-2);
+}

@@ -141,10 +141,14 @@ deploy সফল হবে এমন নিরাপদ ডিফল্ট।
   ```
   এবং Vercel Dashboard → Functions → `api/cron/refresh` → **maxDuration 300–800s**
   (Fluid Compute চালু থাকতে হবে), `QX_CRON_BUDGET` এ লিখুন যেমন `540`।
-- **Hobby plan:** দৈনিক cron + ৬০s burst। চাইলে যেকোনো সময় ম্যানুয়ালি চালান:
+- **Hobby plan:** দৈনিক cron + ৬০s burst। চাইলে যেকোনো সময় ম্যানুয়ালি চালান
+  (SECURITY-FIX C-1, 2026-11-27: সিক্রেট এখন Authorization হেডারেই লাগবে —
+  query string-এ সিক্রেট পাঠানো নিষেধ, সেটা access log-এ লিক হয়):
   ```bash
-  curl "https://YOUR-APP.vercel.app/api/cron/refresh?secret=CRON_SECRET"
+  curl -H "Authorization: Bearer $CRON_SECRET" \
+       "https://YOUR-APP.vercel.app/api/cron/refresh"
   ```
+  (Vercel Cron নিজে `Authorization: Bearer <CRON_SECRET>` পাঠালে আটো পাস করবে; `CRON_SECRET` না সেট করলে endpoint এখন **503 fail-closed** — আগের ফেইল-ওপেন আচরণ বন্ধ।)
 
 ### Step 5 — Verify করুন
 
@@ -154,7 +158,7 @@ APP="https://YOUR-APP.vercel.app"
 curl $APP/healthz | python3 -m json.tool          # {"ok": true, ...}
 curl $APP/api/share-signals | python3 -m json.tool  # সিগন্যাল তালিকা
 curl $APP/api/keys/verify                          # {"valid": false}
-curl "$APP/api/cron/refresh?secret=YOUR_CRON_SECRET"  # burst চালু করে ফল দেখায়
+curl "$APP/api/cron/refresh" -H "Authorization: Bearer $CRON_SECRET"  # burst চালু করে ফল দেখায়
 ```
 
 Browser-এ `$APP/` খুলুন → ৪ ট্যাব UI (Home / Chart Signal / History / Setting)

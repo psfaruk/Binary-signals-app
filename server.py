@@ -1794,23 +1794,61 @@ def _serve_app_html(request: Request):
                                               "must-revalidate"})
 
 
+def _serve_v2_html(request: Request):
+    """NEW TERMINAL (REDESIGN-2026-11-27): static/app-v2/index.html — the
+    React/TS/Vite SPA built by `cd frontend && npm run build`.
+
+    Serves the built bundle with the same preview-gateway patch discipline
+    as the legacy app: behind the XTransformPort port-router gateway, every
+    root-absolute asset URL (/static/app-v2/...) is rewritten to carry the
+    port so CSS/JS route through the gateway instead of the default
+    backend. The demo banner machinery does NOT apply (the new UI renders
+    research-mode state itself via the truth-layer banner).
+    Fail-open behavior if the bundle is absent (e.g. fresh clone without a
+    build): fall back to the legacy app.html so a deployment never serves
+    a blank shell."""
+    v2_path = static_dir / "app-v2" / "index.html"
+    if not v2_path.exists():
+        print("[server] static/app-v2/index.html missing — falling back to "
+              "legacy app.html (run: cd frontend && npm run build)")
+        return _serve_app_html(request)
+    html = v2_path.read_text(encoding="utf-8")
+    _q = request.url.query or ""
+    if "XTransformPort" in _q:
+        import re as _re
+        m = _re.search(r"XTransformPort=(\d+)", _q)
+        _port = m.group(1) if m else None
+        if _port:
+            html = html.replace("<head>", "<head>" + _PREVIEW_PATCH_JS, 1)
+            html = _re.sub(
+                r'((?:src|href)="/(?:static|favicon)[^"?]*)"',
+                r'\1?XTransformPort=' + _port + r'"', html)
+    return Response(html, media_type="text/html",
+                    headers={"Cache-Control": "no-store, no-cache, max-age=0, "
+                                              "must-revalidate"})
+
+
 @app.get("/")
 async def index(request: Request):
-    """Root — serve the consolidated app.html (PHASE-4-FIX, 2026-08-13).
+    """Root — NEW TERMINAL (redesign 2026-11-27).
 
-    Replaces the old router (index.html → otc.html/real.html/alltime_otc.html).
-    The app.html file is a single-page app that reads ?market= from the URL
-    or `marketCategory` from localStorage to decide which market to show.
-    GATEWAY-PREVIEW (2026-09-29): if the request came through the sandbox
-    port-router (XTransformPort query), a tiny script is injected so every
-    fetch/WebSocket the app makes routes to the same backend port.
-    """
-    return _serve_app_html(request)
+    Serves the React/TS/Vite SPA from static/app-v2 (built from frontend/).
+    The legacy vanilla-JS app stays fully reachable at /legacy and /app
+    (bookmarks, muscle memory, A/B verification during migration).
+    GATEWAY-PREVIEW: same XTransformPort handling as before (see
+    _serve_v2_html)."""
+    return _serve_v2_html(request)
 
 
 @app.get("/app")
 async def app_alias(request: Request):
-    """Alias for / — same consolidated app.html."""
+    """Legacy app.html — kept as an alias during the v2 migration."""
+    return _serve_app_html(request)
+
+
+@app.get("/legacy")
+async def legacy_app(request: Request):
+    """Legacy app.html — the pre-redesign vanilla-JS terminal."""
     return _serve_app_html(request)
 
 

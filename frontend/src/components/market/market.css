@@ -1,0 +1,56 @@
+/* market controls */
+
+.mkt-switch { display: inline-flex; background: var(--bg-2); border-radius: var(--radius-pill); padding: 3px; gap: 2px; }
+.mkt-btn {
+  padding: 6px 16px; min-height: 32px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-sm); font-weight: 700; color: var(--ink-3);
+}
+.mkt-btn.on { background: var(--accent-wash); color: var(--accent); }
+
+.pair-select select {
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-md);
+  padding: 8px var(--sp-3);
+  min-height: 40px;
+  min-width: 140px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  color: var(--ink-1);
+}
+
+.price-ticker { display: flex; flex-direction: column; line-height: 1.1; }
+.price-label { font-size: var(--fs-xs); color: var(--ink-3); }
+.price-value {
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  color: var(--ink-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.candle-countdown { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1; }
+.cd-label { font-size: var(--fs-xs); color: var(--ink-3); }
+.cd-value { font-size: var(--fs-lg); font-weight: 700; font-variant-numeric: tabular-nums; }
+.cd-value.ending { color: var(--warn); }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  clip: rect(0 0 0 0); overflow: hidden; white-space: nowrap;
+}
+
+/* Terminal command bar (top of terminal page) */
+.term-bar {
+  display: flex; align-items: center; gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-1);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-lg);
+}
+.term-bar .spacer { flex: 1 1 auto; }
+@media (max-width: 640px) {
+  .term-bar { gap: var(--sp-2); }
+  .price-value { font-size: 1.375rem; }
+}
